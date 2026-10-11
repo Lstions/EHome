@@ -11,9 +11,13 @@
 #include "bus_manager.h"
 #include "hello_handshake.h"
 #include "bus_worker.h"
+#include "report_stats.h"   /* D-14：注册栈余量 provider */
 #include "msg_handler.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "crash_diag.h"
 #include "boot_guard.h"
+#include "device_link_wiring.h"
+#include "session_transport.h"  /* 3.0 会话 → transport 适配（MQTT 已移除，唯一传输）*/
 #include "mem_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
@@ -23,7 +27,6 @@
 #include "rgb_led.h"
 #include "factory_reset.h"
 #include "wifi_mgr.h"
-#include "ehome_mqtt.h"
 #include "transport.h"
 #include "bus_dma.h"
 #include "log_stream.h"
@@ -152,7 +155,7 @@ static void log_boot_heap(const char *stage) { (void)stage; }
 
 static bool s_ota_pending_verify = false;
 
-/* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x20) ==== */
+/* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x21) ==== */
 
 /* 低内存事件只置标志，发布动作留到 status_task 且仅在 MQTT 已连接时执行。
  * 原因：low callback 由 mem_guard_poll() 在 status_task 上下文同步调用，
@@ -169,7 +172,7 @@ static void mem_guard_low_memory_cb(size_t free_bytes, size_t largest_bytes)
              (unsigned)mem_guard_floor_bytes());
 }
 
-/* 编码并发布 MemReport(0x20)。帧很小（5 个 varint），栈缓冲 64B 足够，
+/* 编码并发布 MemReport(0x21)。帧很小（5 个 varint），栈缓冲 64B 足够，
  * 不引入新的堆分配；编码失败只记一行，不阻塞主循环。 */
 static void send_mem_report(void)
 {
@@ -218,7 +221,7 @@ static void status_task(void *pv)
          * uxTaskGetStackHighWaterMark() 测真实峰值。
          *
          * 与原探针的区别：现在**不只在 EHOME_MEM_DIAG 下打日志**，而是把
-         * "最小剩余字节"写入 mem_guard，并随 MemReport(0x20) 低频上报，
+         * "最小剩余字节"写入 mem_guard，并随 MemReport(0x21) 低频上报，
          * 使服务端能看到跨重启趋势（原探针默认编译不进来，服务端什么都看不到）。
          *
          * 单位：uxTaskGetStackHighWaterMark 返回**字**（FreeRTOS 约定），
@@ -234,9 +237,25 @@ static void status_task(void *pv)
         if (mem_periodic) {
             static const char *names[] = {
                 "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
-                "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
+                "cmd_spi", "cmd_i2c", "report_tx",
                 "hello_super", "periph_worker", "periph_rsp", "rgb_led",
                 "factory_reset",
+                /* ⭐ task-34：以下两个任务此前**不在采样名单里**。
+                 *
+                 * 3.0 的链路任务（8 KB 栈）漏得最要命：它是 3.0 引入的新任务，
+                 * 水位既没被记录、也没进 MemReport ⇒ "3.0 到底占了多少栈"在真机上
+                 * **无法回答**（只能靠猜），而本卡恰恰要求先测再改。
+                 * 名单漏项本身就是一类静默缺陷：采样在跑、看着很全，
+                 * 只是恰好漏掉了要观察的那个对象。 */
+                "dev_link",
+                /* S3 的 USB 数据泵（bus_dma.c:1189，栈 3072）—— 真实存在且常驻，
+                 * 同理应当被观察。 */
+                "usb_rx",
+                /* ⚠ "uart0_dl"（bus_dma.c:169，栈 2048）**故意不加**：
+                 * 它只在 USB 下载模式下创建，正常运行期不存在 ⇒ 加进来会
+                 * 恒为 xTaskGetHandle==NULL，除了多一次无效查找没有任何信息。
+                 * 写明理由是为了下一个人不必再查一遍"这是漏了还是有意为之"。
+                 * 若将来该任务在正常启动路径上也被创建，必须加进来。 */
             };
             size_t min_stack_free = (size_t)-1;
             for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -259,23 +278,52 @@ static void status_task(void *pv)
 
         /* 1Hz 轮询水位；低于 floor 时回调置 s_mem_low_event（迟滞见 mem_guard.c）。 */
         mem_guard_poll();
-        bool mem_mqtt_connected = mqtt_client_is_connected_impl();
+
+        /* ⚠ task-34 修正一处 P1 违规：**上行可用 != MQTT 已连接**。
+         *
+         * 这里原先三处都写成 "&& mem_mqtt_connected"（MQTT 连上才发 MemReport），
+         * 注释也写着"等 MQTT 连上再发"。到 §7.3 P3（MQTT 下线、只留 3.0 TCP）时，
+         * 这条路径**永远不会执行** ⇒ 内存/栈水位**再也到不了服务端**，
+         * 而"栈峰值是多少"这个问题就会**再次变得不可回答**
+         * （与 §138 同族：3.0 已就绪，判据却还挂在 MQTT 上）。
+         *
+         * 判据改用 transport_any_connected()：
+         *   - 它回答的正是这里要问的问题：**任一**传输已连接（3.0 TCP 或 MQTT）；
+         *   - 实现已存在（transport.h:183），**不新增第二个判据**（P4）；
+         *   - 发送本身走 msg_handler_publish → 当前传输/广播，两条路都通。
+         *
+         * ⚠ 注意本修正**不改变** MemReport 的内容与频率，只改"什么时候允许发"。 */
+        const bool mem_uplink_ready = transport_any_connected();
         bool mem_send = false;
         {
             static bool s_mem_report_initial_sent = false;
-            if (!s_mem_report_initial_sent && mem_mqtt_connected) {
+            if (!s_mem_report_initial_sent && mem_uplink_ready) {
                 s_mem_report_initial_sent = true;
-                mem_send = true;   /* 启动后首报（等 MQTT 连上再发） */
+                mem_send = true;   /* 启动后首报（等任一路上行可用再发）*/
             }
         }
-        if (mem_periodic && mem_mqtt_connected) mem_send = true;  /* 60s 周期 */
-        if (s_mem_low_event && mem_mqtt_connected) {              /* 低内存事件 */
+        if (mem_periodic && mem_uplink_ready) mem_send = true;    /* 60s 周期 */
+        if (s_mem_low_event && mem_uplink_ready) {                /* 低内存事件 */
             s_mem_low_event = false;
             mem_send = true;
         }
         if (mem_send) send_mem_report();
-        (void)wifi_mgr_check_liveness(mqtt_client_is_connected_impl());
-        if (mqtt_client_is_connected_impl()) {
+
+        /* ⚠ 判据是"**应用层还有没有可用上行**"，而不是"某个特定实现在不在线"。
+         *
+         * 这里有过一次真实缺陷（§193 修）：StatusReport 与 WiFi 活性判据都曾写死
+         * mqtt_client_is_connected_impl()，而 msg_handler_send_status 的**唯一调用点
+         * 就在下面这个 if 里**、它本体是**传输无关**的（handler_data.c:145 编码后走
+         * msg_handler_publish → 当前传输）⇒ 一旦 MQTT 不可用，**3.0 明明能发却不发**，
+         * 服务端再也看不到 StatusReport（连带 ota_confirm 永不确认）。
+         * 更糟的是同一个信号被喂给 wifi_mgr_check_liveness 当 "app_network_ok"，
+         * 而它与 WiFi 毫无关系 ⇒ 会**反复拆一条健康的 WiFi**（wifi_mgr.c:266-268 同形态）。
+         *
+         * ⇒ 用 transport_any_connected()（与上面 MemReport 同一谓词，**不新增第二份**，P4）。
+         * ⚠ MQTT 已移除（§194）⇒ 现在它精确等于"3.0 会话已连接"。 */
+        const bool uplink_ready = transport_any_connected();
+        (void)wifi_mgr_check_liveness(uplink_ready);
+        if (uplink_ready) {
             esp_err_t status_err = msg_handler_send_status(
                 s->uptime_sec, "online",
                 (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
@@ -293,6 +341,26 @@ static void status_task(void *pv)
 static void on_sync_send_hello(void)
 {
     (void)hello_handshake_request_sync();
+}
+
+/* ---- sync 的"有没有可用上行"（P4：一处定义）----
+ *
+ * ⭐ 2026-10-08（§194，MQTT 已彻底移除）：判据是"**3.0 传输是否已连接**"。
+ *
+ * ⚠ 这里有过一段真实的历史缺陷，留着当教训：sync_manager 早期**硬编码**判
+ * `mqtt_client_is_connected_impl()`，于是在"Mqtt 连不上但 3.0 就绪"时
+ * `sync_manager_request_sync()` 直接 return（只留一条 WARN）——
+ * "周期 / 怀疑 / 无配置"三条**主动请求同步**的路径全部失效，而且**不报错**。
+ * 真机实测（C6 + MQTT 死地址，§164）：t=334 与 t=31493 两次请求都被那条挡住。
+ * ⇒ 教训：**判据要问"这件事需要什么"，不要问"某个特定实现是否在线"。**
+ *
+ * 现在只有一条传输 ⇒ 用 `transport_any_connected()`（transport.h:183）。
+ * ⚠ 它是**注册表级**查询：遍历所有已注册 transport 的 is_connected()。
+ *   当前只剩 session_transport（3.0）一个 ⇒ 语义精确等于"3.0 已连接"，
+ *   且**不新增第二份判据**（P4）。 */
+static bool on_sync_uplink_available(void)
+{
+    return transport_any_connected();
 }
 
 /* ---- Weak-symbol bridges for msg_handler callbacks ---- */
@@ -318,14 +386,36 @@ uint64_t channel_cmd_v2_current_time_ms(void)
 bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot)
 {
     if (!cmd) return false;
+    /* ⭐ 方案 D（2026-10-10）：不再传 cmd->plan_data 指针。
+     *
+     * 队列元素已不再内联 plan buffer，plan 字节留在 msg_handler 的 control
+     * 槽位里（就是本函数收到的 cmd 所在槽，见 handler_channel_cmd_v2.c 的
+     * reserve_slot）。bus_worker 执行时按 slot 通过
+     * channel_cmd_v2_borrow_plan() 借用 —— 由访问器校验槽位仍是 QUEUED，
+     * 因此这里传指针既没必要、也会引入悬垂风险（cmd 是解析用的局部量）。
+     * 这里只传两个**标量**给 bus_manager 做准入校验。 */
     return bus_manager_on_channel_cmd_v2(&app_state_get()->bus_runtime, cmd->channel_id,
         cmd->tx_data, cmd->tx_len, cmd->read_size, cmd->rx_timeout_ms,
-        cmd->post_tx_delay_ms, cmd->plan_data, cmd->plan_len, cmd->plan_step_count, slot);
+        cmd->post_tx_delay_ms, cmd->plan_len, cmd->plan_step_count, slot);
 }
 
 void on_query_resources_received(const char *request_id)
 {
     (void)request_id;
+}
+
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 把 bus_manager 的降级快照转给 msg_handler（声明见 msg_handler_hooks.h）。
+ *
+ * 为什么需要这一层转接：msg_handler 不能 REQUIRES bus_manager —— 会成环：
+ *   bus_manager -> bus_worker -> msg_handler
+ * 所以 msg_handler 只声明钩子，实现放在 main/（它已同时依赖两者）。
+ *
+ * ⚠ 声明是**普通 extern**（非弱符号）：漏实现则构建直接失败，
+ *   而不是"降级提示静默消失"（本仓 B2 记录过那一族缺陷）。 */
+int dma_degraded_channels(uint32_t *out_ids, int max)
+{
+    return bus_manager_get_dma_degraded_channels(out_ids, max);
 }
 
 /* ---- Modbus CRC16 helper ---- */
@@ -347,6 +437,25 @@ static uint16_t modbus_crc16(const uint8_t *data, size_t len)
 }
 
 /* ---- Modbus scan callback (overrides weak in handler_writecmd.c) ---- */
+
+/* B2（2026-10-06）：on_scan_req_received 原先**只有**一个 weak 空实现
+ * （在 handler_writecmd.c 里，注释写"implemented in main.c"）——
+ * 但 main.c **从来没有实现过它**。实测确认：全仓搜不到任何强定义。
+ *
+ * 也就是说：扫描请求这条路径一直是**静默无操作**的 ——
+ * 编译通过、链接通过、测试通过，功能却不存在。
+ * 这正是弱符号最坏的形态：它把"没实现"伪装成"已实现"。
+ *
+ * 现在给出一个**显式的**强实现：链接器能确认它存在，
+ * 而运行期每条请求都会留下一条 WARN，让"未实现"变成可见事实。
+ * 真要支持该功能时，替换本函数体即可（声明见 msg_handler_hooks.h）。 */
+void on_scan_req_received(const char *request_id, uint32_t hardware_id)
+{
+    ESP_LOGW(TAG, "on_scan_req_received: NOT IMPLEMENTED (request_id=%s hardware_id=%u) "
+                  "-- scan requests are acknowledged but never executed",
+             request_id ? request_id : "(null)", (unsigned)hardware_id);
+    /* 有意不发送任何成功回执：避免把"没做"报成"做完了"。 */
+}
 
 void on_modbus_scan_req_received(const char *request_id,
     uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)
@@ -505,6 +614,8 @@ void app_main(void)
     
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
+    /* 见 on_sync_uplink_available 的说明：不接这条，"主动请求同步"在 P4 后永久失效。 */
+    sync_manager_register_uplink_available_cb(on_sync_uplink_available);
     msg_handler_init();
     log_boot_heap("after msg_handler");
     /* Create the long-lived Hello supervisor before MQTT can start. */
@@ -521,19 +632,20 @@ void app_main(void)
     log_boot_heap("after ota+sched");
 
     /* ---- Transports ---- */
-    mqtt_client_init();
+    /* ⭐ 2026-10-08（§194）：**MQTT 已彻底移除** —— 3.0 TCP+TLS 是**唯一**传输。
+     *
+     * 随之删掉的三样东西（它们的存在理由**只是**"在 MQTT 与 3.0 之间选一条"）：
+     *   · components/ehome_mqtt/ + link_mqtt/    —— MQTT 客户端与链路
+     *   · components/transport_sel/              —— "TCP 优先 / MQTT 兜底"选路
+     *   · main/uplink_arbiter.{c,h}              —— 让两条门互斥以**防双发**
+     *   · session_transport 的 gate 注入         —— 同上，只剩一条传输后无意义
+     * 只剩一条传输 ⇒ **双发在结构上不可能** ⇒ 那一整套互斥机制失去对象。
+     */
     transport_manager_init();
-    mqtt_transport_register();
-    log_boot_heap("after mqtt_init");
+    log_boot_heap("after transport_init");
 
     /* ---- WiFi + callbacks ---- */
     wifi_mgr_register_state_cb(on_wifi_state_cb, s);
-    mqtt_client_register_state_cb(on_mqtt_state_cb, s);
-    mqtt_client_register_ready_cb(on_mqtt_ready_cb, s);
-    mqtt_client_register_transport_cb(on_mqtt_transport_cb, s);
-    mqtt_client_register_owner_wake_cb(on_mqtt_owner_wake_cb, s);
-    mqtt_client_register_msg_cb(on_mqtt_msg_cb, s);
-    mqtt_client_set_node_id(s->node_id);
 
     rgb_led_init(BOARD_LED_GPIO);
     rgb_led_start();
@@ -555,6 +667,32 @@ void app_main(void)
     /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */
     bus_worker_set_callbacks(msg_handler_send_write_rsp, msg_handler_send_data_report);
     bus_worker_set_channel_cmd_v2_final_cb(handler_channel_cmd_v2_complete);
+    /* D-06（2026-10-06）：DataBatch(0x20) 编码器【显式】注入。
+     * 此前靠 bus_worker.c 里的 __attribute__((weak)) 默认实现，
+     * 生效与否取决于链接顺序，且宿主测试走另一套符号表 ——
+     * 弱定义一旦生效，聚合静默退化为逐样本 0x03 而【没有测试会红】。
+     * 现在与上面两行同一风格：依赖方向单向（main -> 双方），一步到位。 */
+    bus_worker_set_data_batch_cb(msg_handler_send_data_batch);
+
+    /* D-14（2026-10-06）：把"最小栈余量"的提供者注册给中立组件 report_stats。
+     *
+     * 为什么需要这一行：为了让 msg_handler 不再 REQUIRES bus_worker（破除依赖环），
+     * 三个上报统计量搬到了 report_stats。其中 drop_count 与 queue_high_water
+     * 是纯计数器，可以直接搬；而 min_stack_watermark 需要 **bus_worker 的任务句柄**
+     * 按需计算（uxTaskGetStackHighWaterMark）⇒ 不能搬，只能由 bus_worker
+     * 在此注册一个 provider，由 report_stats 转发。
+     *
+     * 不注册的后果：report_stats 会返回 UINT32_MAX（"无低水位"）。
+     * 这**不会**造成假告警（0 才会），但会让上报帧里该字段**恒为无低水位** ——
+     * 也就是丢失真实观测。所以这不是可选项。 */
+    report_stats_set_stack_watermark_provider(bus_worker_get_min_stack_watermark);
+    /* 启动期断言（P6：读一手事实，而不是假设刚才那行生效了）。
+     * 未接上不会有假告警，但会让上报字段恒为"无低水位" —— 沉默地丢观测，
+     * 所以这里必须【看得见】。 */
+    if (!report_stats_has_stack_watermark_provider()) {
+        ESP_LOGE(TAG, "report_stats stack-watermark provider NOT registered: "
+                      "PerformanceReport will lose real stack observations");
+    }
     bus_manager_set_write_rsp_cb(msg_handler_send_write_rsp);
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
@@ -563,6 +701,57 @@ void app_main(void)
     /* Inject crash-record ack callback (v2.6): msg_handler cannot depend on
      * main, so the release-on-ACK handler is injected here. */
     msg_handler_set_diag_ack_cb(crash_diag_on_ack);
+
+    /* 远程运维（0x22 重启 / 恢复出厂）的三个原语。
+     * 注入点刻意放在传输启动之前：晚注入的话，一条早到的 0x22 会命中
+     * "未注入 ⇒ 拒绝执行"分支，而操作员看到的是"设备没反应"。 */
+    device_op_wiring_init();
+
+    /* ⚠ 2026-10-07（heap tracing 实测）**本顺序是敏感的** —— 原注释的"顺序不敏感"已被否证。
+     *
+     * trace 窗口 = 一次 mTLS 连接，实测到的机制：
+     *   · `device_link_wiring_init()` 建 devlink 任务后，该任务**立刻**开始连接
+     *     （WiFi 此时已就绪）⇒ 进入 mbedTLS 握手；
+     *   · 而 app_main 继续往下走到 `bus_worker_start()`，它要建 **7 个任务**
+     *     （report_tx + rx_task + cmd_u0..2 + cmd_spi + cmd_i2c），
+     *     **每个栈 4096 B、全在内部 RAM**（trace 里 7 条 4096 B 记录，调用栈指向
+     *     `xTaskCreatePinnedToCore` ← `report_path_init`/`bus_worker_start`）；
+     *   · 两者**并发** ⇒ 7×4096 的连续块需求与握手缓冲交错 ⇒ largest 塌到 7680。
+     *
+     * ⚠ **但"提前到链路之前"实测更差**（before_connect 的 largest 从 31744 掉到 12288）——
+     *   提前分配只是让堆**先被切碎**。⇒ **顺序改变不了总量**：
+     *   7×4096 栈 + TLS 缓冲之和本身就超出可用连续块。详见设计文档 §155。
+     * 默认关闭（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）⇒ 本段对默认构建无影响。 */
+    device_link_wiring_init();
+
+    /* task-21：把 3.0 会话注册成一条 transport，并注入**仲裁闸**。
+     *
+     * 为什么注册放在这里（而不是上面的 Transports 块）：
+     *   session 由 device_link_wiring_init() 创建并**持有**；上面那块跑的时候
+     *   device_link_wiring_session() 还是 NULL（未启用或尚未创建）。
+     *   本函数内部有运行期早退（CONFIG=n 时直接 return）⇒ 这里取到 NULL 即
+     *   "链路未启用"，静默跳过是**正确**的，不是失败。
+     *
+     * 为什么闸要单独注入：session_transport.c 是"纯判定 + 薄胶水"，让它直接
+     * include 仲裁层会把 IDF 依赖带进 SESSION_TRANSPORT_HOST_TEST 构建，
+     * 破坏那组宿主用例的可测性（见 session_transport.h 的说明）。
+     *
+     * ⚠ 不注册也不报错的原因：默认构建（CONFIG=n）本来就该**逐位不变**，
+     *   报错会让默认构建变吵；而"启用了却拿不到 session"才是真异常，
+     *   那种情况下面单独判并报错。 */
+    {
+        struct session *sess = device_link_wiring_session();
+        if (sess != NULL) {
+            transport_t *t3 = session_transport_create(sess);
+            if (t3 == NULL) {
+                /* ⚠ 2026-10-08（§194）：MQTT 已移除 ⇒ 这里**没有兜底**了。
+                 * 注册失败就是**完全没有上行**，必须响亮报错（不再说"仍走 MQTT"）。 */
+                ESP_LOGE(TAG, "3.0 transport 注册失败 ⇒ **没有任何可用上行**（MQTT 已移除，无兜底）");
+            }
+            /* 不再注入 session_transport_set_gate()：那个闸的唯一用途是
+             * "在 MQTT 与 3.0 之间选一条以防双发"，只剩一条传输后无意义。 */
+        }
+    }
 
     /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
      * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)

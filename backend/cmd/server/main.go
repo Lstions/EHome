@@ -20,16 +20,16 @@ import (
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
-	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/notify"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/seed"
+	"ehome/backend/internal/transport"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
 	"encoding/json"
@@ -53,8 +53,8 @@ func main() {
 
 	// Validate JWT secret is not default in production
 	api.ValidateJWTSecret()
-	logger.Infof("Config: MQTT=%s, DB=%s:%d/%s, API=%s",
-		cfg.MQTTBroker(), cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr())
+	logger.Infof("Config: DB=%s:%d/%s, API=%s, device_listener=%v",
+		cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr(), cfg.Device.Enabled)
 
 	dbCfg := cfg.DBConfig()
 	if err := database.Connect(database.Config{
@@ -198,8 +198,34 @@ func main() {
 		}
 	}
 
-	mqttClient := mqtt.New(cfg.MQTTBroker(), cfg.MQTTUser(), cfg.MQTTPassword())
-	defer mqttClient.Close()
+	// 3.0 device transport (design 7.3 P0). Disabled by default: with
+	// device.enabled unset this build behaves exactly as before, which is what
+	// makes deploying it safe. A partially configured listener is refused HERE
+	// rather than silently not starting, because "I enabled it" and "the
+	// device cannot connect" would otherwise look identical.
+	if err := cfg.Device.Validate(); err != nil {
+		logger.Fatalf("Invalid device transport configuration: %v", err)
+	}
+
+	// 3.0 downlink wiring. This is the ONLY device transport (MQTT was removed
+	// from the backend on 2026-10-08).
+	//
+	// The registry is created HERE, before anything that publishes downlinks,
+	// and handed to the transport below. That ordering is what lets one object
+	// serve both roles: the transport populates it as devices connect, and the
+	// bridge reads it to find the node's live session. With the transport owning
+	// its own registry there would be a window in which a connected device is
+	// reachable by the routing layer but invisible to everyone else.
+	//
+	// ⚠ With device.enabled false there is NO device path at all: every
+	// downlink fails with "no live session", and no device can reach the server.
+	// That is logged below so it is visible rather than discovered.
+	deviceRegistry := transport.NewRegistry()
+	publisher := downlink.New(deviceRegistry)
+	if !cfg.Device.Enabled {
+		logger.Warnf("device.enabled=false: the 3.0 listener is OFF and MQTT is gone -- " +
+			"NO device can connect or be commanded. This is intended only for API-only deployments.")
+	}
 
 	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
@@ -238,11 +264,19 @@ func main() {
 	})
 	go outboxProcessor.Run(outboxContext, time.Second)
 
-	haIntegration := homeassistant.NewIntegration(mqttClient)
-	otaMgr := ota.NewManager(db, mqttClient, wsHub)
+	otaMgr := ota.NewManager(db, publisher, wsHub)
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
-	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
+	nodeMgr := nodemgr.NewManager(db, publisher, wsHub, offlineDetector, otaMgr, driverRegistry)
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调接线 (api 包函数, 避免包依赖环)。
+	// Bring up the 3.0 listener now that FrameHandler exists. It uses the SAME
+	// registry the bridge above holds, so a device that authenticates becomes
+	// immediately addressable over TCP.
+	devTransport, err := startDeviceTransport(cfg, nodeMgr.FrameHandler(), deviceRegistry)
+	if err != nil {
+		logger.Fatalf("Device transport: %v", err)
+	}
+	defer devTransport.stop()
+
 	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
 	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
 	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
@@ -358,21 +392,13 @@ func main() {
 		}
 	})
 
-	mqttClient.SetHandler(nodeMgr.HandleMessage)
-	mqttContext, stopMQTT := context.WithCancel(context.Background())
-	defer stopMQTT()
-	go func() {
-		if err := mqttClient.Run(mqttContext); err != nil {
-			logger.Errorf("MQTT supervisor stopped: %v", err)
-		}
-	}()
 	if cfg.ControlConfig().DeviceControlV2Enabled {
 		dispatcherOwner := commandexec.NewDispatcherOwner("server")
 		// MultiTransport 按 action Transport 路由: channel_cmd_v2 → 通道指令,
 		// periph_cmd → GPIO/PWM 外设帧 (PeriphCmd 0x1B)。
 		transport := commandexec.NewMultiTransport(
-			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry),
-			commandexec.NewPeriphTransport(db, mqttClient, actionRegistry))
+			commandexec.NewChannelCmdV2Transport(db, publisher, actionRegistry),
+			commandexec.NewPeriphTransport(db, publisher, actionRegistry))
 		dispatcher := commandexec.NewDispatcher(db, transport, dispatcherOwner)
 		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
 		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)
@@ -380,23 +406,56 @@ func main() {
 		logger.Infof("ChannelCmdV2 dispatcher disabled by configuration")
 	}
 
-	// v2.1: push only after a real CONNECT+SUBACK, never after an arbitrary sleep.
+	// Server-startup config push.
+	//
+	// ⚠ This MUST keep running: it was gated on <-mqttClient.Ready() (broker
+	// connected), and simply deleting the gate together with MQTT would have
+	// silently removed the feature. The gate was meaningful because "the
+	// transport is up" is a real precondition for a push to arrive.
+	//
+	// Over 3.0 the honest translation of that precondition is "the node has a
+	// live session", checked per node below. Two reasons it cannot just be
+	// dropped to an unconditional loop:
+	//
+	//  1. A node with no session returns an error from Publish, and
+	//     SendConfigManifestWithDecision turns that into fail(), which writes
+	//     config_status=failed. At startup the DB still says "online" for nodes
+	//     that simply have not reconnected yet, so an unconditional push would
+	//     mark healthy nodes failed -- reporting "the device refused its config"
+	//     when the truth is "it is not connected".
+	//  2. It would be useless work: the push could not arrive.
+	//
+	// Devices that are not connected yet are NOT left unsynced: handleHello
+	// (handler_hello.go) runs the same gate on every Hello, so a node gets its
+	// config the moment it connects. This loop covers nodes already connected
+	// when the server starts, which is exactly what it always covered.
+	//
+	// No sleep/x grace period is used on purpose -- an arbitrary wait is what
+	// the original comment ("never after an arbitrary sleep") rejected.
 	go func() {
-		select {
-		case <-mqttClient.Ready():
-		case <-mqttContext.Done():
-			return
-		}
 		decisions := nodeMgr.SyncGate().OnServerStartup()
+		notified, skipped := 0, 0
 		for _, d := range decisions {
-			if d.Action != nodemgr.SyncActionNone {
-				nodeMgr.SendConfigManifestWithDecision(d)
-				logger.Infof("[sync_id=%s] Server-startup push: device=%s reason=%s",
-					d.SyncID, d.DeviceID, d.Reason)
+			if d.Action == nodemgr.SyncActionNone {
+				continue
 			}
+			if !deviceRegistry.HasSession(d.DeviceID) {
+				// Not connected: skip rather than mark it failed. Its config is
+				// delivered by the Hello path when it connects.
+				skipped++
+				logger.Infof("[sync_id=%s] Server-startup push skipped: device=%s reason=%s "+
+					"(no live session yet; Hello will sync it on connect)",
+					d.SyncID, d.DeviceID, d.Reason)
+				continue
+			}
+			nodeMgr.SendConfigManifestWithDecision(d)
+			notified++
+			logger.Infof("[sync_id=%s] Server-startup push: device=%s reason=%s",
+				d.SyncID, d.DeviceID, d.Reason)
 		}
 		if len(decisions) > 0 {
-			logger.Infof("Server-startup push complete: %d nodes notified", len(decisions))
+			logger.Infof("Server-startup push complete: %d notified, %d skipped (not connected)",
+				notified, skipped)
 		}
 	}()
 
@@ -509,9 +568,6 @@ func main() {
 	} else {
 		logger.Infof("HTTP server stopped")
 	}
-
-	mqttClient.Close()
-	logger.Infof("MQTT disconnected")
 
 	logger.Infof("EHomeSystem Server stopped")
 }

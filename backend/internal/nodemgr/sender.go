@@ -12,9 +12,9 @@ import (
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/protoframe"
 
 	"gorm.io/gorm"
 )
@@ -34,30 +34,35 @@ const (
 	// collector could never receive, instead of letting it fail at push time.
 	MaxCommandsPerEdgeDevice = 3
 
-	// MaxManifestWireBytes is the largest ConfigManifest payload that fits in a
-	// SINGLE MQTT downlink event on the ESP32 collectors. It is a hard wire
-	// bound, not a memory-tuning knob: esp-mqtt fragments an inbound PUBLISH
-	// that does not fit the receive buffer into several MQTT_EVENT_DATA events
-	// and the firmware has NO downlink reassembly, so every fragment is handed
-	// to msg_handler_process() as if it were a whole frame. A manifest above
-	// this bound is therefore not merely delayed — it is undeliverable
-	// (first fragment fails to parse → ConfigResult(false), the rest is
-	// discarded as an unknown mid-frame type), while the backend used to see
-	// only "published successfully" (V3 设计文档 §8 R1).
+	// MaxManifestWireBytes is the largest ConfigManifest **payload** an ESP32
+	// collector can receive. It is a hard wire bound, not a memory-tuning knob:
+	// a manifest above it is not merely delayed — it is undeliverable.
 	//
-	// Derivation (all inputs read from the firmware tree):
-	//   CONFIG_MQTT_BUFFER_SIZE = 2048        (esp32-collector/sdkconfig.defaults:24)
-	//   topic = "nodes/<node_id>/control"     (ehome_mqtt.c:665)
-	//   per-event payload = 2048
-	//                     − 1                 (fixed header byte 1: type + flags)
-	//                     − 2                 (remaining-length varint, 2-byte form)
-	//                     − (2 + len(topic))  (2-byte topic length prefix + topic)
-	//                     − 2                 (QoS 1 packet identifier)
-	//   For the shortest deployed node_id (12 hex chars → 26 B topic) that is
-	//   2015 B; for 16 chars (30 B topic) 2011 B; for 32 chars 1995 B. The
-	//   product issues 12-char hex node_ids, so 2011 B is the conservative
-	//   (16-char) figure and leaves 4 B of slack on real hardware.
-	MaxManifestWireBytes = 2011
+	// ⭐ 2026-10-08（§195）：2011 → **4096**，且**推导依据整个换掉**。
+	//
+	// 为什么必须换（这不是调参，是"判据失去了它的对象"）：
+	//   原值 2011 是**按 MQTT 的接收缓冲推导**的 ——
+	//     CONFIG_MQTT_BUFFER_SIZE=2048 − 固定头 − topic 前缀 − QoS 包标识 = 2011。
+	//   MQTT 已于 2026-10-08 **整体移除**（§194）⇒ 那个缓冲、那条 topic、
+	//   那 2 字节 QoS 标识**都不存在了**。一个由已删除传输推导出来的界，
+	//   哪怕数值看着还"能用"，也已经是**没有依据的数字**了
+	//   （原注释甚至引用了 ehome_mqtt.c:665 —— 那个文件已不在仓库里）。
+	//
+	// 新依据（设备**自己申报**的上限，读自固件 Kconfig）：
+	//   CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD = 4096 （默认值；范围 256..8176）
+	//   ⇒ 设备侧的定界器按 (payload + 12 header + 4 CRC) **一笔连续块**分配，
+	//     并在分配不下时**拒绝启动链路**（device_link_check_placement）。
+	//   ⇒ 后端发的 payload 一旦超过设备申报的 4096，设备**收不下**。
+	//   ⚠ 取默认 4096 而不是最大值 8176：设备上该 Kconfig 可被调低，
+	//     而设备目前**不在 Hello 里申报**自己的 max_payload（已核实）⇒
+	//     后端无从得知。用**最小值**是保守方向：
+	//     少发一次可发的配置，好过发一条设备解不了的。
+	//
+	// ⚠ 仍未做（登记，不假装完成）：3.0 的正解是设备在 Hello 里申报
+	//   max_payload、后端据此逐设备取 min(申报值, protoframe.PayloadMax)。
+	//   那是设计工作（见 ESP32-3.0-重构方案 §5.2 与 §489）——本卡只把
+	//   "依据已删除传输"改成"依据设备申报的配置值"，没有顺手发明新协议。
+	MaxManifestWireBytes = 4096
 )
 
 // checkManifestWireBytes fails closed when an encoded ConfigManifest cannot fit
@@ -68,12 +73,39 @@ const (
 // The caller must pass the length of the SAME payload it is about to publish —
 // never a re-encoded copy — so the check and the bytes on the wire are
 // same-source (see SendConfigManifestWithDecision).
+//
+// # ⭐ 2026-10-08（§195）：这一段整个换掉了，原因值得留档
+//
+// 原文（2026-10-07）的论点是："这个界是 transport-INDEPENDENT 的，
+// 因为下行**仍可能落到 MQTT**：downlink.Bridge 在 TCP 会话缺席 / 组帧失败 /
+// SendToNode 出错时回落到 legacy publisher。所以界必须按**最差传输**取。"
+//
+// ⇒ MQTT 已于 2026-10-08 **整体移除**（§194），downlink.Bridge 的回落路径
+//
+//	与 legacy publisher 一并删除 ⇒ **"最差传输"现在是唯一的那条传输**。
+//	那段论证不是"过期"，而是**失去了它的对象**：它成立的前提（存在两条路）
+//	已经不存在了。
+//
+// ⚠ 教训：删除一个传输时，要去找**为多传输权衡而写的判据** ——
+//
+//	它们不会报错，只会继续用"已经不存在的另一条路"来解释自己。
+//	本处是这样，sender.go 的 MaxManifestWireBytes 推导（按 MQTT 缓冲算 2011）
+//	也是这样 —— 两处同批修正。
+//
+// 现在的界只有一个依据：**设备申报的接收上限**（见 MaxManifestWireBytes）。
+// TCP 能承载的上限是 protoframe.PayloadMax（%d B），它比设备侧上限**更大**，
+// 因此不是矛盾 —— 本门禁取的是两者中的**小者**，而小者由设备决定。
 func checkManifestWireBytes(encodedBytes int) error {
 	if encodedBytes > MaxManifestWireBytes {
-		return fmt.Errorf("ConfigManifest is %d bytes; the single MQTT downlink event limit is %d bytes "+
-			"(CONFIG_MQTT_BUFFER_SIZE=2048, esp-mqtt fragments and firmware has no downlink reassembly): "+
-			"refusing to publish a manifest the collector cannot receive",
-			encodedBytes, MaxManifestWireBytes)
+		return fmt.Errorf("ConfigManifest is %d bytes; the bound is %d bytes, "+
+			"which is the device-side limit (CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD), "+
+			"not a server-side one: the collector's wire delimiter allocates "+
+			"(payload + 12 header + 4 CRC) as ONE contiguous block and refuses to "+
+			"start the link when it does not fit, so a manifest above this bound is "+
+			"undeliverable rather than merely delayed. The TCP/TLS path itself would "+
+			"carry up to %d B — the smaller of the two is what binds. "+
+			"Refusing to publish a manifest the collector may be unable to receive",
+			encodedBytes, MaxManifestWireBytes, protoframe.PayloadMax)
 	}
 	return nil
 }
@@ -184,8 +216,10 @@ func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uin
 	logger.Infof("[%s] SendPeriphCmd: type=%d resource_id=%d action=%d value=%d config_len=%d reqID=%d",
 		deviceID, periphType, resourceID, action, value, len(config), requestID)
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-	if m.mqtt == nil {
+	if m.downlink == nil {
+		// Unwired publisher: tests construct a Manager without one. Refuse and
+		// release the pending entry rather than pretending the command went out.
+
 		delete(m.periphPending, requestID)
 		if m.periphLatest[latestKey] == requestID {
 			if hadPreviousLatest {
@@ -199,9 +233,9 @@ func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uin
 			}
 		}
 		m.periphMu.Unlock()
-		return 0, fmt.Errorf("MQTT client not connected")
+		return 0, fmt.Errorf("no downlink publisher configured")
 	}
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		delete(m.periphPending, requestID)
 		if m.periphLatest[latestKey] == requestID {
 			if hadPreviousLatest {
@@ -251,8 +285,7 @@ func (m *Manager) SendPing(deviceID string) error {
 		})
 	}
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendWriteCommand sends a WriteCommand to a device
@@ -273,8 +306,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 		enc.EncodeVarint(4, uint64(readSize))
 	}
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-	return m.mqtt.PublishQoS2(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendScanRequest sends a ScanRequest to a device (I2C mode)
@@ -283,8 +315,7 @@ func (m *Manager) SendScanRequest(deviceID string, hardwareID uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("scan-%d", time.Now().Unix()))
 	enc.EncodeVarint(2, uint64(hardwareID))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendModbusScanRequest sends a ScanRequest to a device (Modbus mode)
@@ -316,8 +347,7 @@ func (m *Manager) SendModbusScanRequest(deviceID string, startAddr, endAddr, tim
 		enc.EncodeVarint(6, 200) // default 200ms
 	}
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return "", err
 	}
 	return requestID, nil
@@ -329,8 +359,7 @@ func (m *Manager) SendQueryRequest(deviceID string, queryType uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("query-%d", time.Now().UnixMilli()))
 	enc.EncodeVarint(2, uint64(queryType))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendHelloAck sends a nonce-correlated HelloAck (0x12, SVR→ESP).
@@ -344,8 +373,7 @@ func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint
 	enc.EncodeVarint(2, uint64(features))
 	enc.EncodeVarint(frame.HelloAckFieldHandshakeNonce, uint64(handshakeNonce))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendConfigQuery sends a ConfigQuery (type=0x10) to a device
@@ -353,8 +381,7 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 	enc := frame.NewEncoder(frame.MsgConfigQuery)
 	enc.EncodeString(1, fmt.Sprintf("cfgq-%d", time.Now().UnixMilli()))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendQueryResources sends a QueryResources (0x1A) to a device, requesting it to send a ResourceReport.
@@ -365,8 +392,7 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 	enc := frame.NewEncoder(frame.MsgQueryResources)
 	enc.EncodeString(1, requestID)
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return "", fmt.Errorf("failed to publish QueryResources: %w", err)
 	}
 
@@ -383,14 +409,13 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 //	accepted=false → persistence failed; the device MUST keep the record and
 //	                 retry. Never send true unless the row is committed.
 //
-// Mirrors SendQueryResources: encode → Publish(mqtt.TopicForNode(deviceID)).
+// Mirrors SendQueryResources: encode → downlink.Publish(deviceID).
 func (m *Manager) SendDiagAck(deviceID string, recordID uint32, accepted bool) error {
 	enc := frame.NewEncoder(frame.MsgDiagAck)
 	enc.EncodeVarint(1, uint64(recordID))
 	enc.EncodeBool(2, accepted)
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return fmt.Errorf("failed to publish DiagAck: %w", err)
 	}
 	return nil
@@ -616,6 +641,16 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		if err != nil {
 			return err
 		}
+		// ⚠⚠ 2026-10-09（用户要求，两层设计的第一层）：
+		//   用户显式把多条 UART 的 DMA 打开 ⇒ **在下发前就报错**，错误回前端。
+		//   而不是下发给设备后让资源计划拒绝整份 manifest（§211 的 C6 事故：
+		//   2818 次 config failed、设备 ch=0 永远 syncing，UI 上看不到原因）。
+		//
+		//   第二层（运行期降级）在固件 bus_manager 的资源计划里：非用户显式冲突
+		//   导致的分不到 DMA ⇒ 降级 polled + 提示，不拒绝整份。
+		if err := validateUARTDMASlots(channels); err != nil {
+			return err
+		}
 		if err := validateManifestTemplateCapacity(snap.templates, limits.maxTemplates); err != nil {
 			return err
 		}
@@ -654,9 +689,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		return fail(fmt.Errorf("encode config manifest: %w", err))
 	}
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-
-	// R1 byte gate: the encoded manifest must fit in ONE MQTT downlink event.
+	// R1 byte gate: the encoded manifest must fit in ONE downlink message.
+	// ⚠ See MaxManifestWireBytes: the bound was DERIVED from the MQTT receive
+	// buffer and has not been re-derived for the 3.0 TCP path. It is kept
+	// unchanged (conservative) rather than silently widened.
 	// Checked on the exact bytes about to be published (same snapshot, same
 	// encode call — never a re-encode), before any state is marked "syncing",
 	// so an undeliverable manifest is rejected with a diagnosable error and the
@@ -676,7 +712,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		return fail(fmt.Errorf("persist syncing state: %w", err))
 	}
 
-	if err := m.mqtt.Publish(topic, payload); err != nil {
+	if err := m.downlink.Publish(deviceID, payload); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 		return fail(fmt.Errorf("publish config manifest: %w", err))
 	}

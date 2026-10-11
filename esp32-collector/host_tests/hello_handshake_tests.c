@@ -79,10 +79,17 @@ void vTaskDelete(TaskHandle_t task) { (void)task; }
 
 const char *get_firmware_version(void) { return "host"; }
 const char *get_model_name(void) { return "ESP32-HOST"; }
-bool config_mgr_has_manifest(void) { return false; }
+/*
+ * 这两个 stub 的返回值原先写死。S0 对拍需要让 handler 产出**与共享向量完全相同的
+ * 字节**（向量要求 field6=1 且**不发** field7），所以改成可注入 —— 但**默认值与原行为
+ * 逐位相同**，因此本文件既有的全部用例行为不变（这是"改测试夹具"不是"改期望"）。
+ */
+static bool stub_has_manifest = false;
+static const char *stub_last_manifest_id = "manifest-host";
+bool config_mgr_has_manifest(void) { return stub_has_manifest; }
 uint8_t config_mgr_get_active_channel_count(void) { return 0; }
 uint64_t config_mgr_get_epoch(void) { return 7; }
-const char *config_mgr_get_last_known_manifest_id(void) { return "manifest-host"; }
+const char *config_mgr_get_last_known_manifest_id(void) { return stub_last_manifest_id; }
 void msg_handler_send_resource_report(void) { resource_report_count++; }
 void sync_manager_start_config_timeout(void) {}
 void sync_manager_on_downlink_received(uint8_t msg_type)
@@ -486,6 +493,82 @@ static void test_runtime_generation_and_nonce_wrap(void)
           "current READY must expose the sole MQTT generation");
 }
 
+/* ⭐⭐ task-33：**真机 §138 的回归**（决策 B′ 的核心判据）。
+ *
+ * 真机症状：3.0 链路发 Hello 用的是自己的 esp_random()，而校验方只认
+ * runtime armed 的 nonce ⇒ 应用层必然判 stale，而链路层照样进 READY。
+ *
+ * 本用例钉住的正是修复后的不变量：
+ *   **在 MQTT 完全没就绪时（ready_generation == 0），
+ *     由 3.0 链路 arm 的 nonce 仍然必须被 notify_ack 接受。**
+ *
+ * 为什么这个前提如此重要：§7.3 P2 的场景就是"TCP 优先、MQTT 兜底"，
+ * 而 prepare_send/notify_ack 的旧判据要求 ready_generation == current，
+ * 那是 **MQTT** 的就绪概念 ⇒ 在 MQTT 未就绪时恒为 0 ⇒ 3.0 的 ACK 被
+ * 永久拒绝。这就是决策文档 §3 否掉候选 A 的那条证据。
+ *
+ * 变异自证：tools/handshake_mutation_proof.py 的 M3（arm 恒失败）会让
+ * 本用例第一组变红。 */
+static void test_link_armed_nonce_is_accepted_without_mqtt_ready(void)
+{
+    hello_runtime_t runtime;
+    hello_runtime_init_with_seed(&runtime, 7U);
+
+    /* 关键前提：**没有**调 on_transport_connected/on_ready ⇒ MQTT 未就绪。
+     * 断言这个前提本身，否则下面"accept"可能只是因为就绪了而对修复无感。 */
+    CHECK(hello_runtime_ready_generation(&runtime) == 0,
+          "前提：MQTT 未就绪时 ready_generation 必须为 0（否则本用例测不到 §138）");
+    CHECK(hello_runtime_current_generation(&runtime) == 0,
+          "前提：current_generation 也必须为 0");
+
+    /* 1) 3.0 链路取 nonce：必须成功且非 0（后端 reject nonce==0）。 */
+    uint32_t link_nonce = 0;
+    CHECK(hello_runtime_arm_link(&runtime, &link_nonce) && link_nonce != 0,
+          "3.0 链路应能从 runtime 取到非 0 nonce");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_LINK,
+          "arm 之后归属必须是 LINK");
+    CHECK(hello_runtime_armed_nonce(&runtime) == link_nonce,
+          "armed_nonce 必须就是刚取到的那个（同一个存储位，P4）");
+
+    /* 2) ⭐ 核心：这个 nonce 必须被校验方**接受** —— 即使 MQTT 未就绪。 */
+    CHECK(hello_runtime_notify_ack(&runtime, link_nonce),
+          "**MQTT 未就绪时，LINK arm 的 nonce 也必须被接受**（真机 §138 的修复点）");
+
+    /* 3) 重新 arm（= 链路重连）后，**旧** nonce 必须失效。 */
+    uint32_t next = 0;
+    CHECK(hello_runtime_arm_link(&runtime, &next) && next != link_nonce,
+          "重新 arm 应给一个不同的 nonce");
+    CHECK(!hello_runtime_notify_ack(&runtime, link_nonce),
+          "重新 arm 之后，旧 nonce 必须被拒（否则重放/迟到 ACK 会被当成功）");
+    CHECK(hello_runtime_notify_ack(&runtime, next),
+          "新的 nonce 应被接受");
+
+    /* 4) 清理：clear 之后谁都别想通过。 */
+    hello_runtime_clear_link_arm(&runtime);
+    CHECK(hello_runtime_armed_nonce(&runtime) == 0, "clear 之后 armed_nonce 应为 0");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_NONE,
+          "clear 之后归属应为 NONE");
+    CHECK(!hello_runtime_notify_ack(&runtime, next),
+          "clear 之后旧 nonce 不得再被接受");
+
+    /* 5) MQTT 路径的既有语义**不得被破坏**：仍是"代际必须就绪"。
+     *    （若有人把 notify_ack 简化成"只看 armed_nonce"，这条会红。） */
+    /* ⚠ 必须先 on_transport_connected(**再**) on_ready —— 这正是决策文档 §3
+     * 的证据：prepare_send 要求 ready_generation == generation，而 ready 只由
+     * MQTT 的就绪回调写入。少调 on_ready 就会失败（本用例第一版就踩了这条，
+     * 恰好从反面印证了 A 为什么在 MQTT 未就绪时取不到 nonce）。 */
+    hello_runtime_on_transport_connected(&runtime, 5);
+    hello_runtime_on_ready(&runtime, 5);
+    uint32_t mqtt_nonce = 0;
+    CHECK(hello_runtime_prepare_send(&runtime, 5, &mqtt_nonce),
+          "前提：MQTT 就绪（connected+ready）后 prepare_send 应能取到 nonce");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_MQTT,
+          "prepare_send 之后归属必须回到 MQTT");
+    hello_runtime_on_transport_connected(&runtime, 6);   /* 代际推进 ⇒ 旧 nonce 作废 */
+    CHECK(!hello_runtime_notify_ack(&runtime, mqtt_nonce),
+          "MQTT 路径：代际变化后旧 nonce 必须被拒（原有语义不得被本卡改掉）");
+}
+
 static void test_runtime_startup_nonce_seed(void)
 {
     hello_runtime_t first;
@@ -625,18 +708,249 @@ static void test_server_caps_captured_and_reset(void)
           "stale ACK must not change server caps");
 }
 
+
+/* ==================================================================== *
+ * S0 盲区修复 (2026-10-07)：把 handler_hello.c 的**真实输出**绑到共享向量
+ *
+ * ## 为什么需要（本卡存在的全部理由）
+ *
+ * 变异 `handler_hello.c:179` 的 field 编号 4 → 10（即 field 4 **整条消失**）后：
+ *   宿主 ctest 100/100 全绿 · 14 条门禁全 RC=0 · 后端 go test rc=0 · 跨语言对锚 rc=0
+ *   ⇒ **没有任何一层发现它**。
+ * 而它是真实破坏：后端 required 集 = {1,2,3,4,5,6,8,9}，缺 4 ⇒ parseHello 返回
+ *   ⇒ 不回 HelloAck ⇒ 设备永远进不了 READY。
+ *
+ * ## 根因（本卡修的那一个）
+ *
+ * `test_hello_codec_requires_nonce` **确实**调用了真实 `msg_handler_send_hello`
+ * （即覆盖了真实编码路径），但它**只断言 field 8 与 field 9**；
+ * field 4/5/6 从不检查 ⇒ 缺必填字段这条真实故障无覆盖。
+ * 教训：**"有测试覆盖了那个函数" ≠ "覆盖了那个函数里会出错的部分"**。
+ *
+ * ## 做法
+ *
+ * 1) `assert_hello_wire_contract`：逐字段核对**编号 + wire type + 必填齐全**；
+ * 2) `test_hello_matches_shared_vector`：用与向量**相同的参数**编一条，
+ *    断言**逐字节等于**向量 `hello_from_device` 的 wire。
+ *
+ * 两者互补：对拍证明"当前字节正确"，逐字段证明"**为什么**错"（对拍失败时能直接
+ * 指出是哪个字段漂了，而不是只说"字节不符"）。
+ * ==================================================================== */
+
+/* 后端 parseHello 的 required 集（handler_hello.go:134）。
+ * 这 8 个字段**一个都不能少** —— 少任何一个后端都直接 return，不回 HelloAck。 */
+static const uint8_t kHelloRequiredFields[] = {1, 2, 3, 4, 5, 6, 8, 9};
+/* 固件**允许**发送的可选字段：field 7 last_manifest（仅非空时发，见 handler_hello.c:186-188）。 */
+static const uint8_t kHelloOptionalFields[] = {7};
+
+static bool field_in_list(uint8_t n, const uint8_t *list, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (list[i] == n) return true;
+    }
+    return false;
+}
+
+/* 每个字段在 wire 上的**规范** wire type。
+ *
+ * ⚠ field 8 (proto_version) 是**字符串**不是 varint —— 依据：
+ *   · 固件 handler_hello.c:189 `frame_encode_string(&enc, HELLO_F_PROTO_VERSION, "2.6")`
+ *   · 后端 handler_hello.go:118-122 对 case 8 要求 WIRE_LENGTH_DELIMITED
+ *   · 共享向量 `bytes 8 322e36`（字符串 "2.6"）
+ * 我第一版把 8 写成 varint，被本函数自己的断言当场抓出（见报告"我自己的错"）。
+ * 这正是"逐字段 wire type"值得写的原因。 */
+static uint8_t expected_wire_type(uint8_t field_num)
+{
+    switch (field_num) {
+    case 1: case 2: case 3: case 7: case 8: return WIRE_LENGTH_DELIMITED;
+    case 4: case 5: case 6: case 9: return WIRE_VARINT;
+    default: return 0xFF; /* 未知字段：调用方自行报错 */
+    }
+}
+
+/*
+ * 逐字段核对 handler_hello.c 真实产出的 Hello：
+ *   · 必填 {1,2,3,4,5,6,8,9} **一个不缺**（这条正是本卡要挡的故障）；
+ *   · 每个出现的字段的 **wire type 正确**；
+ *   · 不出现**未知**字段号（防止编号漂移后落到别的号上而"看起来还在"）。
+ *
+ * 注意：本函数**不检查字段的取值**（channel_count 是 2 还是 10 都不管）——
+ * 契约是关于"编号与存在性"的，取值由别的用例覆盖。
+ */
+static void assert_hello_wire_contract(const uint8_t *data, size_t len, const char *ctx)
+{
+    frame_decoder_t dec;
+    frame_field_t field;
+    bool seen[256] = {false};
+    size_t n_seen = 0;
+
+    if (frame_decoder_init(&dec, data, len) != FRAME_OK) {
+        fprintf(stderr, "FAIL [%s]: Hello 帧无法解码\n", ctx);
+        failures++;
+        return;
+    }
+    if (len == 0 || data[0] != MSG_HELLO) {
+        fprintf(stderr, "FAIL [%s]: 首字节 0x%02X != MSG_HELLO(0x%02X)\n",
+                ctx, len ? data[0] : 0, MSG_HELLO);
+        failures++;
+        return;
+    }
+
+    while (frame_decoder_next(&dec, &field) == FRAME_OK) {
+        if (field.field_num == 0) continue;
+        if (seen[field.field_num]) {
+            fprintf(stderr, "FAIL [%s]: 字段 %u 重复出现\n", ctx, field.field_num);
+            failures++;
+        }
+        seen[field.field_num] = true;
+        n_seen++;
+
+        /* 已知字段必须是"必填"或"可选"之一；其余一律是编号漂移。 */
+        bool known = field_in_list(field.field_num, kHelloRequiredFields,
+                                   sizeof(kHelloRequiredFields)) ||
+                     field_in_list(field.field_num, kHelloOptionalFields,
+                                   sizeof(kHelloOptionalFields));
+        /* wire type 必须与规范一致（未知字段号 => 0xFF 报错）。 */
+        uint8_t want = expected_wire_type(field.field_num);
+        if (!known || want == 0xFF) {
+            fprintf(stderr,
+                    "FAIL [%s]: 出现未知字段号 %u (wire=%u) —— Hello 编号漂移\n",
+                    ctx, field.field_num, field.wire_type);
+            failures++;
+        } else if (field.wire_type != want) {
+            fprintf(stderr,
+                    "FAIL [%s]: 字段 %u wire type = %u, 期望 %u\n",
+                    ctx, field.field_num, field.wire_type, want);
+            failures++;
+        }
+    }
+
+    /* ⭐ 必填字段一个都不能少 —— 缺任何一个后端 parseHello 都直接 return。 */
+    for (size_t i = 0; i < sizeof(kHelloRequiredFields); i++) {
+        uint8_t n = kHelloRequiredFields[i];
+        if (!seen[n]) {
+            fprintf(stderr,
+                    "FAIL [%s]: 缺少**必填**字段 %u —— 后端 parseHello 会整条拒绝,"
+                    " 不回 HelloAck, 设备永远进不了 READY (已见 %zu 个字段)\n",
+                    ctx, n, n_seen);
+            failures++;
+        }
+    }
+}
+
+/* 解码辅助：取某字段的 varint 值（不存在或 wire 不符返回 false）。 */
+static bool hello_field_u64(const uint8_t *data, size_t len, uint8_t want_num,
+                            uint64_t *out)
+{
+    frame_decoder_t dec;
+    frame_field_t field;
+    if (frame_decoder_init(&dec, data, len) != FRAME_OK) return false;
+    while (frame_decoder_next(&dec, &field) == FRAME_OK) {
+        if (field.field_num == want_num && field.wire_type == WIRE_VARINT) {
+            *out = field.value.varint;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * ⭐ 与共享向量**逐字节对拍**：用向量 hello_from_device 的同样参数编一条 Hello。
+ *
+ * 向量参数（protocol/vectors/wire_primitives.txt，case hello_from_device）：
+ *   node_id="v3-link-node"  fw="3.0.0-dev"  model="EH-S3"
+ *   channel_count=4  epoch=7  has_manifest=1  proto="2.6"  nonce=2712847316
+ *   **不发 field 7**（向量里没有 field 7）
+ *
+ * 参数形状核对（这是 Lead 要求先确认的）：
+ *   · handler 的 epoch / has_manifest / last_manifest 来自 config_mgr_* stub
+ *     ⇒ 通过 stub 注入成向量要求的 7 / 1 / (空 ⇒ 不发 field 7)；
+ *   · 其余（node_id/fw/model/channel_count/nonce）都是 handler 的入参，直接给。
+ *   ⇒ **形状对得上**，可以做对拍。
+ */
+static void test_hello_matches_shared_vector(void)
+{
+    reset_fixture();
+    stub_has_manifest = true;              /* 向量 u64 6 1 */
+    stub_last_manifest_id = "";            /* 向量无 field 7 ⇒ 必须不发 */
+
+    msg_handler_send_hello("v3-link-node", "3.0.0-dev", "EH-S3", 4, 2712847316U);
+    stub_has_manifest = false;             /* 立刻还原默认, 避免影响后续用例 */
+    stub_last_manifest_id = "manifest-host";
+
+    CHECK(hello_publish_count == 1,
+          "对拍: handler 必须真的发出一条 Hello");
+    if (hello_publish_count != 1) return;
+
+    /* 先跑逐字段契约 —— 它能在对拍失败时指出**哪个字段**漂了。 */
+    assert_hello_wire_contract(last_publish, last_publish_len, "vector-parity");
+
+    /* 向量 wire（与 protocol/vectors/wire_primitives.txt 的 hello_from_device 一致）。 */
+    static const uint8_t kVectorWire[] = {
+        0x01,
+        0x0a, 0x0c, 'v', '3', '-', 'l', 'i', 'n', 'k', '-', 'n', 'o', 'd', 'e',
+        0x12, 0x09, '3', '.', '0', '.', '0', '-', 'd', 'e', 'v',
+        0x1a, 0x05, 'E', 'H', '-', 'S', '3',
+        0x20, 0x04,
+        0x28, 0x07,
+        0x30, 0x01,
+        0x42, 0x03, '2', '.', '6',
+        0x48, 0xd4, 0x87, 0xcb, 0x8d, 0x0a,
+    };
+
+    if (last_publish_len != sizeof(kVectorWire)) {
+        fprintf(stderr,
+                "FAIL 对拍: Hello 长度 %zu != 向量 %zu\n",
+                last_publish_len, sizeof(kVectorWire));
+        failures++;
+        return;
+    }
+    for (size_t i = 0; i < sizeof(kVectorWire); i++) {
+        if (last_publish[i] != kVectorWire[i]) {
+            fprintf(stderr,
+                    "FAIL 对拍: 第 %zu 字节 0x%02X != 向量 0x%02X\n",
+                    i, last_publish[i], kVectorWire[i]);
+            failures++;
+            return;
+        }
+    }
+
+    /* 顺带把取值也钉住（编号对了但值错了同样是契约漂移）。 */
+    uint64_t v = 0;
+    CHECK(hello_field_u64(last_publish, last_publish_len, 4, &v) && v == 4,
+          "对拍: field4 channel_count 必须 == 4");
+    CHECK(hello_field_u64(last_publish, last_publish_len, 5, &v) && v == 7,
+          "对拍: field5 config_epoch 必须 == 7");
+    CHECK(hello_field_u64(last_publish, last_publish_len, 6, &v) && v == 1,
+          "对拍: field6 has_manifest 必须 == 1");
+    CHECK(hello_field_u64(last_publish, last_publish_len, 9, &v) && v == 2712847316ULL,
+          "对拍: field9 nonce 必须 == 2712847316");
+}
+
+/* 把契约断言接到**既有的**真实编码用例上（它本来就调 msg_handler_send_hello）。 */
+static void test_hello_codec_contract_fields(void)
+{
+    reset_fixture();
+    msg_handler_send_hello("node", "fw", "model", 2, 77);
+    CHECK(hello_publish_count == 1, "contract: Hello 必须发到 wire");
+    assert_hello_wire_contract(last_publish, last_publish_len, "default-config");
+}
+
 int main(void)
 {
     test_delayed_nonce1_ack_after_nonce2_armed_is_rejected();
     test_ack_nonce_is_mandatory();
     test_ack_parser_rejects_duplicate_wrong_wire_overflow_and_malformed();
     test_hello_codec_requires_nonce();
+    test_hello_codec_contract_fields();
+    test_hello_matches_shared_vector();
     test_notify_before_wait_and_latest_state_coalescing();
     test_periodic_sync_requests_coalesce_into_correlated_handshake();
     test_periodic_sync_request_is_generation_scoped();
     test_periodic_sync_replaces_active_nonce_and_rejects_old_ack();
     test_ack_and_reset_during_publish_interleavings();
     test_runtime_generation_and_nonce_wrap();
+    test_link_armed_nonce_is_accepted_without_mqtt_ready();   /* task-33: §138 回归 */
     test_runtime_startup_nonce_seed();
     test_runtime_sync_request_mailbox();
     test_state_machine_retry_policy_is_unchanged();

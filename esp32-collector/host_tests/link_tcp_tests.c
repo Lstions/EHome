@@ -1,0 +1,707 @@
+/* link_tcp_tests.c —— 3.0 主传输（TCP+TLS）驱动的状态机
+ *
+ * 这是 ESP32 端 S1 的核心：设计 §4.1 规定设备作为 TCP client 主动连后端
+ * 8443/mTLS。本用例用**可控假 I/O**驱动状态机，断言四类语义：
+ *   1. D-10：部分写必须续写；写不动 = 背压（可重试），不是失败
+ *   2. 错误分级：证书类硬错 → FATAL（别盲目重试）；网络类软错 → NOT_READY（可退避）
+ *   3. 设计 §4.2：退避 1→2→4→8→16→30→60s + ±20% 抖动；**应用层握手**才重置，
+ *      socket connect **不**重置（防"连上但不通"的抖振）
+ *   4. P2：mtu 由驱动给出（16,384，与 MBEDTLS_SSL_IN_CONTENT_LEN 对齐）
+ */
+#include <pthread.h>
+#include <time.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_err.h"
+#include "link.h"
+#include "link_tcp.h"
+
+/* D-30：link_send 现在需要 progress 出入参。
+ * SEND1 是"发一整帧、不关心中间进度"的便捷包装（progress 从 0 起、丢弃更新）； */
+static size_t g_prog;
+#define SEND1(l, f, n) (g_prog = 0, link_send((l), (f), (n), &g_prog))
+
+/* link.h 规定的续写循环 —— 调用方发一整帧的唯一正确姿势。
+ * 这里把它做成辅助函数，好让每个用例都用同一种（正确的）调用方式，
+ * 而不是各写各的、把"重发整帧"这种错法散落进测试。 */
+static link_result_t SEND_LOOP(link_t *l, const uint8_t *f, size_t n, size_t *prog)
+{
+    *prog = 0;
+    for (int guard = 0; guard < 16; guard++) {     /* 防御：避免测试挂死 */
+        link_result_t r = link_send(l, f, n, prog);
+        if (r == LINK_SENT_PARTIAL) continue;      /* 接着写 */
+        return r;                                  /* FULL / BACKPRESSURE / 其它 */
+    }
+    return LINK_FATAL;
+}
+
+static int s_failures = 0;
+#define CHECK(cond, ...)                                                     \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            printf("FAIL %s:%d  ", __FILE__, __LINE__);                      \
+            printf(__VA_ARGS__);                                             \
+            printf("\n");                                                    \
+            s_failures++;                                                    \
+        }                                                                    \
+    } while (0)
+
+/* ---- 可控假 I/O ---- */
+#define WRITE_SCRIPT_MAX 8
+
+typedef struct {
+    int      connect_calls;
+    int      close_calls;
+    void    *handle_to_return;     /* NULL = 连接失败 */
+    bool     hard_fatal;           /* connect 失败时是否报告为硬错 */
+
+    int      write_results[WRITE_SCRIPT_MAX];
+    size_t   write_count;
+    size_t   write_idx;
+    int      write_calls;
+    size_t   total_written;        /* 经假 I/O 实际写出的字节 */
+    /* 【D-30 的关键】把实际落到"线上"的字节按顺序记下来。
+     * 只有比对这条流，才能证明"续写"没有把已写出的字节重复写一遍。 */
+    uint8_t  wire[256];
+    size_t   wire_len;
+} fake_io_t;
+
+static fake_io_t s_io;
+
+static void *fake_connect(void *io_ctx, bool *hard_fatal)
+{
+    (void)io_ctx;
+    s_io.connect_calls++;
+    if (s_io.handle_to_return == NULL) {
+        if (hard_fatal) *hard_fatal = s_io.hard_fatal;
+        return NULL;
+    }
+    if (hard_fatal) *hard_fatal = false;
+    return s_io.handle_to_return;
+}
+
+/* 把 data[0..n) 追加到"线上"记录（模拟对端真正收到的字节序列） */
+static void record_wire(const uint8_t *data, size_t n)
+{
+    if (s_io.wire_len + n > sizeof(s_io.wire)) return;
+    memcpy(s_io.wire + s_io.wire_len, data, n);
+    s_io.wire_len += n;
+}
+
+static int fake_write(void *handle, const uint8_t *data, size_t len)
+{
+    (void)handle;
+    s_io.write_calls++;
+    if (s_io.write_idx >= s_io.write_count) {
+        s_io.total_written += len;
+        record_wire(data, len);
+        return (int)len;                 /* 脚本用尽：视为一次写完（避免测试挂死） */
+    }
+    int r = s_io.write_results[s_io.write_idx++];
+    if (r > 0) {
+        size_t n = (size_t)r;
+        if (n > len) n = len;            /* 不许"写出"超过请求量 */
+        s_io.total_written += n;
+        record_wire(data, n);
+        return (int)n;
+    }
+    return r;                            /* 0 = 背压；<0 = 硬错 */
+}
+
+static void fake_close(void *handle) { (void)handle; s_io.close_calls++; }
+
+static const link_tcp_io_t FAKE_IO = {
+    .connect = fake_connect, .write = fake_write, .close = fake_close,
+};
+
+static void reset_io(void)
+{
+    memset(&s_io, 0, sizeof(s_io));
+    s_io.handle_to_return = (void *)0x1;   /* 默认连接成功 */
+}
+
+/* 每个测试建独立上下文 —— 无全局状态，测试之间不会互相污染。
+ * （驱动本身是无状态单例；状态都在这个上下文里。） */
+static link_tcp_ctx_t *s_ctx;
+
+static link_t *make_link(const link_tcp_config_t *cfg)
+{
+    s_ctx = link_tcp_new(cfg);
+    if (s_ctx == NULL) return NULL;
+    return link_create(link_tcp_driver(), s_ctx);
+}
+
+static void drop_link(link_t *l)
+{
+    link_destroy(l);       /* 先关链路（内部会用 ctx） */
+    link_tcp_free(s_ctx);  /* 再释放上下文 */
+    s_ctx = NULL;
+}
+
+/* ================= 1. 部分写必须续写（D-10）================= */
+static void test_partial_write_is_continued(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(l != NULL, "link_create 失败");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    /* frame 用可辨识的内容，便于逐字节比对"线上"是否被污染 */
+    uint8_t frame[10];
+    for (int i = 0; i < 10; i++) frame[i] = (uint8_t)(0xA0 + i);
+
+    s_io.write_results[0] = 4;
+    s_io.write_results[1] = 3;
+    s_io.write_results[2] = 3;
+    s_io.write_count = 3;
+
+    /* ⭐ D-30 回归：按 link.h 规定的续写循环发送，而不是"重发整帧"。 */
+    size_t progress = 0;
+    link_result_t r = SEND_LOOP(l, frame, 10, &progress);
+
+    CHECK(r == LINK_SENT_FULL, "续写循环后应 FULL，实际 %s", link_result_name(r));
+    CHECK(progress == 10, "progress 应为 10，实际 %zu", progress);
+    CHECK(s_io.write_calls == 3, "应为 3 次写（4+3+3），实际 %d", s_io.write_calls);
+
+    /* ⭐ 决定性断言：线上收到的字节必须【恰好等于这一帧，且只出现一次】。
+     * 这正是 D-30 的病灶 —— 旧实现会写成 frame[0:4] 两次。 */
+    CHECK(s_io.wire_len == 10, "线上字节数应为 10（不得重复），实际 %zu", s_io.wire_len);
+    CHECK(s_io.wire_len == 10 && memcmp(s_io.wire, frame, 10) == 0,
+          "线上字节必须恰好是这一帧一次（无重复、无错位）");
+
+    drop_link(l);
+}
+
+/* ================= 2. 只写出一部分 -> PARTIAL（不是失败，也不是成功）===== */
+static void test_partial_write_reports_progress(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    uint8_t frame[10] = {0};
+    s_io.write_results[0] = 4;      /* 只吞得下 4 字节 */
+    s_io.write_count = 1;
+
+    size_t progress = 0;
+    link_result_t r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_SENT_PARTIAL, "部分写应 PARTIAL，实际 %s", link_result_name(r));
+    CHECK(!link_result_is_error(r), "PARTIAL【不是】错误（是进行中）");
+    CHECK(progress == 4, "progress 应为 4，实际 %zu", progress);
+
+    /* 关键：新的一次调用必须【从进度处】继续，而不是重头写。
+     * 假 I/O 会如实记录它收到的是 data+4（见下一节的线上比对）。 */
+    s_io.write_results[0] = 6;
+    s_io.write_idx = 0; s_io.write_count = 1;
+    r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_SENT_FULL, "续写后应 FULL，实际 %s", link_result_name(r));
+    CHECK(progress == 10, "progress 应为 10，实际 %zu", progress);
+
+    link_stats_t st;
+    link_get_stats(l, &st);
+    CHECK(st.tx_sent_partial == 1, "PARTIAL 应单独计数（P3），实际 %u", st.tx_sent_partial);
+    CHECK(st.tx_sent_full == 1, "FULL 应计数，实际 %u", st.tx_sent_full);
+    drop_link(l);
+}
+
+/* ================= 2b. 背压 = 一个字节都没写出（整帧重试才安全）========= */
+static void test_write_blocked_is_backpressure_not_failure(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    uint8_t frame[10] = {0};
+    s_io.write_results[0] = 0;      /* 一个字节都没写出 */
+    s_io.write_count = 1;
+
+    size_t progress = 0;
+    link_result_t r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_BACKPRESSURE, "一字节未写出应为 BACKPRESSURE，实际 %s",
+          link_result_name(r));
+    CHECK(!link_result_is_error(r), "背压【不是】错误（调用方应退避重试）");
+    CHECK(progress == 0, "背压时 progress 必须保持 0（这样整帧重试才安全），实际 %zu",
+          progress);
+    CHECK(s_io.wire_len == 0, "背压时线上不应有任何字节，实际 %zu", s_io.wire_len);
+
+    link_stats_t st;
+    link_get_stats(l, &st);
+    CHECK(st.tx_backpressure == 1, "背压应计数");
+    CHECK(st.tx_fatal == 0, "背压不应计入 fatal");
+    drop_link(l);
+}
+
+/* ================= 3. 硬错误 -> FATAL ================= */
+static void test_write_error_is_fatal(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    uint8_t frame[10] = {0};
+    s_io.write_results[0] = -1;     /* 连接已断 */
+    s_io.write_count = 1;
+
+    link_result_t r = SEND1(l, frame, 10);
+    CHECK(r == LINK_FATAL, "写硬错应为 FATAL，实际 %s", link_result_name(r));
+    CHECK(link_result_is_error(r), "FATAL 是错误");
+    drop_link(l);
+}
+
+/* ================= 4. 错误分级：硬错 vs 软错 ================= */
+static void test_connect_error_grading(void)
+{
+    /* 4a. 证书/配置类硬错 -> FATAL（不该盲目退避重试） */
+    reset_io();
+    s_io.handle_to_return = NULL;
+    s_io.hard_fatal = true;
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_FATAL, "证书类硬错应 FATAL");
+    drop_link(l);
+
+    /* 4b. 网络类软错 -> NOT_READY（可退避重试） */
+    reset_io();
+    s_io.handle_to_return = NULL;
+    s_io.hard_fatal = false;
+    link_t *l2 = make_link(&cfg);
+    CHECK(link_open(l2) == LINK_NOT_READY, "网络类软错应 NOT_READY");
+    CHECK(!link_result_is_error(LINK_NOT_READY), "NOT_READY 不是错误");
+    link_destroy(l2);
+}
+
+/* ================= 5. 未连接时发 -> NOT_READY（由驱动给出，不预检）===== */
+static void test_send_before_open_is_not_ready(void)
+{
+    reset_io();
+    s_io.handle_to_return = NULL;
+    s_io.hard_fatal = false;
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+
+    (void)link_open(l);                  /* 失败：未连接 */
+    int writes = s_io.write_calls;
+    CHECK(SEND1(l, (const uint8_t *)"x", 1) == LINK_NOT_READY,
+          "未连接发送应 NOT_READY");
+    CHECK(s_io.write_calls == writes, "未连接时【不应】调用 write");
+    drop_link(l);
+}
+
+/* ================= 6. 退避序列与抖动（纯函数）================= */
+static void test_backoff_sequence(void)
+{
+    /* 中点抖动（rand_permille=500 时 factor=1000）⇒ 应等于查表值 */
+    const uint32_t want[] = { 1000, 2000, 4000, 8000, 16000, 30000, 60000 };
+    for (uint32_t i = 0; i < 7; i++) {
+        uint32_t got = link_tcp_backoff_ms(i, 500);
+        CHECK(got == want[i], "退避[%u] 应为 %u，实际 %u", i, want[i], got);
+    }
+    /* 超出表的次数：夹在上限，不是溢出/0 */
+    CHECK(link_tcp_backoff_ms(7, 500) == 60000, "超出应夹到上限");
+    CHECK(link_tcp_backoff_ms(999, 500) == 60000, "极大值应夹到上限");
+}
+
+static void test_backoff_jitter(void)
+{
+    /* 设计 §4.2：±20%。rand=0 -> -20%；rand=1000 -> +20%；中点 -> 原值。 */
+    CHECK(link_tcp_backoff_ms(6, 0) == 48000, "-20%% 应为 48000，实际 %u",
+          link_tcp_backoff_ms(6, 0));
+    CHECK(link_tcp_backoff_ms(6, 1000) == 72000, "+20%% 应为 72000，实际 %u",
+          link_tcp_backoff_ms(6, 1000));
+    CHECK(link_tcp_backoff_ms(6, 500) == 60000, "中点应无抖动");
+    /* 抖动必须落在 ±20% 区间内（对多个随机点） */
+    for (uint32_t r = 0; r <= 1000; r += 125) {
+        uint32_t v = link_tcp_backoff_ms(6, r);
+        CHECK(v >= 48000 && v <= 72000, "抖动越界：rand=%u -> %u", r, v);
+    }
+    /* 坏输入不崩、不越界 */
+    CHECK(link_tcp_backoff_ms(6, 99999) == 72000, "越界随机数应夹到 +20%%");
+}
+
+/* ================= 7. 【核心】退避重置条件是应用层握手 ================= */
+static void test_backoff_resets_on_handshake_not_connect(void)
+{
+    reset_io();
+    s_io.handle_to_return = NULL;
+    s_io.hard_fatal = false;
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+
+    CHECK(link_tcp_reconnect_attempt(NULL) == 0, "NULL 应安全返回 0");
+    CHECK(link_tcp_is_connected(NULL) == false, "NULL 应安全返回 false");
+
+    /* 连续 3 次软失败 -> attempt = 3 */
+    (void)link_open(l); (void)link_open(l); (void)link_open(l);
+    CHECK(link_tcp_reconnect_attempt(s_ctx) == 3,
+          "3 次软失败后 attempt 应为 3，实际 %u", link_tcp_reconnect_attempt(s_ctx));
+
+    /* ⭐ 连上：**不应**重置（设计 §4.2：重置条件是应用层握手，不是 socket connect） */
+    s_io.handle_to_return = (void *)0x1;
+    CHECK(link_open(l) == LINK_SENT_FULL, "应连接成功");
+    CHECK(link_tcp_is_connected(s_ctx) == true, "连上后 is_connected 应为真");
+    CHECK(link_tcp_reconnect_attempt(s_ctx) == 3,
+          "socket connect 成功【不应】重置退避（设计 §4.2），实际 %u",
+          link_tcp_reconnect_attempt(s_ctx));
+
+    /* 空指针安全（不应崩、不应改状态） */
+    link_tcp_note_handshake(NULL);
+    CHECK(link_tcp_reconnect_attempt(s_ctx) == 3, "空指针调用不应改变状态");
+
+    /* ⭐ 应用层握手完成 -> 才重置 */
+    link_tcp_note_handshake(s_ctx);
+    CHECK(link_tcp_reconnect_attempt(s_ctx) == 0,
+          "应用层握手完成应重置退避，实际 %u", link_tcp_reconnect_attempt(s_ctx));
+
+    drop_link(l);
+}
+
+/* ================= 8. mtu = 设计 §5.2 的 16,384 ================= */
+static void test_mtu_matches_design(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    const link_driver_t *drv = link_tcp_driver();
+    CHECK(drv != NULL, "driver 不应为 NULL");
+    CHECK(drv->mtu(NULL) == LINK_TCP_MTU_BYTES, "mtu 应为常量");
+    /* ⚠ 2026-10-08（§195）：断言值随 IN_CONTENT_LEN 一起 16384 → 8192。
+     * 本断言守的是**跨端一致性**（MTU == TLS 记录大小），而不是"某个数字"：
+     * 若哪天又调 IN_CONTENT_LEN，这里必须同改 —— 这正是本断言存在的用途。 */
+    CHECK(LINK_TCP_MTU_BYTES == 8192u,
+          "mtu 应为 8192（与 MBEDTLS_SSL_IN_CONTENT_LEN 对齐，§195）");
+    CHECK(strcmp(drv->name, "tcp") == 0, "驱动名应为 tcp");
+}
+
+/* ================= 9. P2：超 mtu 在【发出前】被拒 ================= */
+static void test_oversize_rejected_before_write(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    static uint8_t big[LINK_TCP_MTU_BYTES + 1];
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    int before = s_io.write_calls;
+    CHECK(SEND1(l, big, sizeof(big)) == LINK_PAYLOAD_TOO_BIG,
+          "超 mtu 应 PAYLOAD_TOO_BIG");
+    CHECK(s_io.write_calls == before, "超 mtu 时【不应】调用 write");
+
+    /* 恰好等于 mtu：允许 */
+    CHECK(SEND1(l, big, LINK_TCP_MTU_BYTES) == LINK_SENT_FULL, "恰好 mtu 应允许");
+    drop_link(l);
+}
+
+/* ================= 10. close 幂等 + 计数 ================= */
+static void test_close_is_idempotent(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_SENT_FULL, "应连接成功");
+    int n = s_io.close_calls;
+    drop_link(l);
+    CHECK(s_io.close_calls == n + 1, "destroy 应 close 一次，实际 %d", s_io.close_calls - n);
+}
+
+/* ================= 11. 违约驱动：报出的字节数超过请求量 =================
+ * 为什么值得单独测：若 link 信任驱动报的数，进度就会【越过帧尾】，
+ * 下一轮续写会从帧外读到内存里的任意字节并写上线 —— 与 D-30 同族，
+ * 都是"流被污染"。驱动违约必须被显式抓住，不能静默夹取。 */
+static link_result_t lying_send(void *ctx, const uint8_t *data, size_t len,
+                                size_t *written_out)
+{
+    (void)ctx; (void)data; (void)len;
+    if (written_out != NULL) *written_out = 9999;   /* 谎报：远超请求量 */
+    return LINK_SENT_PARTIAL;
+}
+static link_result_t lying_open(void *ctx) { (void)ctx; return LINK_SENT_FULL; }
+static void lying_close(void *ctx) { (void)ctx; }
+static uint32_t lying_mtu(void *ctx) { (void)ctx; return 1024; }
+static bool lying_ready(void *ctx) { (void)ctx; return true; }
+
+static const link_driver_t LYING_DRV = {
+    .open = lying_open, .close = lying_close, .send = lying_send,
+    .mtu = lying_mtu, .is_ready = lying_ready, .name = "lying",
+};
+
+static void test_lying_driver_is_rejected(void)
+{
+    link_t *l = link_create(&LYING_DRV, NULL);
+    CHECK(l != NULL, "link_create 失败");
+    uint8_t frame[8] = {0};
+    size_t progress = 0;
+
+    link_result_t r = link_send(l, frame, 8, &progress);
+    CHECK(r == LINK_FATAL, "驱动谎报字节数应 FATAL，实际 %s", link_result_name(r));
+    CHECK(progress == 0, "被拒时进度不得前进，实际 %zu", progress);
+
+    link_stats_t st;
+    link_get_stats(l, &st);
+    CHECK(st.tx_driver_error == 1, "应计入 tx_driver_error，实际 %u", st.tx_driver_error);
+    link_destroy(l);
+}
+
+/* ================= 12. ⚠⚠ §216：连接不可用时必须**释放**，不能只丢指针 =========
+ *
+ * 真机现象（C6，uptime 2.87h，后端重启后）：
+ *   E esp-tls: Failed to create socket (family 2 socktype 1 protocol 0)
+ *   tls_esp: 连接失败: last_error=0x8002 (=ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET)
+ *   ⇒ 设备再也连不上（每 60s 退避重试，每次都失败）；**断电重启立即恢复**
+ *     ⇒ 是资源泄漏（LWIP_MAX_SOCKETS=6 被耗尽），不是配置/证书问题。
+ *
+ * 根因：read/send 探测到连接不可用时直接 `c->handle = NULL;`
+ *   —— 只丢指针，**不调 io->close()** ⇒ socket/TLS 上下文泄漏。
+ *
+ * ⚠ 本用例为什么必要：既有 test_write_error_is_fatal 只断言"返回 FATAL"，
+ *   **不看 close_calls** ⇒ 旧实现（泄漏版）同样全绿。
+ *   这正是"测了行为，没测资源"的盲区。
+ */
+static void test_write_error_releases_handle(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    int n = s_io.close_calls;
+    s_io.write_results[0] = -1;     /* 写硬错：连接已断 */
+    s_io.write_count = 1;
+
+    link_result_t r = SEND1(l, (const uint8_t *)"x", 1);
+    CHECK(r == LINK_FATAL, "写硬错应为 FATAL");
+    /* ⚠ 关键断言：写失败必须**释放**底层连接，否则 socket 泄漏。 */
+    CHECK(s_io.close_calls == n + 1,
+          "写硬错后必须 close 一次（释放 socket）；实际 close_calls=%d（未释放 => 泄漏）",
+          s_io.close_calls - n);
+    drop_link(l);
+    /* drop 时 handle 已是 NULL ⇒ 不应再 close（幂等，不重复释放） */
+    CHECK(s_io.close_calls == n + 1, "已释放后 drop 不应再 close");
+}
+
+/* ============ 13. ⚠⚠⚠ 2026-10-11 真机 BLOCKER：并发释放同一个 handle ============
+ *
+ * 真机现象（S3P 30EDA0A9A808，**只跑正常轮询、未改任何代码**）：
+ *   E esp-tls-mbedtls: write error :-0x6C00 / read error :-0x004C
+ *   assert failed: tlsf_free tlsf.c:630 (!block_is_free(block)
+ *                    && "block already marked as free")
+ *   Rebooting...
+ * 实测频率：链路有负载时**每 60s 崩溃重启 9 次**；空闲 / 从机不应答 / 低速 = 0 次。
+ * 崩溃点 backtrace（ELF 与设备 SHA256 一致）：
+ *   tlsf_free <- esp_tls_internal_event_tracker_destroy(esp_tls_error_capture.c:50)
+ *            <- esp_tls_conn_destroy(esp_tls.c:188) <- tls_esp_close(tls_esp.c:253)
+ *            <- tcp_release_handle(link_tcp.c)
+ *
+ * 根因：handle 有**两个任务**在动 —— dev_link 走 link_tcp_read()，
+ * report_tx 走 link_send()。两者都可能在**对方 I/O 进行中**判定连接不可用
+ * 并释放句柄 ⇒ 同一句柄被 close 两次 ⇒ 同一 error_handle 二次 free()。
+ *
+ * ⚠ 为什么既有用例全绿却漏了它：test_close_is_idempotent 是**单线程**幂等
+ *   （连一次、关一次、再关一次），覆盖不到"两个线程同时关闭"。
+ *   ⇒ 本用例用 pthread 造**真并发**：读线程阻塞在 read 里（持有句柄），
+ *     写线程此时打一条硬错（真机里就是 esp-tls 的 write error）触发释放。
+ *     用 barrier 对齐，**确定性**复现，不靠概率。
+ *
+ * 三条断言（缺一条都测不出这个缺陷）：
+ *   ① close 恰好一次 —— double-free 的直接判据（修复前为 2）
+ *   ② 不得在 read 仍持有句柄时 close（否则 use-after-free）
+ *   ③ 释放后新 I/O 拿不到旧句柄
+ */
+typedef struct {
+    pthread_barrier_t read_entered;   /* 读线程已进入 io->read（正持有句柄） */
+    pthread_barrier_t in_io;          /* 读/写两个线程都已进入各自的 io 调用 */
+    int               close_calls;
+    int               read_calls;
+    int               close_while_read_inflight;
+    int               read_inflight;  /* 当前是否有 read 在使用句柄 */
+    int               double_close_detected; /* 第一次 close 期间又来了第二次 */
+    /* 只有并发用例才需要对 barrier；反向用例走同一条 io->write，
+     * 若不门控就会去等一个**未初始化**的 barrier（count=0 ⇒ glibc 里
+     * 除零 ⇒ SIGFPE）。实测踩到过。 */
+    bool              sync_in_io;
+} conc_io_t;
+
+static conc_io_t s_conc;
+
+static void *conc_connect(void *io_ctx, bool *hard_fatal)
+{
+    (void)io_ctx;
+    if (hard_fatal) *hard_fatal = false;
+    return (void *)0xABCD;              /* 可辨识的假句柄 */
+}
+
+static int conc_write(void *handle, const uint8_t *data, size_t len)
+{
+    (void)handle; (void)data; (void)len;
+    if (s_conc.sync_in_io) {
+        (void)pthread_barrier_wait(&s_conc.in_io);  /* 与读线程对齐：两者都在 io 调用中 */
+    }
+    return -1;                          /* 硬错：连接已断（真机 = esp-tls write error） */
+}
+
+static int conc_read(void *handle, uint8_t *buf, size_t cap)
+{
+    (void)handle; (void)buf; (void)cap;
+    s_conc.read_calls++;
+    s_conc.read_inflight = 1;
+    (void)pthread_barrier_wait(&s_conc.read_entered);  /* 通知写线程：我已持有句柄 */
+    (void)pthread_barrier_wait(&s_conc.in_io);         /* 等写线程也进入 io->write */
+    s_conc.read_inflight = 0;
+    /* 返回 CLOSED：读线程也会走"连接不可用 -> 释放"这条路。
+     * ⇒ 两个线程**同时**到达 tcp_release_handle —— 这正是真机的形态。 */
+    return LINK_TCP_IO_CLOSED;
+}
+
+static void conc_close(void *handle)
+{
+    (void)handle;
+    s_conc.close_calls++;
+    if (s_conc.read_inflight) s_conc.close_while_read_inflight++;
+
+    /* ⭐ 确定性判据：修复前的实现是"先 close、再置 NULL"，
+     * 所以在 close() 执行期间句柄**仍对其他线程可见**。
+     * 这里让第一次 close 短暂停留，若另一个线程此时也判定"连接不可用"，
+     * 它必然走进来 ⇒ close_calls 变 2 ⇒ 真机的 tlsf double-free。
+     * 修复后句柄在**锁内**先被摘走，第二个线程看到的永远是 NULL，
+     * 因此这里等不到第二个，最多空转 _CLOSE_WAIT_MS 毫秒。 */
+    if (s_conc.close_calls == 1) {
+        for (int i = 0; i < 50 && s_conc.close_calls < 2; i++) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };  /* 1 ms */
+            nanosleep(&ts, NULL);
+        }
+        if (s_conc.close_calls > 1) s_conc.double_close_detected = 1;
+    }
+}
+
+static const link_tcp_io_t CONC_IO = {
+    .connect = conc_connect, .write = conc_write,
+    .read = conc_read, .close = conc_close,
+};
+
+typedef struct { link_t *l; link_tcp_ctx_t *c; } conc_arg_t;
+
+static void *conc_reader(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    uint8_t buf[16];
+    size_t n = 0;
+    (void)link_tcp_read(a->c, buf, sizeof(buf), &n);
+    return NULL;
+}
+
+static void *conc_writer(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    (void)pthread_barrier_wait(&s_conc.read_entered);  /* 等读线程真的进了 read */
+    /* 写硬错 —— 真机里就是 esp-tls 的 write error，会走 §216 释放路径。
+     * ⚠ progress 不能传 NULL：link_send 会直接判 FATAL 而**不调驱动**，
+     *   那样这条路径根本不会被走到（用例会变成"假绿"）。 */
+    size_t prog = 0;
+    (void)link_send(a->l, (const uint8_t *)"x", 1, &prog);
+    return NULL;
+}
+
+static void test_concurrent_release_closes_once(void)
+{
+    memset(&s_conc, 0, sizeof(s_conc));
+    s_conc.sync_in_io = true;
+    CHECK(pthread_barrier_init(&s_conc.read_entered, NULL, 2) == 0, "barrier init 失败");
+    CHECK(pthread_barrier_init(&s_conc.in_io, NULL, 2) == 0, "barrier init 失败");
+
+    link_tcp_config_t cfg = { .io = &CONC_IO, .io_ctx = NULL };
+    link_tcp_ctx_t *c = link_tcp_new(&cfg);
+    CHECK(c != NULL, "link_tcp_new 失败");
+    link_t *l = link_create(link_tcp_driver(), c);
+    CHECK(l != NULL, "link_create 失败");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    /* ⭐ 两个线程**同时**在 I/O 调用中（barrier 对齐），随后各自返回
+     * "连接不可用"（读 -> CLOSED，写 -> 硬错）⇒ 两条释放路径并发到达
+     * tcp_release_handle。这正是真机形态，且是确定性的、不靠概率。 */
+    conc_arg_t a = { .l = l, .c = c };
+    pthread_t tr, tw;
+    CHECK(pthread_create(&tr, NULL, conc_reader, &a) == 0, "reader 线程创建失败");
+    CHECK(pthread_create(&tw, NULL, conc_writer, &a) == 0, "writer 线程创建失败");
+    (void)pthread_join(tr, NULL);
+    (void)pthread_join(tw, NULL);
+
+    /* ① double-free 的直接判据：句柄只能被关闭一次。
+     * 修复前：read 与 send 各关一次 ⇒ close_calls == 2 ⇒ 真机就是 tlsf 断言。 */
+    CHECK(s_conc.close_calls == 1,
+          "并发释放必须只 close 一次（实际 %d）—— 2 次即真机的 tlsf double-free",
+          s_conc.close_calls);
+    CHECK(s_conc.double_close_detected == 0,
+          "不得出现第二次 close 进入（实际检测到）—— 那是并发 double-free");
+
+    /* ② 不得在"读进行中"释放句柄（否则是 use-after-free） */
+    CHECK(s_conc.close_while_read_inflight == 0,
+          "不得在 read 持有句柄期间 close（实际发生 %d 次）—— 那是 use-after-free",
+          s_conc.close_while_read_inflight);
+
+    /* ③ 释放后新 I/O 不得再拿到旧句柄 */
+    uint8_t buf[8];
+    size_t n = 0;
+    CHECK(link_tcp_read(c, buf, sizeof(buf), &n) == LINK_READ_NOT_READY,
+          "释放后 read 应 NOT_READY（不得再用旧句柄）");
+
+    (void)pthread_barrier_destroy(&s_conc.read_entered);
+    (void)pthread_barrier_destroy(&s_conc.in_io);
+    link_destroy(l);
+    link_tcp_free(c);
+}
+
+/* ④ 反向用例：**无并发**时释放必须立刻生效。
+ * 缺了它，一个"永不 close"的实现也能让 ① 通过（close_calls == 0）。 */
+static void test_release_without_inflight_closes_immediately(void)
+{
+    memset(&s_conc, 0, sizeof(s_conc));
+    link_tcp_config_t cfg = { .io = &CONC_IO, .io_ctx = NULL };
+    link_tcp_ctx_t *c = link_tcp_new(&cfg);
+    CHECK(c != NULL, "link_tcp_new 失败");
+    link_t *l = link_create(link_tcp_driver(), c);
+    CHECK(l != NULL, "link_create 失败");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    CHECK(s_conc.close_calls == 0, "初始不应有 close");
+
+    size_t prog = 0;
+    (void)link_send(l, (const uint8_t *)"x", 1, &prog);   /* 写硬错 -> 释放 */
+    CHECK(s_conc.close_calls == 1,
+          "无并发时释放必须**立刻** close 一次（实际 %d）", s_conc.close_calls);
+    /* 已释放后不得再关（幂等，不重复释放） */
+    prog = 0;
+    (void)link_send(l, (const uint8_t *)"x", 1, &prog);
+    CHECK(s_conc.close_calls == 1,
+          "已释放后不得再次 close（实际 %d）—— 那就是 double-free", s_conc.close_calls);
+
+    link_destroy(l);
+    link_tcp_free(c);
+}
+
+int main(void)
+{
+    test_partial_write_is_continued();
+    test_write_blocked_is_backpressure_not_failure();
+    test_write_error_is_fatal();
+    test_write_error_releases_handle();
+    test_connect_error_grading();
+    test_send_before_open_is_not_ready();
+    test_backoff_sequence();
+    test_backoff_jitter();
+    test_backoff_resets_on_handshake_not_connect();
+    test_mtu_matches_design();
+    test_oversize_rejected_before_write();
+    test_close_is_idempotent();
+    test_lying_driver_is_rejected();
+    test_concurrent_release_closes_once();
+    test_release_without_inflight_closes_immediately();
+
+    if (s_failures) { printf("link_tcp_tests: %d FAILURE(S)\n", s_failures); return 1; }
+    printf("link_tcp_tests: all checks passed\n");
+    return 0;
+}

@@ -1,5 +1,20 @@
 menu "EHome Collector Configuration"
 
+    # ⭐ 2026-10-08（§194）：COLLECTOR_NODE_ID 从 components/ehome_mqtt/Kconfig
+    #   **搬到这里**（那个组件随 MQTT 一起删除）。
+    #   ⚠ 它本来就放错了地方：这是**设备标识**，与 MQTT 毫无关系 ——
+    #     app_state.c 生成 node_id 时用它（MAC 读失败才回退到它）。
+    #     放在 MQTT 组件里 ⇒ 删 MQTT 时差点**连带删掉设备身份**（编译期才发现）。
+    #   ⇒ 迁到顶层配置，语义归位。
+    config COLLECTOR_NODE_ID
+        string "Node ID"
+        default "1001"
+        help
+            Unique identifier for this collector node.
+
+            ⚠ 仅在 MAC 读取失败时作为回退使用（app_state.c 的 generate_node_id）。
+            正常路径下 node_id 由 MAC 派生（12 位十六进制），不是这个值。
+
     menu "Model Configuration"
 
         # WS-A: model dimension = same SoC, with or without PSRAM.  The build
@@ -96,6 +111,169 @@ menu "EHome Collector Configuration"
                 Allow downloading firmware over plain HTTP.
                 WARNING: No encryption, no authentication. Dev use only.
 
+
+    endmenu
+
+    menu "3.0 Device Link (TCP + mTLS)"
+
+        config EHOME_DEVICE_LINK_ENABLED
+            bool "Enable 3.0 device link (device is TCP client, mTLS)"
+            default y
+            help
+                Turns on the 3.0 uplink: tls_esp (mTLS I/O) -> session, where
+                session internally drives link_tcp / link_rx_adapt / rx_pump / wire.
+
+                ⚠⚠ 2026-10-08（§194）：**默认改为 y**（原 default n）。
+
+                ⚠ **这是 MQTT 移除的必然后果，不是偏好**：
+                  原来 default n 是**安全的**，因为那时上行默认走 MQTT，
+                  本开关关着只是"还没开 3.0"，设备仍有 MQTT 这一条路。
+                  **MQTT 已彻底移除**（用户明令）⇒ 3.0 是**唯一**上行通道
+                  ⇒ 若默认 n，则**默认构建的设备将完全没有上行**
+                  （不连、不上报、收不到配置，且不报错）。
+                ⇒ 故必须 default y。关掉它现在**只**在"确定不要任何上行"时才有意义。
+
+                NOTE: enabling this does **not** yet make the link usable.
+                Prerequisites (status reviewed 2026-10-07):
+
+                  * SNTP -- **LANDED**.  sntp_mgr is created in
+                    device_link_wiring.c before tls_esp is configured, so
+                    now_epoch is real once the network is up.  With an empty
+                    CONFIG_EHOME_NTP_SERVER it reports DISABLED and does not
+                    pretend to have time; certificate failures are then graded
+                    "self-healing" (retry with backoff) rather than fatal.
+                    (This bullet used to read "SNTP is not landed" -- that was
+                    true when written and became stale; a stale prerequisite
+                    list is worse than none, because it hides real remaining
+                    work behind a list that looks complete.)
+
+                  * Certificate provisioning into an NVS **encrypted**
+                    partition -- **NOT IMPLEMENTED**.  There is no nvs_keys
+                    partition and the guard still yields hard_fatal with no
+                    certs => SESSION_FATAL (deliberately: no retry storm
+                    masking a provisioning gap).  Consequence to be explicit
+                    about: written certs (and the **private key**) sit in NVS
+                    as **plaintext in flash** today.
+
+                  * Framing -- **FIXED** in the same review window.  See below;
+                    it is called out because it was missing from this list
+                    while being the most fatal of the three.
+
+                A prerequisite list is only useful if it is *complete*: the
+                original "Two prerequisites" omitted 3.0 uplink framing, so a
+                build with both of those satisfied still could not complete a
+                handshake.  When you close one item, update this list in the
+                same commit (tools/check_baseline_sync.py guards doc drift).
+
+        config EHOME_DEVICE_LINK_HOST
+            string "Backend host (SNI + certificate CN)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default "192.0.2.1"
+            help
+                Backend device-port host name.  The default is a placeholder,
+                not a deployment: 192.0.2.0/24 is TEST-NET-1 (RFC 5737),
+                reserved for documentation and guaranteed unroutable.  A build
+                without an explicit host therefore cannot reach anything, which
+                fails visibly instead of silently connecting to an unintended
+                host.  ⭐ 2026-10-08（§194）：原注释写"Same convention as
+                COLLECTOR_MQTT_BROKER_URL"—— 那个符号随 MQTT 一起删除了。
+
+        config EHOME_DEVICE_LINK_PORT
+            int "Backend device port"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 8443
+            help
+                Device port for the 3.0 long-lived TLS connection.  The design
+                specifies 8443 (mTLS).
+
+        config EHOME_DEVICE_LINK_TIMEOUT_MS
+            int "Connect timeout (ms)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 10000
+
+        config EHOME_DEVICE_LINK_MAX_PAYLOAD
+            int "Max single-message payload bytes"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 4096
+            # ⭐ 2026-10-08（§195）：上限 16368 → **8176** = 8192 − 12(header) − 4(CRC)。
+            #   不能再让 payload 上限大于"一个 TLS 记录能装的量"：否则配出一个
+            #   16368 的 payload 会得到 16384 的帧，跨 2 个记录、且被后端按 8192
+            #   拒收 —— 能配出来却跑不通，属"配置项说谎"。
+            range 256 8176
+            help
+                Upper bound for one 3.0 message payload.  This is a real memory
+                decision, not a formality: the delimiter allocates
+                (max_payload + 12 header + 4 CRC) bytes as **one contiguous
+                block**, and that block must fit the model's contiguous budget.
+                The wiring refuses to start (visibly) if it does not, rather than
+                silently shrinking the bound -- shrinking would change observable
+                behaviour.
+
+                Ceiling 16368 comes from WIRE_PAYLOAD_MAX (derived so that one
+                full message fits in a single TLS record).  The default 4096 is a
+                starting point: the exact downlink bound depends on design
+                decisions that are still open (send window size, whether the 3.0
+                payload keeps the 2.x type byte).
+
+        config EHOME_DEVICE_LINK_RX_BUF
+            int "Read buffer bytes"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 2048
+            help
+                Buffer the session hands to rx_pump for socket reads.  Provided
+                by the caller so the session never implicitly allocates a large
+                block.
+
+        config EHOME_DEVICE_LINK_CERT_BYTES
+            int "Max bytes per certificate material"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 4096
+            help
+                Per-material cap for ca / cert / key read from NVS.  A blob
+                larger than this is rejected (and reported) rather than accepted
+                by growing the allocation on request.
+
+        config EHOME_NTP_SERVER
+            string "NTP server (empty = SNTP disabled)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default ""
+            help
+                SNTP server used to obtain a trusted wall clock.  mTLS needs it
+                to evaluate certificate notBefore/notAfter: with no NTP the
+                device believes it is 1970, every certificate looks "not yet
+                valid", and the handshake can never succeed (design U6 / K11).
+
+                Empty (the default) puts sntp_mgr straight into DISABLED: no
+                query is ever sent and no time is pretended.  now_epoch then
+                returns 0, tls_guard grades certificate failures as
+                self-healing, and the device degrades instead of lying.
+
+                Deliberately NOT defaulted to a public pool: a shipped device
+                must not silently start talking to a third party the operator
+                never chose.  Set it explicitly per deployment.
+                Examples: "pool.ntp.org", "ntp.aliyun.com".
+
+        config EHOME_DEVICE_LINK_NVS_NS
+            string "NVS namespace holding ca/cert/key"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default "eh_tls"
+            help
+                Namespace containing three blobs: "ca", "cert", "key" (PEM).
+                The design specifies an NVS **encrypted** partition for these;
+                that partition is not implemented yet, so provisioning currently
+                has to be done manually.  Missing material is reported and leads
+                to SESSION_FATAL.
+
+        # ⭐ 2026-10-08（§194）：EHOME_DEVICE_LINK_MQTT_FALLBACK **已删除**。
+        #   MQTT 已彻底移除（用户明令）⇒ 不存在"兜底给谁"这个问题。
+        #   3.0 TCP+TLS 是**唯一**上行/下行通道，没有第二条可退。
+        #
+        #   ⚠ 历史：该开关曾是 §7.3 P2/P3 的迁移闸（TCP 优先 / MQTT 兜底）。
+        #     删除它意味着**不再有迁移中间态** —— 前端（后端 + 证书 + 防火墙）
+        #     必须在刷 3.0 固件**之前**就绪，否则设备将彻底失去上行。
+        #     （这正是原 help 里"设成 n 的三条前提"所要防止的情形；
+        #       现在那三条前提从"可选"变成**强制前置**。）
+
     endmenu
 
 endmenu
@@ -106,7 +284,8 @@ menu "Debug Configuration"
         bool "Enable TCP Transport for debugging"
         default n
         help
-            Enable TCP transport layer that runs in parallel with MQTT.
+            Enable the debug TCP transport (a separate non-TLS debug channel).
+            ⚠ 2026-10-08（§194）：原文写"runs in parallel with MQTT"—— MQTT 已删除。
             This allows testing and debugging via direct TCP connection.
             Disable for production use to save resources.
 

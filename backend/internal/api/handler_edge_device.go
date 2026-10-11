@@ -27,6 +27,26 @@ import (
 // driver get no templates — that legacy DeviceConfig-derived fallback has been
 // superseded by GenericModbusDriver / GenericI2CDriver.
 func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
+	// 2026-10-09 (§206.3, real-hardware confirmed): a disabled edge device must
+	// not consume template quota.
+	//
+	// Previously this ignored dev.Enabled, so an enabled=false device still got a
+	// ConfigTemplate created and appended to channels.template_ids, while the
+	// encoder unconditionally emitted it into ConfigManifest:
+	//   backend  "ConfigManifest sent: ... 1 templates, 3 channels"
+	//   device   parsed edge_device count = 0
+	// => the device received 0 slaves but 1 template = unreferenced dead data
+	//    occupying MAX_TEMPLATES=16. Same consequence as the §205.3 "18 > 16"
+	//    field incident.
+	//
+	// Skipping is safe: when the device is re-enabled, the next manifest push
+	// runs reconcileDriverTemplates (which queries enabled = true edges) and
+	// backfills the missing templates. So disabled => not created, enabled =>
+	// self-healed; no permanent "missing template" state is left behind.
+	if !dev.Enabled {
+		logger.Infof("[edge-device-create] edge device %d (type=%s) is disabled; skipping ConfigTemplate creation", dev.ID, dev.Type)
+		return nil
+	}
 	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
 		// No driver registered — no templates. The generic_modbus and
@@ -540,6 +560,18 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 
 		if err := db.Transaction(func(tx *gorm.DB) error {
+			// Node 存在性必须先判：设计文档 §7.2 要求"node 不存在 → 404"。
+			// 此前缺这一步，不存在的 node 会先撞上 channel 归属校验，报
+			// "channel does not belong to node" 400，与文档口径不符
+			// （2026-10-11 真机验证发现）。用 node_exists 哨兵把 404 与
+			// 其它 400 错误在事务出口区分开。
+			var nodeCount int64
+			if err := tx.Model(&models.Node{}).Where("node_id = ?", *dto.NodeID).Count(&nodeCount).Error; err != nil {
+				return err
+			}
+			if nodeCount == 0 {
+				return errNodeNotFound
+			}
 			var bindingChannel models.Channel
 			if effectiveChannelID > 0 {
 				// Existing channel path
@@ -584,7 +616,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				// 通常不传 bus_config（原实现只在显式传入时才写，否则落空串），同样会
 				// 造出"以后改不了波特率"的通道。这里按节点资源能力补齐。
 				if strings.EqualFold(strings.TrimSpace(bindingChannel.HardwareType), "UART") {
-					if err := ensureUARTBusConfig(&node, &bindingChannel); err != nil {
+					if err := ensureBusConfigExtras(&node, &bindingChannel); err != nil {
 						return err
 					}
 				}
@@ -639,7 +671,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			// empty we fall back to (channel_id, type) so address-less devices are
 			// still de-duplicated.
 			if err := checkDeviceUniqueness(tx, dev.ChannelID, dev.Type, dev.HardwareID, 0); err != nil {
-				return err
+				// 三元重复是冲突语义 → 409（设计文档 §7.2"三元重复 → 409"，
+				// 与本函数出口 errors.As(conflictError) 的既有映射一致）。
+				// 2026-10-11 真机验证发现此前走 400。
+				return newConflictError("%s", err.Error())
 			}
 			// 方案 v3.3 §3.3: 创建继承 (可选)。指定 logical_device_id:
 			// 事务内校验目标存在 + device_type 匹配 + merged_into IS NULL +
@@ -708,6 +743,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
+			if errors.Is(err, errNodeNotFound) {
+				Error(c, http.StatusNotFound, "node not found")
+				return
+			}
 			var conflict conflictError
 			if errors.As(err, &conflict) {
 				// §3.3-2/§3.3-3: 继承校验失败与存活实例冲突为 409 语义。
@@ -1239,8 +1278,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		from := c.Query("start_time")
 		to := c.Query("end_time")
+		// S4 修复 (2026-10-07): 本端点改前没有 clamp (与 /edge-devices 列表端点不同,
+		// 它一直有)。page_size=-1 → LIMIT 整条丢弃 → 返回该设备**全量**历史;
+		// page_size=0 或 "abc" → LIMIT 0 → 静默空页。归一后越界值回落到本端点默认 50。
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 50
+		}
 		cond, args := dataScopeCond(qs)
 		var data []models.DeviceData
 		// P2.2 取消传播: device_data 分页查询绑定请求上下文。

@@ -5,8 +5,6 @@ database:
   password: ehome123
   dbname: ehome
   sslmode: disable
-mqtt:
-  broker: tcp://localhost:1883
 server:
   addr: ":8080"
 log:

@@ -1,6 +1,11 @@
-idf_component_register(SRCS "factory_reset.c"
+idf_component_register(SRCS "factory_reset.c" "factory_reset_namespaces.c"
                        INCLUDE_DIRS "include"
                        REQUIRES esp_driver_gpio nvs_flash rgb_led freertos)
+
+# ⚠ factory_reset_namespaces.c **刻意不依赖任何 IDF 头**（纯数据 + 纯判定）
+# ⇒ 它可以直接进宿主测试（见 host_tests/factory_reset_namespaces_tests.c）。
+# 这是把白名单从 factory_reset.c 抽出来的**主要目的**：让"擦哪些命名空间"
+# 这个破坏性判定可被宿主 100% 覆盖，而不是藏在依赖 nvs_flash 的胶水里。
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 # 见 2026-10-04 status_task 栈溢出（prvTaskCheckFreeStackSpace）：根因帧在

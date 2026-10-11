@@ -12,24 +12,15 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
-# MQTT
+# ⭐ 2026-10-08（§194）：**MQTT 配置段已整体删除** —— MQTT 已彻底移除（用户明令）。
 #
-# IDF 6.1 moved the MQTT client into the managed component espressif/mqtt
-# (lock: 1.1.0).  CONFIG_MQTT_TRANSPORT_TCP no longer exists there -- plain TCP
-# is always compiled in and the remaining transport choice is SSL/WebSocket.
-# Keeping the old symbol produced an "unknown kconfig symbol" notice on every
-# build while silently doing nothing, so it is dropped rather than left to look
-# like it configures something.
-CONFIG_MQTT_USE_CUSTOM_CONFIG=y
-CONFIG_MQTT_BUFFER_SIZE=2048
-# 8192（原 6144）：MQTT 任务要在回调里跑完整条 ConfigManifest 事务，
-# 其中 bus_manager 的 validate_manifest_resources 有 1792 字节栈帧
-# （components/bus_manager/bus_manager.c:376），之后还有 config_mgr 的事务
-# 包装与发布链。6144 对该路径余量偏薄；2026-10-04 的 status_task 栈溢出
-# 证明了这类"帧 + 发布链"组合会实际崩掉设备（PANIC in
-# prvTaskCheckFreeStackSpace），因此一并加厚。
-CONFIG_MQTT_TASK_STACK_SIZE=8192
-CONFIG_MQTT_TASK_PRIORITY=5
+# 原段内容（CONFIG_MQTT_USE_CUSTOM_CONFIG=y / MQTT_BUFFER_SIZE=2048 /
+# MQTT_TASK_STACK_SIZE=8192 / MQTT_TASK_PRIORITY=5）全是给 esp-mqtt 客户端用的，
+# 客户端组件已删除。
+#
+# ⚠ 顺带的**内存收益**：原先 MQTT 任务常驻 8192 B 栈 + 2048 B 收发缓冲
+#   （都在内部 RAM）。这两块是内部 RAM 上的常驻占用，现在整块释放 ——
+#   对 s3p 那个"只剩 ~15 KB largest"的紧张局面是实质缓解。
 
 # WiFi
 CONFIG_ESP_WIFI_ENABLED=y
@@ -54,9 +45,10 @@ CONFIG_ESP_WIFI_ENABLED=y
 #     - dynamic RX 16 + dynamic TX 16 -> ~25.6 KB each of Wi-Fi-layer
 #       buffering (IDF peak formula p = b_rx*m_rx + b_tx*m_tx), i.e. another
 #       ~85 ms of headroom at 300 KB/s.
-#     - MQTT outbox limit 4096 B, QoS1 frames ~100-400 B: ~10-40
-#       unacknowledged publishes can queue before backpressure -> 20-80 ms
-#       of absorption at 500 Hz, matched by the 5760 B TCP window.
+#     - ⭐ §194：原先这里算的是"MQTT outbox 4096 B + QoS1 帧 ~100-400 B
+#       ≈ 10-40 条未确认发布可排队 → 20-80 ms 吸收"。MQTT 已移除 ⇒
+#       这段吸收**不再存在**；换成 3.0 TCP 后由 5760 B 的 TCP 窗口承担
+#       （下面 LWIP 段仍保留该窗口，且 §194 未改它）。
 #   Reference: IDF Wi-Fi performance guide, "Peak Wi-Fi Dynamic Buffer" and
 #   "Wi-Fi Buffer Configure".  Never below IDF range floors
 #   (TCPIP recvmbox >= 6, UDP/TCP recvmbox = 6).
@@ -77,10 +69,13 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
 # TCP/UDP recvmbox (6).
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 #
-# Per-socket budget.  At 500 Hz a socket is busy but not concurrent: one MQTT
-# socket + one OTA (TLS) socket at most, plus a transient DNS socket.  6
-# sockets leaves 2x protocol margin.  No listening sockets in production
-# (debug TCP server off), so 2 is already generous.
+# Per-socket budget.  At 500 Hz a socket is busy but not concurrent: one 3.0
+# uplink (TLS) socket + one OTA (TLS) socket at most, plus a transient DNS
+# socket.  6 sockets leaves 2x protocol margin.  No listening sockets in
+# production (debug TCP server off), so 2 is already generous.
+# ⚠ §194：原文写"one MQTT socket + one OTA socket"。MQTT 已移除 ⇒ 现在
+#   上行是 3.0 那一**条** TLS socket。**数量没变**（仍是最多 1 上行 + 1 OTA
+#   + 1 DNS）⇒ 本预算**无需调整**，只更正说明。
 CONFIG_LWIP_MAX_SOCKETS=6
 CONFIG_LWIP_MAX_ACTIVE_TCP=6
 CONFIG_LWIP_MAX_LISTENING_TCP=2
@@ -91,9 +86,12 @@ CONFIG_LWIP_MAX_LISTENING_TCP=2
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 #
 # TCP window / send buffer are deliberately NOT reduced: 5760 B is 4 x MSS
-# and is the throughput-sensitive pair for the MQTT upload path.  Cutting
+# and is the throughput-sensitive pair for the **uplink** path.  Cutting
 # them would trade RAM for p99 latency, which the 100 Hz requirement forbids.
-# MQTT_BUFFER_SIZE=2048 and the 4096 B outbox limit are likewise kept.
+# ⚠ §194：原文后半句是"MQTT_BUFFER_SIZE=2048 与 4096 B outbox 同样保留"。
+#   那两个随 MQTT 一起删除了（不再占用内部 RAM）。
+#   ⇒ 本行前半句（**TCP 窗口不裁**）仍然有效，且**更重要**了：MQTT 那层
+#     缓冲吸收没了，TCP 窗口成了唯一的在途吸收手段。
 #
 # Product feature switches (2026-10-05 user decision):
 #   - STA only; no SoftAP, no DHCP server, no mDNS.
@@ -187,6 +185,37 @@ CONFIG_COLLECTOR_OTA_ALLOW_HTTP=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
+# ⭐ 2026-10-08（§195）：TLS 记录缓冲 16384 → **8192**
+#
+# 这是 s3p 上"配置事务被内存门拒 + 握手概率性 OOM"的**根因修复**，不是调参。
+#
+# 为什么 16384 是缺陷而不是保守（实测，2026-10-08 2×2 对照，每个 3 次）：
+#   A_base  (floor 8K, IN 16384)   : 握手 3/3，**配置应用 1/3**，末 largest **15360**
+#   B_floor6(floor 6K, IN 16384)   : 握手 3/3，配置应用 3/3，末 largest 7680
+#   C_in8k  (floor 8K, IN **8192**) : 握手 3/3，配置应用 **3/3**，末 largest **23552**
+#   D_both  (floor 6K, IN **8192**) : 握手 3/3，配置应用 3/3，末 largest 23552
+# 补充 6 次复测：A_base 配置应用 **0/6**；C_in8k **6/6**。
+#   ⇒ 合计 A_base 1/9，C_in8k **9/9**。
+#
+# 关键读数：**largest 从 15360 升到 23552，正好 +8192** = IN_CONTENT_LEN 的降幅。
+#   ⇒ mbedTLS 的 in_buf 是一笔**连续内部 RAM**；16384 这笔在 s3p 上（稳态 largest
+#     仅 12288~15872）**根本不可靠** ⇒ 它既是握手 -0x008D
+#     (PSA_ERROR_INSUFFICIENT_MEMORY) 的来源，也是配置事务被 floor 拒的来源。
+#   ⚠ 所以"降 floor"（B 臂）只是**绕过**门禁；"降 IN"（C 臂）才是**去掉**那笔需求 ——
+#     两者都让配置应用变 3/3，但只有 C 同时把水位抬高了 8 KB。
+#
+# 8192 够不够（必要性论证，不靠猜）：
+#   · 后端实测 ConfigManifest **95 B**；
+#   · 最坏 manifest 编码 **2011 B**（后端 MaxManifestWireBytes，原按 MQTT 限推导）；
+#   · 单帧上限（payload 4096 + 12 header + 4 CRC）**4112 B**。
+#   ⇒ 8192 对最坏**实际**帧有 2x 余量，对实测 manifest 有 86x。
+# ⚠ 跨端契约：本值与后端 protoframe.MaxFrameBytes、固件 LINK_TCP_MTU_BYTES
+#   必须**同值**（"一个 TLS 记录承载整条消息"）。三处均已改为 8192（见 §195）。
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+
+# ⚠ OUT 保持 IDF 默认 4096（asymmetric）：设备**发送**方向不需要 16 KB，
+#   而 OUT 也是一笔连续内部 RAM。IN/OUT 分开设正是因为两者需求差 4 倍。
+
 # Bootloader rollback protection
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
 CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
@@ -214,21 +243,14 @@ CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
 # Partition Table - custom with OTA dual partition
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
-# MQTT broker URL -- deliberately NOT a real deployment address.
+# ⭐ 2026-10-08（§194）：CONFIG_COLLECTOR_MQTT_BROKER_URL **已删除**（MQTT 已移除）。
 #
-# 192.0.2.0/24 is TEST-NET-1 (RFC 5737): reserved for documentation and
-# guaranteed unroutable.  Committing a real LAN address here is what caused the
-# 2026-10-01 incident -- a firmware built from the documented command silently
-# pointed at a developer workstation, and the device was unreachable from
-# production until a transparent proxy was installed.
-#
-# The real broker is supplied per-build and never committed:
-#   - config/mqtt-broker.defaults   (gitignored, local override), or
-#   - EXTRA_SDKCONFIG_DEFAULTS=...  (one-off override)
-# build_firmware.sh refuses to produce a flashable image while this placeholder
-# is still in effect, so a build that forgets to set the broker fails loudly
-# rather than shipping a device that cannot connect.
-CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.0.2.1:1883"
+# ⚠ 记下它原来承载的那条教训，因为它**换个地方仍然成立**：
+#   192.0.2.0/24 是 TEST-NET-1（RFC 5737），保留给文档、保证不可路由。
+#   2026-10-01 的事故正是"把一个真实 LAN 地址提交进仓库" —— 按文档命令构建出的
+#   固件静默指向了开发机，设备在生产上一直接不上，直到装了透明代理才发现。
+# ⇒ 现在的等价保护是 3.0 的 CONFIG_EHOME_DEVICE_LINK_HOST（默认 192.0.2.1）
+#   加上 build_firmware.sh 的占位拒绝：忘记配置就**构建失败**，而不是出厂一台连不上的设备。
 CONFIG_COLLECTOR_NODE_ID="1001"
 
 # Debug TCP Server (for parallel debugging with MQTT)
@@ -236,3 +258,35 @@ CONFIG_COLLECTOR_NODE_ID="1001"
 # bring-up; when off the code is #ifdef'd out of the image entirely.
 CONFIG_DEBUG_TCP_ENABLED=n
 CONFIG_DEBUG_TCP_PORT=8088
+
+# ============================================================================
+# SNTP —— mTLS 的**前置条件**（U6 / K11）
+#
+# 为什么必须有：3.0 用 mTLS 取代 MQTT 账号密码。mTLS 要校验证书的
+# notBefore/notAfter，而这需要**可信的墙上时间**。ESP32 无 RTC，断电后
+# 系统时间回到 1970-01-01。
+#
+# 2026-10-06 实测（当时的状态）：本文档与代码里**都没有**任何 SNTP 配置/调用，
+# 于是 now(1970) < notBefore(2026) ⇒ 证书"尚未生效" ⇒ **mTLS 握手必然失败**，
+# 且失败会被当成"网络问题"无限退避（K11 全站失联）。
+#
+# ⚠ 这里**没有** CONFIG_LWIP_SNTP=y 这一行 —— 因为它**不是个真符号**。
+# 2026-10-06 实测：IDF v6.1 的 lwip Kconfig 里 SNTP 是个**无条件 menu**
+#   （components/lwip/Kconfig:1153  menu "SNTP"），
+#   没有 menuconfig 开关 ⇒ SNTP 永远编译在内，**不需要也无法"开启"**。
+# 我一开始写了 CONFIG_LWIP_SNTP=y：它不报错、不警告、被**静默丢弃**，
+# 看起来像做了事，实际什么也没做 —— 这类"沉默无效开关"比缺配置更危险，
+# 故由 tools/check_sdkconfig_symbols.py 门禁看住（它要求 defaults 里每个
+# CONFIG_ 符号都能在生成配置里找到对应行）。
+#
+# ⇒ 真正的缺口从来不是"配置没开"，而是"**没有代码去调用它**"（§52 已证实）。
+#   发起与等待由 components/sntp_mgr 负责（状态机可在宿主机穷举）。
+# 只留 1 台服务器：内存紧张，且 sntp_mgr 自己做退避重试，不需要多台轮询。
+CONFIG_LWIP_SNTP_MAX_SERVERS=1
+# 周期性重同步（1 小时）：设备长期运行会有时钟漂移，
+# 而证书有效期校验依赖时间大致正确。
+CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+# 启动时不延迟：sntp_mgr 决定**何时**发起（网络就绪后），
+# 不需要 lwip 自己再等一轮。
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n
+

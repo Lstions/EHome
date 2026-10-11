@@ -68,7 +68,7 @@ func TestNotificationChannelRoutesRegisteredInSetupRoutes(t *testing.T) {
 	// 与 cmd/server/main.go 相同的装配路径: 最后一个 option 注入 Dispatcher。
 	// nodeMgr 必须是真的 (registerDeviceRoutes 在注册期就会解引用它);
 	// otaMgr/driverRegistry 传 nil 是安全的 (注册期不解引用)。
-	nodeMgr := nodemgr.NewManager(db, nil, websocket.NewHub(), nil, nil, nil)
+	nodeMgr := nodemgr.NewManager(db, nil, websocket.NewHub(), nil, nil)
 	SetupRoutes(r, db, websocket.NewHub(), nodeMgr, nil, nil, notify.NewDispatcher(db))
 	token := seedInitializedAdminSession(t, db)
 

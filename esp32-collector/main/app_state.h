@@ -52,9 +52,6 @@ typedef struct {
     /* ---- Transports ---- */
     transport_t *tcp_transport;
 
-    /* ---- Command queue ---- */
-    QueueHandle_t cmd_queue;                    /* WriteCommand compat (transition) */
-
     /* ---- Per-controller command queues ----
      * Sample queues are scheduler-owned; control queues are reserved for
      * WriteCommand/ChannelCmdV2.  Workers consume both with the same

@@ -2,22 +2,20 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
 
@@ -109,17 +107,16 @@ func newEnvelopeContractDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// setupEnvelopeContractRouter wires data + node + OTA + peripheral routes with
-// a disconnected (non-panicking) MQTT client. Use setupEnvelopeContractOTARouter
-// when a test actually creates an OTA task.
+// setupEnvelopeContractRouter wires data + node + OTA + peripheral routes.
+// Use setupEnvelopeContractOTARouter when a test actually creates an OTA task.
 func setupEnvelopeContractRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	db := newEnvelopeContractDB(t)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, &mqtt.Client{}, nil, nil, nil, nil)
-	otaMgr := ota.NewManager(db, &mqtt.Client{}, nil)
+	mgr := nodemgr.NewManager(db, &envelopeDownlinkStub{}, nil, nil, nil)
+	otaMgr := ota.NewManager(db, &envelopeDownlinkStub{}, nil)
 	registerDataRoutes(v1, db)
 	registerNodeRoutes(v1, db, mgr)
 	registerPeriphRoutes(v1, db, mgr)
@@ -127,141 +124,55 @@ func setupEnvelopeContractRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	return r, db
 }
 
-// ==================== Fake MQTT broker ====================
-
-// fakeMQTTBroker speaks just enough MQTT 3.1.1 to let the supervised
-// mqtt.Client reach Ready and publish a QoS-1 message successfully.
-type fakeMQTTBroker struct {
-	ln net.Listener
+// ==================== Downlink stub ====================
+//
+// ⚠ This replaced a full fake MQTT broker, which spoke enough MQTT 3.1.1 to
+// drive mqtt.Client to Ready and accept a QoS-1 publish. MQTT is gone from the
+// backend, so there is no longer a client to drive -- and no broker to fake.
+//
+// The stub below is the honest replacement: these are ENVELOPE CONTRACT tests
+// (status code + JSON shape), not transport tests. They need the OTA publish to
+// SUCCEED so POST /ota/tasks reaches its 201 branch, and nothing more.
+// A test that needed to prove delivery would use the real 3.0 transport
+// (see cmd/server/device_e2e_test.go) rather than a stub.
+type envelopeDownlinkStub struct {
+	mu       sync.Mutex
+	nodeIDs  []string
+	payloads [][]byte
+	// err, when set, makes every Publish fail. That is how a test expresses
+	// "the node has no usable downlink" now that the removal of MQTT took away
+	// the zero-value client that used to fail for free.
+	err error
 }
 
-func newFakeMQTTBroker(t *testing.T) *fakeMQTTBroker {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("fake mqtt broker listen: %v", err)
-	}
-	b := &fakeMQTTBroker{ln: ln}
-	go b.serve()
-	t.Cleanup(func() { _ = ln.Close() })
-	return b
+// errStubNoDownlink stands in for "the node is not connected".
+var errStubNoDownlink = errors.New("no downlink session for this node")
+
+func (d *envelopeDownlinkStub) Publish(nodeID string, payload []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.nodeIDs = append(d.nodeIDs, nodeID)
+	d.payloads = append(d.payloads, append([]byte(nil), payload...))
+	return d.err
 }
 
-func (b *fakeMQTTBroker) addr() string { return "tcp://" + b.ln.Addr().String() }
-
-func (b *fakeMQTTBroker) serve() {
-	for {
-		conn, err := b.ln.Accept()
-		if err != nil {
-			return
-		}
-		go b.handle(conn)
-	}
-}
-
-func readMQTTPacket(r io.Reader) (byte, []byte, error) {
-	var first [1]byte
-	if _, err := io.ReadFull(r, first[:]); err != nil {
-		return 0, nil, err
-	}
-	length := 0
-	multiplier := 1
-	for {
-		var b [1]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
-			return 0, nil, err
-		}
-		length += int(b[0]&0x7f) * multiplier
-		if b[0]&0x80 == 0 {
-			break
-		}
-		multiplier *= 128
-		if multiplier > 128*128*128 {
-			return 0, nil, fmt.Errorf("malformed remaining length")
-		}
-	}
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, err
-	}
-	return first[0], payload, nil
-}
-
-func (b *fakeMQTTBroker) handle(conn net.Conn) {
-	defer conn.Close()
-	for {
-		hdr, payload, err := readMQTTPacket(conn)
-		if err != nil {
-			return
-		}
-		switch hdr >> 4 {
-		case 1: // CONNECT -> CONNACK (accepted)
-			_, _ = conn.Write([]byte{0x20, 0x02, 0x00, 0x00})
-		case 8: // SUBSCRIBE -> SUBACK (one granted QoS per filter)
-			if len(payload) < 2 {
-				continue
-			}
-			pid := payload[:2]
-			count := 0
-			idx := 2
-			for idx+2 <= len(payload) {
-				tl := int(payload[idx])<<8 | int(payload[idx+1])
-				idx += 2 + tl + 1
-				count++
-			}
-			if count == 0 {
-				count = 1
-			}
-			resp := []byte{0x90, byte(2 + count), pid[0], pid[1]}
-			for i := 0; i < count; i++ {
-				resp = append(resp, 0x01)
-			}
-			_, _ = conn.Write(resp)
-		case 3: // PUBLISH -> PUBACK for QoS 1/2
-			qos := (hdr >> 1) & 0x03
-			if qos == 0 || len(payload) < 2 {
-				continue
-			}
-			tl := int(payload[0])<<8 | int(payload[1])
-			off := 2 + tl
-			if off+2 > len(payload) {
-				continue
-			}
-			_, _ = conn.Write([]byte{0x40, 0x02, payload[off], payload[off+1]})
-		case 12: // PINGREQ -> PINGRESP
-			_, _ = conn.Write([]byte{0xD0, 0x00})
-		case 14: // DISCONNECT
-			return
-		}
-	}
-}
-
-// setupEnvelopeContractOTARouter wires OTA routes with a live in-process
-// broker so POST /ota/tasks reaches its 201 success branch.
+// setupEnvelopeContractOTARouter wires OTA routes with a recording downlink so
+// POST /ota/tasks reaches its 201 success branch.
+//
+// ⚠ It used to stand up a live in-process MQTT broker and wait for the client
+// to reach Ready. That wait is gone with MQTT: the stub below succeeds
+// synchronously, so there is no readiness window in which this test could flake
+// (nor a 5s timeout that could fail the whole package's setup).
 func setupEnvelopeContractOTARouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	db := newEnvelopeContractDB(t)
-	broker := newFakeMQTTBroker(t)
-	mc := mqtt.New(broker.addr(), "", "")
-	mc.SetHandler(func(string, []byte) {})
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = mc.Run(ctx) }()
-	select {
-	case <-mc.Ready():
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("fake MQTT broker: client did not become ready")
-	}
-	t.Cleanup(func() {
-		cancel()
-		mc.Close()
-	})
+	down := &envelopeDownlinkStub{}
 
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, &mqtt.Client{}, nil, nil, nil, nil)
-	registerOTARoutes(v1, db, ota.NewManager(db, mc, nil), mgr)
+	mgr := nodemgr.NewManager(db, down, nil, nil, nil)
+	registerOTARoutes(v1, db, ota.NewManager(db, down, nil), mgr)
 	return r, db
 }
 

@@ -49,7 +49,7 @@ func newReconfigureTestRouter(t *testing.T) (*reconfigureEnv, *models.Channel) {
 		t.Fatalf("create channel: %v", err)
 	}
 	r := setupRouter()
-	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 	return &reconfigureEnv{r: r, db: db}, &ch
 }
 
@@ -117,7 +117,7 @@ func TestChannelReconfigure_RejectsNonUART(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := setupRouter()
-	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := postReconfigure(t, r, ch.ID, `{"baudrate":115200}`)
 	if w.Code != http.StatusBadRequest {
@@ -141,7 +141,7 @@ func TestChannelReconfigure_RejectsMalformedBusConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := setupRouter()
-	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerDeviceRoutes(r.Group("/api/v1"), db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := postReconfigure(t, r, ch.ID, `{"baudrate":115200}`)
 	if w.Code != http.StatusBadRequest {

@@ -9,7 +9,6 @@ import (
 
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/testutil"
 
@@ -216,8 +215,8 @@ func TestPeriphTransportDispatchGPIO(t *testing.T) {
 			if result.WireDigest == "" || result.PublishedAt.IsZero() {
 				t.Fatal("dispatch result must carry wire digest and publish time")
 			}
-			if pub.topic != mqtt.ControlTopicForNode(node.NodeID) {
-				t.Fatalf("topic = %s", pub.topic)
+			if pub.nodeID != node.NodeID {
+				t.Fatalf("downlink node = %s, want %s", pub.nodeID, node.NodeID)
 			}
 			fields := decodePeriphFrame(t, pub.payload)
 			if fields[2] != uint64(periphTypeGPIO) {
@@ -338,7 +337,7 @@ func TestMultiTransportRoutesByAction(t *testing.T) {
 	if _, err := multi.Dispatch(context.Background(), execution, attempt); err != nil {
 		t.Fatalf("multi dispatch gpio_set: %v", err)
 	}
-	if pub.topic != mqtt.ControlTopicForNode(node.NodeID) || len(pub.payload) == 0 || pub.payload[0] != frame.MsgPeriphCmd {
+	if pub.nodeID != node.NodeID || len(pub.payload) == 0 || pub.payload[0] != frame.MsgPeriphCmd {
 		t.Fatalf("periph route did not publish a PeriphCmd frame")
 	}
 

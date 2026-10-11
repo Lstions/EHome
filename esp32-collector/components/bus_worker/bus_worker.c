@@ -23,6 +23,11 @@
  */
 
 #include "bus_worker.h"
+#include "report_stats.h"   /* D-14：上报统计量已搬到中立组件，打破依赖环 */
+/* ⭐ 2026-10-10：命令 fence 的事件等待用二值信号量（替代 5ms 轮询）。
+ * 见 UART_RESPONSE_WAIT_MS 与 s_pending_done 的说明。 */
+#include "freertos/semphr.h"
+#include "data_batch_codec.h"   /* D-18：帧长算术的唯一定义处 */
 #include "bus_queue_policy.h"
 #include "bus_rx_boundary.h"
 #include "bus_dma.h"
@@ -30,11 +35,25 @@
 #include "scheduler.h"
 #include "collector_mem.h"
 #include "frame_codec.h"
+/* ⭐ 2026-10-08：HW_UART_COUNT —— UART 任务数必须**由硬件表派生**。
+ * 原先无条件建 cmd_u0/u1/u2 三个任务，而 C6 只有 2 个 UART ⇒
+ * cmd_u2 的 4096 B 内部栈与队列在 C6 上**永远收不到命令**（纯浪费）：
+ *   · 后端只知道 2 个 UART（ResourceReport 只含 hw_uarts 的 2 条）
+ *   · bus_manager 按 hw_uarts 校验 controller_id ⇒ UART2 无法注册
+ *   · scheduler.dispatch_queue 的 UART_NUM_2 分支永不命中
+ * ⇒ 这是 P8（型号差异只影响放置/大小，且差异必须显式）没做到的地方：
+ *   "有几个 UART"已经在 hw_tables 里写清楚了，任务数却还写死 3。
+ * ⚠ 只加 REQUIRES，不加行为差异：S3/S3P 的 HW_UART_COUNT=3 ⇒ 建 3 个，与改动前一致。 */
+#include "hw_tables.h"
 /* V3-2a：能力位读取（契约 §1）。只取这个轻量头，刻意**不**引入
  * msg_handler.h —— 它会把 scheduler/config_mgr/esp_err 整条头链拖进
  * bus_worker。DataBatch 的**编码**不在这里：见 bus_worker.h 的
  * data_batch_cb_t 注释（组件门禁 1024 B，而一帧需要 1400 B 缓冲）。 */
 #include "handler_hello.h"
+/* ⭐ 方案 D（2026-10-10）：channel_cmd_v2_borrow_plan() —— 按 control_slot 借用
+ * msg_handler 槽位里的 batch plan（队列元素已不再内联 plan buffer）。
+ * bus_worker 本来就 REQUIRES msg_handler（见 CMakeLists 的说明），故无新增依赖。 */
+#include "msg_handler_hooks.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
@@ -71,7 +90,28 @@
 #define UART_EVENT_QUEUE_DEPTH 32
 #define UART_EVENT_SET_CAPACITY (SCHED_MAX_CHANNELS * UART_EVENT_QUEUE_DEPTH)
 #define RX_WAKE_PERIOD_MS 250  /* lifecycle/timeout wake, not RX polling */
-#define UART_RESPONSE_WAIT_MS 5 /* command fence only; RX uses driver events */
+/* ⭐ 2026-10-10 压测修复：命令 fence 从"轮询"改为"事件等待"。
+ *
+ * 旧实现 while (has_pending_cmd) vTaskDelay(5ms) 实测每次循环耗 **21ms**：
+ *   · vTaskDelay(5) 只是 5ms 粒度；
+ *   · 但 pending 队列要等 rx_task 完成才清空，而 rx_task 的完成判据包含
+ *     UART_IDLE_THRESHOLD_US(10ms) 静默窗口；
+ *   · 加上 cmd_task(prio=6) 与 rx_task(prio=7) 的调度交错。
+ * 后果：单通道吞吐被钉死在 ~27 req/s，**且与波特率无关**
+ *   （实测 115200 与 921600 都是 21.26ms/事务）。
+ *
+ * 现在改为事件驱动：pending 的**出队方**（rx_task 的各完成路径、超时路径、
+ * 丢弃路径）在清空 pending 之后唤醒等待者；等待者用二值信号量阻塞。
+ *
+ * 为什么用**独立信号量**而不是复用 s_batch_rx[].waiter：
+ *   同一个 cmd_task 既可能在 execute_uart_batch 里等批处理响应
+ *   （notify_batch_waiter），也可能在 wait_for_uart_response_slot 里等 fence。
+ *   复用同一 task 的通知槽会互相吞唤醒（ulTaskNotifyTake(pdTRUE) 会清零计数），
+ *   先到的唤醒被后到的等待吃掉 ⇒ 死等。用独立二值信号量则语义互不干扰。
+ *
+ * UART_RESPONSE_WAIT_MS 保留为**超时兜底**（不再是轮询周期）：
+ * 任何漏唤醒最多多等这么多毫秒，不会死等。 */
+#define UART_RESPONSE_WAIT_MS 5 /* 事件等待的超时兜底，不再是轮询周期 */
 #define CMD_QUEUE_WAIT_MS 25 /* bounded wait so lifecycle suspend is observable */
 #define WORKER_SUSPEND_TIMEOUT_MS 2000
 
@@ -128,7 +168,31 @@
  * 组件级 -Wframe-larger-than 门禁会继续盯着它。4096 相对 2416 的帧
  * 有 1680 字节余量，仍高于该门禁要求。若将来再叠大缓冲，构建会失败，
  * 那时应提高此值而不是放宽门禁。 */
-#define REPORT_TASK_STACK 4096
+/* ⚠⚠ 2026-10-09（§201，压测实测）：4096 **不够**，已改回 6144。
+ *
+ * 真机证据（三路 UART 同时满载压测，S3 profile）：
+ *   ***ERROR*** A stack overflow in task report_tx has been detected.
+ *   Backtrace: 0x40381fd5 ... |<-CORRUPTED
+ *   rst:0xc (RTC_SW_CPU_RST)      ⇒ **150 秒内重启 12 次**
+ *
+ * 触发条件（正是上面 2026-10-04 那段注释预测的"特定数据块尺寸"）：
+ *   三路 UART **同时**在等从机响应 → RX_TASK 同时报多个超时
+ *     CMD_U0/U1/U2: waiting for pending UART response ch=34/35/36
+ *     RX_TASK: RX timeout slot0/slot2 type=1 reqID=0 (1001ms)
+ *   ⇒ report_tx 一轮要处理**多个**超时报告 ⇒ 2416 B 栈帧叠加 ⇒ 溢出。
+ *
+ * ⚠ 教训：**按实测峰值收紧栈，等于把余量押在"峰值不会变"上**。
+ *   2026-10-05 依据"峰值 3464、余量 2680"把 6144 收到 4096（留 ~630 B），
+ *   当时结论是安全的 —— 但那是在**单通道、有应答**的条件下测的。
+ *   压测把条件换成"三路同时超时"，峰值立刻越界。
+ *   ⇒ 收紧栈的理由（省内部 RAM 给 lwIP/TLS）仍成立，但余量不能只按均值场景定。
+ *
+ * 回到 6144 的代价（S3 profile 无 PSRAM，实测）：崩溃前 free=32860 largest=12800，
+ *   多占 2048 B 后 free≈30812；xTaskCreate 要连续块，6144 < largest(12800) ⇒ 无风险。
+ * ⚠ 根因仍在：send_data_report 把 2416 字节放在栈上（handler_data.c 的 buf[1400]）。
+ *   彻底消除应把那块缓冲移出栈，而不是继续加大栈。
+ *   组件级 -Wframe-larger-than 门禁会继续盯着它。 */
+#define REPORT_TASK_STACK 6144
 #define REPORT_TASK_PRIO 5
 
 /* ------------------------------------------------------------------ *
@@ -220,8 +284,9 @@ static QueueHandle_t s_control_final_q;
 static QueueHandle_t s_write_rsp_q;
 static QueueSetHandle_t s_report_ready_set;
 static TaskHandle_t s_report_task_h;
-static volatile uint32_t s_report_telemetry_drops;
-static volatile uint32_t s_report_queue_high_water;
+/* D-14：这两个计数器已搬到 components/report_stats ——
+ * msg_handler 要在上报帧里读它们，而它不该为了两个计数器就
+ * REQUIRES 整个 bus_worker（那正是唯一的组件依赖环）。 */
 static bool s_report_path_started;
 
 static bool report_is_critical(uint32_t error_code, uint32_t request_id,
@@ -254,6 +319,8 @@ static data_rpt_cb_t s_data_rpt_cb = NULL;
 /* V3-2a DataBatch 编码回调（由 main 注入 msg_handler 的实现）。为 NULL 时
  * DataBatch 完全不启用，即使能力位为 1。 */
 static data_batch_cb_t s_data_batch_cb = NULL;
+/* D-06：编码器未注入（配置错误）—— 供启动门禁/诊断查询，避免"静默降级"。 */
+static bool s_data_batch_missing = false;
 static channel_cmd_v2_final_cb_t s_channel_cmd_v2_final_cb = NULL;
 
 #define SUSPEND_RX_BIT   BIT0
@@ -291,6 +358,14 @@ static QueueSetHandle_t s_cmd_u1_set = NULL;
 static QueueSetHandle_t s_cmd_u2_set = NULL;
 static QueueSetHandle_t s_cmd_spi_set = NULL;
 static QueueSetHandle_t s_cmd_i2c_set = NULL;
+/* P3-3 (2026-10-10): members of the five command queue sets, recorded at
+ * creation time so destroy_cmd_queue_sets() can detach them (and therefore
+ * clear their pxQueueSetContainer) before the set object is freed.  Two
+ * members per set, five sets. */
+#define CMD_SET_MAX_MEMBERS 10
+static QueueHandle_t s_cmd_set_members[CMD_SET_MAX_MEMBERS];
+static QueueSetHandle_t s_cmd_set_member_sets[CMD_SET_MAX_MEMBERS];
+static size_t s_cmd_set_member_count;
 static QueueSetHandle_t s_uart_event_set = NULL;
 static QueueHandle_t s_uart_event_members[SCHED_MAX_CHANNELS];
 static size_t s_uart_event_member_count;
@@ -319,8 +394,39 @@ static void destroy_uart_event_set(void)
  s_uart_event_member_count = 0;
 }
 
+/* Detach one member queue from its set before the set is freed.
+ *
+ * FreeRTOS does NOT clear a member's pxQueueSetContainer in vQueueDelete, so
+ * freeing the set while a member still points at it leaves a dangling pointer.
+ * A later xQueueAddToSet on that member then fails with pdFAIL because
+ * pxQueueSetContainer != NULL, the set handles stay NULL, and
+ * receive_prioritized_command() falls through to its "no set" fast path —
+ * exactly the shape of the 2026-10-04 incident.  xQueueRemoveFromSet refuses
+ * a non-empty queue, so reset first (the order destroy_uart_event_set()
+ * already uses).  All workers have acknowledged suspend before this runs, so
+ * no producer can refill it; the bounded retry plus the visible failure below
+ * cover a late producer without spinning forever. */
+static void detach_cmd_queue_member(QueueHandle_t q, QueueSetHandle_t set)
+{
+ if (!q || !set) return;
+ for (int attempt = 0; attempt < 100; attempt++) {
+  (void)xQueueReset(q);
+  if (xQueueRemoveFromSet(q, set) == pdPASS) return;
+ }
+ ESP_LOGE(TAG_RX, "command queue detach failed: producer still active");
+}
+
 static void destroy_cmd_queue_sets(void)
 {
+ /* Detach every member while the sets are still alive.  The members are
+  * recorded when the sets are created, so this works from bus_worker_stop()
+  * too, which has no bus_runtime_t at hand. */
+ for (size_t i = 0; i < s_cmd_set_member_count; i++) {
+  detach_cmd_queue_member(s_cmd_set_members[i], s_cmd_set_member_sets[i]);
+ }
+ s_cmd_set_member_count = 0;
+ memset(s_cmd_set_members, 0, sizeof(s_cmd_set_members));
+ memset(s_cmd_set_member_sets, 0, sizeof(s_cmd_set_member_sets));
  if (s_cmd_u0_set) { vQueueDelete(s_cmd_u0_set); s_cmd_u0_set = NULL; }
  if (s_cmd_u1_set) { vQueueDelete(s_cmd_u1_set); s_cmd_u1_set = NULL; }
  if (s_cmd_u2_set) { vQueueDelete(s_cmd_u2_set); s_cmd_u2_set = NULL; }
@@ -349,6 +455,18 @@ static QueueSetHandle_t create_cmd_queue_set(QueueHandle_t sample,
   }
   return NULL;
  }
+ /* Record the members so destroy_cmd_queue_sets() can detach them without
+  * needing the bus_runtime_t. */
+ if (s_cmd_set_member_count + 2 <= CMD_SET_MAX_MEMBERS) {
+  s_cmd_set_members[s_cmd_set_member_count] = sample;
+  s_cmd_set_member_sets[s_cmd_set_member_count] = set;
+  s_cmd_set_member_count++;
+  s_cmd_set_members[s_cmd_set_member_count] = control;
+  s_cmd_set_member_sets[s_cmd_set_member_count] = set;
+  s_cmd_set_member_count++;
+ } else {
+  ESP_LOGE(TAG_RX, "%s member table full; detach would be incomplete", tag);
+ }
  return set;
 }
 
@@ -371,11 +489,43 @@ static void rebuild_cmd_queue_sets(bus_runtime_t *rt)
 /* Consume control commands with priority, but after a bounded burst give a
  * ready sample one turn.  This preserves control latency without allowing a
  * continuous control producer to starve scheduled sampling forever. */
-static bool receive_prioritized_command(QueueSetHandle_t set,
-                                         QueueHandle_t sample,
-                                         QueueHandle_t control,
-                                         bus_cmd_t *cmd,
-                                         uint8_t *control_burst)
+/* P2 (2026-10-10): a sample queue holds sample_cmd_t (the slim prefix), so
+ * xQueueReceive writes only the first sizeof(sample_cmd_t) bytes of this
+ * bus_cmd_t buffer.  Everything past that keeps whatever the previous
+ * iteration left there.  The plan members live past the prefix and are only
+ * reachable through the channel_cmd_v2 guard, so no stale read is possible —
+ * but zero them anyway: it costs 520 B per SAMPLE command and turns any
+ * future mistake into an obvious "plan_len == 0" instead of a ghost batch.
+ * Control commands go through the reset too: they are always fully written,
+ * so it is a no-op for them. */
+/* ⭐ 方案 D（2026-10-10）：本函数**已无实际作用**，保留为显式的防御位。
+ *
+ * 它当初存在的原因是：sample 队列的元素是 sample_cmd_t（瘦），而消费者用
+ * bus_cmd_t（大）接收，于是 bus_cmd_t 的前缀之后会残留上一次迭代的字节 ——
+ * 那段正是 plan 成员（520 B）。
+ *
+ * 现状：bus_cmd_t 与 sample_cmd_t **尺寸相同**（都是 180 B target / 192 B
+ * host，见 cmd_queue.h 的 _Static_assert），前缀之后没有任何字节，
+ * 因此 memset 的长度恒为 0。保留函数与注释是为了让下一个人知道
+ * 「这里曾经有个尾部残留问题」以及它为什么消失了，而不是当成死代码删掉后
+ * 又有人在 bus_cmd_t 上加字段时忘记恢复它。
+ *
+ * ⚠ 若将来 bus_cmd_t 再次比 sample_cmd_t 大，本函数会自动恢复作用
+ *   （memset 长度不再为 0）——前提是调用点没有被删掉。 */
+static void scrub_plan_tail(bus_cmd_t *cmd)
+{
+    if (cmd->channel_cmd_v2) return;   /* control command: fully written by producer */
+    _Static_assert(sizeof(bus_cmd_t) >= sizeof(sample_cmd_t),
+                   "bus_cmd_t must not be smaller than sample_cmd_t");
+    memset((uint8_t *)cmd + sizeof(sample_cmd_t), 0,
+           sizeof(bus_cmd_t) - sizeof(sample_cmd_t));
+}
+
+static bool receive_prioritized_command_raw(QueueSetHandle_t set,
+                                             QueueHandle_t sample,
+                                             QueueHandle_t control,
+                                             bus_cmd_t *cmd,
+                                             uint8_t *control_burst)
 {
 if (!cmd || !control_burst) return false;
 
@@ -427,6 +577,21 @@ if (decision == BUS_QUEUE_DECISION_CONTROL &&
 if (decision == BUS_QUEUE_DECISION_SAMPLE &&
  xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
 return false;
+}
+
+/* P2 (2026-10-10): wrap the raw receive so every caller gets the plan-tail
+ * scrub.  The wrapper deliberately leaves the queue-set accounting logic
+ * untouched — that code is hardened against the 2026-10-04 field incident and
+ * must not be restructured for a buffer-hygiene concern. */
+static bool receive_prioritized_command(QueueSetHandle_t set,
+                                        QueueHandle_t sample,
+                                        QueueHandle_t control,
+                                        bus_cmd_t *cmd,
+                                        uint8_t *control_burst)
+{
+    bool got = receive_prioritized_command_raw(set, sample, control, cmd, control_burst);
+    if (got) scrub_plan_tail(cmd);
+    return got;
 }
 
 static void report_free_block(bool critical, uint8_t index)
@@ -489,52 +654,38 @@ static bool data_batch_compatible(const report_desc_t *base, const report_desc_t
  return true;
 }
 
-/* 一帧 DataBatch 的**确切**字节数预测，与 data_batch_codec.c 的
- * data_batch_encoded_size() 同式。bus_worker 用它做"降 n"决策，从而不必
- * 链接编码器、也不必分配编码缓冲。
+/* D-18 修复（2026-10-06）：此处原先【复刻】了编码器的字节算术
+ * （db_varint_size / db_field_varint_size / db_field_bytes_size /
+ *   data_batch_frame_size，约 50 行），注释自陈"与 data_batch_codec.c 的
+ * data_batch_encoded_size() 同式"，靠一句"两侧若漂移测试会红"约束。
  *
- * 字段号/布局必须与契约 §2 及 data_batch_codec.h 保持一致；两侧若漂移，
- * bus_worker_data_batch_tests.c 的 T6（降 n）会立刻变红。 */
-static size_t db_varint_size(uint64_t v)
-{
- size_t n = 1;
- while (v > 0x7F) { n++; v >>= 7; }
- return n;
-}
-
-static size_t db_field_varint_size(uint8_t field_num, uint64_t value)
-{
- return db_varint_size(((uint64_t)field_num << 3) | 0) + db_varint_size(value);
-}
-
-static size_t db_field_bytes_size(uint8_t field_num, size_t len)
-{
- return db_varint_size(((uint64_t)field_num << 3) | 2) +
-        db_varint_size(len) + len;
-}
-
-/* 与编码器同款的可选字段省略规则（0 即省略；field8 在 edge!=0 时恒写，
- * 与 data_report_codec.c 对 0x03 的既有习惯一致）。 */
+ * 为什么要删掉复刻：
+ *   1. 帧布局若有两处定义，漂移时的症状是【静默】的 —— 尺寸算小了会写出
+ *      超长帧或提前降 n，算大了会白白少聚合；两者都不会让编译失败；
+ *   2. 复刻【没有换来任何解耦】：bus_worker 本就 REQUIRES msg_handler
+ *      （其 CMakeLists 注释明确写着就是为了 data_batch_encode()），
+ *      宿主测试也早已链接 data_batch_codec.c ⇒ 只是多了一份会漂移的副本；
+ *   3. 这正是 P4（语义只有一处定义）。
+ *
+ * 现在唯一来源是 data_batch_encoded_size()：bus_worker 只做
+ * report_desc_t -> data_batch_sample_t 的**字段搬运**，不含任何布局知识。
+ * 字段号/宽度/省略规则一旦改动，两侧不可能再各自漂移 —— 因为只剩一侧。 */
 static size_t data_batch_frame_size(uint32_t channel_id, uint64_t base_ts,
                                     uint32_t first_seq,
                                     const report_desc_t *cands, size_t n,
                                     uint32_t edge, uint32_t tmpl, uint8_t cmd_idx)
 {
- size_t total = 1; /* 类型字节 */
- total += db_field_varint_size(1, n);
- total += db_field_varint_size(2, base_ts);
- total += db_field_varint_size(3, first_seq);
- total += db_field_varint_size(4, channel_id);
- for (size_t i = 0; i < n; i++) {
-  uint64_t delta = cands[i].timestamp_us - base_ts;
-  size_t body = db_field_varint_size(1, delta) +
-                db_field_bytes_size(2, cands[i].len);
-  total += db_field_bytes_size(5, body);
- }
- if (edge != 0) total += db_field_varint_size(6, edge);
- if (tmpl != 0) total += db_field_varint_size(7, tmpl);
- if (cmd_idx > 0 || edge != 0) total += db_field_varint_size(8, cmd_idx);
- return total;
+    if (cands == NULL || n == 0 || n > DATA_BATCH_MAX_SAMPLES) return 0;
+
+    data_batch_sample_t samples[DATA_BATCH_MAX_SAMPLES];
+    for (size_t i = 0; i < n; i++) {
+        /* 只搬字段，不做算术 —— 布局知识全部留在编码器里。 */
+        samples[i].delta_us = cands[i].timestamp_us - base_ts;
+        samples[i].raw_data = report_payload_of(&cands[i]);
+        samples[i].raw_len  = cands[i].len;
+    }
+    return data_batch_encoded_size(channel_id, base_ts, first_seq,
+                                   samples, n, edge, tmpl, cmd_idx);
 }
 
 /* 时间戳是否落在聚合窗口内（契约 §3：ts - start_us < WINDOW_MS）。 */
@@ -551,7 +702,10 @@ static bool data_batch_in_window(uint64_t ts, uint64_t start_us)
  * data_batch_cb_t 的注释（组件门禁 1024 B vs 一帧需要 1400 B）。 */
 static bool data_batch_publish(const report_desc_t *descs, size_t n)
 {
- if (!s_data_batch_cb || !descs || n < 2 || n > DATA_BATCH_MAX_SAMPLES) return false;
+ /* 未注入编码器 = 配置错误（【不是】"这一批装不下"）——
+  * 两者都返回 false，但前者在 start() 时已经 ERROR 过，这里不再重复刷屏。 */
+ if (!s_data_batch_cb) return false;
+ if (!descs || n < 2 || n > DATA_BATCH_MAX_SAMPLES) return false;
 
  const uint8_t *raw[DATA_BATCH_MAX_SAMPLES];
  size_t raw_lens[DATA_BATCH_MAX_SAMPLES];
@@ -635,7 +789,7 @@ static bool report_try_data_batch(QueueSetMemberHandle_t member, report_desc_t *
  for (size_t i = n; i-- > 0; ) {
   if (xQueueSendToFront(s_report_telemetry_q, &cands[i], 0) != pdTRUE) {
    report_free_block(false, cands[i].block_index);
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
   }
  }
  return true;
@@ -788,7 +942,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
   ESP_LOGW(TAG_RX, "DataReport payload too large (%u > %u)",
            (unsigned)len, (unsigned)REPORT_PAYLOAD_BLOCK_SIZE);
   if (!critical) {
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
   /* Keep error reporting on the publisher task even for malformed oversized
@@ -802,7 +956,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
  bool emergency = false;
  if (!report_alloc_block(critical, &index)) {
   if (!critical) {
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
   emergency = report_alloc_emergency_block(&index);
@@ -810,7 +964,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
    /* This is only possible when the reserved normal and emergency slots are
     * both occupied.  Count it explicitly; transport remains off this task. */
    ESP_LOGE(TAG_RX, "critical report pools exhausted");
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
  }
@@ -831,16 +985,14 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
  if (!q || xQueueSend(q, &desc, 0) != pdTRUE) {
   if (emergency) report_free_emergency_block(index);
   else report_free_block(critical, index);
-  __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+  report_stats_note_drop();
   return;
  }
  UBaseType_t queued = uxQueueMessagesWaiting(s_report_critical_q) +
                       uxQueueMessagesWaiting(s_report_critical_emergency_q) +
                       uxQueueMessagesWaiting(s_report_telemetry_q);
- uint32_t old = __atomic_load_n(&s_report_queue_high_water, __ATOMIC_RELAXED);
- while (queued > old && !__atomic_compare_exchange_n(&s_report_queue_high_water, &old,
-                                                      queued, false,
-                                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
+ /* D-14：高水位由中立组件维护（CAS 逻辑一并搬过去）。 */
+ report_stats_note_queue_depth((uint32_t)queued);
 }
 
 static void report_path_init(void)
@@ -892,8 +1044,7 @@ static void report_path_init(void)
  for (uint8_t i = 0; i < REPORT_CRITICAL_BLOCKS; i++) (void)xQueueSend(s_report_critical_free, &i, 0);
  for (uint8_t i = 0; i < REPORT_CRITICAL_EMERGENCY_BLOCKS; i++) (void)xQueueSend(s_report_critical_emergency_free, &i, 0);
  for (uint8_t i = 0; i < REPORT_TELEMETRY_BLOCKS; i++) (void)xQueueSend(s_report_telemetry_free, &i, 0);
- s_report_telemetry_drops = 0;
- s_report_queue_high_water = 0;
+ report_stats_reset();
  s_report_path_started = true;
  if (xTaskCreate(report_task, "report_tx", REPORT_TASK_STACK, NULL,
                  REPORT_TASK_PRIO, &s_report_task_h) != pdPASS) {
@@ -935,6 +1086,28 @@ static void report_path_deinit(void)
 /* 8.1: Runtime counters */
 static uint32_t s_rx_timeout_count[SCHED_MAX_CHANNELS];
 static volatile bool s_plan_active[SCHED_MAX_CHANNELS];
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待对象（每总线槽一个）。
+ *
+ * 语义：**二值信号量**，由 pending 出队方 give，由 cmd_task 在
+ * wait_for_uart_response_slot 里 take。见 UART_RESPONSE_WAIT_MS 处的说明
+ * （为什么不用 task notification 复用 s_batch_rx[].waiter）。
+ *
+ * 生命周期：与 pending 队列一同在 bus_worker 启动时创建、停止时删除。
+ * 为 NULL 时等待路径退化为原来的轮询（安全降级，不会崩）。 */
+static SemaphoreHandle_t s_pending_done[SCHED_MAX_CHANNELS];
+
+/* 唤醒在 fence 上等待的 cmd_task。
+ *
+ * 调用点：**每一个把 pending 队列清空的路径**都要调用它，否则等待者只能靠
+ * UART_RESPONSE_WAIT_MS 超时兜底 —— 那会让本次优化失效（退化成慢轮询）。
+ * 用 xSemaphoreGive（而非 FromISR）：全部调用点都在任务上下文。 */
+static void notify_pending_done(int ch_idx)
+{
+ if (ch_idx < 0 || ch_idx >= SCHED_MAX_CHANNELS) return;
+ SemaphoreHandle_t sem = s_pending_done[ch_idx];
+ if (sem) (void)xSemaphoreGive(sem);
+}
 
 /* ChannelCmdV2 batches still need one synchronous final result, but their RX
  * bytes must come from the same UART event owner as ordinary traffic.  The RX
@@ -1054,6 +1227,15 @@ void bus_worker_set_data_batch_cb(data_batch_cb_t cb)
 {
  s_data_batch_cb = cb;
 }
+/* D-06：编码器是否已注入。
+ * 存在的理由：未注入时 DataBatch 会静默退回逐样本 0x03 ——
+ * 该状态此前【无法从外部观测】（弱符号让它看起来总是"已注入"）。
+ * 启动门禁与诊断据此判断，而不是靠人猜。 */
+bool bus_worker_data_batch_encoder_present(void)
+{
+    return s_data_batch_cb != NULL;
+}
+
 
 /* ------------------------------------------------------------------ */
 /*  P2-2: Turnaround delay helpers                                    */
@@ -1219,13 +1401,33 @@ static bool uart_collect_response(int ch_idx, uint8_t *out, size_t cap,
  }
 }
 
+/* ⭐ 方案 D（2026-10-10）：plan 不再从队列元素读取。
+ *
+ * 队列元素（bus_cmd_t）已不再内联 512 B 的 plan buffer —— 它违反本项目的
+ * 「一条命令 ≤ 256 B」约束，且占掉 3 个 control 队列共 16.8 KiB 堆。plan 只
+ * 存在于 msg_handler 的 control 槽位里，这里按 cmd->control_slot **借用**。
+ *
+ * 借用由 channel_cmd_v2_borrow_plan() 完成，它内部校验槽位状态仍是
+ * QUEUED/COMPLETING；不满足就报错返回 false —— 把「槽位在读完前不被复用」
+ * 这条不变量变成显式运行时强制，而不是靠执行顺序偶然成立。
+ *
+ * ⚠ 借用期约定：plan 指针只在**本次调用内**有效（同任务、不长时间阻塞）。
+ *   本函数恰好满足：读 plan 与随后的完成回调在同一任务内串行。 */
 static bool execute_uart_batch(int ch_idx, bus_dma_ctx_t *ctx,
                                const bus_cmd_t *cmd, uint8_t *raw, size_t *raw_len,
                                uint32_t *error_code)
 {
  if (ch_idx < 0 || ch_idx >= SCHED_MAX_CHANNELS || !ctx || !cmd || !raw ||
-     !raw_len || !error_code || cmd->plan_step_count < 2 ||
-     cmd->plan_step_count > CMD_BATCH_MAX_STEPS || cmd->plan_len == 0) return false;
+     !raw_len || !error_code) return false;
+
+ const uint8_t *plan = NULL;
+ size_t plan_len = 0;
+ uint8_t plan_steps = 0;
+ if (!channel_cmd_v2_borrow_plan(cmd->control_slot, &plan, &plan_len, &plan_steps)) {
+     /* 槽位不可借用（已释放/已复用）或本来就没有 plan。 */
+     return false;
+ }
+ if (plan_steps < 2 || plan_steps > CMD_BATCH_MAX_STEPS || plan_len == 0) return false;
  /* Drain bytes left by a previous request before claiming the sequence. */
  uint8_t drain[128];
  while (bus_dma_read(ctx, drain, sizeof(drain)) > 0) { }
@@ -1236,14 +1438,14 @@ static bool execute_uart_batch(int ch_idx, bus_dma_ctx_t *ctx,
  s_batch_rx[ch_idx].error = false;
  s_plan_active[ch_idx] = true;
  size_t cursor = 0, encoded = 1;
- raw[0] = cmd->plan_step_count;
- for (uint8_t i = 0; i < cmd->plan_step_count; i++) {
-  if (cursor + 2 > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
-  uint16_t step_len = (uint16_t)cmd->plan_data[cursor] | ((uint16_t)cmd->plan_data[cursor + 1] << 8);
+ raw[0] = plan_steps;
+ for (uint8_t i = 0; i < plan_steps; i++) {
+  if (cursor + 2 > plan_len) { *error_code = 0x1100U + i; goto fail; }
+  uint16_t step_len = (uint16_t)plan[cursor] | ((uint16_t)plan[cursor + 1] << 8);
   cursor += 2;
-  if (step_len == 0 || cursor + step_len > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
+  if (step_len == 0 || cursor + step_len > plan_len) { *error_code = 0x1100U + i; goto fail; }
   batch_step_t step;
-  if (!decode_batch_step(cmd->plan_data + cursor, step_len, &step)) { *error_code = 0x1100U + i; goto fail; }
+  if (!decode_batch_step(plan + cursor, step_len, &step)) { *error_code = 0x1100U + i; goto fail; }
   cursor += step_len;
   /* Reset the event-driven hand-off before TX so a fast peripheral response
    * cannot race a post-write reset. */
@@ -1337,7 +1539,17 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
    }
   }
 
-  if (cmd.channel_cmd_v2 && cmd.plan_step_count > 0) {
+  /* ⭐ 方案 D（2026-10-10）：plan 不再在队列元素里，改用访问器探测。
+   * 这里只取元数据判断「这条命令是否有 plan」；execute_uart_batch 内部会
+   * 再次借用（并校验槽位状态）——两次借用都是只读，代价可忽略。 */
+  const uint8_t *probe_plan = NULL;
+  size_t probe_len = 0;
+  uint8_t probe_steps = 0;
+  bool has_plan = cmd.channel_cmd_v2 &&
+                  channel_cmd_v2_borrow_plan(cmd.control_slot, &probe_plan,
+                                             &probe_len, &probe_steps) &&
+                  probe_steps > 0;
+  if (has_plan) {
    uint8_t raw[256];
    size_t raw_len = 0;
    uint32_t code = 0x1000;
@@ -1552,7 +1764,32 @@ static void cmd_task_i2c(void *pv) {
 /*  in fixed blocks and closed by the common 10ms idle timeout.         */
 /* ------------------------------------------------------------------ */
 
-#define UART_IDLE_THRESHOLD_US 10000  /* protocol-neutral idle completion deadline */
+/* ⭐ 2026-10-10 压测修复（待办 3）：软 idle 兜底从 10ms 降到 2ms。
+ *
+ * 定位过程（先证明它是不是瓶颈，再决定改不改）：
+ *   · **主动轮询路径（有 pending + read_size）不经过这里** ——
+ *     bus_rx_boundary_length 一收满 read_size 就返回，既不等本常量、
+ *     也不依赖硬件 timeout_flag。所以 10ms **不是** 27 req/s 的原因
+ *     （那个已由 P2 的 21ms 轮询 fence 解释并修复）。
+ *   · 本常量只影响两类"长度未声明"的场景：
+ *       (a) length-less 协议（GPS NMEA 等）—— 但 P3-1 已让**硬件
+ *           timeout_flag**（uart_set_rx_timeout(port, 4) = 4 字符静默）
+ *           优先成为权威边界，软兜底只是它缺席时的后备；
+ *       (b) **真被动数据**（无 pending 命令）—— 见 bus_rx_boundary.h 的 P3 修复。
+ *
+ * 取值依据（不是拍脑袋）：
+ *   · 硬件 timeout 在 115200 下是 4 字符 = 347 us、921600 下 43 us；
+ *     2ms 给硬件事件留了 5.8x（115200）～46x（921600）的余量，
+ *     足够覆盖 rx_task 被更高优先级任务抢占后的调度延迟。
+ *   · 旧值 10ms 是被动路径的**最坏延迟下限**，对 100Hz 级采集明显过大。
+ *   · 不能降到 ~0：IDF 不保证 FIFO 溢出时一定发 TOUT 事件（见 P3-1 注释），
+ *     软兜底必须在硬件事件缺席时仍能把帧关掉，否则该帧会一直挂在缓冲区
+ *     直到 rx_timeout_ms（默认 1000ms）才失败。
+ *   · 也不能降到低于一次任务切换的量级，否则会与硬件事件竞争、把
+ *     同一个帧的两次完成路径都触发（虽然 emit_buffered_frame 是唯一写者、
+ *     不会重复完成，但会增加无谓唤醒）。
+ *   ⇒ 2ms 是"远大于硬件窗口 + 远小于采集周期"的折中。 */
+#define UART_IDLE_THRESHOLD_US 2000  /* protocol-neutral idle completion deadline */
 
 /* s_streams storage is declared next to s_telemetry_payload above (the PSRAM
  * branch must be visible to report_path_init before this point). */
@@ -1598,6 +1835,7 @@ static void emit_ready_stream_chunks(bus_runtime_t *rt, int idx, int64_t now_us)
     pending ? pcmd.command_index : 0);
   }
   if (pending && consume_pending) (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+  if (pending && consume_pending) notify_pending_done(idx);
   if (pending && !consume_pending) s_stream_chunked[idx] = true;
   s->len -= target;
   if (s->len > 0) memmove(s->buffer, s->buffer + target, s->len);
@@ -1628,10 +1866,27 @@ static bool wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
  ESP_LOGI(tag, "waiting for pending UART response ch=%lu before %s",
           (unsigned long)cmd->channel_id,
           cmd->channel_cmd_v2 ? "V2 command" : "next command");
+ /* ⭐ 2026-10-10：事件等待替代轮询（原来每轮 5ms 的 vTaskDelay 实测耗 21ms，
+  * 把单通道吞吐钉死在 ~27 req/s 且与波特率无关 —— 见 UART_RESPONSE_WAIT_MS
+  * 处的完整分析）。
+  *
+  * 语义要点（改动时必须保持）：
+  *   1. 超时用 UART_RESPONSE_WAIT_MS 兜底：任何漏唤醒最多多等这么久，不会死等。
+  *      超时后回到循环顶部重新判断，行为与旧轮询一致（只是不再固定睡 5ms）。
+  *   2. 信号量为 NULL（未初始化/已释放）时退化为原来的 vTaskDelay 轮询，
+  *      保证生命周期边界上不崩。
+  *   3. 循环结束后主动非阻塞 take 一次，清掉可能残留的 give，
+  *      避免把陈旧唤醒"透支"给下一次 fence 等待。 */
+ SemaphoreHandle_t sem = s_pending_done[ch_idx];
  while (has_pending_cmd(rt, ch_idx)) {
   if (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return false;
-  vTaskDelay(pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  if (sem) {
+   (void)xSemaphoreTake(sem, pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  } else {
+   vTaskDelay(pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  }
  }
+ if (sem) (void)xSemaphoreTake(sem, 0);
  return !__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE);
 }
 
@@ -1688,17 +1943,27 @@ static void rx_append_from_event(bus_runtime_t *rt, int idx, uint8_t *rx,
  }
 }
 
-static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
+/* P3 (2026-10-10): the frame-emission body was split out of
+ * complete_idle_response so the hardware frame boundary (UART RX timeout,
+ * reported as uart_event_t::timeout_flag) can reuse it verbatim instead of
+ * going through the boundary-length heuristic, which is a no-op for
+ * length-less protocols (bus_rx_boundary_length returns 0 while
+ * buffered < BUS_RX_FIXED_BLOCK_SIZE).
+ *
+ * This function is the SINGLE writer that closes a frame.  It clears
+ * s->len / s_stream_chunked / s_last_rx_us under the caller's critical
+ * section, so whichever caller wins (idle fallback or hardware TOUT) makes
+ * the other one a no-op: the loser sees s_last_rx_us == 0 and returns
+ * immediately.  A frame therefore cannot be completed twice. */
+static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
 {
  stream_rx_t *s = &s_streams[idx];
- if (s_last_rx_us[idx] == 0 ||
-     now_us - s_last_rx_us[idx] < UART_IDLE_THRESHOLD_US)
-  return false;
 
  if (s->overflow) {
   pending_cmd_t pcmd;
   bool pending = rt->pending_queues[idx] &&
                  xQueueReceive(rt->pending_queues[idx], &pcmd, 0) == pdTRUE;
+   if (pending) notify_pending_done(idx);
   if (pending && pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, false, 0x02, NULL, 0);
   } else if (pending) {
@@ -1722,6 +1987,7 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  if (s->len == 0 && s_stream_chunked[idx] && has_pending_cmd(rt, idx)) {
   pending_cmd_t pcmd;
   if (xQueueReceive(rt->pending_queues[idx], &pcmd, 0) == pdTRUE) {
+   notify_pending_done(idx);
    s_stream_chunked[idx] = false;
    s_last_rx_us[idx] = 0;
    return true;
@@ -1749,6 +2015,7 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
    * A genuinely silent sensor still fails, via expire_uart_state() timeout. */
   if (pcmd.read_size > 0 && s->len < pcmd.read_size && !pcmd.channel_cmd_v2) {
    (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   notify_pending_done(idx);
    /* Short read = the sensor answered incompletely: a command error.
     * 2026-09-30: move the counter the server reads (sched_command_t), not
     * only the channel-level backoff counter. */
@@ -1783,6 +2050,7 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
     pcmd.command_template_id, pcmd.command_index);
   }
   (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   notify_pending_done(idx);
  } else {
   /* Passive/terminal data follows the same automatic boundary path. */
   report_enqueue(rt->bus_ch[idx], (uint64_t)now_us, ++s_rx_sequence[idx],
@@ -1792,6 +2060,41 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  s_stream_chunked[idx] = false;
  s_last_rx_us[idx] = 0;
  return true;
+}
+
+/* P3-2 (2026-10-10): is a hardware frame boundary still in flight for this
+ * slot?  The UART driver reports the end of an idle-less frame through
+ * uart_event_t::timeout_flag, which is queued asynchronously.  If the 10 ms
+ * software fallback fired first, it would emit the bytes received so far as
+ * one frame, and the still-queued TOUT would then emit the remainder as a
+ * second frame — one response split in two.  The fallback therefore yields
+ * whenever the slot's UART event queue is non-empty: a TOUT arrives within
+ * ~0.35 ms at 115200 (4 character times), so a 10 ms quiet period with an
+ * empty event queue is genuine idle. */
+static bool hw_boundary_pending(bus_runtime_t *rt, int idx)
+{
+#ifdef EHOME_HOST_TESTS
+    /* The host stub has no event queue; its driver is synchronous. */
+    (void)rt; (void)idx;
+    return false;
+#else
+    QueueHandle_t q = bus_dma_uart_event_queue(&rt->bus_ctx[idx]);
+    return q != NULL && uxQueueMessagesWaiting(q) > 0;
+#endif
+}
+
+static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
+{
+ stream_rx_t *s = &s_streams[idx];
+ if (s_last_rx_us[idx] == 0 ||
+     now_us - s_last_rx_us[idx] < UART_IDLE_THRESHOLD_US)
+  return false;
+
+ /* P3-2: let a queued hardware boundary win; it is the authoritative frame
+  * end for length-less protocols.  See hw_boundary_pending(). */
+ if (hw_boundary_pending(rt, idx)) return false;
+
+ return emit_buffered_frame(rt, idx, now_us);
 }
 
 /* 行状态事件（BREAK/PARITY/FRAME）的日志限流。
@@ -1893,6 +2196,21 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
  case UART_DATA:
  case UART_PATTERN_DET:
   rx_append_from_event(rt, idx, rx, rx_cap);
+  /* P3-1 (2026-10-10): use the hardware frame boundary when the driver
+   * reports one.  A UART_DATA event carries timeout_flag == false when the
+   * FIFO filled up (frame not necessarily over) and true when the RX timeout
+   * fired, which means the line went idle for uart_set_rx_timeout() character
+   * times — that is the end of a length-less frame (GPS NMEA and friends).
+   * Before this, the flag was never read anywhere in the repository and such
+   * frames only completed after the 10 ms software fallback.
+   *
+   * The software fallback stays: the IDF driver does not promise a TOUT event
+   * when the FIFO overflowed, so a frame can still be closed by the idle gap.
+   * Both paths funnel into emit_buffered_frame(), which is the single writer,
+   * so a frame cannot be completed twice. */
+  if (event->type == UART_DATA && event->timeout_flag) {
+   (void)emit_buffered_frame(rt, idx, esp_timer_get_time());
+  }
   break;
  case UART_FIFO_OVF:
  case UART_BUFFER_FULL:
@@ -1957,6 +2275,7 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
   int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
   if (elapsed_ms <= (int64_t)pcmd.rx_timeout_ms) continue;
   if (xQueueReceive(rt->pending_queues[i], &pcmd, 0) != pdTRUE) continue;
+   notify_pending_done(i);
   completions++;
   s_rx_timeout_count[i]++;
   /* This loop covers BUS_TYPE_UART *and* BUS_TYPE_USB (the native USB CDC
@@ -2078,62 +2397,52 @@ static void rx_task(void *pv)
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 
-/* 前向声明：让 bus_worker_start() 能在定义之前引用编码器。这里刻意**不带**
- * weak 属性 —— 它只是声明；真正的弱定义在下面，宿主测试可用编译定义关掉。 */
-bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
-                                 const uint64_t *timestamps_us,
-                                 const uint8_t *const *raw_data,
-                                 const size_t *raw_lens, size_t count,
-                                 uint32_t edge_device_id,
-                                 uint32_t command_template_id,
-                                 uint8_t command_index);
-
-/* V3-2a: DataBatch(0x20) 编码器（在 msg_handler 组件内）的弱默认实现。
+/* D-06 修复（2026-10-06）：此处原有一个 __attribute__((weak)) 的
+ * msg_handler_send_data_batch 默认实现 + "若未注入则用它"。
  *
- * EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER：宿主测试若**同时**编入了
- * handler_data.c（真正的强定义，例如 rx_health_e2e_tests），就不能再定义
- * 这个弱符号，否则同一翻译单元里重定义。该测试通过编译定义打开这个开关。
+ * 为什么删掉它：
+ *   1. 它【违反本组件自己的契约】—— bus_worker.h 里 data_batch_cb_t 的注释
+ *      明确写着"Not injected => DataBatch stays disabled"，
+ *      弱符号却偷偷给了一个默认实现；
+ *   2. 生效与否取决于【链接顺序】（msg_handler 的强符号是否被拉进镜像），
+ *      而宿主测试走的是另一套符号表 ⇒ **弱定义一旦生效，DataBatch 静默
+ *      退化为逐样本 0x03，且【没有测试会红】**；
+ *   3. 它与仓库里既有的做法【不一致】—— main.c 已经对另外两个回调
+ *      (bus_worker_set_callbacks / bus_worker_set_channel_cmd_v2_final_cb)
+ *      做显式注入，只有这一个用弱符号走捷径。
  *
- * 为什么需要它：bus_worker 已经 REQUIRES msg_handler（handler_data.c 读
- * 上报计数器），但这只建立"谁依赖谁"，**不会**让 main/ 去调用
- * bus_worker_set_data_batch_cb()。task-1 的写范围明确冻结 main/，因此
- * 这里用弱符号给出默认实现 —— 既不改 main/，也不要求 Lead 在 main/ 里加
- * 一行注入代码。
- *
- * 为什么链接器一定能取到强符号：ESP-IDF 把每个组件打成静态库。链接器在
- * 解析 __idf_msg_handler.a 时会把强定义 msg_handler_send_data_batch 拉进
- * 最终镜像，强定义随即覆盖弱定义（弱符号的地址由链接器在解析阶段回填）。
- * 因此运行时调用的始终是 msg_handler 的实现。
- *
- * 语义边界：能力位为 0 时 report_try_data_batch() 根本不会走到这里，所以
- * "与现状逐字节一致"这条红线不受本弱符号影响。能力位为 1 而弱定义被误用
- * （即 msg_handler 未链接进来）时返回 false，聚合路径退化为逐样本 0x03，
- * 属 fail-safe，绝不产出半截帧。 */
-#ifndef EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER
-__attribute__((weak))
-bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
-                                 const uint64_t *timestamps_us,
-                                 const uint8_t *const *raw_data,
-                                 const size_t *raw_lens, size_t count,
-                                 uint32_t edge_device_id,
-                                 uint32_t command_template_id,
-                                 uint8_t command_index)
-{
- (void)channel_id; (void)first_sequence; (void)timestamps_us;
- (void)raw_data; (void)raw_lens; (void)count;
- (void)edge_device_id; (void)command_template_id; (void)command_index;
- return false;
-}
-#endif
+ * 现在：依赖方向保持单向（main -> bus_worker / main -> msg_handler），
+ * 由 main.c 显式注入；未注入时【可见地】失败，而不是静默降级。 */
 
 void bus_worker_start(bus_runtime_t *rt)
 {
  ensure_suspend_events();
  s_runtime = rt;
+
+ /* ⭐ 2026-10-10：创建命令 fence 的事件等待对象（每总线槽一个二值信号量）。
+  * 见 s_pending_done / UART_RESPONSE_WAIT_MS 的说明。
+  * 创建失败不致命：等待路径会退化为 vTaskDelay 轮询（行为正确，只是慢），
+  * 因此这里只告警、不中止启动 —— 吞吐退化比"设备起不来"轻得多。 */
+ for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+  if (s_pending_done[i]) continue;   /* 重复 start 不重复创建 */
+  s_pending_done[i] = xSemaphoreCreateBinary();
+  if (!s_pending_done[i]) {
+   ESP_LOGW("BUS_WORKER",
+            "pending-done semaphore %d unavailable; command fence falls back "
+            "to %d ms polling (throughput will be lower)", i, UART_RESPONSE_WAIT_MS);
+  }
+ }
  /* 默认注入 DataBatch(0x20) 编码器（msg_handler 的强定义；main/ 若另行
   * 注入会覆盖此默认值）。放在 start() 而不是 report_path_init()：编码器
   * 只被 report_tx 使用，而 report_tx 由 report_path_init() 创建。 */
- if (s_data_batch_cb == NULL) s_data_batch_cb = msg_handler_send_data_batch;
+ /* D-06：不再兜底 —— 未注入就是配置错误，必须【看得见】。
+  * 静默降级（悄悄退回逐样本 0x03）正是弱符号时代最难查的故障形态。 */
+ if (s_data_batch_cb == NULL) {
+  ESP_LOGE(TAG_RX, "DataBatch encoder NOT injected: aggregation disabled "
+                   "(capability bit may be advertised but 0x20 will never be sent). "
+                   "main.c must call bus_worker_set_data_batch_cb().");
+  s_data_batch_missing = true;
+ }
  report_path_init();
  if (!s_report_path_started) {
   /* report_path_init() failed (or was never able to build its pool).  Starting
@@ -2145,12 +2454,34 @@ void bus_worker_start(bus_runtime_t *rt)
  rebuild_uart_event_set(rt);
  xTaskCreate(rx_task, "rx_task", RX_STACK,
   (void *)rt, RX_PRIO, &s_rx_task_h);
+ /* ⭐ 2026-10-08：UART 任务数**由硬件表派生**（P8：型号差异必须显式，
+  * 且"有几个 UART"hw_tables 已经写清楚了 —— 不该在这里再写死一遍）。
+  *
+  * 缺陷：原先无条件建 cmd_u0/u1/u2 三个。而 **C6 只有 2 个 UART**
+  * （hw_tables.c 的 C6 分支 HW_UART_COUNT=2），于是 cmd_u2 在 C6 上
+  * **永远收不到命令**：
+  *   · 后端只知道 2 个 UART（ResourceReport 只含 hw_uarts 那 2 条）
+  *   · bus_manager 按 hw_uarts 校验 controller_id ⇒ UART2 无法注册
+  *   · scheduler.dispatch_queue 的 UART_NUM_2 分支永不命中
+  * ⇒ 白占 **4096 B 内部连续块** + 一对队列 + TCB，而 C6 的门禁是 12 KiB。
+  *
+  * ⚠ 这不是"顺手省内存"：它是 P8 要求的"三型号差异显式化"没做到的地方。
+  * ⚠ S3/S3P 的 HW_UART_COUNT=3 ⇒ 仍建 3 个，**行为与改动前逐字节一致**。
+  * ⚠ 用 static_assert 钉住上限：下面的分支只写到 u2，若哪天有 4 UART 的
+  *   型号加进来，这里会**编译失败**而不是静默少建一个任务。 */
+ _Static_assert(HW_UART_COUNT <= 3,
+                "bus_worker 的 UART 任务分支只写到 cmd_u2；"
+                "新增更多 UART 的型号时必须在这里补分支（不要静默少建任务）");
  xTaskCreate(cmd_task_uart0, "cmd_u0", UART_STACK,
   (void *)rt, CMD_PRIO, &s_cmd_u0_h);
- xTaskCreate(cmd_task_uart1, "cmd_u1", UART_STACK,
-  (void *)rt, CMD_PRIO, &s_cmd_u1_h);
- xTaskCreate(cmd_task_uart2, "cmd_u2", UART_STACK,
-  (void *)rt, CMD_PRIO, &s_cmd_u2_h);
+ if (HW_UART_COUNT >= 2) {
+  xTaskCreate(cmd_task_uart1, "cmd_u1", UART_STACK,
+   (void *)rt, CMD_PRIO, &s_cmd_u1_h);
+ }
+ if (HW_UART_COUNT >= 3) {
+  xTaskCreate(cmd_task_uart2, "cmd_u2", UART_STACK,
+   (void *)rt, CMD_PRIO, &s_cmd_u2_h);
+ }
  xTaskCreate(cmd_task_spi, "cmd_spi", SPI_I2C_STACK,
   (void *)rt, CMD_PRIO, &s_cmd_spi_h);
  xTaskCreate(cmd_task_i2c, "cmd_i2c", SPI_I2C_STACK,
@@ -2234,12 +2565,16 @@ void bus_worker_discard_queued(bus_runtime_t *rt)
  discard_command_queue(rt->i2c_control_queue);
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
   pending_cmd_t pending;
+  bool drained = false;
   while (rt->pending_queues[i] && xQueueReceive(rt->pending_queues[i], &pending, 0) == pdTRUE) {
+   drained = true;
    if (pending.channel_cmd_v2)
     queue_control_final(pending.control_slot, false, 1007, NULL, 0);
    else if (pending.request_id)
     queue_write_rsp(pending.request_id, false, 1007, "configuration changed before response");
   }
+  /* 出队循环结束后唤醒：等待者此时看到 pending 已空，会立即离开 fence。 */
+  if (drained) notify_pending_done(i);
  }
 }
 
@@ -2253,6 +2588,14 @@ void bus_worker_stop(void)
  if (s_cmd_i2c_h)  { vTaskDelete(s_cmd_i2c_h);  s_cmd_i2c_h  = NULL; }
  destroy_cmd_queue_sets();
  destroy_uart_event_set();
+ /* ⭐ 2026-10-10：任务已全部删除，等待者不存在了 —— 释放 fence 信号量。
+  * 顺序：必须在 vTaskDelete 之后（否则被删除的任务可能仍持有/等待它）。 */
+ for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+  if (s_pending_done[i]) {
+   vSemaphoreDelete(s_pending_done[i]);
+   s_pending_done[i] = NULL;
+  }
+ }
  report_path_deinit();
 }
 
@@ -2262,14 +2605,17 @@ uint32_t bus_worker_get_rx_timeout_count(int channel)
  return 0;
 }
 
+/* D-14：这两个 getter 保留为【兼容转发】—— 仍可能有调用方（如诊断打印）。
+ * 真正的数据源已在中立组件 report_stats；msg_handler 不再经由这里读取，
+ * 因此不再产生依赖环。 */
 uint32_t bus_worker_get_report_drop_count(void)
 {
- return __atomic_load_n(&s_report_telemetry_drops, __ATOMIC_RELAXED);
+ return report_stats_get_drop_count();
 }
 
 uint32_t bus_worker_get_report_queue_high_water(void)
 {
- return __atomic_load_n(&s_report_queue_high_water, __ATOMIC_RELAXED);
+ return report_stats_get_queue_high_water();
 }
 
 uint32_t bus_worker_get_min_stack_watermark(void)

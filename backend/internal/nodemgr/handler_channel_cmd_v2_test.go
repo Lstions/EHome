@@ -17,17 +17,15 @@ import (
 )
 
 type v2CapturePublisher struct {
-	topic   string
+	nodeID  string
 	payload []byte
 }
 
-func (p *v2CapturePublisher) Publish(topic string, payload []byte) error {
-	p.topic = topic
+func (p *v2CapturePublisher) Publish(nodeID string, payload []byte) error {
+	p.nodeID = nodeID
 	p.payload = append([]byte(nil), payload...)
 	return nil
 }
-func (p *v2CapturePublisher) PublishQoS2(string, []byte) error     { return nil }
-func (p *v2CapturePublisher) PublishRetained(string, []byte) error { return nil }
 
 func TestSN3001BaudSideEffectUpdatesChannelAndPublishesEvent(t *testing.T) {
 	db := testutil.OpenTestDB(t)
@@ -254,8 +252,8 @@ func TestReadActionOutboxToFinalDriverVerificationSlice(t *testing.T) {
 	publisher := &v2CapturePublisher{}
 	dispatcher := commandexec.NewDispatcher(db, commandexec.NewChannelCmdV2Transport(db, publisher, actions), "e2e-test")
 	processed, err := dispatcher.ProcessOnce(context.Background())
-	if err != nil || !processed || publisher.topic == "" {
-		t.Fatalf("dispatch processed=%v topic=%q err=%v", processed, publisher.topic, err)
+	if err != nil || !processed || publisher.nodeID == "" {
+		t.Fatalf("dispatch processed=%v node=%q err=%v", processed, publisher.nodeID, err)
 	}
 	command, err := frame.DecodeChannelCmdV2(publisher.payload)
 	if err != nil {

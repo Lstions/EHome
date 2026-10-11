@@ -58,3 +58,59 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_s3_16m.csv"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IRAM → DRAM 优化（2026-10-10 真机实测）
+#
+# 原理（IDF 文档「内存优化」原文）：
+#   「程序运行时，由于使用了静态 IRAM，用于堆内存使用的 DRAM 会相应减少。
+#     反之，可以通过减少 IRAM 使用，增加可用 DRAM。」
+#
+# 因为 ESP32-S3 的 D/IRAM 共享区（0x40378000..0x403CB700，333.75 KiB）是
+# **同一块物理 SRAM 的两个地址别名**：ELF 里的 .dram0.dummy 就是 DRAM 侧为
+# 跳过 IRAM 代码占用区而设的 NOLOAD 段。因此 **IRAM 代码每少 1 字节，
+# 堆起点（heap_init 第一个池）就前移 1 字节**。
+#
+# 实测收益（S3P 板烧 s3 profile，同一台硬件 A/B，channels=0）：
+#   .iram0.text   82,391 -> 65,803 B   (-16.2 KiB)
+#   .dram0.dummy  67,072 -> 50,688 B   (-16.0 KiB)
+#   heap_start    0x3FCB1690 -> 0x3FCAD260   (前移 17,456 B)
+#   堆总量        284,580 -> 302,036 B  (+17.0 KiB)
+#   free          91,248 -> 112,676 B  (**+20.9 KiB**)
+#   largest       49,152 ->  69,632 B  (**+20.0 KiB**，门禁口径同向改善)
+#   启动初始化    113.4 -> 116.0 ms    (+2.6 ms, +2.3%；两组样本完全不重叠)
+#
+# 为什么选这四项（而非其它 IRAM 选项）：
+#   * FREERTOS_IN_IRAM / RINGBUF_IN_IRAM 默认已是 n，无需写；
+#   * ESP_WIFI_IRAM_OPT / ESP_WIFI_RX_IRAM_OPT 本工程已是 n（已优化态）；
+#   * SPI_FLASH_ROM_IMPL 会失去 esp_flash 的 bug 修复与新型号支持，不划算；
+#   * HAL_DEFAULT_ASSERTION_LEVEL=0 会关掉 HAL 断言，排障价值高于省下的 IRAM。
+#
+# ⚠⚠ HEAP_PLACE_FUNCTION_INTO_FLASH 的安全前提（IDF Kconfig 原文）：
+#   「only safe to enable this configuration if no functions from
+#     esp_heap_caps.h or esp_heap_trace.h are called from IRAM ISR
+#     which runs when cache is disabled.」
+#
+# 本工程核查（2026-10-10，逐条验证而非假定）：
+#   * SPI master 的 3 处 heap 调用（spi_master_init_driver / spi_bus_add_device
+#     / spi_device_queue_multi_trans）**均不在 ISR 路径**：
+#       - 前两个是初始化 API；
+#       - 第三个标 SPI_MASTER_ATTR（由 CONFIG_SPI_MASTER_IN_IRAM 决定，本工程 n），
+#         且**本工程未使用**（只用 spi_device_transmit，其函数体内无 heap 调用）。
+#   * 开本项会让 Kconfig 自动关闭 CONFIG_SPI_MASTER_ISR_IN_IRAM
+#     （esp_driver_spi/Kconfig:25 有 `depends on !HEAP_PLACE_FUNCTION_INTO_FLASH`），
+#     这是 IDF 有意设计的互斥，不是副作用。
+#   * 工程未使用 SPI slave，故 SPI_SLAVE_ISR_IN_IRAM=n 安全。
+#   * 工程 esp_event_post 调用数为 0（更未用 ISR 版本），
+#     故 ESP_EVENT_POST_FROM_IRAM_ISR=n 安全。
+#   * 无 cache-disable ISR 使用 libc 锁 API，故 LIBC_LOCKS_PLACE_IN_IRAM=n 安全。
+#
+# ⚠ 仍未验证（合入产线前应补）：
+#   * 运行时热点路径（总线收发 100Hz / 帧编解码 / TLS 握手）的性能基准；
+#   * 长稳测试；
+#   * 全部 ISR 路径的静态审查（本卡只核了 SPI/event/libc 三条已知路径）。
+# ─────────────────────────────────────────────────────────────────────────────
+CONFIG_SPI_SLAVE_ISR_IN_IRAM=n
+CONFIG_LIBC_LOCKS_PLACE_IN_IRAM=n
+CONFIG_ESP_EVENT_POST_FROM_IRAM_ISR=n
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y

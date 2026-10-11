@@ -214,7 +214,7 @@ typedef enum {
 #define CHANNEL_CMD_V2_MAX_PLAN_BYTES 512U
 #define CHANNEL_CMD_V2_MAX_BATCH_STEPS 8U
 
-typedef struct {
+typedef struct channel_cmd_v2 {
     uint8_t command_id[16];
     uint8_t payload_digest[16];
     uint32_t attempt;

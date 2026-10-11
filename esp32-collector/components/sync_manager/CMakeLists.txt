@@ -1,6 +1,12 @@
 idf_component_register(SRCS "sync_manager.c"
                        INCLUDE_DIRS "."
-                       REQUIRES config_mgr ehome_mqtt nvs_flash rgb_led)
+                       # ⭐ 2026-10-08（§194）：去掉 ehome_mqtt —— MQTT 已彻底移除。
+                       # ⚠⚠ 同时补上 esp_timer：sync_manager.c:20 用了 esp_timer.h
+                       #     （timer 句柄 + esp_timer_get_time），此前靠 ehome_mqtt
+                       #     的传递 REQUIRES 活着。删除后立刻报
+                       #     "fatal error: esp_timer.h: No such file or directory"。
+                       #     ⇒ 本文件 :15 早就写过这个教训，这次真的应验了。
+                       REQUIRES config_mgr nvs_flash rgb_led esp_timer)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 # 见 2026-10-04 status_task 栈溢出（prvTaskCheckFreeStackSpace）：根因帧在

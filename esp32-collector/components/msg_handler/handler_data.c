@@ -2,19 +2,23 @@
  * @file handler_data.c
  * @brief DataReport/StatusReport/OtaProg message handler
  *
- * Receives: MSG_OTA_CMD (0x0C)
+ * Receives: MSG_OTA_CMD (0x0A)
  * Sends:    DataReport (0x03), StatusReport (0x02), OtaProg (0x0D)
  */
 
 #include "msg_handler.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "msg_handler_internal.h"
+#include "report_stats.h"   /* D-14：不再直接依赖 bus_worker */
 #include "frame_codec.h"
 #include "data_report_codec.h"
 #include "data_batch_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
-#include "bus_worker.h"
+/* D-14（2026-10-06）：原先这里 #include "bus_worker.h" —— 只为读 3 个上报统计量。
+ * 它们已搬到中立组件 report_stats，本文件不再使用任何 bus_worker_* 符号，
+ * 故删除该 include（它正是"msg_handler 依赖 bus_worker"这条环边的来源）。 */
 #include "ota.h"
 #include "wifi_mgr.h"
 #include "esp_log.h"
@@ -51,14 +55,11 @@
  */
 #define OTA_CMD_MEM_NEED_BYTES (4096u + 4096u)
 
-__attribute__((weak)) bool ehome_mem_can_start(size_t need_bytes)
-{
-    /* Host tests and any build without the main/ implementation: do not gate. */
-    (void)need_bytes;
-    return true;
-}
+/* B2（2026-10-06）：原为 weak 且 **return true**（"不设门禁"）。
+ * 已删除 —— 声明见 msg_handler_hooks.h，强实现在 main/app_callbacks.c。
+ * 一个漏实现就放行的内存门禁，比没有门禁更危险：它看起来是开着的。 */
 
-/* === Receive: OtaCmd (0x0C) === */
+/* === Receive: OtaCmd (0x0A) === */
 
 void handler_data_process_ota(frame_decoder_t *dec)
 {
@@ -262,10 +263,10 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
     bool perf_ok = frame_encode_varint(&perf_enc, 1, perf_heap_free) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 2, perf_heap_min) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 3, perf.stack_high_water_words) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 4, bus_worker_get_min_stack_watermark()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 4, report_stats_get_min_stack_watermark()) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 5, perf.min_queue_spaces) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 6, bus_worker_get_report_drop_count()) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 7, bus_worker_get_report_queue_high_water()) == FRAME_OK;
+        frame_encode_varint(&perf_enc, 6, report_stats_get_drop_count()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 7, report_stats_get_queue_high_water()) == FRAME_OK;
     scheduler_queue_metrics_t queue_metrics = {0};
     scheduler_get_queue_metrics(&queue_metrics);
     for (uint8_t i = 0; perf_ok && i < SCHED_QUEUE_METRIC_COUNT; i++) {
@@ -285,6 +286,15 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
         int rssi_dbm = wifi_mgr_get_rssi_dbm();
         uint64_t rssi_abs = (rssi_dbm < 0) ? (uint64_t)(-rssi_dbm) : 0;
         perf_ok = frame_encode_varint(&perf_enc, 28, rssi_abs) == FRAME_OK;
+    }
+    /* Field 29 (P4, 2026-10-10): largest free internal heap block.  The gate in
+     * main/mem_guard.c judges on heap_caps_get_largest_free_block(INTERNAL),
+     * but until now that value was only ever printed (during a configuration
+     * transaction); the steady-state ResourceReport carried free and min_free
+     * only, so "did the node pass its gate" was not observable online. */
+    if (perf_ok) {
+        perf_ok = frame_encode_varint(&perf_enc, 29,
+            (uint64_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) == FRAME_OK;
     }
     if (perf_ok) {
         (void)frame_encode_bytes(&enc, STATUS_RPT_F_RUNTIME_PERF,

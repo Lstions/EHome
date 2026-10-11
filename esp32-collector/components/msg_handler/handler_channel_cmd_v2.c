@@ -1,14 +1,12 @@
 #include "msg_handler_internal.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "esp_log.h"
 #include <string.h>
 
-/* Host decoder tests link this handler without the MQTT transport component;
- * production provides the strong checked publisher. */
-__attribute__((weak)) esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
-{
-    msg_handler_publish(data, len);
-    return ESP_OK;
-}
+/* B2（2026-10-06）：此处原先有一个 __attribute__((weak)) 的
+ * msg_handler_publish_checked 默认实现（退化为未校验发布）。
+ * 已删除 —— 声明见 msg_handler_hooks.h，强实现在 msg_handler.c。
+ * 保留弱默认等于"绕过校验也能编译"，与 L-02 建立的约束相悖。 */
 
 #define TAG "CH_CMD_V2"
 #define V2_PROTOCOL 1U
@@ -56,10 +54,13 @@ typedef struct {
 
 /* The application bridge must enqueue the small slot index on an existing
  * per-bus worker queue. It must return false without physical TX if admission
- * fails. */
-__attribute__((weak)) const char *channel_cmd_v2_current_boot_id(void) { return NULL; }
-__attribute__((weak)) uint64_t channel_cmd_v2_current_time_ms(void) { return 0; }
-__attribute__((weak)) bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot) { (void)cmd; (void)slot; return false; }
+ * fails.
+ *
+ * B2（2026-10-06）：这三个钩子原先各带一个 weak 默认实现
+ * （boot_id -> NULL / time -> 0 / received -> false）。
+ * 全部删除 —— 声明见 msg_handler_hooks.h，强实现在 main.c。
+ * 弱默认会把"应用桥没接上"伪装成"boot_id 为空 / 命令被拒绝"，
+ * 而这两者都不会让编译或测试失败。 */
 static uint32_t s_event_sequence;
 static uint64_t s_completed_sequence;
 static uint32_t s_reservation_lock;
@@ -361,4 +362,42 @@ void handler_channel_cmd_v2_process(frame_decoder_t *dec)
     send_ack(&cmd,true,0); return;
 malformed:
     ESP_LOGW(TAG,"Rejecting malformed ChannelCmdV2"); send_ack(NULL,false,V2_ERR_MALFORMED);
+}
+
+/* ⭐ 方案 D（2026-10-10）：batch plan 的**借用访问器**。
+ *
+ * bus_worker 不再从队列元素里读 plan（那个 512 B 的副本已删除，见
+ * bus_dma/include/cmd_queue.h），改为按 control_slot 借用本文件槽位里的那一份。
+ *
+ * 为什么做成访问器而不是交出裸指针（见 msg_handler_hooks.h 的详细说明）：
+ * 裸指针把「槽位在 worker 读完之前不被复用」这条不变量变成**隐式**的 ——
+ * 它只在当前执行顺序下偶然成立，将来任何改动都可能让它变成静默的
+ * use-after-free。这里把它变成**显式运行时校验**：
+ * 状态不是 QUEUED / COMPLETING 就打印错误并拒绝交出 plan。
+ *
+ * 注意 COMPLETING 也接受：那是 worker 完成后、send_response 之前的短暂状态，
+ * 期间槽位的 cmd（含 plan_data）尚未被任何东西改写。 */
+bool channel_cmd_v2_borrow_plan(uint8_t slot, const uint8_t **out_plan,
+                                size_t *out_len, uint8_t *out_steps)
+{
+    if (!out_plan || !out_len || !out_steps) return false;
+    *out_plan = NULL; *out_len = 0; *out_steps = 0;
+    if (slot >= CHANNEL_CMD_V2_SLOT_COUNT) return false;
+
+    v2_control_slot_t *entry = &s_slots[slot];
+    uint32_t state = __atomic_load_n(&entry->state, __ATOMIC_ACQUIRE);
+    if (state != V2_SLOT_QUEUED && state != V2_SLOT_COMPLETING) {
+        /* 不变量被破坏：有人在我们读完之前复用/释放了这个槽。
+         * 明确报错而不是交出一份会被踩烂的 plan。 */
+        ESP_LOGE(TAG, "borrow_plan: slot %u state=%u (expected QUEUED/%u) -- "
+                      "slot reused before the plan was read; refusing",
+                 (unsigned)slot, (unsigned)state, (unsigned)V2_SLOT_QUEUED);
+        return false;
+    }
+    if (entry->cmd.plan_len == 0) return false;   /* 该命令本来就没有 plan */
+
+    *out_plan  = entry->cmd.plan_data;
+    *out_len   = entry->cmd.plan_len;
+    *out_steps = entry->cmd.plan_step_count;
+    return true;
 }

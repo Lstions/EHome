@@ -12,16 +12,19 @@ var (
 		Help: "Number of online nodes",
 	})
 
-	// MessagesReceived counts total MQTT messages received by type
+	// MessagesReceived counts total device messages received by type.
+	// (Wording was MQTT-specific; both transports shared this counter and now
+	// only the 3.0 TCP path feeds it.)
 	MessagesReceived = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_messages_received_total",
-		Help: "Total MQTT messages received by type",
+		Help: "Total device messages received by type",
 	}, []string{"type"})
 
-	// MessagesSent counts total MQTT messages sent by type
+	// MessagesSent counts total device messages sent by type.
+	// (See MessagesReceived: the counter is transport-agnostic.)
 	MessagesSent = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_messages_sent_total",
-		Help: "Total MQTT messages sent by type",
+		Help: "Total device messages sent by type",
 	}, []string{"type"})
 
 	// DataReportsProcessed counts data reports processed
@@ -240,13 +243,13 @@ var (
 
 	DeviceActionQueueDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ehome_device_action_queue_duration_seconds",
-		Help:    "Duration from durable creation until MQTT publication",
+		Help:    "Duration from durable creation until downlink publication",
 		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
 	})
 
 	DeviceActionAcceptDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ehome_device_action_accept_duration_seconds",
-		Help:    "Duration from MQTT publication until collector acceptance",
+		Help:    "Duration from downlink publication until collector acceptance",
 		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
 	})
 
@@ -342,5 +345,99 @@ var (
 	DataBatchRejectedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ehome_data_batch_rejected_total",
 		Help: "Total DataBatch (0x20) frames rejected by a strict invariant",
+	})
+
+	// FrameTypeMismatchTotal counts frames whose 12-byte header type disagreed
+	// with the message type byte at the start of the payload.
+	//
+	// 3.0 carries the type TWICE: header offset 3 is what the transport routes
+	// on, while payload[0] is what every decoder validates. The two could not
+	// disagree before (2.x had no header), so nothing checked. A divergence
+	// would be silent in the worst way -- routed as one type, decoded as
+	// another -- hence a rejection plus this counter rather than a choice.
+	//
+	// This should stay flat zero in normal operation. Anything else means the
+	// two ends build frames differently.
+	FrameTypeMismatchTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_frame_type_mismatch_total",
+		Help: "Total frames dropped because the header type disagreed with the payload type byte",
+	})
+
+	// --- 3.0 downlink routing (internal/downlink) ---
+	//
+	// These make delivery failures visible. Without them "the device did not get
+	// the command" is indistinguishable from "the command was never framed".
+	// (They were introduced to make the TCP-vs-MQTT CHOICE visible; MQTT is gone
+	// now, so what remains worth observing is whether a downlink went out at all.)
+
+	// DownlinkOverNativeTotal counts downlinks delivered over TCP+TLS.
+	DownlinkOverNativeTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_over_native_total",
+		Help: "Total downlink messages delivered over the native TCP+TLS transport",
+	})
+
+	// DownlinkNativeFailedTotal counts downlinks that could NOT be delivered.
+	//
+	// ⚠ The name is historical: it used to mean "had a TCP session but the write
+	// failed, so we retried over MQTT". There is no retry path any more (MQTT
+	// was removed 2026-10-08), so this now simply means "the send failed and the
+	// caller was told". The metric NAME is kept because renaming a Prometheus
+	// series breaks dashboards/alerts; only the meaning is updated here.
+	DownlinkNativeFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_native_failed_total",
+		Help: "Total downlink messages that could not be delivered (send failed)",
+	})
+
+	// DownlinkWrapFailedTotal counts payloads that could not be wrapped into a
+	// 3.0 frame (empty, or above the 3.0 payload maximum). A rising value while
+	// a node is on TCP means that node may be missing messages.
+	DownlinkWrapFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_wrap_failed_total",
+		Help: "Total downlink payloads that could not be framed for the 3.0 transport",
+	})
+
+	// --- node-level device operations (reboot / factory reset) ---
+	//
+	// These count FOUR different facts that must not be collapsed:
+	//   sent + acked(ok)     -> the device did it
+	//   sent + acked(<other>) -> the device refused, and said why
+	//   sent + unacked        -> we do not know; the device may have done it
+	//   refused               -> we never sent it (already in flight)
+	// Reporting the third as a failure would tell an operator a reboot did not
+	// happen while the device is already coming back up.
+
+	DeviceOpSentTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_sent_total",
+		Help: "Total node-level device operations delivered to a transport",
+	}, []string{"op"})
+
+	DeviceOpAckedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_acked_total",
+		Help: "Total device operations the device acknowledged, by result",
+	}, []string{"op", "result"})
+
+	DeviceOpUnackedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_unacked_total",
+		Help: "Total device operations sent that were never acknowledged (outcome unknown)",
+	}, []string{"op"})
+
+	DeviceOpRefusedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_refused_total",
+		Help: "Total device operations refused locally because the node already had one in flight",
+	}, []string{"op"})
+
+	DeviceOpSendFailedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_send_failed_total",
+		Help: "Total device operations that could not be handed to a transport",
+	}, []string{"op"})
+
+	DeviceOpBadAckTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_device_op_bad_ack_total",
+		Help: "Total malformed device op ACKs dropped",
+	})
+
+	DeviceOpStaleAckTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_device_op_stale_ack_total",
+		Help: "Total device op ACKs for an unknown or already-expired request",
 	})
 )

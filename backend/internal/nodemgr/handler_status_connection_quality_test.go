@@ -159,3 +159,86 @@ func TestStatusReportOfflineSkipsQuality(t *testing.T) {
 		t.Fatalf("wifi_rssi=%d want -70", stored.WiFiRSSI)
 	}
 }
+
+// P4 (2026-10-10): perf field 29 carries the largest free INTERNAL heap block,
+// which is the unit the firmware memory gate judges on.
+func TestStatusReportRuntimePerformanceField29(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := models.Node{NodeID: "node-p4", Name: "node", Status: "offline", HardwareInfo: `{"channels":[]}`}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	hub := websocket.NewHub()
+	go hub.Run()
+	manager := NewManager(db, nil, hub, nil, nil, nil)
+
+	perf := frame.NewEncoder(0)
+	perf.EncodeVarint(1, 200000)
+	perf.EncodeVarint(2, 180000)
+	perf.EncodeVarint(3, 1200)
+	perf.EncodeVarint(4, 900)
+	perf.EncodeVarint(5, 8)
+	perf.EncodeVarint(29, 40960) // largest free internal block
+
+	status := frame.NewEncoder(frame.MsgStatusRpt)
+	status.EncodeVarint(1, 30)
+	status.EncodeString(2, "online")
+	status.EncodeVarint(3, 1)
+	status.EncodeVarint(4, 0)
+	status.EncodeVarint(5, 0)
+	status.EncodeBytes(9, perf.Bytes()[1:])
+	manager.handleStatusReport(node.NodeID, status.Bytes())
+
+	var stored models.Node
+	if err := db.Where("node_id = ?", node.NodeID).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.LargestFreeInternalBytes != 40960 {
+		t.Fatalf("largest_free_internal_bytes=%d want 40960", stored.LargestFreeInternalBytes)
+	}
+}
+
+// P4 forward compatibility: a NEWER firmware may send field numbers this
+// backend does not know.  Before P4 the decoder rejected anything above 28,
+// which made an older backend DISCARD THE WHOLE performance block (free heap,
+// RSSI, queue health) the moment the device spoke a new field.  Unknown tail
+// fields must therefore be skipped, not rejected.
+func TestStatusReportRuntimePerformanceSkipsUnknownHigherField(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := models.Node{NodeID: "node-p4-fwd", Name: "node", Status: "offline", HardwareInfo: `{"channels":[]}`}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	hub := websocket.NewHub()
+	go hub.Run()
+	manager := NewManager(db, nil, hub, nil, nil, nil)
+
+	perf := frame.NewEncoder(0)
+	perf.EncodeVarint(1, 123456) // the field we must still receive
+	perf.EncodeVarint(2, 100000)
+	perf.EncodeVarint(3, 1200)
+	perf.EncodeVarint(4, 900)
+	perf.EncodeVarint(5, 8)
+	perf.EncodeVarint(29, 40960)
+	perf.EncodeVarint(200, 7) // unknown tail field from a future firmware
+
+	status := frame.NewEncoder(frame.MsgStatusRpt)
+	status.EncodeVarint(1, 30)
+	status.EncodeString(2, "online")
+	status.EncodeVarint(3, 1)
+	status.EncodeVarint(4, 0)
+	status.EncodeVarint(5, 0)
+	status.EncodeBytes(9, perf.Bytes()[1:])
+	manager.handleStatusReport(node.NodeID, status.Bytes())
+
+	var stored models.Node
+	if err := db.Where("node_id = ?", node.NodeID).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.FreeHeapBytes != 123456 {
+		t.Fatalf("free_heap_bytes=%d want 123456 (unknown higher field must not discard the block)", stored.FreeHeapBytes)
+	}
+	if stored.LargestFreeInternalBytes != 40960 {
+		t.Fatalf("largest_free_internal_bytes=%d want 40960", stored.LargestFreeInternalBytes)
+	}
+}

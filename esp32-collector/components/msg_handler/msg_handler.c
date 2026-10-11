@@ -13,7 +13,6 @@
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
 #include "transport.h"
-#include "ehome_mqtt.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
 #include "esp_log.h"
@@ -71,7 +70,11 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
         ESP_LOGW(TAG, "Failed to send via current transport, falling back to broadcast");
     }
 
-    esp_err_t ret = transport_broadcast(data, len);
+    /* D-01（2026-10-06）：广播【如实回报】它到底尝试了谁。
+     * 此前这里只能靠 transport_registry_has_type(MQTT) 去猜 ——
+     * 那是代理判据，答的是"MQTT 是否已注册"，而非"是否尝试过"。 */
+    transport_broadcast_report_t rep;
+    esp_err_t ret = transport_broadcast_ex(data, len, &rep);
     if (ret == ESP_OK) {
         ESP_LOGD(TAG, "Broadcast to all transports (%d bytes)", (int)len);
         return ESP_OK;
@@ -91,16 +94,25 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
      *   ⇒ PF = 2 x 帧, NT = BF = 1 x 帧, FS = 0
      *   实测：PF=3873, NT=1938, BF=1937, FS=0  ✔
      *
-     * 修法：适配器已在注册表里时不再重发，失败由 return ret 如实上报。
-     * 用注册表查询而非硬编码，使宿主测试（不注册适配器）仍走原路径，
-     * 不改变既有测试契约。 */
-    if (transport_registry_has_type(TRANSPORT_TYPE_MQTT)) {
-        ESP_LOGW(TAG, "Broadcast failed; MQTT already attempted inside broadcast, not re-publishing");
-        return ret;
-    }
-
-    ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
-    return mqtt_client_publish_impl(data, len) ? ESP_OK : ESP_FAIL;
+     * 修法（D-01，2026-10-06 起）：改问【真实】的问题 ——
+     * "广播刚才有没有真的对 MQTT 调用过 send？"（rep.mqtt_attempted）
+     *
+     * 此前用的是 transport_registry_has_type(MQTT)，那是**代理判据**：
+     * 它答的是"MQTT 是否已注册"。两者在"**已注册但未连接**"时不等价 ——
+     * broadcast 只在 is_connected() 时才 send，所以那一刻它从未尝试过 MQTT，
+     * 而日志却说 "already attempted"。当前行为碰巧安全（未连接时重试也会失败），
+     * 但那是巧合：一旦"未连接"变成可恢复状态，错误的判据就会导致**漏发**。 */
+    /* ⭐ 2026-10-08（§194）：**MQTT 直发兜底已删除**（MQTT 已彻底移除）。
+     *
+     * 这一段的全部历史都是"兜底反而造成重复发送"的教训，记下来：
+     *   广播内已对 MQTT 发过一次，这里又直发一次 ⇒ 实测 PF/NT ≈ 2.0
+     *   （每失败帧 2 条 Publish failed：PF=3873 / NT=1938 / BF=1937）。
+     *   后来改用 rep.mqtt_attempted 问"广播刚才是否**真的**试过 MQTT"，
+     *   修正了"用代理判据 transport_registry_has_type() 答错问题"这一层。
+     * ⇒ 教训：**"兜底"若与主路径指向同一个出口，它不是兜底，是重试两次。**
+     * 现在只剩一条传输（3.0）⇒ 广播即全量，无兜底可加、也不该加。 */
+    ESP_LOGW(TAG, "Broadcast failed; no fallback transport (MQTT removed)");
+    return ret;
 }
 
 void msg_handler_publish(const uint8_t *data, size_t len)
@@ -188,6 +200,12 @@ void msg_handler_process(const uint8_t *data, size_t len)
     ESP_LOGI(TAG, "Received message type=0x%02X, len=%zu", msg_type, len);
 
     switch (msg_type) {
+    case MSG_DEVICE_OP:
+        /* v3.0 远程运维（重启 / 恢复出厂）。设备侧策略在 device_op 组件里，
+         * 这里只负责解析字段、注入原语、把结果编成 0x23 送回去。 */
+        handler_device_op_process(&dec);
+        break;
+
     case MSG_CONFIG_MFST:
         /* v2.4: config_mgr_apply_manifest moved to handle_config_applied
          * inside app_state_lock_config() — prevents TOCTOU race between

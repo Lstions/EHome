@@ -17,25 +17,30 @@ import (
 // 一个 Node = 一个物理边缘设备 (ESP32-C6/S3) 的中心端抽象
 // 字段含义见 docs/设计/节点/详细设计.md
 type Node struct {
-	ID                        uint       `gorm:"primaryKey" json:"id"`
-	NodeID                    string     `gorm:"column:node_id;type:varchar(32);uniqueIndex;not null" json:"node_id"` // 物理 ID (hex string, e.g. "F0F5BD02F35C")
-	Name                      string     `gorm:"size:64;not null" json:"name"`
-	Model                     string     `gorm:"size:20" json:"model"`
-	FirmwareVersion           string     `gorm:"size:32" json:"firmware_version"`
-	ProtocolVersion           string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
-	Platform                  string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
-	Status                    string     `gorm:"size:20;default:offline" json:"status"`
-	ConfigVersion             string     `gorm:"size:64" json:"config_version"`
-	ConfigStatus              string     `gorm:"size:20;default:pending" json:"config_status"`
-	LastSeen                  *time.Time `json:"last_seen"`
-	LastPingAt                *time.Time `json:"last_ping_at"`
-	UptimeSeconds             uint32     `json:"uptime_seconds"`
-	PingLatencyMs             int32      `json:"ping_latency_ms"`
-	MQTTTopicUp               string     `gorm:"size:128" json:"mqtt_topic_up"`
-	MQTTTopicDown             string     `gorm:"size:128" json:"mqtt_topic_down"`
-	WiFiSSID                  string     `gorm:"size:64" json:"wifi_ssid"`
-	WiFiRSSI                  int        `json:"wifi_rssi"`
-	FreeHeapBytes             int        `json:"free_heap_bytes"`
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	NodeID          string     `gorm:"column:node_id;type:varchar(32);uniqueIndex;not null" json:"node_id"` // 物理 ID (hex string, e.g. "F0F5BD02F35C")
+	Name            string     `gorm:"size:64;not null" json:"name"`
+	Model           string     `gorm:"size:20" json:"model"`
+	FirmwareVersion string     `gorm:"size:32" json:"firmware_version"`
+	ProtocolVersion string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
+	Platform        string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
+	Status          string     `gorm:"size:20;default:offline" json:"status"`
+	ConfigVersion   string     `gorm:"size:64" json:"config_version"`
+	ConfigStatus    string     `gorm:"size:20;default:pending" json:"config_status"`
+	LastSeen        *time.Time `json:"last_seen"`
+	LastPingAt      *time.Time `json:"last_ping_at"`
+	UptimeSeconds   uint32     `json:"uptime_seconds"`
+	PingLatencyMs   int32      `json:"ping_latency_ms"`
+	MQTTTopicUp     string     `gorm:"size:128" json:"mqtt_topic_up"`
+	MQTTTopicDown   string     `gorm:"size:128" json:"mqtt_topic_down"`
+	WiFiSSID        string     `gorm:"size:64" json:"wifi_ssid"`
+	WiFiRSSI        int        `json:"wifi_rssi"`
+	FreeHeapBytes   int        `json:"free_heap_bytes"`
+	// LargestFreeInternalBytes is StatusReport perf field 29 (P4, 2026-10-10):
+	// the largest free internal heap block.  This is the unit the firmware memory
+	// gate (main/mem_guard.c) judges on, so it is what makes "did the node pass
+	// its gate" answerable from the server.  0 = the device did not send it.
+	LargestFreeInternalBytes  int        `json:"largest_free_internal_bytes"`
 	Capabilities              string     `gorm:"type:jsonb;default:'{}'" json:"capabilities"`
 	HardwareInfo              string     `gorm:"type:jsonb;default:'{}'" json:"hardware_info"`
 	DmaChannels               string     `gorm:"type:jsonb;default:'[]'" json:"dma_channels"`
@@ -56,6 +61,17 @@ type Node struct {
 	ConfigSyncState string     `gorm:"size:20;default:unknown" json:"config_sync_state"`
 	LastSyncAt      *time.Time `json:"last_sync_at"`
 	LastSyncID      string     `gorm:"size:64" json:"last_sync_id"`
+
+	// ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+	// 最近一次**成功**配置回执里设备上报的降级告警（JSONB 数组）。
+	//
+	// 语义：**不是错误** —— 配置成功应用了，只是某些通道从 DMA 降级为
+	// 中断/轮询。之所以要显示：用户配了两条 UART 且硬件只有 1 个 DMA 槽位时，
+	// 设备会静默降级一条（§211 的 C6 事故就是用户完全看不到原因）。
+	//
+	// 元素形状：{"code":"dma_degraded","channel_id":49,"message":"..."}
+	// ⚠ 空数组 = 无告警；不用 NULL 表示"未知"，避免与"没上报过"混淆。
+	ConfigWarnings string `gorm:"type:jsonb;default:'[]'" json:"config_warnings"`
 	// v2.5: log stream config (sent to ESP32 via ConfigManifest field 10)
 	LogStreamEnabled bool `gorm:"default:false" json:"log_stream_enabled"`
 	LogStreamLevel   int  `gorm:"default:2" json:"log_stream_level"` // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE

@@ -1,6 +1,7 @@
 package nodemgr
 
 import (
+	"errors"
 	"time"
 
 	"ehome/backend/pkg/logger"
@@ -55,8 +56,23 @@ func NewConfigEventBus(bufferSize int) *ConfigEventBus {
 	}
 }
 
+// ErrConfigEventBusFull reports that Publish could not enqueue the event
+// because the bus buffer was full, and the event was therefore DROPPED.
+//
+// S5 (2026-10-07): before this sentinel existed, Publish dropped the event and
+// still returned nil, so every caller's error branch was dead code — a full
+// buffer was indistinguishable from a successful publish. Publish stays
+// non-blocking (the hot path must not stall on a slow subscriber); it now
+// REPORTS the drop instead of hiding it.
+//
+// Callers may use errors.Is(err, ErrConfigEventBusFull) to distinguish "the
+// event was dropped" from any future failure mode.
+var ErrConfigEventBusFull = errors.New("ConfigEventBus buffer full: event dropped")
+
 // Publish sends the event to the bus channel.
-// If the channel is full, the event is dropped with a warning (non-blocking).
+//
+// Non-blocking by design: a full buffer never stalls the caller. That drop is
+// reported as ErrConfigEventBusFull (see above) rather than swallowed.
 func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
 	if evt.EventID == "" {
 		evt.EventID = uuid.New().String()
@@ -69,10 +85,14 @@ func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
 	case b.ch <- evt:
 		return nil
 	default:
-		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%s entity=%s",
-			evt.Type, evt.Action, evt.NodeID, evt.EntityID)
+		// Log + metric stay: the log carries the event identity for triage, the
+		// metric drives alerting. The returned error is what lets callers
+		// actually act (retry, degrade, or surface it) instead of assuming
+		// success.
+		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%s entity=%s event_id=%s",
+			evt.Type, evt.Action, evt.NodeID, evt.EntityID, evt.EventID)
 		metrics.EventBusDroppedTotal.Inc()
-		return nil // drop silently per design — alarm via metrics in production
+		return ErrConfigEventBusFull
 	}
 }
 

@@ -67,7 +67,7 @@ func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Regis
 	if customize != nil {
 		customize(registry)
 	}
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, registry)
 	registerEdgeDeviceRoutes(v1, db, mgr, registry)
 	return r, db
 }
@@ -961,8 +961,10 @@ func TestEdgeDevice_Create_RejectsDuplicateTypeAtSameAddress(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for duplicate channel+hardware_id+type, got %d: %s", w.Code, w.Body.String())
+	// 409 而非 400：设计文档 §7.2「三元重复 → 409」，§1.1 冲突文案亦是 409
+	// （前端按 409 渲染"该位置已有同型号设备"）。2026-10-11 真机验证改正。
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate channel+hardware_id+type, got %d: %s", w.Code, w.Body.String())
 	}
 	var count int64
 	db.Model(&models.EdgeDevice{}).Where("name = ?", "Dup").Count(&count)
@@ -1014,8 +1016,8 @@ func TestEdgeDevice_Create_RejectsDuplicateTypeWhenAddressEmpty(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for duplicate channel+type with empty address, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate channel+type with empty address, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1059,8 +1061,8 @@ func TestEdgeDevice_Create_TreatsWhitespaceAddressAsEmpty(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for whitespace-only address colliding with empty-address device, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for whitespace-only address colliding with empty-address device, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

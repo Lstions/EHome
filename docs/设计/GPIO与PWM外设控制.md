@@ -86,13 +86,33 @@ components/
 
 ## 6. 验收标准
 
-- [ ] GPIO SET_HIGH/LOW/READ 三操作闭环（实机验证：引脚电平变化 + READ 返回）。
-- [ ] PWM START（freq/duty/resolution 合法组合）→ 波形输出；STOP 停止。
-- [ ] PWM 占空比滑块：拖动过程不发 API、松开才提交。
-- [ ] 未配置外设操作 → 明确错误提示。
-- [ ] 配置下发后外设面板显示正确占用状态。
-- [ ] 后端：PeriphCmd 编码单测 + PeriphRsp 错误码映射。
-- [ ] 固件：gpio_ctrl/pwm_ctrl host tests（并发安全 + 边界）。
+> 2026-10-11 复核（S3 真机 `30EDA0A9A808` fw 2.8.0 + 本地后端 8081）。
+> 逐条标注**实测**/已有测试/**未验证**，证据见 `__scratch_v3/logs/periph-verify/gpio-pwm-真机验证.txt`。
+> ⚠ 口径：勾选只代表"该项所述证据已取得"，不代表整条产品链路已端到端验收。
+
+- [x] **GPIO SET_HIGH/LOW/READ 三操作闭环**（实测）。引脚 17：SET HIGH→READ=1、SET LOW→READ=0，
+  4 条 PeriphRsp 均 `success=true`。固件 `gpio_ctrl_read()` 走 `gpio_get_level()`（读物理 pad）⇒
+  SET→READ 一致构成"引脚电平真的变了"的证据。
+- [~] **PWM START → 波形；STOP 停止**（**部分实测**）。START/STOP/STATE/DUTY 全链路 `success=true`，
+  STATE 经 `ledc_get_duty()` 从 **LEDC 硬件寄存器**回读得 5000→2500（=50%→25%）。
+  ⚠ **未用示波器/逻辑分析仪观测实际波形** ⇒ "确实有方波输出"未经物理测量，不得声称。
+- [x] **PWM 占空比滑块：拖动不发 API、松开才提交**（测试 + **变异自证**）。
+  `HardwareResourceLists.spec.ts:333` 用两个独立探针区分 input/change；
+  注入"input 也写设备"后测试**立刻变红**，还原 md5 一致 ⇒ 非假绿。
+- [x] **未配置外设操作 → 明确错误**（实测）。未配置 SET/READ → 404 `GPIO config not found`；
+  未配置 PWM START → 404 `PWM config not found`；保留脚 GPIO0 → 422（附原因）；未上报引脚 99 → 422。
+- [ ] **配置下发后外设面板显示正确占用状态** —— **未验证**（需前端 UI 实测，本轮只走 HTTP API）。
+- [x] **后端：PeriphCmd 编码单测 + PeriphRsp 错误码映射**（已有测试，实跑通过）。
+  注：其中 `TestGPIO_Set_Success` / `TestPWM_GetState_Success` 曾**假绿**（只有 `t.Logf`、
+  请求在 422 门禁就被拦），已于 2026-10-08 修为真断言。
+- [x] **固件：gpio_ctrl/pwm_ctrl host tests**（已有，`ctest` 99/99 通过）。
+
+### 6.1 未验证项清单（不得声称已验收）
+
+- 物理波形：未用示波器验证 PWM 频率/占空比的实际输出。
+- 前端 UI：未验证外设面板的占用状态显示、按钮交互。
+- 三型号差异：仅 S3 实测；C6（LEDC 3 定时器/6 通道）未测。
+- 并发与长稳：host tests 覆盖并发安全，但未做真机压力/长稳。
 
 ## 7. 已知限制
 

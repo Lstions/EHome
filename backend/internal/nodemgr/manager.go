@@ -10,11 +10,10 @@ import (
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/deviceinit"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/drivers"
-	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/logstream"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/pendingwrite"
@@ -31,9 +30,8 @@ import (
 // Manager handles node lifecycle and message processing
 type Manager struct {
 	db              *gorm.DB
-	mqtt            mqtt.Publisher
+	downlink        downlink.Publisher
 	wsHub           *websocket.Hub
-	ha              *homeassistant.Integration
 	otaMgr          *ota.Manager
 	hashMgr         *ConfigHashManager
 	pendingWrite    *pendingwrite.Manager
@@ -64,6 +62,14 @@ type Manager struct {
 	// sourceHealthSink 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功
 	// 健康回调, main.go 经 SetSourceHealthSink 二阶段注入到所有已构建 consumer。
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
+
+	// deviceOps pairs node-level device-op ACKs (0x23) with their requests
+	// (0x22). Node-level because a collector reboot has no channel, manifest
+	// or edge-device id, so it does not belong in the edge-device pipeline.
+	deviceOps *DeviceOpTracker
+
+	// deviceOpTimeout is how long a device op waits for its ACK; 0 = default.
+	deviceOpTimeout time.Duration
 
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
@@ -149,7 +155,7 @@ func (m *Manager) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames [
 // that many independent bus workers keyed by node ID (0/1 = legacy single
 // consumer). Each shard uses its own streamReassembler: buffers are keyed by
 // (deviceID, requestID), so per-device reassembly stays shard-local.
-func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
+func NewManager(db *gorm.DB, downlinkPublisher downlink.Publisher, wsHub *websocket.Hub, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
 	driverRegistry := drivers.NewRegistry()
 	if len(registries) > 0 && registries[0] != nil {
 		driverRegistry = registries[0]
@@ -158,13 +164,12 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	mgr := &Manager{
 		db:              db,
-		mqtt:            mqttClient,
+		downlink:        downlinkPublisher,
 		wsHub:           wsHub,
-		ha:              ha,
 		otaMgr:          otaMgr,
 		hashMgr:         NewConfigHashManager(),
-		pendingWrite:    pendingwrite.NewManager(mqttClient, db),
-		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient, driverRegistry),
+		pendingWrite:    pendingwrite.NewManager(downlinkPublisher, db),
+		deviceInit:      deviceinit.NewOrchestrator(db, downlinkPublisher, driverRegistry),
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
 		driverRegistry:  driverRegistry,
@@ -173,6 +178,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		periphLatest:    make(map[string]uint32),
 	}
 	mgr.pingTracker = NewPingTracker()
+	mgr.deviceOps = NewDeviceOpTracker()
 
 	// v2.2: Initialize sync mechanism (no epoch generator)
 	mgr.eventBus = NewConfigEventBus(1024)
@@ -202,10 +208,6 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	// 在 NewManager 之后 / Start 之前调用, 时序仍然安全 (单线程 main goroutine)。
 	mgr.buildParserConsumers()
 
-	if ha != nil {
-		ha.StartPublishWorker()
-	}
-
 	// G10: 启动时先播报一次在线数，避免首次离线检测循环（最多 1s）之前的空窗。
 	//
 	// 注意这**不是**该指标的唯一维护者：原先只有这一处 Set()，于是 ehome_nodes_online
@@ -227,7 +229,6 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 func (mgr *Manager) buildParserConsumers() {
 	db := mgr.db
 	wsHub := mgr.wsHub
-	ha := mgr.ha
 	offlineDetector := mgr.offlineDetector
 	driverRegistry := mgr.driverRegistry
 
@@ -254,7 +255,7 @@ func (mgr *Manager) buildParserConsumers() {
 		reassemblers = append(reassemblers, newStreamReassembler())
 	}
 	for i := 0; i < parserShards; i++ {
-		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
+		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, reassemblers[i], driverRegistry, deviceActivity)
 		mgr.parserConsumers = append(mgr.parserConsumers, parser)
 		// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调注入。
 		// 注意: 通过函数变量间接引用 api.SetLatestValue, 避免 nodemgr→api 编译期
@@ -320,9 +321,6 @@ func (m *Manager) Start() {
 	if m.dataBus != nil {
 		m.dataBus.Stop()
 	}
-	if m.ha != nil {
-		m.ha.StopPublishWorker()
-	}
 	if m.logBus != nil {
 		m.logBus.Stop()
 	}
@@ -357,6 +355,12 @@ func (m *Manager) SetCommandExecutionService(service *commandexec.Service) {
 }
 
 // HandleMessage processes incoming MQTT messages from devices
+// HandleMessage is the 2.x (MQTT) entry point: the topic carries the node id.
+//
+// It stays for the dual-stack window (design 7.3 P0-P3): the backend must keep
+// serving 2.8.0 devices over MQTT while 3.0 rolls out. It is a thin wrapper so
+// that BOTH transports share one dispatch switch -- two switches would be two
+// definitions of "which messages exist", and they would drift.
 func (m *Manager) HandleMessage(topic string, payload []byte) {
 	parts := strings.Split(topic, "/")
 	if len(parts) < 3 {
@@ -364,7 +368,32 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		return
 	}
 	deviceID := parts[1]
+	if len(payload) < 1 {
+		logger.Infof("Empty payload from %s", deviceID)
+		return
+	}
+	// On MQTT the payload's first byte IS the type; there is no header.
+	m.HandleFrame(deviceID, payload[0], payload)
+}
 
+// HandleFrame is the 3.0 (TCP+TLS) entry point: the node id comes from the
+// client certificate and the type comes from the 12-byte frame header.
+//
+// ⚠ The message type appears TWICE on the 3.0 wire:
+//
+//	[12-byte header, type at offset 3][payload, whose first byte is ALSO the type]
+//
+// The payload keeps its leading type byte because every existing decoder
+// (frame.NewDecoder -> MsgType()) reads and validates it; that is the 2.x
+// convention and it is what the shared wire_primitives.txt vectors encode
+// (case writecmd_golden: "type 6" -> wire starts "06...").
+//
+// Nothing in the old protocol could disagree with itself, so no check existed.
+// Now two copies can diverge, and the failure would be SILENT in the worst way:
+// routing would follow the header while parsing followed the payload, so a
+// frame could be dispatched as one type and decoded as another. Hence the
+// explicit agreement check below.
+func (m *Manager) HandleFrame(deviceID string, msgType uint8, payload []byte) {
 	// Update heartbeat on every message (no-op since Redis retirement;
 	// offline detection relies on DB last_seen)
 	if m.offlineDetector != nil {
@@ -375,8 +404,14 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		logger.Infof("Empty payload from %s", deviceID)
 		return
 	}
-
-	msgType := payload[0]
+	if payload[0] != msgType {
+		// Two sources of truth disagree. Reject rather than pick one: whichever
+		// we picked, the other half of the pipeline would use the other value.
+		metrics.FrameTypeMismatchTotal.Inc()
+		logger.Warnf("[%s] Frame type mismatch: header says 0x%02X, payload says 0x%02X -- dropped",
+			deviceID, msgType, payload[0])
+		return
+	}
 	logger.Debugf("[%s] Received msg type 0x%02X (%d bytes)", deviceID, msgType, len(payload))
 
 	// Record message type as metric
@@ -404,6 +439,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.otaMgr.HandleOtaProgress(deviceID, payload)
 	case frame.MsgScanRpt:
 		m.handleScanReport(deviceID, payload)
+	case frame.MsgDeviceOpAck:
+		m.handleDeviceOpAck(deviceID, payload)
 	case frame.MsgQueryRsp:
 		m.handleQueryResponse(deviceID, payload)
 	case frame.MsgConfigReport:
@@ -602,34 +639,6 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 		ids = append(ids, c.NodeID)
 	}
 	return ids
-}
-
-// publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a node
-func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
-	if m.ha == nil {
-		return
-	}
-
-	var devices []models.EdgeDevice
-	m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
-		Where("channels.node_id = ?", collectorID).
-		Find(&devices)
-
-	for _, dev := range devices {
-		driver, err := m.driverRegistry.Get(dev.Type)
-		if err != nil {
-			continue
-		}
-		sensors := driver.GetSensorDefinitions()
-		if len(sensors) == 0 {
-			continue
-		}
-		if err := m.ha.PublishDiscovery(deviceID, dev.Name, dev.Type, sensors); err != nil {
-			logger.Infof("[%s] HA Discovery failed for device %s: %v", deviceID, dev.Name, err)
-		} else {
-			logger.Infof("[%s] HA Discovery published for device %s (%s)", deviceID, dev.Name, dev.Type)
-		}
-	}
 }
 
 // SetTransactionIsolation sets the transaction isolation level to REPEATABLE READ

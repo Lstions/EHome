@@ -39,6 +39,18 @@ bool hello_handshake_notify_ack(uint32_t nonce);
 bool hello_handshake_is_running(void);
 bool hello_handshake_has_failed(void);
 
+/* === task-33：3.0 链路的 arm 入口（决策 B′）===
+ *
+ * 3.0 链路（device_link_wiring.c）**不再自己生成 nonce**，改从这里取：
+ * 同一个 runtime、同一个分配器、同一个 armed_nonce 位。
+ * 这样"本次握手的 nonce 归谁"只有一个答案（P4），校验方也自然认识它。
+ *
+ * ⚠ 不唤醒 2.x worker：唤醒会让它按 2.x 逻辑**再发一条 Hello**。
+ */
+bool hello_handshake_arm_link_nonce(uint32_t *nonce);
+void hello_handshake_clear_link_nonce(void);
+uint32_t hello_handshake_debug_armed_transport(void);
+
 /* One finite worker iteration, shared by the production task and host tests. */
 bool hello_handshake_worker_step(uint32_t max_wait_ticks);
 uint32_t hello_handshake_debug_armed_nonce(void);

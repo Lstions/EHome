@@ -205,6 +205,18 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) {
 
 /* ---- semaphore stubs ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 
@@ -1355,9 +1367,279 @@ static void test_v2_short_read_delivers_partial_payload(void) {
 
     teardown_test_runtime();
 }
+
+/* =====================================================================
+ * P3 (2026-10-10): hardware frame boundary (uart_event_t::timeout_flag)
+ * ===================================================================== */
+
+/* P3-1: timeout_flag == true means the RX timeout fired, i.e. the line went
+ * idle for uart_set_rx_timeout() character times.  That is the hardware frame
+ * boundary for a length-less protocol, so the frame must be emitted right
+ * there — without waiting for the 10 ms software fallback. */
+static void test_hw_timeout_flag_completes_frame(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* A short NMEA-like line, well below BUS_RX_FIXED_BLOCK_SIZE (512), so the
+     * boundary-length heuristic would refuse to emit it. */
+    const char *line = "$GPGGA,123519,4807.038,N\r\n";
+    size_t line_len = strlen(line);
+    CHECK(line_len < BUS_RX_FIXED_BLOCK_SIZE,
+          "fixture: the line must be shorter than the fixed block size");
+    memcpy(g_fake_rx_data, line, line_len);
+    g_fake_rx_len = line_len;
+    g_fake_rx_pos = 0;
+    g_test_time_us = 9000;
+
+    uart_event_t event = { .type = UART_DATA, .size = (uint32_t)line_len,
+                           .timeout_flag = true };
+    uint8_t rx[256];
+    handle_uart_event(&g_test_rt, 0, &event, rx, sizeof(rx));
+
+    /* The frame must be closed by the event itself. */
+    CHECK(s_streams[0].len == 0, "hardware boundary must empty the stream buffer");
+    CHECK(s_last_rx_us[0] == 0, "hardware boundary must clear last_rx_us");
+
+    /* report_task is not running: assert on the telemetry queue directly, the
+     * same way test_rx_append_block_emission does. */
+    report_desc_t desc;
+    bool got = (s_report_telemetry_q &&
+                xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE);
+    CHECK(got, "hardware boundary must emit exactly one report");
+    if (got) {
+        CHECK(desc.len == line_len, "report must carry the whole line");
+        CHECK(desc.channel_id == 100, "report must carry the channel id");
+        CHECK(desc.error_code == 0, "a healthy line is not an error");
+        report_free_block(false, desc.block_index);
+    }
+    teardown_test_runtime();
+}
+
+/* P3-1: timeout_flag == false means the FIFO filled up; the frame is not
+ * necessarily over, so the bytes must only accumulate. */
+static void test_hw_timeout_flag_false_accumulates(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    uint8_t data[7] = {1, 2, 3, 4, 5, 6, 7};
+    memcpy(g_fake_rx_data, data, sizeof(data));
+    g_fake_rx_len = sizeof(data);
+    g_fake_rx_pos = 0;
+    g_test_time_us = 4000;
+
+    uart_event_t event = { .type = UART_DATA, .size = sizeof(data),
+                           .timeout_flag = false };
+    uint8_t rx[256];
+    handle_uart_event(&g_test_rt, 0, &event, rx, sizeof(rx));
+
+    CHECK(s_streams[0].len == sizeof(data),
+          "FIFO-full event (flag=false) must accumulate, not emit");
+    CHECK(s_last_rx_us[0] == 4000, "last_rx_us must be stamped");
+    report_desc_t desc;
+    CHECK(!(s_report_telemetry_q && xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE),
+          "FIFO-full event must not emit a report");
+    teardown_test_runtime();
+}
+
+/* P3-2: the 10 ms software fallback must yield while a hardware boundary
+ * event is still queued.  Otherwise the fallback emits the bytes received so
+ * far and the later TOUT emits the remainder — one response split in two. */
+static void test_idle_fallback_yields_to_queued_hw_event(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* Buffer holds a partial frame. */
+    s_streams[0].len = 4;
+    memcpy(s_streams[0].buffer, "PART", 4);
+    s_last_rx_us[0] = 1000;
+    g_test_time_us = 20000;   /* well past UART_IDLE_THRESHOLD_US (10 ms) */
+
+    /* The fixture installs a fake sentinel handle in uart_event_queue, but
+     * hw_boundary_pending() must inspect a REAL queue, so give slot 0 one. */
+    QueueHandle_t evq = xQueueCreate(4, sizeof(uart_event_t));
+    CHECK(evq != NULL, "fixture: the event queue must be created");
+    g_test_bus_ctx[0].uart_event_queue = evq;
+    g_test_rt.bus_ctx[0].uart_event_queue = evq;
+
+    /* Queue a hardware boundary event for this slot: the fallback must wait. */
+    uart_event_t queued = { .type = UART_DATA, .size = 0, .timeout_flag = true };
+    CHECK(xQueueSend(evq, &queued, 0) == pdTRUE,
+          "fixture: the hardware boundary event must fit in the queue");
+
+    CHECK(!complete_idle_response(&g_test_rt, 0, g_test_time_us),
+          "idle fallback must NOT complete the frame while a hw boundary is queued");
+    CHECK(s_streams[0].len == 4, "the partial frame must stay buffered");
+    CHECK(s_last_rx_us[0] == 1000, "last_rx_us must be untouched");
+
+    teardown_test_runtime();
+}
+
+/* P3: emit_buffered_frame() is the single writer that closes a frame.  Once
+ * one caller has completed it, the other must be a no-op — a frame cannot be
+ * delivered twice even if both the hardware boundary and the fallback run. */
+static void test_single_writer_prevents_double_completion(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    s_streams[0].len = 3;
+    memcpy(s_streams[0].buffer, "END", 3);
+    g_test_time_us = 7000;
+
+    CHECK(emit_buffered_frame(&g_test_rt, 0, g_test_time_us),
+          "first completion must succeed");
+    CHECK(s_last_rx_us[0] == 0, "first completion must clear last_rx_us");
+    CHECK(!emit_buffered_frame(&g_test_rt, 0, g_test_time_us),
+          "second completion must be a no-op (single-writer semantics)");
+
+    int reports = 0;
+    report_desc_t desc;
+    while (s_report_telemetry_q && xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE) {
+        reports++;
+        report_free_block(false, desc.block_index);
+    }
+    CHECK(reports == 1, "exactly one report may be emitted for one frame");
+    teardown_test_runtime();
+}
+
+/* =====================================================================
+ * P3-3 (2026-10-10): command queue set rebuild must not leave members
+ * pointing at a freed set.
+ *
+ * vQueueDelete does NOT clear a member queue's set_container, so a rebuild
+ * that deletes the set without detaching its members leaves dangling
+ * pointers.  The next xQueueAddToSet then fails (container != NULL), the set
+ * handles stay NULL and receive_prioritized_command() silently takes the
+ * "no set" fast path — the 2026-10-04 incident shape.  This test drives the
+ * real rebuild_cmd_queue_sets() twice and asserts the members end up either
+ * attached to a LIVE set or fully detached. */
+static void test_cmd_queue_set_rebuild_detaches_members(void) {
+    reset_counters();
+    setup_test_runtime();
+
+    /* Give slot 0 real sample/control queues so a set can actually be built. */
+    QueueHandle_t sample_q = xQueueCreate(4, sizeof(sample_cmd_t));
+    QueueHandle_t control_q = xQueueCreate(4, sizeof(bus_cmd_t));
+    CHECK(sample_q != NULL && control_q != NULL, "fixture: queues must be created");
+    g_test_rt.uart0_cmd_queue = sample_q;
+    g_test_rt.uart0_control_queue = control_q;
+
+    /* First build. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    QueueSetHandle_t first_set = s_cmd_u0_set;
+    CHECK(first_set != NULL, "first rebuild must create the UART0 set");
+    CHECK(s_cmd_set_member_count == 2,
+          "the created set must record both of its members");
+
+    /* Leave an item in the queue: xQueueRemoveFromSet must refuse a non-empty
+     * queue, so the detach path is required to reset it first. */
+    sample_cmd_t queued = { .type = CMD_SAMPLE, .channel_id = 1 };
+    CHECK(xQueueSend(sample_q, &queued, 0) == pdTRUE,
+          "fixture: the sample queue must accept an item");
+
+    /* Second build must destroy the first set and re-create everything. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    QueueSetHandle_t second_set = s_cmd_u0_set;
+    CHECK(second_set != NULL,
+          "second rebuild must create a new UART0 set (members were detached)");
+    CHECK(second_set == first_set || second_set != first_set, "informational");
+    CHECK(s_cmd_set_member_count == 2, "the new set must record its members");
+
+    /* Rebuilding again must stay stable — this is the regression guard: with a
+     * dangling container the third xQueueAddToSet fails and the set stays NULL. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    CHECK(s_cmd_u0_set != NULL,
+          "a third rebuild must still succeed (no dangling member container)");
+
+    /* And the members must be usable: an attached queue delivers to the set. */
+    sample_cmd_t again = { .type = CMD_SAMPLE, .channel_id = 2 };
+    CHECK(xQueueSend(g_test_rt.uart0_cmd_queue, &again, 0) == pdTRUE,
+          "the re-attached queue must accept items");
+
+    destroy_cmd_queue_sets();
+    CHECK(s_cmd_u0_set == NULL, "destroy must clear the UART0 set handle");
+    CHECK(s_cmd_set_member_count == 0, "destroy must clear the member table");
+
+    vQueueDelete(sample_q);
+    vQueueDelete(control_q);
+    teardown_test_runtime();
+}
+
+
 /* =====================================================================
  * Main
  * ===================================================================== */
+
+/* =====================================================================
+ * ⭐ 2026-10-10：命令 fence 的**快速路径**（P2 修复的可测部分）
+ *
+ * 背景：wait_for_uart_response_slot 原先是 5ms 轮询（实测每轮耗 21ms，
+ * 把单通道吞吐钉死在 ~27 req/s 且与波特率无关）。现改为：
+ *   · 出队方在清空 pending 后调用 notify_pending_done() 唤醒；
+ *   · 等待者用二值信号量阻塞，UART_RESPONSE_WAIT_MS 仅作超时兜底。
+ *
+ * ⚠⚠ 本测试的**覆盖边界**（已用变异自证确认，不要夸大）：
+ *   它只覆盖 **pending 为空时立即通过**（不引入额外延迟）这一条。
+ *   它**不能**验证"唤醒是否真的发生"：host 的 xSemaphoreTake stub 是
+ *   立即返回 1、没有真实阻塞语义；把 notify_pending_done 改成空操作后
+ *   本测试**仍然全绿**（变异未捕获）。
+ *   ⇒ **唤醒路径只能靠真机验证**（测量 21ms 间隔是否消失）。
+ *   这里保留该测试的价值是：锁住"无 pending 时不引入延迟"这一回归。
+ * ===================================================================== */
+static void test_pending_fence_fast_path(void)
+{
+    setup_test_runtime();
+
+    /* 该函数只读 cmd->channel_id 与 cmd->channel_cmd_v2 用于日志，构造一个即可。 */
+    bus_cmd_t fence_cmd;
+    memset(&fence_cmd, 0, sizeof(fence_cmd));
+    fence_cmd.channel_id = 100;
+    fence_cmd.channel_cmd_v2 = false;
+
+    /* (1) pending 为空 ⇒ 立即通过。用一个"未被消耗的"虚拟时钟来证明：
+     *     若走了等待路径，时钟会被 vTaskDelay 推进。 */
+    int64_t t0 = g_test_time_us;
+    bool ok = wait_for_uart_response_slot(&g_test_rt, 0, "TEST", &fence_cmd);
+    CHECK(ok, "an empty pending queue must pass the fence immediately");
+    CHECK(g_test_time_us == t0, "no delay must be introduced when nothing is pending");
+
+    /* (2) pending 非空 ⇒ 出队并唤醒后必须通过。 */
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.channel_cmd_v2 = true;
+    pcmd.read_size = 0;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE, "pending enqueue must succeed");
+    CHECK(has_pending_cmd(&g_test_rt, 0), "pending must be visible");
+
+    /* 模拟出队方：清空 + 唤醒（这正是 rx_task 各完成路径做的事）。 */
+    pending_cmd_t out;
+    CHECK(xQueueReceive(g_test_pending_q[0], &out, 0) == pdTRUE, "pending dequeue must succeed");
+    notify_pending_done(0);
+    CHECK(!has_pending_cmd(&g_test_rt, 0), "pending must be empty after dequeue");
+
+    bool ok2 = wait_for_uart_response_slot(&g_test_rt, 0, "TEST", &fence_cmd);
+    CHECK(ok2, "the fence must pass once the pending queue is drained");
+
+    /* (3) 出队方清空后，has_pending_cmd 必须转为 false —— 这是等待者
+     *     能离开 while 循环的前提（无论唤醒是否送达，超时兜底也能离开）。
+     *     ⚠ 注意这里**不能**断言"唤醒已送达"：host stub 无阻塞语义，
+     *     见上方覆盖边界说明。 */
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE, "second pending enqueue must succeed");
+    CHECK(has_pending_cmd(&g_test_rt, 0), "pending must be visible after enqueue");
+    pending_cmd_t out2;
+    CHECK(xQueueReceive(g_test_pending_q[0], &out2, 0) == pdTRUE, "second dequeue must succeed");
+    CHECK(!has_pending_cmd(&g_test_rt, 0), "pending must be empty after dequeue");
+
+    teardown_test_runtime();
+}
+
 int main(void)
 {
     /* Initialize report path (needed for report_enqueue) */
@@ -1377,6 +1659,7 @@ int main(void)
     test_expire_no_timeout_when_disabled();
     test_expire_v2_timeout();
     test_rx_wait_ticks();
+    test_pending_fence_fast_path();
     test_decode_batch_step_valid();
     test_decode_batch_step_invalid();
     test_rx_append_with_read_size();
@@ -1389,6 +1672,11 @@ int main(void)
     test_complete_response_reports_channel_success();
     test_short_read_reports_command_error();
     test_v2_short_read_delivers_partial_payload();
+    test_hw_timeout_flag_completes_frame();
+    test_hw_timeout_flag_false_accumulates();
+    test_idle_fallback_yields_to_queued_hw_event();
+    test_single_writer_prevents_double_completion();
+    test_cmd_queue_set_rebuild_detaches_members();
 
     report_path_deinit();
 

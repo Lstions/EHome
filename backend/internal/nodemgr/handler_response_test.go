@@ -20,9 +20,7 @@ func init() {
 // noopPublisher implements mqtt.Publisher for tests — all methods return nil.
 type noopPublisher struct{}
 
-func (n *noopPublisher) Publish(topic string, payload []byte) error         { return nil }
-func (n *noopPublisher) PublishQoS2(topic string, payload []byte) error     { return nil }
-func (n *noopPublisher) PublishRetained(topic string, payload []byte) error { return nil }
+func (n *noopPublisher) Publish(nodeID string, payload []byte) error { return nil }
 
 // setupHandlerTestDB creates a fresh SQLite in-memory DB for handler response tests.
 // Uses a different function name to avoid collision with manager_test.go's setupTestDB.
@@ -49,7 +47,7 @@ func setupHandlerManager(t *testing.T) *Manager {
 		wsHub:        wsHub,
 		pendingWrite: pendingwrite.NewManager(nil, db),
 		pingTracker:  NewPingTracker(),
-		mqtt:         &noopPublisher{},
+		downlink:     &noopPublisher{},
 	}
 	return mgr
 }

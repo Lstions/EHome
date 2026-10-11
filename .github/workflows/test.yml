@@ -59,7 +59,7 @@ jobs:
       # go vet ./... 看不到 //go:build simulation 的文件（drivers_sim.go、
       # simulation/** 等 4 个包只在 -tags=simulation 下参与构建）。
       # 于是仿真专用代码可以在"CI 全绿"的情况下烂掉 —— 直到 backend-scenarios
-      # job 需要真实 PG + EMQX 才发现，反馈慢且贵。
+      # job（需要真实 PG）才发现，反馈慢且贵。
       # 本步骤不依赖任何外部服务，只做编译 + vet，把这段代码的可见性补回 main 门禁。
       # 覆盖分母：go list ./... = 35 包 → go list -tags=simulation ./... = 39 包。
       - name: Go vet (simulation build tag)
@@ -127,13 +127,13 @@ jobs:
         run: |
           go test -race -count=1 -tags=integration ./...
 
-  # ─── Backend: scenario simulation (real PostgreSQL + real EMQX) ──
-  # backend/simulation 的 preflight 是硬的：必须连真实 PostgreSQL（自建/自删
-  # ehome_sim_<runid>，连维护库 postgres 执行 CREATE/DROP）与真实 EMQX（真实
-  # MQTT 收发二进制帧），缺任何一方直接失败而非跳过。
-  # 就绪判定一律用健康检查 + 显式轮询，不用固定 sleep。
+  # ─── Backend: simulation gates (real PostgreSQL; MQTT subsystem removed) ──
+  # 2026-10-11：本 job 原名"scenario simulation"，依赖真实 EMQX 收发 MQTT 帧。
+  # 后端移除 MQTT 后该链路不存在 ⇒ EMQX 容器、1883 轮询、MQTT_BROKER 全部移除。
+  # 保留真实 PostgreSQL：harness.Preflight 仍校验维护库可达。
+  # ⚠ 本 job 现在只覆盖**结构性门禁**，不再声称验证端到端功能。
   backend-scenarios:
-    name: Backend (scenario simulation)
+    name: Backend (simulation gates)
     runs-on: ubuntu-latest
     needs: backend
     services:
@@ -152,16 +152,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
-      # emqx ping = 节点存活探针（bin/emqx: assert_node_alive），已启动即 exit 0
-      emqx:
-        image: emqx/emqx:5.8
-        ports:
-          - 1883:1883
-        options: >-
-          --health-cmd "emqx ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
     defaults:
       run:
         working-directory: backend
@@ -173,27 +163,20 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
 
-      # 服务容器健康检查只覆盖"容器内 EMQX 已启动"，不覆盖宿主端口映射；
-      # 这里从 runner 侧显式轮询 1883，连得上才算真的可用（上限 60s）。
-      - name: Wait for EMQX MQTT port (1883)
-        run: |
-          for i in $(seq 1 30); do
-            if timeout 2 bash -c '</dev/tcp/127.0.0.1/1883' 2>/dev/null; then
-              echo "EMQX 1883 已就绪（第 ${i} 次探测）"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::EMQX 1883 在 60s 内不可达"
-          exit 1
 
-      - name: Run scenario simulation tests (real server + PG + EMQX)
+      # 2026-10-11（CI 收尾）：**EMQX 服务与 1883 轮询已移除**。
+      # 后端已于 2026-10-08 整体移除 MQTT，而 harness 的设备侧仍是 MQTT 客户端 ⇒
+      # TestScenarios 的链路不存在，实测必然红（30s 超时"服务端尚未消费 MQTT 上行"）。
+      # 现已改为显式 Skip（见 simulation_test.go），本 job 只跑**真正有效**的部分：
+      #   · TestCatalogGate（纯结构门禁，不需要任何基础设施）
+      #   · TestSimulationDriverTypesCoverEverySpecType（型号登记门禁）
+      # 仍需真实 PG：harness.Preflight 校验维护库可达（自建/自删 ehome_sim_* 库）。
+      - name: Run simulation gate tests (PG only; MQTT subsystem removed)
         env:
           EHOME_DB_HOST: 127.0.0.1
           EHOME_DB_PORT: 5432
           EHOME_DB_USER: ehome
           EHOME_DB_PASSWORD: ehome123
-          MQTT_BROKER: tcp://127.0.0.1:1883
           # 抢不到 run 级排他锁时快速失败，而不是等默认的 45m
           EHOME_SIM_LOCK_WAIT: 3s
         run: go test -tags=simulation -count=1 -timeout=30m ./simulation/...

@@ -22,6 +22,7 @@ target_compile_options(protocol_log_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME protocol_log_tests COMMAND protocol_log_tests)
 
 add_executable(writecmd_decoder_tests
+    msg_handler_hooks_stubs.c
     writecmd_decoder_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/handler_writecmd.c
@@ -36,6 +37,7 @@ target_compile_options(writecmd_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME writecmd_decoder_tests COMMAND writecmd_decoder_tests)
 
 add_executable(channel_cmd_v2_decoder_tests
+    msg_handler_hooks_stubs.c
     channel_cmd_v2_decoder_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/handler_channel_cmd_v2.c
@@ -50,6 +52,7 @@ target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werro
 add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
 
 add_executable(channel_cmd_v2_slot_tests
+    msg_handler_hooks_stubs.c
     channel_cmd_v2_slot_tests.c
     channel_cmd_v2_slot_app_stubs.c
     ../components/frame/frame_codec.c
@@ -72,13 +75,15 @@ add_test(NAME legacy_write_guard_tests COMMAND legacy_write_guard_tests)
 
 add_executable(bus_queue_policy_tests bus_queue_policy_tests.c)
 target_include_directories(bus_queue_policy_tests PRIVATE
-    ../components/bus_worker/include)
+    ../components/bus_worker/include
+    ../components/report_stats/include)
 target_compile_options(bus_queue_policy_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_queue_policy_tests COMMAND bus_queue_policy_tests)
 
 add_executable(bus_rx_boundary_tests bus_rx_boundary_tests.c)
 target_include_directories(bus_rx_boundary_tests PRIVATE
-    ../components/bus_worker/include)
+    ../components/bus_worker/include
+    ../components/report_stats/include)
 target_compile_options(bus_rx_boundary_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_rx_boundary_tests COMMAND bus_rx_boundary_tests)
 
@@ -174,6 +179,33 @@ target_compile_definitions(config_manifest_pwm_tests PRIVATE
 target_compile_options(config_manifest_pwm_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME config_manifest_pwm_tests COMMAND config_manifest_pwm_tests)
 
+# ---- task-30: ConfigManifest(0x04) 跨语言对锚的固件侧解码器 ----
+#
+# 为什么是**可执行程序**而不是 ctest 用例：
+# 0x04 的对锚需要**后端 Go 真实编码器**产出的字节 —— 那是另一个进程/另一种语言。
+# 所以这里只提供"喂字节 → 用生产解码器解 → 逐字段打印"的可执行文件，
+# 由 backend/internal/nodemgr/manifest_crosslang_test.go 驱动并逐字段断言
+# （入口脚本 tools/run_firmware_backend_e2e.sh 负责先构建再跑，缺任一半都响亮失败）。
+#
+# ⚠ 这里**故意不加 add_test**：它需要参数（一个 hex 文件），
+# 无参运行只会打印 usage 并 rc=2；挂进 ctest 会制造一条永远失败的用例。
+# 它的"会跑"由 E2E 脚本保证，而不是由 ctest 假装保证。
+add_executable(firmware_manifest_crosslang
+    firmware_manifest_crosslang.c
+    ../components/config_mgr/config_mgr.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(firmware_manifest_crosslang PRIVATE
+    stubs
+    ../components/config_mgr
+    ../components/frame
+    ../components/dma_pool/include
+)
+target_compile_definitions(firmware_manifest_crosslang PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+)
+target_compile_options(firmware_manifest_crosslang PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+
 add_executable(dma_pool_contract_tests
     dma_pool_contract_tests.c
     ../components/dma_pool/dma_pool.c
@@ -200,6 +232,7 @@ target_include_directories(bus_manager_manifest_tests PRIVATE
     stubs/rom
     ../components/bus_manager/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/config_mgr
     ../components/dma_pool/include
@@ -222,6 +255,7 @@ target_include_directories(bus_dma_lease_tests PRIVATE
     stubs/rom
     ../components/bus_manager/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/config_mgr
     ../components/dma_pool/include
@@ -252,6 +286,7 @@ target_compile_options(bus_dma_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-f
 add_test(NAME bus_dma_tests COMMAND bus_dma_tests)
 
 add_executable(scheduler_route_tests scheduler_route_tests.c
+    ../components/scheduler/scheduler_health.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
     stubs/heap_stub_impl.c
@@ -262,6 +297,7 @@ target_include_directories(scheduler_route_tests PRIVATE
     ../components/scheduler
     ../components/bus_dma/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/config_mgr
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -271,15 +307,18 @@ target_compile_definitions(scheduler_route_tests PRIVATE CONFIG_IDF_TARGET_ESP32
 target_compile_options(scheduler_route_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME scheduler_route_tests COMMAND scheduler_route_tests)
 
-add_executable(bus_worker_report_tests bus_worker_report_tests.c
+add_executable(bus_worker_report_tests ../components/report_stats/report_stats.c
+    bus_worker_report_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_report_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -293,15 +332,18 @@ target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP
 target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
 
-add_executable(bus_worker_rx_tests bus_worker_rx_tests.c
+add_executable(bus_worker_rx_tests ../components/report_stats/report_stats.c
+    bus_worker_rx_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_rx_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -315,15 +357,21 @@ target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6
 target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
 
-add_executable(bus_worker_batch_tests bus_worker_batch_tests.c
+add_executable(bus_worker_batch_tests ../components/report_stats/report_stats.c
+    bus_worker_batch_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    # ⭐ 方案 D（2026-10-10）：bus_cmd_t 不再内联 plan buffer，execute_uart_batch
+    # 改为通过 channel_cmd_v2_borrow_plan() 从「槽位」借 plan。本测试不链接
+    # handler_channel_cmd_v2.c，故由该 stub 提供行为等价的替身 + 装载辅助。
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_batch_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -347,10 +395,15 @@ target_include_directories(perf_metrics_encode_tests PRIVATE
 target_compile_options(perf_metrics_encode_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
 
-add_executable(handler_data_tests handler_data_tests.c
+add_executable(handler_data_tests ../components/report_stats/report_stats.c
+    handler_data_tests.c
+    msg_handler_hooks_stubs.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
     ../components/msg_handler/data_batch_codec.c
+    # P4 (2026-10-10): the perf block now reports field 29 via
+    # heap_caps_get_largest_free_block(), so this target needs the heap stub.
+    stubs/heap_stub_impl.c
 )
 target_include_directories(handler_data_tests PRIVATE
     stubs
@@ -361,6 +414,7 @@ target_include_directories(handler_data_tests PRIVATE
     ../components/sync_manager
     ../components/scheduler
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -377,12 +431,16 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 # reported counter) and the REAL handler_data.c (encodes the wire frame)
 # together.  bus_worker_rx_tests.c only proves a notify hook is called; this
 # proves the encoded StatusReport actually changes.
-add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
+add_executable(rx_health_e2e_tests ../components/report_stats/report_stats.c
+    rx_health_e2e_tests.c
+    msg_handler_hooks_stubs.c
+    ../components/scheduler/scheduler_health.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/heap_stub_impl.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(rx_health_e2e_tests PRIVATE
     stubs
@@ -393,6 +451,7 @@ target_include_directories(rx_health_e2e_tests PRIVATE
     ../components/sync_manager
     ../components/scheduler
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -417,6 +476,7 @@ target_include_directories(app_state_tests PRIVATE
     stubs/rom
     ../main
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -541,19 +601,10 @@ target_link_options(log_stream_lifecycle_tests PRIVATE -Wl,--wrap=log_capture_se
 target_link_libraries(log_stream_lifecycle_tests PRIVATE pthread)
 add_test(NAME log_stream_lifecycle_tests COMMAND log_stream_lifecycle_tests)
 
-add_executable(mqtt_event_tests mqtt_event_tests.c
-    stubs/heap_stub_impl.c
-)
-target_include_directories(mqtt_event_tests PRIVATE stubs)
-target_compile_options(mqtt_event_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
-add_test(NAME mqtt_event_tests COMMAND mqtt_event_tests)
-
-add_executable(mqtt_recovery_tests mqtt_recovery_tests.c
-    stubs/heap_stub_impl.c
-)
-target_include_directories(mqtt_recovery_tests PRIVATE stubs ../main)
-target_compile_options(mqtt_recovery_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
-add_test(NAME mqtt_recovery_tests COMMAND mqtt_recovery_tests)
+# ⚠ 2026-10-08：mqtt_event_tests / mqtt_recovery_tests 已随 MQTT **整体移除**。
+# 它们测的是 components/ehome_mqtt 的发布/重连状态机，被测对象已不存在
+# ⇒ 整个文件删除（不是"注释掉"：留着会让人以为还有 MQTT 行为被守护）。
+# 移除 MQTT 后这两条行为由 3.0 的 session/stx 路径承接，见 uplink 相关用例。
 
 add_executable(hello_handshake_tests
     hello_handshake_tests.c
@@ -691,14 +742,17 @@ add_test(NAME data_batch_codec_tests COMMAND data_batch_codec_tests)
 # 与 bus_worker_report_tests 分开的理由：那份用例覆盖 0x03 路径的池/队列
 # 语义，本份只覆盖"能力位门控 + 聚合决策"。两者共享 #include bus_worker.c
 # 的模式，但断言集互不重叠，分开后失败定位更快。
-add_executable(bus_worker_data_batch_tests bus_worker_data_batch_tests.c
+add_executable(bus_worker_data_batch_tests ../components/report_stats/report_stats.c
+    bus_worker_data_batch_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_data_batch_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -787,3 +841,765 @@ target_include_directories(transport_registry_tests PRIVATE
 )
 target_compile_options(transport_registry_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_registry_tests COMMAND transport_registry_tests)
+# ---- 3.0 骨架：variant / link（设计文档「3.0-实施设计-骨架与增量」§2） ----
+# ⚠ 编译【三份】：每份注入一个型号，让"MAX_CHANNELS 的编译分支"与
+# "variant 的 max_channels"在**三种型号下**都被真正比对。
+# 只编一份的话，另外两个分支永远没被执行 —— 而"改一处忘另一处"
+# 恰恰最可能发生在没被编到的那个分支上。
+foreach(_v S3 S3P C6)
+    add_executable(variant_tests_${_v}
+        variant_tests.c
+        ../components/variant/variant.c
+    )
+    target_include_directories(variant_tests_${_v} PRIVATE
+        stubs
+        stubs/rom
+        ../components/variant/include
+        # 让本用例能 include config_mgr.h，从而把 MAX_CHANNELS 与 variant 的
+        # max_channels 钉在一起（两处定义同一事实 ⇒ 必须证明它们一致）。
+        ../components/config_mgr
+    )
+    target_compile_options(variant_tests_${_v} PRIVATE -Wall -Wextra -Werror)
+endforeach()
+# S3 与 S3P 共用 CONFIG_IDF_TARGET_ESP32S3（靠 VARIANT_SELECTED 区分）
+target_compile_definitions(variant_tests_S3  PRIVATE CONFIG_IDF_TARGET_ESP32S3=1 VARIANT_SELECTED=VARIANT_S3)
+target_compile_definitions(variant_tests_S3P PRIVATE CONFIG_IDF_TARGET_ESP32S3=1 VARIANT_SELECTED=VARIANT_S3P)
+target_compile_definitions(variant_tests_C6  PRIVATE CONFIG_IDF_TARGET_ESP32C6=1 VARIANT_SELECTED=VARIANT_C6)
+add_test(NAME variant_tests_S3  COMMAND variant_tests_S3)
+add_test(NAME variant_tests_S3P COMMAND variant_tests_S3P)
+add_test(NAME variant_tests_C6  COMMAND variant_tests_C6)
+
+add_executable(link_tests
+    link_tests.c
+    ../components/link/link.c
+)
+target_include_directories(link_tests PRIVATE ../components/link/include)
+target_compile_options(link_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME link_tests COMMAND link_tests)
+
+add_executable(wire_tests
+    wire_tests.c
+    ../components/wire/wire.c
+)
+target_include_directories(wire_tests PRIVATE ../components/wire/include)
+target_compile_options(wire_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME wire_tests COMMAND wire_tests)
+
+add_executable(msgcodec_tests
+    msgcodec_tests.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(msgcodec_tests PRIVATE ../components/msgcodec/include)
+target_compile_options(msgcodec_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME msgcodec_tests COMMAND msgcodec_tests)
+
+# ⭐ 两套独立编解码实现的**逐字节对拍**（frame_codec 生产用；msgcodec 是 S0 向量的 C 侧实现）。
+# 共享向量只覆盖 20 条固定用例 —— 超出之后"两者一致"只是假定。
+# 本 target 把它变成"在大范围边界输入空间上实测一致"。
+add_executable(codec_equivalence_tests
+    codec_equivalence_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(codec_equivalence_tests PRIVATE
+    ../components/frame
+    ../components/msgcodec/include
+)
+target_compile_options(codec_equivalence_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME codec_equivalence_tests COMMAND codec_equivalence_tests)
+
+add_executable(dispatch_tests
+    dispatch_tests.c
+    ../components/dispatch/dispatch.c
+)
+target_include_directories(dispatch_tests PRIVATE ../components/dispatch/include)
+target_compile_options(dispatch_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME dispatch_tests COMMAND dispatch_tests)
+
+add_executable(net_policy_tests
+    net_policy_tests.c
+    ../components/netpolicy/net_policy.c
+)
+target_include_directories(net_policy_tests PRIVATE ../components/netpolicy/include)
+target_compile_options(net_policy_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME net_policy_tests COMMAND net_policy_tests)
+
+# D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME host_coverage
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_host_coverage.py --max-uncovered 15)
+
+add_test(NAME no_weak_symbols
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_no_weak_symbols.py)
+
+add_test(NAME databatch_injected
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_databatch_injected.py)
+
+add_test(NAME tcp_start_reachable
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tcp_start_reachable.py)
+
+# "建好了但没插电"门禁：每个组件都必须能从 main 到达。
+# 同族先例：api.WarmupLatestValues 自 2026-08-21 起一直没有调用者；
+# 3.0 设备侧链路组件（session/link_tcp/tls_*/transport_sel/sntp_mgr）各自
+# 有宿主测试且全绿，而 main/ 对它们**零引用** ⇒ 固件里根本没有 3.0 链路。
+# 这类问题**没有任何一处会报错**：组件自己的测试天然测不到"有没有人用它"。
+add_test(NAME component_reachable
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_reachable.py)
+
+# D-09 定帧契约（需要 esp 头 stub 才能宿主编译 transport.c）
+add_executable(transport_framing_tests
+    transport_framing_tests.c
+    ../components/transport/transport.c
+    ../components/netpolicy/net_policy.c
+)
+target_include_directories(transport_framing_tests PRIVATE
+    ../components/transport/include
+    ../components/netpolicy/include
+    hello_stubs
+)
+target_compile_options(transport_framing_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(transport_broadcast_tests
+    transport_broadcast_tests.c
+    ../components/transport/transport.c
+)
+target_include_directories(transport_broadcast_tests PRIVATE
+    ../components/transport/include
+    hello_stubs
+)
+target_compile_options(transport_broadcast_tests PRIVATE -Wall -Wextra -Werror)
+
+# ⚠ 2026-10-08：以下 4 个目标已随 MQTT **整体移除**（被测对象都不存在了）：
+#   * transport_dualstack_tests    —— 测"MQTT 与 3.0 同时 connected ⇒ broadcast 双发"。
+#                                    双栈本身已取消 ⇒ 该风险不存在。
+#   * uplink_arbiter_tests         —— 测 main/uplink_arbiter.c。仲裁的唯一用途是
+#                                    "MQTT 与 3.0 两条门互斥防双发"；只剩一条传输后，
+#                                    它的存在本身就是多余，故随源码一起删除。
+#   * uplink_gate_exhaustive_tests —— 同上（16 组穷举互斥性）。
+#   * uplink_mqtt_transport_tests  —— 测 main/uplink_mqtt_transport.c（MQTT 出口）。
+# ⇒ 四个文件删除而非注释：留着会让人以为"双栈双发""两条门互斥"仍被守护。
+# 移除后**上行只有 3.0 一条**，其发送语义由 session_transport/ stx 相关用例守护。
+
+add_executable(msg_handler_publish_tests
+    msg_handler_publish_tests.c
+    ../components/transport/transport.c
+    ../components/frame/frame_codec.c
+    # 本用例 #include 真实的 msg_handler.c，而它现在分发了 MSG_DEVICE_OP；
+    # 因此必须把该 handler 也链进来（否则 undefined reference）。
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(msg_handler_publish_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/msg_handler
+    ../components/frame
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/scheduler
+    ../components/bus_worker/include
+    ../components/report_stats/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/hw_profile/include
+    ../components/sync_manager
+    ../components/ota
+    ../components/wifi_mgr
+    ../components/log_stream
+    ../components/log_stream/include
+    ../components/gpio_ctrl
+    ../components/pwm_ctrl
+    ../components/periph_owner
+    ../components/rgb_led
+    ../components/factory_reset
+    ../components/nvs_helper
+    ../components/device_op/include
+)
+target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_executable(ehome_tcp_send_tests
+    ehome_tcp_send_tests.c
+    ../components/netpolicy/net_policy.c
+)
+target_include_directories(ehome_tcp_send_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/ehome_tcp/include
+    ../components/netpolicy/include
+)
+target_compile_options(ehome_tcp_send_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+add_executable(report_stats_tests
+    report_stats_tests.c
+    ../components/report_stats/report_stats.c
+)
+target_include_directories(report_stats_tests PRIVATE ../components/report_stats/include)
+target_compile_options(report_stats_tests PRIVATE -Wall -Wextra -Werror)
+# ⚠ 2026-10-08：link_mqtt_tests / mqtt_adapter_tests / transport_sel_tests 已随 MQTT 移除。
+#   三者的被测对象分别是 components/link_mqtt、components/ehome_mqtt 的适配层、
+#   components/transport_sel（TCP 优先 / MQTT 兜底选路）—— 源码全部删除 ⇒ 用例一并删除。
+#   ⚠ link_mqtt_tests 里"四态必须原样到达调用方"（D-01）的价值**没有丢失**：
+#     该不变式现在由 3.0 的 link/session 侧用例承接（device_link_*_tests.c）。
+
+add_executable(golden_vectors_tests
+    golden_vectors_tests.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(golden_vectors_tests PRIVATE ../components/msgcodec/include)
+target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(sync_manager_uplink_tests
+    sync_manager_uplink_tests.c
+    sync_manager_uplink_tests_stubs.c
+    ../components/sync_manager/sync_manager.c
+)
+target_include_directories(sync_manager_uplink_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/sync_manager
+    ../components/config_mgr
+    ../components/rgb_led/include
+)
+target_compile_options(sync_manager_uplink_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-parameter)
+add_test(NAME sync_manager_uplink COMMAND sync_manager_uplink_tests)
+
+# 出厂重置白名单（2026-10-08 从 factory_reset.c 抽出，见 factory_reset_namespaces.h）
+add_executable(factory_reset_namespaces_tests
+    factory_reset_namespaces_tests.c
+    ../components/factory_reset/factory_reset_namespaces.c
+)
+target_include_directories(factory_reset_namespaces_tests PRIVATE
+    ../components/factory_reset/include
+)
+target_compile_options(factory_reset_namespaces_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME factory_reset_namespaces COMMAND factory_reset_namespaces_tests)
+
+# 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
+# 后端（Go）侧的 S0 对锚。工具链自包含在 .tools/gotool，不在系统 PATH，
+# 故通过脚本运行（脚本会报出找不到工具链的原因）。
+add_test(NAME golden_vectors_go
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tools/run_backend_golden.sh)
+
+add_test(NAME baseline_sync
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_baseline_sync.py)
+
+add_test(NAME golden_vectors_python
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_golden_vectors.py)
+
+add_executable(link_tcp_tests
+    link_tcp_tests.c
+    ../components/link/link.c
+    ../components/link_tcp/link_tcp.c
+    # ⭐ 2026-10-11：link_tcp 现在用互斥保护 handle 生命周期（真机 double-free
+    # 修复）。这里给**真**（pthread 支撑）信号量，而不是空桩 —— 否则
+    # "并发只 close 一次"这类断言在单线程下照样全绿，等于没测。
+    stubs/freertos_sem_stub.c
+)
+target_include_directories(link_tcp_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/link/include
+    ../components/link_tcp/include
+)
+target_compile_options(link_tcp_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+# 2026-10-11：并发释放用例需要真线程（barrier 对齐读/写两个线程的时序）。
+target_link_libraries(link_tcp_tests PRIVATE pthread)
+add_test(NAME link_tcp_tests COMMAND link_tcp_tests)
+
+add_executable(frame_header_tests
+    frame_header_tests.c
+    ../components/wire/wire.c
+)
+target_include_directories(frame_header_tests PRIVATE ../components/wire/include)
+target_compile_options(frame_header_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(device_op_tests
+    device_op_tests.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_tests PRIVATE ../components/device_op/include)
+target_compile_options(device_op_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME check_frame_header
+    COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_frame_header.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/frame_header.txt)
+
+add_test(NAME device_op_tests COMMAND device_op_tests)
+
+add_test(NAME frame_header_tests
+    COMMAND frame_header_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/frame_header.txt)
+
+add_test(NAME golden_vectors_tests
+    COMMAND golden_vectors_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
+
+add_test(NAME report_stats_tests COMMAND report_stats_tests)
+
+add_test(NAME mem_budget_thresholds
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_mem_budget_thresholds.py)
+
+# ⚠ 2026-10-08：stub_enum_sync 门禁已**删除**（连同 tools/check_stub_enum_sync.py）。
+#   它的唯一守护目标 mqtt_publish_result_t 随 components/ehome_mqtt 整体移除；
+#   而本仓**已无任何"手抄生产枚举的宿主副本"**（已逐个核对：stubs/rgb_led.h 是
+#   刻意缩减的符号子集、从不按数值跨边界比较；stubs/mqtt_client.h 是 IDF 自己的
+#   枚举桩，不是本仓副本；config_apply_transaction_tests.c 的是宿主自用枚举）。
+#   ⇒ 无靶即删，而不是换个靶凑数（那会让门禁"看起来还在守"却守错东西）。
+
+# 证书 NVS 契约（命名空间 + 三个键名）两端必须一致。
+#
+# 它是**跨语言**契约：固件（C）读 eh_tls:{ca,cert,key}，工具（Python）写同样的名字，
+# 而此前**没有任何东西把它们钉在一起** —— 正是 P4 要防的形态。
+# 失效后果是静默的：两端漂移时工具照样生成镜像、**读回校验也照样全绿**，
+# 因为 verify() 比的是"镜像与它自己"，从没比过"镜像与固件读的名字"。
+# 真机上表现为 NVS_NOT_FOUND / 证书缺失 ⇒ 链路 FATAL，
+# 而"我刚生成的镜像校验全过"会把人引向错误方向。
+add_test(NAME cert_nvs_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_cert_nvs_contract.py)
+
+# 门禁分类器自检：证明每条门禁**真的会咬**（喂坏输入 ⇒ 必须非零）。
+#
+# 为什么它配得上一条 ctest（而不是"偶尔手动跑跑"）：
+# 本仓有三次"门禁存在却不管用"的前科 —— D-25 恒真阈值（remain>=0 永远成立）、
+# D-27 门禁**从未被任何流程调用**、L-05 阈值余量只剩 16 B。
+# 而且 Lead 报告里写过多轮"14 条门禁全 RC=0"，那句话本身是用一条
+# **结构上不可能打印非 0** 的 shell 循环得出的（$(basename) 先执行会重置 $?）。
+# ⇒ "门禁会不会咬"必须由机器每次回答，不能靠人相信。
+#
+# ⚠ 它**会临时改写生产文件**再还原（见脚本头部的 journal 说明），
+# 所以脚本在"目标文件已脏"时返回 77(SKIP) —— 用 SKIP_RETURN_CODE 认它，
+# 避免开发中（工作树正常是脏的）把 ctest 弄红，从而被人学会忽略。
+# 真正生效的场景是 CI / 干净检出。
+add_test(NAME gate_selftest
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_gates_selftest.py)
+# ⚠ set_tests_properties 必须在 add_test **之后** ——
+# 写反了 cmake 会以 "Can not find test to add properties to" 直接配置失败（已踩）。
+set_tests_properties(gate_selftest PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)
+
+add_test(NAME component_cycles
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_cycles.py)
+
+add_test(NAME ehome_tcp_send_tests COMMAND ehome_tcp_send_tests)
+
+add_test(NAME msg_handler_publish_tests COMMAND msg_handler_publish_tests)
+
+add_test(NAME transport_broadcast_tests COMMAND transport_broadcast_tests)
+
+add_test(NAME transport_framing_tests COMMAND transport_framing_tests)
+
+# D-07 健康计数写入规则（纯函数，无需 stub）
+add_executable(scheduler_health_tests
+    scheduler_health_tests.c
+    ../components/scheduler/scheduler_health.c
+)
+target_include_directories(scheduler_health_tests PRIVATE ../components/scheduler)
+target_compile_options(scheduler_health_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)
+
+# 3.0 会话 → transport 适配的**纯判定**（main/session_transport.c 的纯部分）。
+# 用 SESSION_TRANSPORT_HOST_TEST=1 只编纯判定，不含 IDF 头 ——
+# 适配层里两处判断错了都**不会报错**（静默丢弃 / 流污染），所以必须宿主可测。
+add_executable(session_transport_tests
+    session_transport_tests.c
+    ../main/session_transport.c
+    # task-32: stx_send_frame 调用**生产**成帧函数 devlink_encode_frame，
+    # 因此要把它所在文件（只编纯判定段）与它的依赖一起链进来。
+    # 与 firmware_tcp_e2e_client 编的是同一批（那边 :17-27 已注明同一原因）。
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/frame/frame_codec.c
+    ../components/wire/wire.c
+)
+target_include_directories(session_transport_tests PRIVATE
+    ../main
+    ../components/session/include
+    ../components/link/include
+    ../components/link_tcp/include
+    ../components/rx_pump/include
+    ../components/wire/include
+    ../components/transport/include
+    # task-32: session_transport.c 现在 include device_link_wiring.h（为了复用
+    # **生产**成帧函数 devlink_encode_frame，P4 不写第二个实现），
+    # 而 device_link_wiring.h include variant.h。
+    # 与 firmware_tcp_e2e_client 同一处需要（那边 :22 已注明同一原因）。
+    ../components/variant/include
+)
+# ⚠ 两个宏都要：SESSION_TRANSPORT_HOST_TEST 关掉本文件的 IDF 胶水段，
+# DEVICE_LINK_HOST_TEST 关掉 device_link_wiring.c 的 IDF 胶水段
+# （后者是对锚 target 早已在用的同一个宏 —— 见 firmware_tcp_e2e_client 的
+#  compile definitions。少任何一个都会去 include esp_err.h 而编译失败。）
+target_compile_definitions(session_transport_tests PRIVATE
+    SESSION_TRANSPORT_HOST_TEST=1
+    DEVICE_LINK_HOST_TEST=1)
+target_compile_options(session_transport_tests PRIVATE -Wall -Wextra -Werror)
+# 2026-10-11：并发共享 scratch 用例需要真线程（barrier 对齐两个发送线程）。
+target_link_libraries(session_transport_tests PRIVATE pthread)
+add_test(NAME session_transport_tests COMMAND session_transport_tests)
+
+# 3.0 链路接线里的**判定**（main/device_link_wiring.c 的纯判定部分）。
+# 用 DEVICE_LINK_HOST_TEST=1 只编纯判定，不含任何 IDF 头 ——
+# 这样"有判断的部分"被真正跑到，而不是靠 EXEMPT 绕过覆盖率门禁。
+add_executable(device_link_wiring_tests
+    device_link_wiring_tests.c
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/wire/wire.c
+)
+target_include_directories(device_link_wiring_tests PRIVATE
+    ../main
+    ../components/variant/include
+    ../components/wire/include
+)
+target_compile_definitions(device_link_wiring_tests PRIVATE DEVICE_LINK_HOST_TEST=1)
+target_compile_options(device_link_wiring_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_wiring_tests COMMAND device_link_wiring_tests)
+
+# 3.0 **下行帧的分发判定**（task-19）。
+#
+# 为什么单独一个 target：这组用例防的是"收到的帧被静默丢弃"——
+# devlink_on_msg 原先从不调用 msg_handler_process，后端下发的 0x22
+# （重启/恢复出厂）在固件里被丢掉，而构建/门禁/日志全都正常。
+# 用假 dispatch 直接观察"有没有真的进分发、进去的字节对不对"，
+# 这是"只断言计数器"骗不过的后果层断言。
+add_executable(device_link_downlink_tests
+    device_link_downlink_tests.c
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/wire/wire.c
+)
+target_include_directories(device_link_downlink_tests PRIVATE
+    ../main
+    ../components/variant/include
+    ../components/wire/include
+)
+target_compile_definitions(device_link_downlink_tests PRIVATE DEVICE_LINK_HOST_TEST=1)
+target_compile_options(device_link_downlink_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_downlink_tests COMMAND device_link_downlink_tests)
+
+add_executable(rx_pump_tests
+    rx_pump_tests.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(rx_pump_tests PRIVATE
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(rx_pump_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rx_pump_tests COMMAND rx_pump_tests)
+
+# 投喂型入口（rx_pump_feed）—— ehome_tcp.c 真正使用的那个缝合点。
+# 与 rx_pump_tests 分开的理由见文件头：引擎绿 ≠ 接口对，D-09 的缺陷在接口上。
+add_executable(rx_pump_feed_tests
+    rx_pump_feed_tests.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(rx_pump_feed_tests PRIVATE
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(rx_pump_feed_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rx_pump_feed_tests COMMAND rx_pump_feed_tests)
+
+add_executable(tls_guard_tests
+    tls_guard_tests.c
+    ../components/tls_guard/tls_guard.c
+)
+target_include_directories(tls_guard_tests PRIVATE ../components/tls_guard/include)
+target_compile_options(tls_guard_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_guard_tests COMMAND tls_guard_tests)
+
+add_test(NAME check_tls_constants
+    COMMAND ${CMAKE_COMMAND} -E env
+            IDF_PATH=/home/sun/env/esp-idf
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tls_constants.py)
+
+
+add_executable(tls_io_tests
+    tls_io_tests.c
+    ../components/tls_io/tls_io.c
+)
+target_include_directories(tls_io_tests PRIVATE ../components/tls_io/include)
+target_compile_options(tls_io_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_io_tests COMMAND tls_io_tests)
+
+add_executable(tls_link_adapt_tests
+    tls_link_adapt_tests.c
+    ../components/tls_link_adapt/tls_link_adapt.c
+    ../components/tls_io/tls_io.c
+)
+target_include_directories(tls_link_adapt_tests PRIVATE
+    ../components/tls_link_adapt/include
+    ../components/tls_io/include
+    ../components/link_tcp/include
+    ../components/link/include
+)
+target_compile_options(tls_link_adapt_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_link_adapt_tests COMMAND tls_link_adapt_tests)
+
+add_executable(link_rx_adapt_tests
+    link_rx_adapt_tests.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
+)
+target_include_directories(link_rx_adapt_tests PRIVATE
+    stubs
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(link_rx_adapt_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME link_rx_adapt_tests COMMAND link_rx_adapt_tests)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 跨语言对锚：固件侧 C 客户端（task-13）
+#
+# 这是"固件 C 与后端 Go 从未在真实链路上对话过"的第一半：用**真实固件栈**
+# 通过**真实 TCP socket** 发真实字节，并校验对端回帧。
+#
+# 与其它 target 的关键区别：**它不是 add_test**。它需要一个真实对端
+# （Lead 的 Go 服务端）才能跑，不能进 ctest —— 否则 ctest 会因为"连不上"
+# 而红，而那与"代码坏了"完全不是一回事。
+#
+# 组件与 session_tests 完全相同，因为本程序按 session.c:58-66 的方式自己
+# 组装同一批真实层（session 没有上行入口 —— 见源文件头部注释）。
+add_executable(firmware_tcp_e2e_client
+    firmware_tcp_e2e_client.c
+    # task-15：客户端改为**只用 session 收发**（此前绕开 session 自己拼下面四层，
+    # 因为当时 session 没有上行入口）。因此这里也要编入 session.c。
+    ../components/session/session.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+    # task-17：握手决策（与 main/device_link_wiring.c 用的是**同一份**）
+    ../main/device_link_handshake.c
+    # ⭐ task-31：**生产成帧函数**（devlink_encode_frame）。编入本 target 是为了让
+    # 对锚与真机走同一条成帧路径 —— 此前客户端自己拼 12 B 头，于是"生产上行
+    # 不成帧"这个缺陷能长期藏在全绿后面（对锚证明的是**另一个程序**）。
+    # 只编纯判定段（DEVICE_LINK_HOST_TEST=1），不含 IDF 头。
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/frame/frame_codec.c
+    # task-23：Hello 改用**真实 handler 的编码**（消除客户端手写的第二份定义）。
+    # 客户端调用生产的 msg_handler_send_hello()，并提供 msg_handler_publish()
+    # 的捕获实现来接住产出的字节 —— 与 hello_handshake_tests 同一手法。
+    # ⚠ 未改任何生产文件（没有给 handler_hello.c 加"只编码不发布"的新入口）。
+    ../components/msg_handler/handler_hello.c
+    # task-25：真实 device_op 回程 —— 编入**真实的** msg_handler.c（含真实分发
+    # switch 与真实 msg_handler_publish_checked）+ 真实 handler_device_op.c +
+    # 真实 device_op.c。这样 0x22 → 分发 → 执行 → 钩子 → 发布 → 广播 全程是真代码。
+    ../components/msg_handler/msg_handler.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
+    # 真实广播路径的落点（msg_handler_publish_checked → transport_broadcast_ex）。
+    ../components/transport/transport.c
+)
+target_include_directories(firmware_tcp_e2e_client PRIVATE
+    # ⚠ ../components/msg_handler 必须在 hello_stubs **之前**：
+    #   hello_stubs/msg_handler.h 是个只声明 Hello 相关函数的桩，它会**遮蔽**
+    #   真实头里的 msg_handler_process / msg_handler_set_device_op_hooks 等
+    #   ⇒ 编译期报 implicit declaration（task-25 实测踩到）。真实头是超集。
+    ../components/msg_handler
+    hello_stubs
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/dma_pool/include
+    ../components/device_op/include
+    ../main
+    ../components/frame
+    ../components/session/include
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+    ../components/variant/include   # task-31: device_link_wiring.h -> variant.h
+)
+# task-31：只编 device_link_wiring.c 的**纯判定段**（成帧函数在那里）。
+target_compile_definitions(firmware_tcp_e2e_client PRIVATE DEVICE_LINK_HOST_TEST=1)
+target_compile_options(firmware_tcp_e2e_client PRIVATE -Wall -Wextra -Werror)
+
+# 3.0 应用层握手的**决策**（task-17）。纯函数、无 IDF 依赖。
+#
+# 为什么单列：这组用例防的是"接线了但走不完握手"——补它之前 main/ 里没有任何
+# 地方调用 session_send / session_note_handshake，链路永远停在 WAIT_HANDSHAKE，
+# 而构建/门禁/组件单测全是绿的。
+add_executable(device_link_handshake_tests
+    device_link_handshake_tests.c
+    ../main/device_link_handshake.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(device_link_handshake_tests PRIVATE
+    ../main
+    ../components/frame
+    ../components/session/include
+    ../components/link/include
+    ../components/link_tcp/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(device_link_handshake_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_handshake_tests COMMAND device_link_handshake_tests)
+
+# 上行入口 session_send（task-15）。与 session_tests 分开：
+# session_tests 锁"退避只由应用层握手重置"；本文件锁"第一帧到底发不发得出去"
+# —— 那是另一条独立性更强、错了会让 3.0 链路完全不可用却处处不报错的路径。
+add_executable(session_send_tests
+    session_send_tests.c
+    ../components/session/session.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
+)
+target_include_directories(session_send_tests PRIVATE
+    stubs
+    ../components/session/include
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(session_send_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME session_send_tests COMMAND session_send_tests)
+
+add_executable(session_tests
+    session_tests.c
+    ../components/session/session.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
+)
+target_include_directories(session_tests PRIVATE
+    stubs
+    ../components/session/include
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(session_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME session_tests COMMAND session_tests)
+
+add_executable(sntp_mgr_tests
+    sntp_mgr_tests.c
+    ../components/sntp_mgr/sntp_mgr.c
+)
+target_include_directories(sntp_mgr_tests PRIVATE ../components/sntp_mgr/include)
+target_compile_options(sntp_mgr_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME sntp_mgr_tests COMMAND sntp_mgr_tests)
+
+add_test(NAME check_sdkconfig_symbols
+    COMMAND ${CMAKE_COMMAND} -E env
+            IDF_PATH=/home/sun/env/esp-idf
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_sdkconfig_symbols.py)
+
+add_test(NAME check_message_types
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_message_types.py)
+
+
+# ⚠ 2026-10-08：transport_sel_tests 已随 components/transport_sel **整体删除**。
+#   该组件的唯一用途是"TCP 优先 / MQTT 兜底"选路；MQTT 移除后只剩一条传输，
+#   选路策略无从谈起（"有链路就用它"），故源码与用例一并删除。
+
+# 远程运维（0x22 -> 0x23）：解析、结果如实回显、request_id 关联、未注入原语即拒绝。
+# 只编译 handler_device_op.c + frame_codec.c + device_op.c ——
+# 不拉 msg_handler.c（它牵动整棵组件树），因此这三个文件的契约在本机可独立验证。
+add_executable(handler_device_op_tests
+    handler_device_op_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+
+# task-24：**真实** 0x22→执行→0x23 回程的字节级证明。
+# 对锚里那条 0x23 是手写常量（firmware_tcp_e2e_client.c:90-93）⇒ 只证明
+#「手写的正确形状能被后端接受」，没证明「设备真的会产生它」。
+# 本用例用真实 handler_device_op.c + device_op.c 跑一遍并断言 == 共享向量。
+add_executable(device_op_ack_realtime_tests
+    device_op_ack_realtime_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_ack_realtime_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_ack_realtime_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_op_ack_realtime_tests COMMAND device_op_ack_realtime_tests)
+target_include_directories(handler_device_op_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(handler_device_op_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME handler_device_op_tests COMMAND handler_device_op_tests)
+
+# 让**固件真实实现**（handler_device_op.c）消费共享向量，而不是只用通用编解码器。
+# 既有 golden_vectors_tests 只证明"通用 encoder 能产出这串字节"，
+# 证明不了"handler 用的是 field 1/2/3" —— 字段号写错它照样绿。
+# 本用例与后端 Go 的 device_op_vectors_test.go 用同一串字节对锚。
+add_executable(device_op_shared_vectors_tests
+    device_op_shared_vectors_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_shared_vectors_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_shared_vectors_tests PRIVATE -Wall -Wextra -Werror)
+# 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
+# （与 golden_vectors_tests 同一口径）。
+add_test(NAME device_op_shared_vectors_tests
+    COMMAND device_op_shared_vectors_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
+
+# main 侧注入的三个原语：NVS 擦除 / 同步发送 / 重启。
+# 重点覆盖"命名空间不存在算成功"这条分支 —— 它错法的后果是
+# "一个永远失败、其实已经成功的恢复出厂"。
+add_executable(device_op_wiring_tests
+    device_op_wiring_tests.c
+    # 注入函数本身（msg_handler_set_device_op_hooks）在 handler_device_op.c 里；
+    # device_op.c 提供 device_op_reset_state 等。
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(device_op_wiring_tests PRIVATE
+    stubs
+    stubs/rom
+    ../main
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_wiring_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_op_wiring_tests COMMAND device_op_wiring_tests)

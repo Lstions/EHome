@@ -21,12 +21,12 @@ import (
 // newManifestTestManager builds a Manager (with driver registry) on the given
 // DB and a capturing publisher. Uses testutil.OpenTestDB so the same tests run
 // against SQLite and PostgreSQL (EHOME_TEST_DB=postgres).
-func newManifestTestManager(t *testing.T, db *gorm.DB, registry *drivers.Registry) (*Manager, *mockMQTTPublisher) {
+func newManifestTestManager(t *testing.T, db *gorm.DB, registry *drivers.Registry) (*Manager, *mockDownlinkPublisher) {
 	t.Helper()
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := &Manager{
 		db:             db,
-		mqtt:           mock,
+		downlink:       mock,
 		hashMgr:        NewConfigHashManager(),
 		eventBus:       NewConfigEventBus(64),
 		driverRegistry: registry,

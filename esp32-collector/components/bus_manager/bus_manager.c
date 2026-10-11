@@ -33,6 +33,29 @@
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static uint32_t s_runtime_generation;
 
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 最近一次成功 apply 时因 DMA 不可用而降级为 polled 的通道 id。
+ *
+ * 为什么用模块级快照：降级决策在 validate_manifest_resources 的栈上 plan 里，
+ * 而"提示"要经 msg_handler → ConfigResult 上报给后端 → 前端。
+ * 那两处拿不到栈上的 plan，所以在这里留一份只读快照。
+ *
+ * 线程/时序：只在 apply_manifest 的配置事务上下文写（单写者），
+ * 读取方（msg_handler 发 ConfigResult）在同一事务的后续步骤里，无并发。 */
+#define DMA_DEGRADED_MAX MAX_CHANNELS
+static uint32_t s_dma_degraded_ids[DMA_DEGRADED_MAX];
+static int s_dma_degraded_count;
+
+/* 供 msg_handler 读取（声明见 bus_manager.h）。 */
+int bus_manager_get_dma_degraded_channels(uint32_t *out_ids, int max)
+{
+    if (out_ids && max > 0) {
+        int n = s_dma_degraded_count < max ? s_dma_degraded_count : max;
+        for (int i = 0; i < n; i++) out_ids[i] = s_dma_degraded_ids[i];
+    }
+    return s_dma_degraded_count;
+}
+
 void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb)
 {
     s_write_rsp_cb = cb;
@@ -316,6 +339,11 @@ static bool claim_resource_pin(int *owners, int pin, int owner)
 typedef struct {
     bool valid;
     int32_t controller_id;
+    /* ⚠ 2026-10-09（用户要求的两层设计的第二层）：
+     * 该通道请求了 DMA 但资源不可用，已降级为 polled。
+     * 用于在 apply 阶段保持一致（不能 preinstall 降级了、apply 又去要 DMA），
+     * 也用于把"降级"这件事**上报给后端**变成用户可见的提示。 */
+    bool dma_degraded;
 } bus_plan_entry_t;
 
 static int32_t runtime_controller_id(const bus_dma_ctx_t *ctx)
@@ -389,6 +417,20 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
         for (int i = 0; i < MAX_CHANNELS; i++) {
             plan[i].valid = false;
             plan[i].controller_id = -1;
+            /* ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：
+             * **必须**显式清零 dma_degraded。
+             *
+             * 原实现只重置 valid/controller_id，把新增的 dma_degraded 漏了。
+             * plan 是 apply_manifest 里的**未初始化栈数组** ⇒ 该字段是随机值。
+             * 真机实测（C6，层① 临时关闭）后果：bus_manager_apply_manifest
+             * 把随机的 dma_degraded 当成 true 收集进 s_dma_degraded_ids
+             * ⇒ 上报了**通道 48**（实际它是拿到 DMA 的那条）：
+             *   "2 channel(s) degraded"，其中 channel 48 是假阳性。
+             * ⇒ 前端会显示一条不成立的告警，用户被误导去关一条正常的通道。
+             *
+             * ⚠ 教训：给结构体加字段时，"哪些地方初始化它"必须一起找齐。
+             *   这里 plan 的两处重置点（valid/controller_id）就是全部线索。 */
+            plan[i].dma_degraded = false;
         }
     }
     bool used_uart[HW_UART_COUNT] = {false};
@@ -665,6 +707,28 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
         /* USB owns its own packet buffers; there is no DMA pool lease to take
          * (and no GDMA channel to contend for with the UARTs). */
         if (dma_requested && ch->bus_type != BUS_TYPE_USB) {
+            /* ⚠⚠ 2026-10-09（用户要求，两层设计的第二层）：
+             *   用户原话："用户手动开两条 UART DMA：ESP32应该直接报错，前端显示错误，
+             *             DMA 分不到降级为提示"
+             *
+             * 这里是**第二层（降级 + 提示）**：DMA 分不到时**不再拒绝整份 manifest**，
+             * 而是把这条通道降级为 polled 并告警。
+             *
+             * 为什么必须降级而不能拒绝：§211 的 C6 现场事故证明"拒绝整份"的代价是
+             * **全部通道都不工作**（设备 ch=0、永远 syncing、后端 2818 次 config failed），
+             * 而用户**完全看不到原因**。这与设计原则矛盾：
+             *   fab4e2fc v2.0 §1.4 原则 3：
+             *     "节点默认开启 DMA — DMA 优先分配，**不可用时自动降级 polled**"
+             *
+             * ⚠ 分工（用户 2026-10-09 明确的两层）：
+             *   · **用户显式**开多条 UART DMA ⇒ 后端 validateUARTDMASlots 在**编码前**
+             *     就拒绝并回错误给前端（manifest_codec.go）—— 那是**硬报错**。
+             *   · **非显式冲突**（如资源被别的总线占、硬件不支持）⇒ 落到这里，
+             *     **降级 + 提示**，不拒绝整份。
+             *   ⇒ 所以本函数现在只处理"意料之外的不可用"，不处理用户配置错误。
+             *
+             * ⚠ 仍保留一处**致命**：!have_dma（连 DMA 池都没有）是配置/初始化
+             *   层面的错误，不是资源争用 —— 那种情况降级会掩盖真正的问题。 */
             if (!have_dma) return ESP_ERR_INVALID_STATE;
             uint32_t dma_id = 0;
             char hw_id[16] = {0};
@@ -673,8 +737,15 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
              * pin matcher intentionally returns UNKNOWN. */
             format_resource_hw_id(hw_id, sizeof(hw_id), ch->bus_type, resource_id);
             if (!resource_id || dma_pool_allocate(&simulated_dma, ch->bus_type,
-                                                   hw_id, &dma_id) != ESP_OK)
-                return ESP_ERR_NOT_FOUND;
+                                                   hw_id, &dma_id) != ESP_OK) {
+                /* 降级为 polled，并把结果记进 plan 供 apply 阶段使用。 */
+                ESP_LOGW(TAG,
+                         "ch=%" PRIu32 " DMA unavailable (hw_id=%s); "
+                         "degrading to polled. Other channels keep working.",
+                         ch->id, resource_id ? hw_id : "(none)");
+                if (plan) plan[i].dma_degraded = true;
+                dma_requested = false;
+            }
         }
         if (plan) {
             plan[i].valid = true;
@@ -743,10 +814,24 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                     ESP_LOGI(TAG, "ch=%" PRIu32 " DMA allocated (id=%" PRIu32 ")",
                              ch_id, dma_id);
                 } else {
-                    ESP_LOGE(TAG, "ch=%" PRIu32 " DMA requested but allocation failed: %s",
+                    /* ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：
+                     * 这里**也必须降级**，与 validate_manifest_resources 的第二层一致。
+                     *
+                     * 原实现直接 return dma_err ⇒ 整份 manifest 失败。
+                     * 真机实测（C6，层① 临时关闭）：
+                     *   plan 阶段已正确降级（"2 channel(s) degraded to polled"），
+                     *   但 apply 阶段又在这里硬失败 ⇒ ConfigResult success=0
+                     *   ⇒ 降级形同虚设，用户仍看到"配置失败"。
+                     *
+                     * ⚠ 这正是我 §213.4 声称"已修"的一致性缺陷的**第二个实例**：
+                     *   我当时只修了 bus_manager_preinstall_uarts 的读取，
+                     *   没注意到 apply 路径里还有一处**独立**的 DMA 分配。
+                     *   ⇒ 教训：改"降级"语义时，必须找出**所有**分配点，
+                     *     而不是修完第一个就以为覆盖了。 */
+                    ESP_LOGW(TAG, "ch=%" PRIu32 " DMA unavailable (%s); "
+                                  "degrading to polled. Other channels keep working.",
                              ch_id, esp_err_to_name(dma_err));
-                    rt->bus_ch[i] = 0;
-                    return dma_err;
+                    dma = false;
                 }
             } else {
                 ESP_LOGI(TAG, "ch=%" PRIu32 " DMA disabled by user config", ch_id);
@@ -891,6 +976,20 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
         ESP_LOGE(TAG, "manifest resource plan rejected: %s", esp_err_to_name(plan_err));
         return plan_err;
     }
+    /* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+     * 把计划阶段的降级结果快照下来，供 ConfigResult 上报给后端 → 前端。
+     * 位置必须在 validate_manifest_resources 之后、任何后续 return 之前。 */
+    s_dma_degraded_count = 0;
+    for (int di = 0; di < manifest->channel_count && di < MAX_CHANNELS; di++) {
+        if (plan[di].dma_degraded && s_dma_degraded_count < DMA_DEGRADED_MAX) {
+            s_dma_degraded_ids[s_dma_degraded_count++] = manifest->channels[di].id;
+        }
+    }
+    if (s_dma_degraded_count > 0) {
+        ESP_LOGW(TAG, "%d channel(s) degraded to polled (DMA unavailable); "
+                      "reported to the backend as a warning",
+                 s_dma_degraded_count);
+    }
     uint32_t generation = ++s_runtime_generation;
     uint8_t enabled_count = 0;
     for (int i = 0; i < manifest->channel_count; i++) {
@@ -1033,8 +1132,18 @@ esp_err_t bus_manager_preinstall_uarts(bus_runtime_t *rt, const config_manifest_
         if (lease != NULL) preferred = runtime_controller_id(lease);
 
         uart_port_t port = UART_NUM_MAX;
+        /* ⚠ 2026-10-09（两层设计的第二层）：必须复用**资源计划**的降级决策。
+         * 若这里重新读 config_channel_get_dma_enabled(ch)，就会把计划阶段
+         * 已经降级为 polled 的通道**又当成要 DMA** —— preinstall 与 apply
+         * 不一致，降级形同虚设（而且会在 apply 阶段重新失败）。 */
+        /* plan 在此处是栈上数组（见函数开头 `bus_plan_entry_t plan[MAX_CHANNELS]`），
+         * 恒非 NULL —— 不能写 `plan && ...`（-Werror=address 会报错）。 */
+        bool dma_for_this_ch = config_channel_get_dma_enabled(ch);
+        if (plan[i].dma_degraded) {
+            dma_for_this_ch = false;
+        }
         esp_err_t err = bus_dma_uart_preinstall(tx, rx, baud,
-                                                config_channel_get_dma_enabled(ch),
+                                                dma_for_this_ch,
                                                 preferred, &port);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "UART preinstall failed for ch=%" PRIu32 ": %s",
@@ -1216,17 +1325,27 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
 }
 
+/* ⭐ 方案 D（2026-10-10）：plan 不再作为参数传入、也不再 memcpy 进队列元素。
+ *
+ * 元素里那个 512 B 的副本已删除（见 bus_dma/include/cmd_queue.h）；plan 只
+ * 存在于 msg_handler 的 control 槽位里，由 bus_worker 通过
+ * channel_cmd_v2_borrow_plan() 按 control_slot 借用。
+ *
+ * 本函数仍需要 plan 的**长度/步数**做准入校验（否则非法 plan 会被入队，
+ * 直到 worker 才被发现）。这两个值是纯标量，由调用方（main.c 的
+ * on_channel_cmd_v2_received）从已解析的 channel_cmd_v2_t 直接传值 ——
+ * 因此本组件**不需要**依赖 msg_handler，也不必接触任何指针。 */
+
 bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
                                    const uint8_t *data, size_t len, uint32_t read_size,
                                    uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
-                                   const uint8_t *plan_data, size_t plan_len,
-                                   uint8_t plan_step_count,
+                                   size_t plan_len, uint8_t plan_step_count,
                                    uint8_t control_slot)
 {
     if (!rt || control_slot == CONTROL_SLOT_NONE ||
         !legacy_write_args_valid(ch, data, len, read_size, rx_timeout_ms, CMD_TX_MAX) ||
         plan_len > CMD_PLAN_MAX || plan_step_count > CMD_BATCH_MAX_STEPS ||
-        (plan_step_count > 0 && (!plan_data || plan_step_count < 2))) return false;
+        (plan_step_count > 0 && plan_step_count < 2)) return false;
     bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
     if (!bctx) return false;
     /* Multi-step plans (write + readback) need the same sequential TX→RX engine
@@ -1235,10 +1354,11 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
      * atomic in spi_i2c_cmd_loop and still cannot. */
     if (plan_step_count > 0 && bctx->bus_type != BUS_TYPE_UART &&
         bctx->bus_type != BUS_TYPE_USB) return false;
+    /* ⭐ 方案 D：元素里不再有 plan 成员。plan_len / plan_step_count 只用于上面
+     * 的准入校验；执行时由 bus_worker 按 control_slot 从槽位借用。 */
     bus_cmd_t cmd = { .channel_id = ch, .bus_type = bctx->bus_type, .tx_len = len,
         .delay_ms = post_tx_delay_ms, .read_size = read_size, .rx_timeout_ms = rx_timeout_ms,
-        .channel_cmd_v2 = true, .control_slot = control_slot, .plan_len = plan_len,
-        .plan_step_count = plan_step_count, .type = CMD_WRITE };
+        .channel_cmd_v2 = true, .control_slot = control_slot, .type = CMD_WRITE };
     if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
     if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) return false;
     /* UART and USB are served by uart_cmd_loop, which has an explicit TX→RX
@@ -1247,7 +1367,8 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
     if (cmd.bus_type != BUS_TYPE_UART && cmd.bus_type != BUS_TYPE_USB &&
         post_tx_delay_ms != 0) return false;
     memcpy(cmd.tx_data, data, len);
-    if (plan_len > 0) memcpy(cmd.plan_data, plan_data, plan_len);
+    /* ⭐ 方案 D：不再 memcpy plan —— 它留在 msg_handler 的槽位里，
+     * bus_worker 通过 channel_cmd_v2_borrow_plan() 按 control_slot 借用。 */
     QueueHandle_t target_q = NULL;
     switch (cmd.bus_type) {
     case BUS_TYPE_UART:

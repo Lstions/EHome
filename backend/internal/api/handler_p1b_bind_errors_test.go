@@ -102,7 +102,7 @@ func TestP1B_Node_I2CScan_RejectsMalformedJSON(t *testing.T) {
 	}
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	for _, tc := range []struct {
 		name string

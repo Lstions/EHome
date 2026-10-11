@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -59,6 +60,11 @@ typedef struct {
     uart_event_type_t type;
     size_t size;
     uint8_t *data;
+    /* P3 (2026-10-10): the IDF driver sets this on UART_DATA events —
+     * false when the RX FIFO filled up, true when the RX timeout fired and the
+     * line went idle (i.e. the hardware saw a frame boundary).  The firmware
+     * now reads it, so the stub must model it; tests drive it directly. */
+    bool timeout_flag;
 } uart_event_t;
 
 /* Driver function declarations — implementations provided by test files */

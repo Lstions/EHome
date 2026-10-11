@@ -31,7 +31,19 @@ type runtimePerformanceReport struct {
 	// WiFiRssiAbs is |RSSI| in dBm from sub-frame field 28 (v2.3+).
 	// 0 = no data; positive values convert to dBm via rssi = -int(WiFiRssiAbs).
 	WiFiRssiAbs uint32 `json:"wifi_rssi_abs"`
+	// LargestFreeInternalBytes is sub-frame field 29 (P4, 2026-10-10): the
+	// largest free internal heap block.  The firmware's memory gate judges on
+	// this unit, but before field 29 it never left the device in steady state,
+	// so "did the node pass its gate" was not observable online.  0 = the
+	// firmware did not send the field.
+	LargestFreeInternalBytes uint32 `json:"largest_free_internal_bytes"`
 }
+
+// maxPerfFieldNum is the highest runtime-performance field this backend knows.
+// A device may send HIGHER numbers (a newer firmware); those are skipped rather
+// than rejected, so an older backend never discards the whole block.  Bump this
+// when adding a case below.
+const maxPerfFieldNum = 29
 
 // controlStatisticsReport is a bounded boot-local aggregate from the V2
 // firmware path.  It has no identifiers or payloads and exists solely for
@@ -49,7 +61,11 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 	if err != nil {
 		return report, err
 	}
-	seen := [29]bool{}
+	// P4 (2026-10-10): unknown HIGHER field numbers are skipped instead of
+	// rejected.  The old "> 28 -> error" rule meant a firmware that added a
+	// field made every older backend discard the entire performance block.
+	// Lower bound, wire type and duplicates are still enforced.
+	seen := [maxPerfFieldNum + 1]bool{}
 	for {
 		field, err := dec.NextField()
 		if errors.Is(err, frame.ErrEndOfFrame) {
@@ -58,8 +74,14 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 		if err != nil {
 			return report, err
 		}
-		if field.FieldNum < 1 || field.FieldNum > 28 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+		if field.FieldNum < 1 || field.WireType != frame.WireVarint {
 			return report, fmt.Errorf("invalid runtime performance field")
+		}
+		if field.FieldNum > maxPerfFieldNum {
+			continue // forward compatibility: ignore an unknown tail field
+		}
+		if seen[field.FieldNum] {
+			return report, fmt.Errorf("duplicate runtime performance field")
 		}
 		value := frame.GetUint64(field)
 		if value > math.MaxUint32 {
@@ -91,6 +113,8 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 			report.QueueSampleRejected[field.FieldNum-23] = uint32(value)
 		case 28: // v2.3: WiFi RSSI absolute value (|dBm|), 0 = no data
 			report.WiFiRssiAbs = uint32(value)
+		case 29: // P4: largest free internal heap block (the memory gate's unit)
+			report.LargestFreeInternalBytes = uint32(value)
 		}
 	}
 	for field := uint8(1); field <= 5; field++ {
@@ -335,6 +359,11 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	if performance != nil || controlStatistics != nil {
 		if performance != nil {
 			updates["free_heap_bytes"] = int(performance.FreeHeapBytes)
+			// P4 (2026-10-10): field 29.  Only written when the firmware sent
+			// it, so an older device never clobbers a known value with 0.
+			if performance.LargestFreeInternalBytes > 0 {
+				updates["largest_free_internal_bytes"] = int(performance.LargestFreeInternalBytes)
+			}
 
 			// v2.3: derive wifi_rssi + connection_quality from runtime performance
 			// field 28 (|RSSI| dBm) and the last measured ping RTT.

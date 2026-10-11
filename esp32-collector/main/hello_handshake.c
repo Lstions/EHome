@@ -208,6 +208,32 @@ bool hello_handshake_request_sync(void)
     return true;
 }
 
+/* === task-33：3.0 链路的 arm 入口（决策 B′）===
+ *
+ * 3.0 链路走这里取 nonce，而**不是**自己 esp_random()。
+ * 为什么不让它直接调 hello_runtime_arm_link：runtime 是本文件的 static
+ * （s_runtime），外部拿不到句柄；经本函数转发也保证了"3.0 与 2.x 用同一份
+ * runtime"这件事是**结构性**的，而不是靠调用方自觉。
+ *
+ * ⚠ 这里**不**调 notify_worker()：worker 属于 2.x 状态机，3.0 有自己的
+ * 链路任务与状态机（dlhs_*）。唤醒 worker 会让它按 2.x 的逻辑再发一条
+ * Hello —— 正是决策文档 §3 否掉候选 A 的次生问题之一。
+ */
+bool hello_handshake_arm_link_nonce(uint32_t *nonce)
+{
+    return hello_runtime_arm_link(&s_runtime, nonce);
+}
+
+void hello_handshake_clear_link_nonce(void)
+{
+    hello_runtime_clear_link_arm(&s_runtime);
+}
+
+uint32_t hello_handshake_debug_armed_transport(void)
+{
+    return (uint32_t)hello_runtime_armed_transport(&s_runtime);
+}
+
 bool hello_handshake_notify_ack(uint32_t nonce)
 {
     if (!hello_runtime_notify_ack(&s_runtime, nonce)) return false;

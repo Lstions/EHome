@@ -1,0 +1,16 @@
+# 诊断专用：heap trace STANDALONE（**不得进交付配置**）
+#
+# 用途：把每次堆分配连同调用栈记录下来，用于定位"谁吃掉了 internal 连续块"。
+# 见 main/heap_trace_diag.c 顶部注释（task-34 四次归因失败的记录）。
+#
+# ⚠ 代价：每次分配都会走跟踪钩子 ⇒ 明显变慢；记录缓冲另占约 64 KB。
+# 用法：EXTRA_SDKCONFIG_DEFAULTS="/tmp/link90.defaults;<this file>" 并同时 -DEHOME_HEAP_TRACE=1
+
+CONFIG_HEAP_TRACING_STANDALONE=y
+
+# 记录缓冲放外部 RAM：本卡测的正是**内部**连续块，把工具放进内部会改变被测对象。
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_HEAP_TRACE_HASH_MAP_IN_EXT_RAM=y
+
+# 调用栈深度：2 只能看到直接调用者；4 才有定位价值（代价是记录更大）。
+CONFIG_HEAP_TRACING_STACK_DEPTH=4

@@ -49,28 +49,21 @@ func (fourCommandDriver) GetCommandTemplates() []drivers.CommandTemplate {
 	}
 }
 
-// mockMQTTPublisher 记录所有发布的消息, 用于验证 SendPeriphCmd 编码正确性
-type mockMQTTPublisher struct {
-	publishedTopic     string
-	publishedPayload   []byte
-	publishQoS2Topic   string
-	publishQoS2Payload []byte
-	publishErr         error
+// mockDownlinkPublisher 记录下行消息, 用于验证 SendPeriphCmd 编码正确性。
+//
+// ⚠ 字段改名如实反映语义：publishedTopic 里存的**一直是 nodeID**（MQTT 时代是
+// 从 topic 里读出来的），QoS2 那两个字段随 PublishQoS2 一起删除 —— QoS 是 MQTT
+// 概念，3.0 没有等价物（旧路径本就把 QoS2 降级成 best-effort 并计数，见
+// internal/downlink 的包注释）。
+type mockDownlinkPublisher struct {
+	publishedNodeID  string
+	publishedPayload []byte
+	publishErr       error
 }
 
-func (m *mockMQTTPublisher) Publish(topic string, payload []byte) error {
-	m.publishedTopic = topic
+func (m *mockDownlinkPublisher) Publish(nodeID string, payload []byte) error {
+	m.publishedNodeID = nodeID
 	m.publishedPayload = payload
-	return m.publishErr
-}
-
-func (m *mockMQTTPublisher) PublishQoS2(topic string, payload []byte) error {
-	m.publishQoS2Topic = topic
-	m.publishQoS2Payload = payload
-	return m.publishErr
-}
-
-func (m *mockMQTTPublisher) PublishRetained(topic string, payload []byte) error {
 	return m.publishErr
 }
 
@@ -82,7 +75,7 @@ func (m *mockMQTTPublisher) PublishRetained(topic string, payload []byte) error 
 func TestSendPeriphCmd_MessageType(t *testing.T) {
 	// Arrange
 	db := setupTestDBForPeriph(t)
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	db.Create(&models.Node{NodeID: "dev1", Status: "online"})
 
@@ -104,41 +97,49 @@ func TestSendPeriphCmd_MessageType(t *testing.T) {
 func TestSendPeriphCmd_NilMQTTFailsClosed(t *testing.T) {
 	db := setupTestDBForPeriph(t)
 	mgr := newManagerWithMock(db, nil)
-	mgr.mqtt = nil
+	mgr.downlink = nil
 	if err := mgr.SendPeriphCmd("dev1", 1, 0, 1, 0, nil); err == nil {
 		t.Fatal("nil MQTT client must return an error instead of panicking")
 	}
 }
 
-func TestSendPeriphCmd_UsesQoS1Publish(t *testing.T) {
+// TestSendPeriphCmd_Publishes -- 命令确实被发出去。
+//
+// ⚠ 原名 TestSendPeriphCmd_UsesQoS1Publish，断言两件事：走了 Publish、没走
+// PublishQoS2。后一条随 PublishQoS2 一起消失（3.0 没有 QoS），**保留它只会是
+// 一条永远成立的空断言**，所以删掉；留下的是真正有价值的那条：命令发出去了。
+func TestSendPeriphCmd_Publishes(t *testing.T) {
 	db := setupTestDBForPeriph(t)
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	if err := mgr.SendPeriphCmd("dev1", 1, 0, 1, 0, nil); err != nil {
 		t.Fatalf("SendPeriphCmd failed: %v", err)
 	}
 	if len(mock.publishedPayload) == 0 {
-		t.Fatal("QoS1 Publish was not used")
+		t.Fatal("SendPeriphCmd did not publish anything")
 	}
-	if len(mock.publishQoS2Payload) != 0 {
-		t.Fatal("QoS2 Publish must not be used for ESP-MQTT peripheral commands")
+	if mock.publishedNodeID != "dev1" {
+		t.Errorf("published to %q, want dev1", mock.publishedNodeID)
 	}
 }
 
-// TestSendPeriphCmd_Topic 验证发布到正确的 MQTT topic
-func TestSendPeriphCmd_Topic(t *testing.T) {
+// TestSendPeriphCmd_TargetsTheNode 验证下行寻址到正确的节点。
+//
+// ⚠ 原名 TestSendPeriphCmd_Topic，断言的是 "nodes/dev1/control" 这个 MQTT topic。
+// MQTT 删除后下行**直接寻址节点**（topic 已随 MQTT 一起消失，见 internal/downlink
+// 的包注释），所以断言对象改为 nodeID —— 检查的是同一件事：命令发给了谁。
+func TestSendPeriphCmd_TargetsTheNode(t *testing.T) {
 	db := setupTestDBForPeriph(t)
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	// Act
 	mgr.SendPeriphCmd("dev1", 1, 5, 0, 0, nil)
 
 	// Assert
-	expectedTopic := "nodes/dev1/control"
-	if mock.publishedTopic != expectedTopic {
-		t.Errorf("expected topic %s, got %s", expectedTopic, mock.publishedTopic)
+	if mock.publishedNodeID != "dev1" {
+		t.Errorf("expected downlink to node dev1, got %q", mock.publishedNodeID)
 	}
 }
 
@@ -192,7 +193,7 @@ func TestSendPeriphCmd_Fields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Arrange
 			db := setupTestDBForPeriph(t)
-			mock := &mockMQTTPublisher{}
+			mock := &mockDownlinkPublisher{}
 			mgr := newManagerWithMock(db, mock)
 
 			// Act
@@ -273,7 +274,7 @@ func TestSendPeriphCmd_Fields(t *testing.T) {
 // TestSendPeriphCmd_RequestIDIncrement 验证 request_id 自增
 func TestSendPeriphCmd_RequestIDIncrement(t *testing.T) {
 	db := setupTestDBForPeriph(t)
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	// Act: 发送两次命令, request_id 应递增
@@ -315,7 +316,7 @@ func TestSendPeriphCmd_RequestIDIncrement(t *testing.T) {
 // TestSendPeriphCmd_PublishError 验证 MQTT 发布失败时返回错误
 func TestSendPeriphCmd_PublishError(t *testing.T) {
 	db := setupTestDBForPeriph(t)
-	mock := &mockMQTTPublisher{publishErr: errMockPublish}
+	mock := &mockDownlinkPublisher{publishErr: errMockPublish}
 	mgr := newManagerWithMock(db, mock)
 
 	err := mgr.SendPeriphCmd("dev1", 1, 1, 0, 0, nil)
@@ -349,7 +350,7 @@ func setupTestDBForManifest(t *testing.T, nodeID string, protocolVersion string)
 func TestConfigManifest_GPIOConfigs(t *testing.T) {
 	// Arrange
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	// 创建 GPIO 配置 (全部 enabled=true, 注意 GORM default:true 会覆盖 false)
@@ -413,7 +414,7 @@ func TestConfigManifest_GPIOConfigs(t *testing.T) {
 func TestConfigManifest_PWMConfigs(t *testing.T) {
 	// Arrange
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, AutoStart: false, Enabled: true})
@@ -486,7 +487,7 @@ func TestConfigManifest_PWMConfigs(t *testing.T) {
 func TestConfigManifest_PeriphVersionGate(t *testing.T) {
 	// Arrange: 使用旧版本固件
 	db := setupTestDBForManifest(t, "dev1", "2.3")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 1, Enabled: true})
@@ -529,7 +530,7 @@ func TestConfigManifest_PeriphVersionGate(t *testing.T) {
 func TestConfigManifest_PeriphVersion_2_4(t *testing.T) {
 	// Arrange: 2.4 版本应包含 GPIO/PWM
 	db := setupTestDBForManifest(t, "dev1", "2.4")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
 	db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 1, Direction: 0, Enabled: true})
@@ -564,7 +565,7 @@ func TestConfigManifest_PeriphVersion_2_4(t *testing.T) {
 func TestConfigManifest_PeriphEmpty(t *testing.T) {
 	// Arrange
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	// 不创建任何 GPIO/PWM 配置
 
@@ -601,15 +602,67 @@ func TestConfigManifest_PeriphEmpty(t *testing.T) {
 	}
 }
 
-func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
-	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
-	mgr := newManagerWithMock(db, mock)
-	for i := 0; i < maxManifestTemplates+1; i++ {
-		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
+// §206.3 修复后，容量门禁只统计"被启用设备引用"的模板
+// （pruneUnreferencedTemplates 剪掉无引用模板 —— 设备根本收不到它们）。
+// 所以这两个容量测试必须先造出"启用设备 + 驱动命令 write_data 引用"，
+// 否则模板被剪成 0，门禁自然不拒绝 —— 那样测试就测不到东西了。
+//
+// ⚠ 这不是把测试改松，而是让测试**描述真实约束**：
+//
+//	固件 MAX_TEMPLATES 限制的是"设备实际收到几个模板"，
+//	而设备只收到被引用的模板（§206.3 真机证实：0 个启用设备 ⇒ 设备收到 0 模板）。
+//
+// 走 v2 多命令路径（而非 legacy 单命令）：legacy 的 findTemplateID 只取
+// 通道 template_ids 里的第一个 id，一个通道只能引用 1 个模板，造不出 N 个。
+func registryWithReferencedTemplates(t *testing.T, db *gorm.DB, count int) *drivers.Registry {
+	t.Helper()
+	cmds := make([]drivers.CommandTemplate, 0, count)
+	for i := 0; i < count; i++ {
+		cmds = append(cmds, drivers.CommandTemplate{
+			ID: fmt.Sprintf("c%d", i), Type: "read",
+			WriteData: fmt.Sprintf("%02X", i), ReadLength: 1,
+			IntervalMs: 1000, Schedulable: true,
+		})
+	}
+	registry := drivers.NewRegistry()
+	registry.Register(&manyCmdDriver{cmds: cmds})
+
+	ch := models.Channel{ID: 900, NodeID: "dev1", HardwareType: "UART", BusType: "UART",
+		HardwareID: "UART1", Enabled: true, BusConfig: "10110000096000"}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < count; i++ {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1",
+			WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
+	ed := models.EdgeDevice{NodeID: "dev1", ChannelID: ch.ID, Name: "ref", HardwareID: "1",
+		Enabled: true, Status: "pending", InitState: "pending", Type: "many-cmd"}
+	if err := db.Create(&ed).Error; err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
+// manyCmdDriver 声明任意条可轮询命令，供容量测试造出 N 个被引用模板。
+type manyCmdDriver struct{ cmds []drivers.CommandTemplate }
+
+func (d *manyCmdDriver) DeviceType() string                             { return "many-cmd" }
+func (d *manyCmdDriver) DeviceName() string                             { return "many-cmd" }
+func (d *manyCmdDriver) OEM() string                                    { return "test" }
+func (d *manyCmdDriver) Category() string                               { return "test" }
+func (d *manyCmdDriver) HardwareTypes() []string                        { return []string{"uart"} }
+func (d *manyCmdDriver) GetSensorDefinitions() []drivers.SensorData     { return nil }
+func (d *manyCmdDriver) ParseData([]byte) ([]drivers.SensorData, error) { return nil, nil }
+func (d *manyCmdDriver) GetCommandTemplates() []drivers.CommandTemplate { return d.cmds }
+
+func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockDownlinkPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	mgr.driverRegistry = registryWithReferencedTemplates(t, db, maxManifestTemplates+1)
 
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "overflow", ManifestID: "overflow"})
 	if err == nil || !strings.Contains(err.Error(), "collector limit") {
@@ -629,16 +682,12 @@ func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
 
 func TestConfigManifestHonorsReportedTemplateCapacity(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	if err := db.Model(&models.Node{}).Where("node_id = ?", "dev1").Update("hardware_info", `{"manifest_capacity":{"max_templates":1,"max_channels":8,"max_template_ids":8}}`).Error; err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
+	mgr.driverRegistry = registryWithReferencedTemplates(t, db, 2)
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "reported-capacity", ManifestID: "reported-capacity"})
 	if err == nil || !strings.Contains(err.Error(), "collector limit is 1") {
 		t.Fatalf("expected reported-capacity failure, got %v", err)
@@ -683,7 +732,7 @@ func TestReconcileDriverTemplatesRejectsOverflowBeforeMutation(t *testing.T) {
 
 func TestConfigManifestRejectsTooManyV2EdgeDevicesBeforePublish(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
 		t.Fatal(err)
@@ -705,7 +754,7 @@ func TestConfigManifestRejectsTooManyV2EdgeDevicesBeforePublish(t *testing.T) {
 
 func TestConfigManifestRejectsTooManyV2CommandsBeforePublish(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	registry := drivers.NewRegistry()
 	registry.Register(fourCommandDriver{})
@@ -733,7 +782,7 @@ func TestConfigManifestRejectsTooManyV2CommandsBeforePublish(t *testing.T) {
 
 func TestConfigManifestV2ExplicitZeroIntervalsEncodeNoPollingCommands(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	registry := drivers.NewRegistry()
 	registry.Register(&drivers.JiabaidaBMSDriver{})
@@ -809,7 +858,7 @@ func TestConfigManifestV2ExplicitZeroIntervalsEncodeNoPollingCommands(t *testing
 
 func TestConfigManifest_RejectsLegacyPeripheralChannelsIncludingNumericAliases(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	db.Create(&models.Channel{NodeID: "dev1", HardwareType: "GPIO", BusType: "GPIO", Enabled: true})
 	db.Create(&models.Channel{NodeID: "dev1", HardwareType: "6", BusType: "6", Enabled: true})
@@ -849,7 +898,7 @@ func TestConfigManifestRevalidatesCurrentAuthorityAndRecordsFailure(t *testing.T
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupTestDBForManifest(t, "dev1", "2.5")
-			mock := &mockMQTTPublisher{}
+			mock := &mockDownlinkPublisher{}
 			mgr := newManagerWithMock(db, mock)
 			tc.seed(db)
 			err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "authority", ManifestID: "bad"})
@@ -870,7 +919,7 @@ func TestConfigManifestRevalidatesCurrentAuthorityAndRecordsFailure(t *testing.T
 
 func TestConfigManifestIgnoresDisabledTransportPinReservation(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	db.Create(&models.Channel{NodeID: "dev1", BusType: "I2C", HardwareType: "I2C", BusConfig: "0207", Enabled: true})
 	db.Model(&models.Channel{}).Where("node_id = ?", "dev1").Update("enabled", false)
@@ -905,10 +954,10 @@ func setupTestDBForPeriph(t *testing.T) *gorm.DB {
 }
 
 // newManagerWithMock 创建使用 mock MQTT publisher 的 Manager
-func newManagerWithMock(db *gorm.DB, mock *mockMQTTPublisher) *Manager {
+func newManagerWithMock(db *gorm.DB, mock *mockDownlinkPublisher) *Manager {
 	return &Manager{
 		db:       db,
-		mqtt:     mock,
+		downlink: mock,
 		hashMgr:  NewConfigHashManager(),
 		eventBus: NewConfigEventBus(64),
 	}
@@ -931,7 +980,7 @@ func newManagerWithMock(db *gorm.DB, mock *mockMQTTPublisher) *Manager {
 // must NOT still advertise in_sync/applied.
 func TestConfigManifestRejectionOverwritesStaleInSyncState(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
-	mock := &mockMQTTPublisher{}
+	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
 	registry := drivers.NewRegistry()
 	registry.Register(fourCommandDriver{})

@@ -1,4 +1,8 @@
 #include "factory_reset.h"
+/* ⭐ 2026-10-08：白名单抽到 factory_reset_namespaces.[ch]（P4 单一来源 + 宿主可测）。
+ * 原先它是本文件里的 static 数组 ⇒ 宿主引用不到 ⇒ 本文件长期零覆盖，
+ * 而 tests/ 下那份"测试"只能**复制**一份名单（且与生产不同，见 §166.4）。 */
+#include "factory_reset_namespaces.h"
 #include "rgb_led.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -11,13 +15,11 @@
 #define TAG "FACTORY_RESET"
 static bool s_in_progress = false;
 
-/* Namespace whitelist - only erase these during factory reset */
-static const char *NVS_NAMESPACES[] = {
-    "wifi_cfg",
-    "config",
-    "ota",
-};
-#define NVS_NAMESPACE_COUNT (sizeof(NVS_NAMESPACES) / sizeof(NVS_NAMESPACES[0]))
+/* 白名单已移到 factory_reset_namespaces.c —— **唯一来源**（P4）。
+ * 下面两个宏只是本文件内的短别名，避免改动大量调用点；
+ * ⚠ 不要在这里再写一份名单：那正是本次修掉的形态（两份定义必然漂移）。 */
+#define NVS_NAMESPACES       FACTORY_RESET_NAMESPACES
+#define NVS_NAMESPACE_COUNT  FACTORY_RESET_NAMESPACE_COUNT
 
 /* BOOT button GPIO differs by chip:
  *   S3: GPIO0 (standard BOOT pin, also used for ROM download mode)

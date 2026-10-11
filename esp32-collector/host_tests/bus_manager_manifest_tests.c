@@ -599,9 +599,47 @@ static void test_prune_protects_live_channel_leases(void)
     }
 }
 
+/*
+ * ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：plan[].dma_degraded 必须被初始化。
+ *
+ * 真机现象（C6，层① 临时关闭）：
+ *   设备上报 "2 channel(s) degraded"，但其中 **channel 48** 实际拿到了 GDMA_CH1
+ *   —— 那是**假阳性**。前端会显示一条不成立的告警，误导用户去关一条正常的通道。
+ *
+ * 根因：validate_manifest_resources 只重置 plan[i].valid / controller_id，
+ *   新增的 dma_degraded 漏了 ⇒ 该字段是 apply_manifest 栈数组里的**随机值**。
+ *
+ * 检测手法：先把 plan 数组用 0xFF 污染，再调用。若函数不初始化 dma_degraded，
+ *   污染值(true)会残留 ⇒ 用例红。
+ * ⚠ 不直接用"未初始化的栈数组"测：结果依赖栈内容，会时红时绿（假绿/假红）。
+ */
+static void test_plan_dma_degraded_is_initialized(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.dma_pool = NULL;
+
+    config_channel_t ch;
+    make_uart_channel(&ch, 1, 16, 17, 9600, false); /* DMA 关闭，本用例不需要分配 */
+    config_manifest_t m;
+    make_manifest(&m, &ch, 1);
+
+    bus_plan_entry_t plan[MAX_CHANNELS];
+    memset(plan, 0xFF, sizeof(plan)); /* 污染：所有 bool 都变成 true */
+
+    (void)validate_manifest_resources(&rt, &m, plan);
+
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        CHECK(!plan[i].dma_degraded,
+              "plan[i].dma_degraded 未被初始化：残留的随机值会让设备上报"
+              "不成立的降级告警（真机 §215 的 channel 48 假阳性）");
+    }
+}
+
 int main(void)
 {
     test_null_inputs_rejected();
+    test_plan_dma_degraded_is_initialized();
     test_disabled_channel_skipped();
     test_uart_tx_rx_same_pin_rejected();
     test_uart_baud_zero_rejected();

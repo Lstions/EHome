@@ -35,7 +35,15 @@ func registerTerminalRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.M
 			return
 		}
 		channelID, _ := strconv.Atoi(c.Param("channel_id"))
-		count, _ := strconv.Atoi(c.DefaultQuery("count", "50"))
+		// count 必须归一 (2026-10-07): 改前是 `count, _ := strconv.Atoi(...)` 直接透传,
+		// 于是 ?count=-1 (或任何负值) 会让 term.History(-1) 走到
+		// `make([]Entry, 0, -1)` ⇒ **panic: makeslice: cap out of range** ⇒ 该请求 500 且
+		// gin 的 recover 会打一整段栈。已实测复现该 panic, 不是理论推演。
+		// 上限取 ringBufferSize(256): 历史缓冲本身就是 256 条, 请求超过它也只是同一批数据。
+		count, err := strconv.Atoi(c.DefaultQuery("count", "50"))
+		if err != nil || count < 1 || count > 256 {
+			count = 50
+		}
 		entries := nodeMgr.TerminalMgr().GetHistory(uint(channelID), count)
 		c.JSON(http.StatusOK, gin.H{
 			"channel_id": channelID,

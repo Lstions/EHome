@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "ehome_tcp.c"
     INCLUDE_DIRS "include"
-    REQUIRES transport lwip freertos
+    REQUIRES transport lwip freertos netpolicy
 )
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。

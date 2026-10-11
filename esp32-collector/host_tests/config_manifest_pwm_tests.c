@@ -287,6 +287,38 @@ static void test_channel_dma_field_has_legacy_fallback(void)
     CHECK(config_channel_get_dma_enabled(&legacy));
     legacy.bus_config[6] = 0;
     CHECK(!config_channel_get_dma_enabled(&legacy));
+
+    /*
+     * 2026-10-09（用户要求）：**DMA 默认都不开，由用户手动配置。**
+     *
+     * 用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+     *         "修改原则：DMA默认都不开，由用户手动配置"
+     *
+     * 未配置（既无 field 8，bus_config 也短到没有 flags 字节）必须解析为
+     * **false**。此前这里是 return true —— 那是 2026-07 修"field 8 缺失
+     * case 8 的 fail-open"时留下的向后兼容默认，语义是"没说就当作要开 DMA"。
+     *
+     * 为什么这个 fail-open 在 S3/C6 上必然出事：
+     *   两个型号的 UART 同时只有 1 条能用 DMA（S3 也只有一条 UHCI）。
+     *   "没配置"被当成"要开" ⇒ 多条 UART 一起抢 ⇒ 后 attach 的静默抢走前一个的
+     *   UHCI（前者 DMA 失效不报错），或资源计划直接拒绝整份 manifest（§211 的
+     *   C6 现场事故：2818 次 config failed）。
+     *   ⇒ 收敛为 false 后，"没配置" = 不开 DMA = 走中断/轮询，功能不受影响。
+     */
+    config_channel_t unconfigured = {0};
+    unconfigured.bus_type = 1;
+    unconfigured.bus_config_len = 6;   /* < min_len(7) => 没有 flags 字节 */
+    CHECK(!config_channel_get_dma_enabled(&unconfigured));
+    unconfigured.bus_type = 2;
+    unconfigured.bus_config_len = 7;   /* < min_len(8) */
+    CHECK(!config_channel_get_dma_enabled(&unconfigured));
+    unconfigured.bus_type = 3;
+    unconfigured.bus_config_len = 6;   /* < min_len(7) */
+    CHECK(!config_channel_get_dma_enabled(&unconfigured));
+    /* 未知 bus_type 也必须 false */
+    unconfigured.bus_type = 99;
+    unconfigured.bus_config_len = 64;
+    CHECK(!config_channel_get_dma_enabled(&unconfigured));
 }
 
 /*

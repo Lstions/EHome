@@ -306,6 +306,64 @@ func TestPRS3001Driver_ParseData_2ByteCount(t *testing.T) {
 	}
 }
 
+// TestPRS3001Driver_ParseData_4ByteCount 钉住 shipped read_rainfall 模板的帧契约。
+//
+// 模板 WriteData "010300000002C40B" 读 2 个保持寄存器 ⇒ ReadLength 9 ⇒ bytecount=4。
+// 2026-10-11 真机验证发现该分支缺失，导致"读得回来、解析必失败"、设备永远 pending。
+func TestPRS3001Driver_ParseData_4ByteCount(t *testing.T) {
+	d := &PRS3001Driver{}
+	// 雨量 0x00C8 = 200 ⇒ 20.0 mm；光照度 0x01F4 = 500 Lux
+	raw := []byte{0x01, 0x03, 0x04, 0x00, 0xC8, 0x01, 0xF4, 0x7B, 0xDA}
+	data, err := d.ParseData(raw)
+	if err != nil {
+		t.Fatalf("ParseData(byteCount=4): %v", err)
+	}
+	if len(data) != 2 {
+		t.Fatalf("want 2 sensors, got %d (%+v)", len(data), data)
+	}
+	if data[0].Name != "rainfall" || data[0].Value != 20.0 || data[0].Unit != "mm" {
+		t.Errorf("rainfall = %+v, want 20 mm", data[0])
+	}
+	if data[1].Name != "illuminance" || data[1].Value != 500 || data[1].Unit != "Lux" {
+		t.Errorf("illuminance = %+v, want 500 Lux", data[1])
+	}
+}
+
+// TestPRS3001Driver_ShippedTemplateIsParsable 守住"模板与解析器同源"：
+// 用 GetCommandTemplates 里 read_rainfall 的 ReadLength 反推 bytecount，
+// 造一帧该长度的合法响应，必须能被 ParseData 解出至少一个量。
+func TestPRS3001Driver_ShippedTemplateIsParsable(t *testing.T) {
+	d := &PRS3001Driver{}
+	var tmpl CommandTemplate
+	for _, c := range d.GetCommandTemplates() {
+		if c.ID == "read_rainfall" {
+			tmpl = c
+		}
+	}
+	if tmpl.WriteData == "" {
+		t.Fatal("read_rainfall template not found")
+	}
+	// Modbus FC03 响应: addr + fc + bytecount + N*2 数据 + CRC(2)
+	byteCount := tmpl.ReadLength - 5
+	if byteCount <= 0 {
+		t.Fatalf("ReadLength=%d cannot hold a FC03 frame", tmpl.ReadLength)
+	}
+	payload := make([]byte, byteCount)
+	for i := range payload {
+		payload[i] = byte(i + 1)
+	}
+	raw := append([]byte{0x01, 0x03, byte(byteCount)}, payload...)
+	raw = append(raw, 0x00, 0x00) // CRC 由 parseLegacy 之外的层校验，这里不参与
+	data, err := d.ParseData(raw)
+	if err != nil {
+		t.Fatalf("shipped template ReadLength=%d (byteCount=%d) is NOT parsable: %v",
+			tmpl.ReadLength, byteCount, err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("shipped template produced no sensors")
+	}
+}
+
 func TestPRS3001Driver_ParseData_6ByteCount(t *testing.T) {
 	d := &PRS3001Driver{}
 	// byte_count=6: rainfall + illuminance (uint16)
@@ -354,13 +412,16 @@ func TestPRS3001Driver_ParseData_8ByteCount(t *testing.T) {
 
 func TestPRS3001Driver_ParseData_UnexpectedByteCount(t *testing.T) {
 	d := &PRS3001Driver{}
-	// byte_count=4: unexpected
-	data := make([]byte, 3+4+2)
+	// byte_count=4 自 2026-10-11 起是 shipped 模板的合法帧（见
+	// TestPRS3001Driver_ParseData_4ByteCount）。此处改用真正无分支的 10，
+	// 继续守住 default 兜底会报错这件事。
+	data := make([]byte, 3+10+2)
 	data[0] = 0x01
 	data[1] = 0x03
-	data[2] = 0x04
-	binary.BigEndian.PutUint16(data[3:5], 50)
-	binary.BigEndian.PutUint16(data[5:7], 100)
+	data[2] = 0x0A
+	for i := 3; i < 3+10; i++ {
+		data[i] = byte(i)
+	}
 
 	_, err := d.ParseData(data)
 	if err == nil {

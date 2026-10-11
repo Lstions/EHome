@@ -20,7 +20,7 @@ import (
 func setupTerminalRouteTest(t *testing.T) (*gin.Engine, *nodemgr.Manager, func(models.Channel)) {
 	t.Helper()
 	db := setupTestDB(t)
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	registerTerminalRoutes(v1, db, mgr, ControlPolicy{RawDiagnosticsEnabled: true})

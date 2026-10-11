@@ -86,7 +86,30 @@ typedef struct {
     uint8_t  edge_device_count;
 } config_channel_t;
 
-/** Resolve DMA preference with field-8/legacy bus_config compatibility. */
+/** Resolve DMA preference with field-8/legacy bus_config compatibility.
+ *
+ * ⚠⚠ 2026-10-09（用户明确要求）：**DMA 默认都不开，由用户手动配置。**
+ *   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+ *           "修改原则：DMA默认都不开，由用户手动配置"
+ *
+ * 五条返回路径全部收敛为"默认 false"：
+ *   ① 无 channel                    -> false
+ *   ② field 8 存在                  -> 用它的值（用户显式配置）
+ *   ③ field 8 缺失 + bus_config 够长 -> 读 bus_config 的 DMA 位（legacy 显式配置）
+ *   ④ field 8 缺失 + bus_config 太短 -> false（原为 true，fail-open）
+ *   ⑤ bus_type 未知                 -> false
+ *
+ * ⚠ 第 ④ 条原来是 return true —— 那是 2026-07 修"field 8 缺失 case 8 的
+ *   fail-open"时留下的**向后兼容**默认（docs/设计/DMA资源管理设计.md §6）。
+ *   它的语义是"没说就当作要开 DMA"，与用户现在的要求**正好相反**：
+ *   S3/C6 上 UART 同时只有 1 条能用 DMA（用户 2026-10-09 指正），
+ *   所以 fail-open 会让"没配置"变成"抢 DMA" ⇒ 另一个 UART 静默失效
+ *   或整份 manifest 被资源计划拒绝（§211 的 C6 现场事故：2818 次 config failed）。
+ *   ⇒ 收敛为 false 后，"没配置" = 不开 DMA = 走中断/轮询，功能不受影响。
+ *
+ * ⚠ ③ 仍保留：bus_config 里的 DMA 位是**用户显式配置过**的值（前端开关会写
+ *   这一位），不是"默认"。只有"既没 field 8 也没 flags 字节"才算未配置。
+ */
 static inline bool config_channel_get_dma_enabled(const config_channel_t *channel)
 {
     if (!channel) return false;
@@ -102,7 +125,8 @@ static inline bool config_channel_get_dma_enabled(const config_channel_t *channe
     }
     if (channel->bus_config_len >= min_len)
         return (channel->bus_config[flags_offset] & 0x01U) != 0;
-    return true;
+    /* 未配置：默认**不开** DMA（用户 2026-10-09 要求；原为 true 是 fail-open）。 */
+    return false;
 }
 
 /* === DMA Channel Config (persisted with manifest) === */

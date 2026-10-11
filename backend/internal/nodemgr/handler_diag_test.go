@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/testutil"
 
@@ -23,25 +23,22 @@ import (
 // =====================================================================
 
 // diagRecordingPublisher records every published frame (unlike the shared
-// mockMQTTPublisher, which keeps only the last one) so idempotent retries can
+// mockDownlinkPublisher, which keeps only the last one) so idempotent retries can
 // be counted.
 type diagRecordingPublisher struct {
 	mu       sync.Mutex
-	topics   []string
+	nodeIDs  []string
 	payloads [][]byte
 	err      error
 }
 
-func (p *diagRecordingPublisher) Publish(topic string, payload []byte) error {
+func (p *diagRecordingPublisher) Publish(nodeID string, payload []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.topics = append(p.topics, topic)
+	p.nodeIDs = append(p.nodeIDs, nodeID)
 	p.payloads = append(p.payloads, append([]byte(nil), payload...))
 	return p.err
 }
-
-func (p *diagRecordingPublisher) PublishQoS2(string, []byte) error     { return p.err }
-func (p *diagRecordingPublisher) PublishRetained(string, []byte) error { return p.err }
 
 func (p *diagRecordingPublisher) count() int {
 	p.mu.Lock()
@@ -55,9 +52,9 @@ func (p *diagRecordingPublisher) at(i int) []byte {
 	return p.payloads[i]
 }
 
-func newDiagTestManager(t *testing.T, db *gorm.DB, pub mqtt.Publisher) *Manager {
+func newDiagTestManager(t *testing.T, db *gorm.DB, pub downlink.Publisher) *Manager {
 	t.Helper()
-	return &Manager{db: db, mqtt: pub}
+	return &Manager{db: db, downlink: pub}
 }
 
 func openDiagTestDB(t *testing.T) *gorm.DB {

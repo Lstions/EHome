@@ -102,6 +102,13 @@ func channelRoutePins(ch models.Channel) ([]int, error) {
 	}
 	switch busType {
 	case "UART", "I2C":
+		/* ⚠ 这里**刻意**只要 2 字节：本函数的用途是**引脚冲突检测**（"这条通道占哪两个脚"），
+		 * 2 字节足够，且仿真套件与存量库都在用 2 字节（见 channel_update_uart_busconfig_test.go
+		 * 的 TestChannelUpdate_UART2ByteRouteAccepted —— 那是 P0 回归护栏，收严会让 simulation 门禁变红）。
+		 *
+		 * ⇒ **不要在这里加"UART 需 >=6"**：那会误伤"只有引脚路由、还没配波特率"的合法通道。
+		 * 固件对**下发**要求 >=6（bus_manager.c:443），这条约束属于**组装 manifest 时**的补全，
+		 * 由 ensureUARTBusConfig / buildUARTBusConfig 负责 —— 见 handler_periph.go:204-238。 */
 		if len(bytes) < 2 {
 			return nil, fmt.Errorf("%s bus_config requires at least 2 bytes", busType)
 		}
@@ -217,6 +224,33 @@ func validateChannelCrossChannelPins(tx *gorm.DB, ch models.Channel) error {
 		}
 	}
 	return nil
+}
+
+// validateNodeUARTDMASlots 在**通道写入时**守住 UART DMA 槽位不变量。
+//
+// 为什么需要它（2026-10-11 真机发现的 P1）：
+//
+//	validateUARTDMASlots 原先只在 nodemgr/sender.go:651（下发 manifest 时）被调用。
+//	于是 DB 里可以存出「同一节点两条 UART 都开 DMA」这种**写入期合法、下发期必炸**
+//	的组合：每次 StatusReport 都触发整份 manifest 被拒（"UART DMA 槽位不足"），
+//	节点永久停在 config_sync_state=failed。C6（F0F5BD02F35C）ch89/ch90 正是此状态，
+//	且 UI 上只看到"配置失败"，看不到是 DMA —— 与 §211 的 2818 次 config failed 同族。
+//
+// 判据与 nodemgr 保持**同源**（复用 validateUARTDMASlots），不重写一套，
+//	避免两处口径漂移。这里只负责把「同节点其它通道」一起喂进去。
+//
+// candidate.ID == 0 表示新建（此时它还没进 DB，不会出现在查询结果里）。
+func validateNodeUARTDMASlots(tx *gorm.DB, candidate *models.Channel) error {
+	if candidate == nil {
+		return fmt.Errorf("channel is required")
+	}
+	var siblings []models.Channel
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("node_id = ? AND id <> ?", candidate.NodeID, candidate.ID).
+		Find(&siblings).Error; err != nil {
+		return err
+	}
+	return nodemgr.ValidateUARTDMASlots(append(siblings, *candidate))
 }
 
 // validateChannelBindings prevents channel mutation from invalidating an
@@ -817,11 +851,16 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 一个"以后改不了波特率"的通道。前端已不再静默产出空串，但后端不能把
 			// "调用方一定会带合法 bus_config"当契约 —— 这里按节点已上报的资源能力补齐。
 			if isUARTChannel(&ch) {
-				if err := ensureUARTBusConfig(&node, &ch); err != nil {
+				if err := ensureBusConfigExtras(&node, &ch); err != nil {
 					return err
 				}
 			}
 			if err := validateChannelPeripheralConflicts(tx, ch); err != nil {
+				return err
+			}
+			// 写入期就守住 UART DMA 槽位不变量（2026-10-11 P1 修复）：
+			// 否则能存出"下发期必炸"的组合，节点永久 config failed 且 UI 看不出原因。
+			if err := validateNodeUARTDMASlots(tx, &ch); err != nil {
 				return err
 			}
 			if err := tx.Create(&ch).Error; err != nil {
@@ -851,7 +890,14 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			// 两类 UART 输入问题都报 400：能力不可得（等资源上报 / 检查 hardware_id）
 			// 与显式 bus_config 非法。它们都是用户能据此行动的输入问题，不是服务端故障。
-			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) || errors.Is(err, errI2CBusConfigIncomplete) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			// DMA 槽位不足是**用户可行动**的配置错误（关掉一条 DMA 即可），
+			// 不是服务端故障 —— 必须报 400 而不是 500，否则用户看到"服务端错误"
+			// 会以为可重试，也无从知道是自己配错了（与 §211 的教训同族）。
+			if nodemgr.IsManifestValidationError(err) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -973,6 +1019,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if dto.BusConfig != nil {
 				finalCandidate.BusConfig = *dto.BusConfig
 			}
+			// dma_enabled 必须一并进入 finalCandidate：校验器读的是 candidate，
+			// 漏掉它会让"PUT 开第二条 UART 的 DMA"绕过守卫（2026-10-11 自测发现）。
+			if dto.DmaEnabled != nil {
+				finalCandidate.DmaEnabled = *dto.DmaEnabled
+			}
 			if err := validateTransportChannelType(&finalCandidate); err != nil {
 				return err
 			}
@@ -986,7 +1037,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 避免"改个名字/开关"被无关能力缺失挡住（既有行为不做无谓加严）。
 			if isUARTChannel(&finalCandidate) && (dto.BusConfig != nil || dto.HardwareType != nil) {
 				before := finalCandidate.BusConfig
-				if err := ensureUARTBusConfig(&node, &finalCandidate); err != nil {
+				if err := ensureBusConfigExtras(&node, &finalCandidate); err != nil {
 					return err
 				}
 				// 只有**真的被补齐/改写**时才写回 bus_config。
@@ -1003,6 +1054,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if err := validateChannelBindings(tx, &finalCandidate); err != nil {
 				return err
 			}
+			// 同创建路径：DMA 槽位不变量在写入期校验（2026-10-11 P1 修复）。
+			if err := validateNodeUARTDMASlots(tx, &finalCandidate); err != nil {
+				return err
+			}
 			return tx.Model(&locked).Updates(updates).Error
 		}); err != nil {
 			// 与 POST /channels 同口径：能力不可得 / bus_config 非法都报 400（输入问题），
@@ -1015,7 +1070,12 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				Error(c, http.StatusConflict, "channel route conflicts with GPIO/PWM configuration")
 				return
 			}
-			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) || errors.Is(err, errI2CBusConfigIncomplete) {
+				Error(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			// 同创建路径：DMA 槽位不足是用户可行动的配置错误 ⇒ 400（不是 500）。
+			if nodemgr.IsManifestValidationError(err) {
 				Error(c, http.StatusBadRequest, err.Error())
 				return
 			}

@@ -36,7 +36,7 @@ func newIngestGateConsumer(t *testing.T, db *gorm.DB, hub *websocket.Hub, reasse
 	t.Helper()
 	registry := drivers.NewRegistry()
 	registry.Register(&plainTestDriver{})
-	return NewSensorParserConsumerWithRegistry(db, hub, nil, reassembler, registry)
+	return NewSensorParserConsumerWithRegistry(db, hub, reassembler, registry)
 }
 
 func countRows(t *testing.T, db *gorm.DB, model interface{}) int64 {

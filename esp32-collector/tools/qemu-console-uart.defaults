@@ -1,0 +1,36 @@
+# 仅用于 QEMU 验证：把控制台从 USB Serial JTAG 改到 UART0。
+#
+# ## 为什么需要这个文件
+# 产品配置把控制台放在 **USB Serial JTAG**（CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y,
+# CONFIG_ESP_CONSOLE_UART_NUM=-1）—— 这在真机上是对的（S3 原生 USB）。
+# 但 QEMU 只模拟 UART0，**不模拟 USB Serial JTAG** ⇒ 直接跑我们的镜像时
+# 串口一个字节都没有（bootloader 到了 entry 就"静默"，看起来像死机）。
+#
+# 实测对照（同一台 QEMU、同一 IDF）：
+#   hello_world（UART 控制台）  ⇒ 完整输出，能跑
+#   我们的镜像（USB-JTAG 控制台）⇒ 只到 ROM 的 "entry 0x..." 便再无输出
+# ⇒ 那个"静默"是**控制台通道**问题，不是固件问题。
+#
+# ## 用法（不改产品配置，只在命令行追加）
+#   EXTRA_SDKCONFIG_DEFAULTS=tools/qemu-console-uart.defaults \
+#       BUILD_ROOT=/tmp/qemu ./build_firmware.sh s3-n16
+#
+# ⚠ 这只是"看得见输出"的开关。不能因此认为产品固件的控制台配置有问题 ——
+#   恰恰相反，USB Serial JTAG 是 S3 上的常见选择。
+
+# 把**控制台**从 USB Serial JTAG 改到 UART0（CONFIG_ESP_CONSOLE_UART_NUM=-1 的来源）。
+#
+# ⚠ 只改"控制台选哪条"，**不要**关掉 USB Serial JTAG 驱动本身：
+# 实测 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=n 会让链接失败 ——
+#   components/bus_dma/bus_dma.c:1145 调用 usb_serial_jtag_vfs_use_driver()，
+#   那是产品功能的真实依赖（S3 原生 USB 口），不是控制台附属品。
+#   ld: undefined reference to 'usb_serial_jtag_vfs_use_driver'
+# ⇒ 驱动留着，只挪控制台。
+CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# bootloader 也走 UART（否则 bootloader 阶段仍然是静默的）
+CONFIG_BOOTLOADER_LOG_LEVEL=3

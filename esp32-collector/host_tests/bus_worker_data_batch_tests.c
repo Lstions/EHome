@@ -99,6 +99,18 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) { (void)ctx; return ESP_
 
 /* ---- semaphore stubs ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 
@@ -567,6 +579,36 @@ static void test_buffer_pressure_downgrades_n(void)
     drain_telemetry();
 }
 
+
+/*
+ * D-06（2026-10-06）：编码器"有没有被接上"必须是【可观测】的。
+ *
+ * 弱符号时代这件事无法从外部判断 —— 弱定义让 s_data_batch_cb 看起来
+ * 总是非 NULL，于是"没接上"变成一个看不见的状态，
+ * 症状是 DataBatch 悄悄退回逐样本 0x03（而能力位可能还宣称支持）。
+ * 现在：未注入 => 查询接口返回 false，且 start() 会打 ERROR。
+ */
+static void test_encoder_injection_is_observable(void)
+{
+    /* main() 里已经注入过 test_data_batch_cb —— 先确认"已注入"看得见 */
+    CHECK(bus_worker_data_batch_encoder_present() == true,
+          "an injected encoder must be reported present");
+
+    /* 显式置空（模拟"main 忘了注入"）—— 必须返回 false，不能假装存在 */
+    bus_worker_set_data_batch_cb(NULL);
+    CHECK(bus_worker_data_batch_encoder_present() == false,
+          "a missing encoder must be reported ABSENT -- silently pretending "
+          "it exists is exactly the D-06 failure mode");
+
+    /* 未注入时聚合必须【关闭】而不是产出坏帧 */
+    CHECK(data_batch_publish(NULL, 0) == false,
+          "without an encoder the aggregation path must refuse");
+
+    /* 恢复（后续用例与收尾都依赖它） */
+    bus_worker_set_data_batch_cb(test_data_batch_cb);
+    CHECK(bus_worker_data_batch_encoder_present() == true, "restore must work");
+}
+
 int main(void)
 {
     /* 与 bus_worker_report_tests 同款：先建 report 路径（队列 + 池）。 */
@@ -585,6 +627,7 @@ int main(void)
     test_window_boundary();
     test_critical_and_max_n();
     test_buffer_pressure_downgrades_n();
+    test_encoder_injection_is_observable();
 
     report_path_deinit();
 

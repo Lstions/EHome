@@ -37,7 +37,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 
 	r := gin.New()
 	v1 := r.Group("/api/v1")
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil)
 	registerNodeRoutes(v1, db, mgr)
 	registerEdgeDeviceRoutes(v1, db, mgr, nil)
 	registerDataRoutes(v1, db)

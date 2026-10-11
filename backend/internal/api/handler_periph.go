@@ -234,6 +234,14 @@ func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
 		if _, err := channelRoutePins(*ch); err != nil {
 			return fmt.Errorf("%w：UART 通道 bus_config 非法（%q）：%v", errUARTBusConfigMalformed, ch.BusConfig, err)
 		}
+
+		/* ⚠ 2026-10-07 记：这里**刻意**不把短 bus_config 补齐成 >=6 字节，尽管固件对下发
+		 * 要求 >=6（bus_manager.c:443）。原因是本函数的契约是"校验/补齐**空值**"，
+		 * 而**已给出的值必须原样保留** —— 这是 P0 回归护栏
+		 * （TestChannelUpdate_UART2ByteRouteAccepted:121 明确断言"调用方显式给的引脚路由必须原样保留"）。
+		 *
+		 * ⇒ "短值下发前补齐"属于**组装下发字节时**的职责，不在本函数。
+		 *   缺陷（后端 201 但设备 ESP_ERR_INVALID_SIZE）见设计文档 §160。 */
 		return nil
 	}
 	if node == nil {
@@ -261,10 +269,23 @@ func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
 		// 能力上限低于默认值时退到上限，不造一个设备明确不支持的速率。
 		baud = int(entry.MaxBaud)
 	}
-	// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）：
-	// 传 true 得到 0x01，与生产既有三条 UART 行一致。帧格式 8N1 由固件硬编码，
-	// 不编进 bus_config（UART 分支不读 byte 7..9）。
-	ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, true)
+	// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）。
+	// 帧格式 8N1 由固件硬编码，不编进 bus_config（UART 分支不读 byte 7..9）。
+	//
+	// ⚠⚠ 2026-10-09（用户明确要求）：**DMA 默认都不开，由用户手动配置。**
+	//   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+	//           "修改原则：DMA默认都不开，由用户手动配置"
+	//
+	// 原实现硬编码 true（注释写"与生产既有三条 UART 行一致"）—— 那是**沿用
+	// 历史现状**，不是需求。在 S3/C6 上它必然出事：
+	//   · 两个型号的 UART 同时只有 1 条能用 DMA（S3 也只有一条 UHCI）；
+	//   · 建 2 条 UART 通道就都带着"要 DMA"的意愿 ⇒ 第 2 条抢不到 ⇒
+	//     设备侧资源计划拒绝**整份 manifest**（§211 的 C6 现场事故：
+	//     2818 次 config failed、设备 ch=0 且永远 syncing）。
+	//
+	// ⇒ 改为 false。用户要开 DMA 时由前端 DMA 开关显式写这一位
+	//   （channel_reconfigure.go 的 uartDMAFlagsByte 是唯一构造点）。
+	ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, false)
 	return nil
 }
 
@@ -1360,4 +1381,87 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			"request_id":  requestID,
 		})
 	})
+}
+
+// ===== I2C bus_config 的判据（§197）=====
+//
+// ⚠ 与 UART 的处境**不同**，所以处置也不同 —— 这是本函数存在的理由：
+//
+//	UART：短值(2B) 是可接受的中间状态，因为缺的那 4 字节是**波特率**，
+//	      有公认默认值(9600)，后端下发前补齐不会替用户做危险决定。
+//	      见 internal/uartcfg.PadShortUART 与 §160。
+//
+//	I2C ：固件要求 >= **7** 字节（bus_manager.c:582、bus_dma.c:1746），布局是
+//	          byte0 sda / byte1 scl / byte2 **从机地址** / byte3..6 freq(big-endian)
+//	      ⚠ 缺的那几字节里包含 **从机地址** —— 那是"跟谁说话"，不是"说多快"。
+//	      后端**不能**替用户编一个默认地址：编错了会去访问总线上**另一个**设备。
+//	      ⇒ 所以这里**只校验、不补齐**，并在入库时就拒绝，而不是等下发才发现。
+//
+// 为什么必须在**入库**时拒绝（而不是像 UART 那样下发时补）：
+//
+//	症状代价不同。UART 短值下发会失败，但补齐即可救；I2C 短值下发同样会
+//	`ESP_ERR_INVALID_SIZE` ⇒ **整份 manifest 被拒**（validate_manifest_resources 是
+//	整份判据）⇒ 用户加的这条 I2C 会把**其它所有通道一起弄坏**，
+//	而接口返回的是 201「创建成功」。⇒ 越早拒绝越好，且错误里要写清正确长度。
+var errI2CBusConfigIncomplete = errors.New("i2c bus_config incomplete")
+
+// i2cBusConfigMinLen 是**固件**接受 I2C 下发的硬下限。
+// 两个固件点都按这个数判：bus_manager.c:582 与 bus_dma.c:1746。
+const i2cBusConfigMinLen = 7
+
+// validateI2CBusConfig 在**落库前**校验 I2C 的 bus_config 是否达到固件下限。
+//
+// 非空但不足 7 字节 ⇒ 返回 errI2CBusConfigIncomplete（调用方映射 400）。
+// 空 ⇒ **放行**：与 UART 一致，"还没配总线参数"是合法建通道状态，
+//
+//	用户随后会配（I2C 扫描 / 手工填地址）。此时它不可能进 manifest
+//	—— 因为 manifest 组装要求通道可用，而空 bus_config 的 I2C 在固件侧
+//	同样会被拒；这一点已在 §197.3 登记为待收敛项。
+func validateI2CBusConfig(ch *models.Channel) error {
+	if ch == nil {
+		return fmt.Errorf("channel is required")
+	}
+	raw := strings.TrimSpace(ch.BusConfig)
+	if raw == "" {
+		return nil
+	}
+	raw = strings.TrimPrefix(raw, "0x")
+	data, err := hex.DecodeString(raw)
+	if err != nil {
+		return fmt.Errorf("%w：I2C bus_config 不是合法 hex（%q）：%v",
+			errI2CBusConfigIncomplete, ch.BusConfig, err)
+	}
+	if len(data) < i2cBusConfigMinLen {
+		return fmt.Errorf("%w：I2C bus_config 只有 %d 字节，固件要求至少 %d 字节"+
+			"（sda, scl, 从机地址, 4 字节频率 big-endian）。"+
+			"⚠ 不足的值会让设备拒收**整份** manifest（不止这一条通道）。",
+			errI2CBusConfigIncomplete, len(data), i2cBusConfigMinLen)
+	}
+	return nil
+}
+
+// ensureBusConfigExtras 是「按总线类型分派的落库前校验」的统一入口。
+//
+// 为什么要有它：UART 有 ensureUARTBusConfig，I2C 本轮（§197）才有 validateI2CBusConfig，
+// 而四条写 channels 的路径若各自记得调哪几个，迟早漏一条 —— 本轮就漏了 I2C 整整一类。
+// ⇒ 收敛成一个入口：调用方只需 `ensureBusConfigExtras(&node, &ch)`，
+//
+//	由这里按 bus_type 分派。**新增总线类型时只改这一处**（P4）。
+//
+// ⚠ 返回的错误可能是任意一种具体错误（UART 的 / I2C 的），调用方用 errors.Is 判。
+func ensureBusConfigExtras(node *models.Node, ch *models.Channel) error {
+	if ch == nil {
+		return fmt.Errorf("channel is required")
+	}
+	switch strings.ToUpper(strings.TrimSpace(ch.BusType)) {
+	case "UART", "1":
+		return ensureUARTBusConfig(node, ch)
+	case "I2C", "2":
+		// I2C 不走"按能力补齐"：它缺的字节里含从机地址，后端不能替用户编（见 validateI2CBusConfig）。
+		return validateI2CBusConfig(ch)
+	default:
+		// 其它总线（SPI/USB/ADC/GPIO/PWM）本轮不新增判据：
+		// 它们各自的固件下限尚未在真机上暴露过缺陷，无证据不改（先测再改）。
+		return nil
+	}
 }

@@ -4,7 +4,9 @@
  */
 
 #include "ehome_tcp.h"
+#include "net_policy.h"   /* D-10：写结果分类（宿主可测）*/
 #include "esp_log.h"
+#include <errno.h>
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -290,13 +292,40 @@ static esp_err_t tcp_send(transport_t *transport, const uint8_t *data, size_t le
     if (xSemaphoreTake(priv->clients_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         for (int i = 0; i < priv->config.max_clients; i++) {
             if (priv->clients[i].active && priv->clients[i].socket >= 0) {
-                ssize_t sent = send(priv->clients[i].socket, data, len, 0);
-                if (sent > 0) {
-                    sent_count++;
-                    priv->bytes_sent += sent;
-                } else {
-                    ESP_LOGW(TAG, "Failed to send to client %d", i);
+                /* D-10 修复（2026-10-06）：TCP 的 send 允许【部分写】。
+                 * 旧代码把 sent > 0 记为成功 —— 于是短写会【静默发出半帧】，
+                 * 上层以为送达、对端收到残缺数据。现在：
+                 *   ① 循环续写直到写完或真错误；
+                 *   ② 只有 WRITE_COMPLETE 才计入 sent_count；
+                 *   ③ 部分写【不计入成功】，并按推进量记账（便于诊断）。 */
+                size_t written_total = 0;
+                write_outcome_t outcome = WRITE_NOTHING;
+                for (;;) {
+                    ssize_t n = send(priv->clients[i].socket,
+                                     data + written_total, len - written_total, 0);
+                    if (n > 0) {
+                        written_total += (size_t)n;
+                        if (written_total >= len) {
+                            outcome = WRITE_COMPLETE;
+                            break;
+                        }
+                        continue;   /* 部分写：续写 */
+                    }
+                    if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        continue;   /* 可重试 */
+                    }
+                    outcome = (written_total == 0) ? WRITE_NOTHING : WRITE_PARTIAL;
+                    if (n < 0) outcome = WRITE_ERROR;   /* 硬错误优先 */
+                    break;
                 }
+                if (net_policy_write_is_success(outcome)) {
+                    sent_count++;
+                } else {
+                    ESP_LOGW(TAG, "Send to client %d incomplete: %s (%u/%u bytes)",
+                             i, net_policy_write_outcome_name(outcome),
+                             (unsigned)written_total, (unsigned)len);
+                }
+                priv->bytes_sent += written_total;
             }
         }
         xSemaphoreGive(priv->clients_mutex);

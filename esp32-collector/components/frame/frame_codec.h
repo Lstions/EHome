@@ -89,8 +89,11 @@ typedef enum {
  *
  * ⚠ 类型号 0x20 → 0x21（2026-10-05，V3-2a 裁决）。0x20 被 V3 的 DataBatch
  * 同时占用，而 DataBatch 已在设计文档/收益表/迁移表里通篇使用 0x20。
- * MSG_MEM_RPT 尚未合入 main、后端尚未解析（后端对它只会打 Unknown msg type
- * 警告），因此改号零成本。详见
+ * ⚠ 2026-10-08 更正后半句：MSG_MEM_RPT **已合入 main**（mem_guard.c:176 用本宏
+ * 编码、main.c 周期上报），"尚未合入 main"已过期。**"后端尚未解析"仍然成立**：
+ * 后端 frame.go:88 有常量、:445 有名字，但 nodemgr/manager.go 的分布 switch
+ * 无对应 case ⇒ 落 default 打 Unknown msg type 警告（2026-10-08 实测 675 次）。
+ * 详见
  * docs/设计/V3-2a-DataBatch-落地契约-2026-10-05.md §0.1。 */
 #define MSG_MEM_RPT          0x21
 
@@ -110,6 +113,24 @@ typedef enum {
 
 /* DataBatch 能力位（HelloAck field 2 features 的 bit0）。 */
 #define CAP_DATA_BATCH_V1    ((uint64_t)1 << 0)
+
+/* v3.0 远程运维：重启 / 恢复出厂（保留连通性）。
+ *
+ * 为什么放在这张表里而不是只留在 device_op.h：
+ * **这张表是设备侧消息号的定义处**（check_message_types.py 就是按它扫的），
+ * 而 0x22 原来只定义在 components/device_op/include/device_op.h，
+ * 于是"设备侧有这个号"在**权威表里查不到** ——
+ * 那份门禁正是为消灭"两端各自的测试都绿、合起来静默不通"而存在的，
+ * 消息号只躺在组件私有头文件里会绕开它。
+ * device_op.h 现在改为引用这里的定义，号只有一个来源（P4）。
+ *
+ * 相邻占用：0x20 DATA_BATCH / 0x21 MEM_REPORT。 */
+#ifndef MSG_DEVICE_OP
+#define MSG_DEVICE_OP        0x22   /* 下行：请设备执行一个运维操作 */
+#endif
+#ifndef MSG_DEVICE_OP_ACK
+#define MSG_DEVICE_OP_ACK    0x23   /* 上行：执行结果（重启前送出） */
+#endif
 
 /* === Encoder === */
 typedef struct {

@@ -7,7 +7,6 @@ import (
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -290,8 +289,7 @@ func (m *Manager) SendPongAck(deviceID string, pingTimestamp uint64) error {
 	enc.EncodeVarint(1, pingTimestamp)                  // echo back the ping timestamp
 	enc.EncodeVarint(2, uint64(time.Now().UnixMilli())) // server timestamp
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // handlePeriphResponse processes PeriphRsp (type=0x1C) — GPIO/PWM operation result.

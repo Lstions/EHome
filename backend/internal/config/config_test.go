@@ -25,9 +25,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Database.DBName != "ehome" {
 		t.Errorf("default db name = %q, want ehome", cfg.Database.DBName)
 	}
-	if cfg.MQTT.Broker != "tcp://localhost:1883" {
-		t.Errorf("default mqtt broker = %q, want tcp://localhost:1883", cfg.MQTT.Broker)
-	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level = %q, want info", cfg.Log.Level)
 	}
@@ -41,7 +38,6 @@ func TestLoadDefaults(t *testing.T) {
 	os.Unsetenv("CONFIG_PATH")
 	os.Unsetenv("EHOME_SERVER_ADDR")
 	os.Unsetenv("EHOME_DB_HOST")
-	os.Unsetenv("MQTT_BROKER")
 	os.Unsetenv("REDIS_ADDR")
 	os.Unsetenv("LOG_LEVEL")
 
@@ -58,9 +54,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	os.Setenv("EHOME_DB_USER", "testuser")
 	os.Setenv("EHOME_DB_PASSWORD", "testpass")
 	os.Setenv("EHOME_DB_NAME", "testdb")
-	os.Setenv("MQTT_BROKER", "tcp://mqtt:1883")
-	os.Setenv("MQTT_USER", "mqttuser")
-	os.Setenv("MQTT_PASSWORD", "mqttpass")
 	os.Setenv("LOG_LEVEL", "debug")
 	defer func() {
 		os.Unsetenv("EHOME_SERVER_ADDR")
@@ -69,9 +62,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 		os.Unsetenv("EHOME_DB_USER")
 		os.Unsetenv("EHOME_DB_PASSWORD")
 		os.Unsetenv("EHOME_DB_NAME")
-		os.Unsetenv("MQTT_BROKER")
-		os.Unsetenv("MQTT_USER")
-		os.Unsetenv("MQTT_PASSWORD")
 		os.Unsetenv("LOG_LEVEL")
 	}()
 
@@ -94,15 +84,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	if cfg.Database.DBName != "testdb" {
 		t.Errorf("expected testdb, got %q", cfg.Database.DBName)
 	}
-	if cfg.MQTT.Broker != "tcp://mqtt:1883" {
-		t.Errorf("expected tcp://mqtt:1883, got %q", cfg.MQTT.Broker)
-	}
-	if cfg.MQTT.User != "mqttuser" {
-		t.Errorf("expected mqttuser, got %q", cfg.MQTT.User)
-	}
-	if cfg.MQTT.Password != "mqttpass" {
-		t.Errorf("expected mqttpass, got %q", cfg.MQTT.Password)
-	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("expected debug, got %q", cfg.Log.Level)
 	}
@@ -112,21 +93,11 @@ func TestConvenienceAccessors(t *testing.T) {
 	cfg := &Config{
 		Server:   ServerConfig{Addr: ":9090"},
 		Database: DatabaseConfig{Host: "h", Port: 5432, User: "u", Password: "p", DBName: "d", SSLMode: "disable"},
-		MQTT:     MQTTConfig{Broker: "tcp://m:1883", User: "mu", Password: "mp"},
 		Log:      LogConfig{Level: "warn"},
 	}
 
 	if cfg.APIAddr() != ":9090" {
 		t.Errorf("APIAddr = %q, want :9090", cfg.APIAddr())
-	}
-	if cfg.MQTTBroker() != "tcp://m:1883" {
-		t.Errorf("MQTTBroker = %q", cfg.MQTTBroker())
-	}
-	if cfg.MQTTUser() != "mu" {
-		t.Errorf("MQTTUser = %q", cfg.MQTTUser())
-	}
-	if cfg.MQTTPassword() != "mp" {
-		t.Errorf("MQTTPassword = %q", cfg.MQTTPassword())
 	}
 	if cfg.LogLevel() != "warn" {
 		t.Errorf("LogLevel = %q, want warn", cfg.LogLevel())
@@ -169,7 +140,6 @@ func TestEnvPartialOverride(t *testing.T) {
 	// Only set some env vars, others should remain default
 	os.Setenv("EHOME_SERVER_ADDR", ":7777")
 	os.Unsetenv("EHOME_DB_HOST")
-	os.Unsetenv("MQTT_BROKER")
 	defer os.Unsetenv("EHOME_SERVER_ADDR")
 
 	cfg := Load()

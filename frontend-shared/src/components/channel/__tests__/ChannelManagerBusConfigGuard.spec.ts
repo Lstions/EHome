@@ -217,7 +217,12 @@ describe("ChannelManager 不得静默产出空 bus_config（2026-10-03）", () =
     expect(hex).toMatch(/^[0-9A-F]{14}$/)
     expect(hex.slice(0, 4)).toBe("1415")
     expect(Number.parseInt(hex.slice(4, 12), 16), "默认波特率必须是 9600").toBe(9600)
-    expect(Number.parseInt(hex.slice(12, 14), 16) & 0x01, "byte6 必须置 DMA 使能位").toBe(1)
+    // DMA 2026-10-09 (user requirement): DMA defaults OFF, user enables it manually.
+    //   User: "C6 S3 all UARTs: only one can use DMA at a time"
+    //         "Principle: DMA defaults off, configured manually by the user"
+    // So a newly created channel must write byte6 = 0x00.
+    // The old assertion (& 0x01).toBe(1) locked the OLD behavior.
+    expect(Number.parseInt(hex.slice(12, 14), 16), "byte6 must NOT enable DMA by default").toBe(0)
   })
 
   it("源码级防回退：不得再出现 115200 默认值，且守卫覆盖需要 bus_config 的总线", () => {

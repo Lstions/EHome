@@ -616,7 +616,16 @@ const handleSubmit = async () => {
       buf[3] = (baud >> 16) & 0xFF
       buf[4] = (baud >> 8) & 0xFF
       buf[5] = baud & 0xFF
-      buf[6] = 0x01
+      // ⚠⚠ 2026-10-09（用户明确要求）：**DMA 默认都不开，由用户手动配置。**
+      //   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+      //           "修改原则：DMA默认都不开，由用户手动配置"
+      //
+      // 原为 0x01（默认开）。在 S3/C6 上必然出事：两个型号的 UART 同时只有
+      // 1 条能用 DMA（S3 也只有一条 UHCI）；建 2 条 UART 通道就都带着"要 DMA"
+      // 的意愿 ⇒ 第 2 条抢不到 ⇒ 设备侧资源计划拒绝整份 manifest
+      // （§211 的 C6 现场事故：2818 次 config failed、设备 ch=0 永远 syncing）。
+      // ⇒ 改为 0x00。用户要开 DMA 时走 DMA 开关（uartDMAFlagsByte 是唯一构造点）。
+      buf[6] = 0x00
        busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
        // Also store in config JSON for readability
        config.baud_rate = baud

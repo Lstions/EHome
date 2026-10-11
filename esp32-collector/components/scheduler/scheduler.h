@@ -71,6 +71,11 @@ typedef struct {
     bool     enabled;
     TickType_t last_run_ms;     /* independent timing per command */
     uint32_t error_count;       /* consecutive errors for health reporting */
+    /* D-07（2026-10-06）：【本机】背压的独立计数 —— 队列满、投递不进。
+     * 它【绝不】进 error_count：后者是服务端读的健康量（映射成 TIMEOUT/FAULT），
+     * 把"我们自己处理不过来"混进去会让现场看到一批没坏的传感器报故障。
+     * 该计数只用于诊断，规则见 scheduler_health.h。 */
+    uint32_t queue_full_count;
 } sched_command_t;
 
 /* === v2.3: per-edge-device scheduler state === */

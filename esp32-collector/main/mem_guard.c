@@ -1,6 +1,13 @@
 /**
  * @file mem_guard.c
- * @brief 运行期内存水位门禁实现（最小实现，WS-E/OTA/log_stream 的接口点）。
+ * @brief 运行期内存水位门禁实现（最小实现）。
+ *
+ * ⚠ 本门禁的**实际**调用点（2026-10-08 核实，共 3 类；改动前请重新核实）：
+ *     ① 配置事务：config_apply_transaction.c（各步 + preflight）
+ *     ② log_stream 启动：app_callbacks.c（need=2048，拒绝时 SKIP 而非失败）
+ *     ③ UART install：app_callbacks.c（need=CONFIG_TX_UART_INSTALL_LARGEST_NEED）
+ *   ⚠ **OTA 不在此列** —— 见下方 §"OTA 为什么有意不受本门禁"。
+ *   （旧注释曾把 OTA 写成"接口点"，与代码不符，属过期声称，2026-10-08 已改正。）
  *
  * 设计边界（Lead 2026-10-05 裁决）：
  *   - 本模块只提供"读取水位 + 谓词 + 低水位回调 + 报告编码"，不执行任何
@@ -38,10 +45,35 @@
  *   因此这是纯修复、不改这两个型号的行为。 */
 #define MEM_GUARD_CAPS  (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
-/* 硬地板：低于此值绝不启动任何重操作（配置事务/OTA/log_stream/大块分配）。
- * 判决依据是 largest（连续块），不是 free —— 见调试方法论 §4.1。 */
+/* 硬地板：低于此值时，**本门禁的调用方**不启动重操作
+ * （实际为：配置事务 / log_stream 启动 / UART install，见文件头）。
+ * 判决依据是 largest（连续块），不是 free —— 见调试方法论 §4.1。
+ *
+ * ⚠ OTA 为什么有意**不受**本门禁（2026-10-08 核实并记入注释）：
+ *   OTA 是设备远程不可达时**唯一的救命通道**，其成败**不该取决于堆碎片**。
+ *   ota.c 用 xTaskCreateStatic 把栈与 TCB 放进 .bss，从堆的分配与碎片中**解耦**；
+ *   若再给它加一道"largest 必须 ≥ floor"的门，就把刚解耦掉的依赖又装回去了 ——
+ *   而且是加在**最不该失败**的那条路径上。
+ *   ⇒ 所以"OTA 不受门禁"是**有意设计**，不是遗漏。
+ *   ⇒ 同理，log_tx_task 与 scheduler 也已改为静态分配（见各自注释）。
+ *   ⚠ 但这条不变量**此前没有任何测试/门禁保护**（2026-10-08 发现）：
+ *     有人把 ota.c 的 xTaskCreateStatic 改回 xTaskCreate，全套测试仍会绿。
+ *     ⇒ 已补门禁 tools/check_critical_tasks_static.py。 */
 #if defined(CONFIG_COLLECTOR_PSRAM) && CONFIG_COLLECTOR_PSRAM
-#define MEM_GUARD_FLOOR_BYTES       (16u * 1024u)
+/* ⭐ 2026-10-08 重定值（决策 §13，原 16 KiB）：16 KiB **不可达** ⇒ 门禁永久关闭。
+ *
+ * 判据（按 largest 口径，三条）：
+ *   ① 可达性：floor 必须**低于稳态 largest**，否则不是"保守"而是**功能缺陷** ——
+ *      3.0 运行中 s3p 稳态 largest 实测 12288~15360（min 12288），而 16 KiB = 16384 > 12288
+ *      ⇒ 该地板**永远无法满足**，配置事务恒被拒（§172 实测 memgate 14~21 次、success=0）。
+ *   ② 必要性：调用方最大声明需求 = 4096（配置事务 apply_buses/preflight）⇒ 8 KiB 有 2x 余量；
+ *   ③ 一致性：s3 与 s3p 是**同一颗芯片**（build_firmware.sh 都是 esp32s3），s3 用 8 KiB。
+ *      原 2x 差异无任何文档依据（§178.5），且唯一可能机制（SPIRAM_MALLOC_RESERVE_INTERNAL
+ *      占用内部 RAM）只会**减少可用连续块** —— 那更是"门槛必须可达"的理由，而非抬高门槛。
+ *
+ * 实测依据：floor=8192 下配置事务 893 s 无失败（§185），且三个调用方（配置事务 4096 /
+ *   log_stream 2048 / UART install 3584）**全部实测通过**；OTA 不调用本门禁（§190，有意设计）。 */
+#define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)

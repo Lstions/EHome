@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"gorm.io/gorm"
@@ -26,14 +26,10 @@ type Step struct {
 	Role string
 }
 
-type publisher interface {
-	Publish(topic string, payload []byte) error
-}
-
 type Orchestrator struct {
-	db   *gorm.DB
-	mqtt publisher
-	mu   sync.RWMutex
+	db       *gorm.DB
+	downlink downlink.Publisher
+	mu       sync.RWMutex
 	// cache is keyed by the concrete EdgeDevice, never by device type.
 	cache          map[uint]*InitState
 	pendingMu      sync.Mutex
@@ -81,8 +77,8 @@ type InitState struct {
 
 var nextInitRequestID uint32
 
-func NewOrchestrator(db *gorm.DB, mqttClient publisher, driverRegistry *drivers.Registry) *Orchestrator {
-	return &Orchestrator{db: db, mqtt: mqttClient, cache: make(map[uint]*InitState), pendingResp: make(map[uint32]pendingResponse), driverRegistry: driverRegistry}
+func NewOrchestrator(db *gorm.DB, downlinkPublisher downlink.Publisher, driverRegistry *drivers.Registry) *Orchestrator {
+	return &Orchestrator{db: db, downlink: downlinkPublisher, cache: make(map[uint]*InitState), pendingResp: make(map[uint32]pendingResponse), driverRegistry: driverRegistry}
 }
 
 // GetInitSequence resolves the init sequence for a device type with a three-tier
@@ -192,8 +188,8 @@ func hardcodedInitSequence(deviceType string) []Step {
 }
 
 func (o *Orchestrator) sendAndWait(nodeID string, edgeDeviceID uint, stepName string, channelID, requestID uint32, data []byte, readSize uint32, timeout time.Duration) ([]byte, error) {
-	if o.mqtt == nil {
-		return nil, fmt.Errorf("mqtt required")
+	if o.downlink == nil {
+		return nil, fmt.Errorf("downlink publisher required")
 	}
 	respCh := make(chan pendingResult, 1)
 	o.pendingMu.Lock()
@@ -224,7 +220,7 @@ func (o *Orchestrator) sendAndWait(nodeID string, edgeDeviceID uint, stepName st
 		}
 		enc.EncodeVarint(6, uint64(rxTimeoutMs))
 	}
-	if err := o.mqtt.Publish(mqtt.TopicForNode(nodeID), enc.Bytes()); err != nil {
+	if err := o.downlink.Publish(nodeID, enc.Bytes()); err != nil {
 		return nil, fmt.Errorf("send failed: %w", err)
 	}
 	select {

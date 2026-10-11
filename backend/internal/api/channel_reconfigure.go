@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"ehome/backend/internal/uartcfg"
 )
 
 // ===== UART bus_config 在 api 包内的唯一布局真源 =====
@@ -42,38 +44,30 @@ import (
 // 默认波特率取 9600 而不是 115200：本仓真实 UART 设备（BMS 4800/9600、SN-3001 4800、
 // 逆变器 2400）都不支持 115200。拿设备不支持的速率当默认值，会让「建完就能用」变成
 // 「建完必须先改波特率」。9600 是这些设备实际在用的档位，故选它。
-const defaultUARTBaudrate = 9600
+//
+// ⚠ 2026-10-07：这些布局常量/函数**已搬到 internal/uartcfg**（P4：同一语义一份定义）。
+// 原因：**下发路径**在 internal/nodemgr（sender_snapshot.go），而它不能 import 本包
+// （api 依赖 nodemgr ⇒ 会成环）⇒ 只能各写一份，而"各写一份"已在真机上造成缺陷：
+// 2 字节的 UART bus_config 被原样下发，固件要求 >= 6 ⇒ 设备
+// `preinstall rejected by resource plan`，而后端返回 201。
+// ⇒ 现由 uartcfg 提供唯一实现，本包与 nodemgr **共用**。
+// 下面保留同名薄包装只为不惊扰本包内的既有调用点与测试。
+const defaultUARTBaudrate = uartcfg.DefaultBaudrate
 
-// uartBusConfigLen 是 UART bus_config 的标准长度（7 字节）：
-// tx + rx + 4 字节波特率 + 1 字节 DMA flags。与生产既有行、固件 uart_init
-// （len >= 6）和 config_channel_get_dma_enabled（UART 需 len >= 7 才读 flags）
-// 都对齐。
-const uartBusConfigLen = 7
+// uartBusConfigLen 是 UART bus_config 的标准长度（7 字节）。
+const uartBusConfigLen = uartcfg.LayoutLen
 
 // setUARTBaudrateBytes 把波特率写进 bus_config 的字节 2..5（big-endian）。
-// 这是**唯一的字节偏移实现**：新建补齐（buildUARTBusConfig）与改写（withUARTBaudrate）
-// 都经由它，任何第三处再抄一遍 2/3/4/5 的位移都视为布局漂移。
+// 委托给 uartcfg —— 全仓**唯一的字节偏移实现**。
 func setUARTBaudrateBytes(data []byte, baudrate int) {
-	target := uint32(baudrate)
-	data[2] = byte(target >> 24)
-	data[3] = byte(target >> 16)
-	data[4] = byte(target >> 8)
-	data[5] = byte(target)
+	uartcfg.SetBaudrateBytes(data, baudrate)
 }
 
-// buildUARTBusConfig 按上表造出 7 字节的 UART bus_config hex 串（大写）。
+// buildUARTBusConfig 按标准布局造出 7 字节的 UART bus_config hex 串（大写）。
 // 新建 UART 通道且调用方未提供 bus_config 时由后端兜底调用，保证落库的一定是
 // 可被 withUARTBaudrate 解析/改写的合法布局（否则用户会得到一个「改不了波特率」的通道）。
-//
-// dmaEnabled 直接决定 byte 6：固件按 `byte6 & 0x01` 判 DMA。默认传 true
-// （与生产三条既有行的 byte 6 = 0x01 一致）。
 func buildUARTBusConfig(txPin, rxPin, baudrate int, dmaEnabled bool) string {
-	data := make([]byte, uartBusConfigLen)
-	data[0] = byte(txPin)
-	data[1] = byte(rxPin)
-	setUARTBaudrateBytes(data, baudrate)
-	data[6] = uartDMAFlagsByte(dmaEnabled)
-	return strings.ToUpper(hex.EncodeToString(data))
+	return uartcfg.Build(txPin, rxPin, baudrate, dmaEnabled)
 }
 
 // uartDMAFlagsByte 是 byte 6 的唯一构造点：固件只读 bit0。

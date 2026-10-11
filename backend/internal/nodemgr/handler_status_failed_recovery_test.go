@@ -29,14 +29,14 @@ func statusFrameWithHash(uptimeSec uint64, syncState uint64, configHash, syncID 
 // newStatusTestManager 建一个可用于 handleStatusReport 的最小 Manager。
 // 用真实 NewManager（它负责装配 syncGate 等字段），再替换成记录型 MQTT，
 // 这样既能断言落库、也能断言"是否真的下发了 manifest"。
-func newStatusTestManager(t *testing.T) (*Manager, *senderMockMQTT) {
+func newStatusTestManager(t *testing.T) (*Manager, *senderMockDownlink) {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
-	mock := &senderMockMQTT{}
+	mock := &senderMockDownlink{}
 	hub := websocket.NewHub()
 	go hub.Run()
 	mgr := NewManager(db, nil, hub, nil, nil, nil)
-	mgr.mqtt = mock
+	mgr.downlink = mock
 	return mgr, mock
 }
 

@@ -21,6 +21,10 @@ typedef struct transport transport_t;
 extern "C" {
 #endif
 
+/* 远程运维（0x22）的注入契约拆到单独头文件：见 msg_handler_device_op.h
+ * 的说明（本头 include 了整棵组件树，而那份契约只需要三个函数指针）。 */
+#include "msg_handler_device_op.h"
+
 /* === Init === */
 void msg_handler_init(void);
 void msg_handler_deinit(void);

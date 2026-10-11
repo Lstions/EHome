@@ -110,6 +110,18 @@ static inline void vTaskDelayUntil(TickType_t *prev, TickType_t inc) { (void)pre
 
 /* ---- semaphore stubs (bus_worker.c's report path) ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 

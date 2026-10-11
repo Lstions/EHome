@@ -600,6 +600,71 @@ static void test_enqueue_success_does_not_clear_error_count(void)
     s_queues.uart0_cmd_queue = NULL;
 }
 
+
+/*
+ * 4c) D-07 调用点回归（2026-10-06）：【本机队列满】不得计进设备健康计数。
+ *
+ * 为什么需要这条：sched_command_t.error_count 是服务端读的【唯一】健康量
+ * （handler_data.c 映射成 comm_status：>=3 -> FAULT，>0 -> TIMEOUT）。
+ * 旧代码在队列满时也把它 +1 => 100 Hz 下必然发生的队列满
+ * （L-01c 实测 full=577~589）会被上报成"现场传感器故障"。
+ *
+ * 这条测的是【调用点】而不是纯函数 —— 变异自证时发现：
+ * 只测 scheduler_health.c 的话，把 scheduler.c 改回 error_count++ 没有测试会红。
+ * 与 L-02 的教训同型：纯函数测试不能证明调用点用对了。
+ */
+static void test_queue_full_does_not_bump_device_health(void)
+{
+    reset_scheduler_state();
+    make_v2_channel(100, 11, 5000);
+
+    sched_command_t *cmd = reported_command(100, EDGE_ID, 11, 0);
+    CHECK(cmd != NULL, "fixture: the v2 command must exist");
+    cmd->error_count = 0;
+    cmd->queue_full_count = 0;
+
+    /* 造一个【已满】的队列：深度 1 且填满 => spaces(0) <= RESERVE(2)
+     * => 走 scheduler.c 的"队列满"分支。 */
+    QueueHandle_t q = xQueueCreate(1, sizeof(bus_cmd_t));
+    CHECK(q != NULL, "fixture: queue must be creatable");
+    s_queues.uart0_cmd_queue = q;
+    bus_cmd_t filler;
+    memset(&filler, 0, sizeof(filler));
+    CHECK(xQueueSend(q, &filler, 0) == pdTRUE, "fixture: queue must be full");
+
+    s_channels[0].edge_devices[0].commands[0].interval_ms = 0;
+    s_channels[0].edge_devices[0].commands[0].last_run_ms = 0;
+
+    uint32_t total_samples = 0, queue_full = 0;
+    schedule_v2_channel(&s_channels[0], 1000, false, &total_samples, &queue_full);
+
+    CHECK(queue_full == 1, "the queue-full path must be taken");
+    CHECK(total_samples == 0, "nothing may be enqueued into a full queue");
+    CHECK(cmd->queue_full_count == 1,
+          "local backpressure must have its OWN counter (observable, not silent)");
+    CHECK(cmd->error_count == 0,
+          "D-07: a full LOCAL queue must NOT increment the device health counter -- "
+          "the server reads it as sensor TIMEOUT/FAULT and would dispatch field "
+          "maintenance for a sensor that is not broken");
+
+    /* 再压几次也不能爬到 FAULT 阈值(3) */
+    for (int i = 0; i < 10; i++) {
+        s_channels[0].edge_devices[0].commands[0].last_run_ms = 0;
+        schedule_v2_channel(&s_channels[0], 1000 + (uint32_t)i, false, &total_samples, &queue_full);
+    }
+    CHECK(cmd->error_count == 0,
+          "repeated local backpressure must never reach the FAULT threshold (3)");
+    CHECK(cmd->queue_full_count == 11, "every rejection must be counted");
+
+    /* 对照：设备层面的失败【仍然】要推动健康计数（不能为了修 D-07 把这条路也堵死） */
+    scheduler_notify_command_outcome(100, EDGE_ID, 11, 0, false);
+    CHECK(cmd->error_count == 1,
+          "a real device failure must still increment the reported health counter");
+
+    vQueueDelete(q);
+    s_queues.uart0_cmd_queue = NULL;
+}
+
 /*
  * 4b) observe_queue_metrics with NULL queues: queue_spaces_or_depth returns
  *     CMD_QUEUE_DEPTH (16) for NULL queues, so used = capacity - 16.
@@ -712,6 +777,7 @@ int main(void)
     test_command_outcome_error_is_precisely_addressed();
     test_command_outcome_separates_devices_on_same_channel();
     test_enqueue_success_does_not_clear_error_count();
+    test_queue_full_does_not_bump_device_health();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

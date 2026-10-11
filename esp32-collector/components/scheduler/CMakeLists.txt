@@ -1,4 +1,4 @@
-idf_component_register(SRCS "scheduler.c"
+idf_component_register(SRCS "scheduler.c" "scheduler_health.c"
                        INCLUDE_DIRS "."
                        REQUIRES config_mgr bus_dma)
 

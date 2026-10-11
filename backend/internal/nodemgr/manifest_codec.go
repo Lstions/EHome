@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -124,7 +125,7 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 	owners := make(map[int]string)
 	claim := func(pin int, owner string) error {
 		if prior, exists := owners[pin]; exists {
-			return fmt.Errorf("GPIO pin %d conflict between %s and %s", pin, prior, owner)
+			return newManifestValidationError(fmt.Sprintf("GPIO pin %d conflict between %s and %s", pin, prior, owner))
 		}
 		owners[pin] = owner
 		return nil
@@ -194,6 +195,10 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 			return nil, err
 		}
 	}
+	// ⚠ 2026-10-09（§198）：到这里 owners 已收齐**全部**将要编码的引脚
+	//（UART/I2C/SPI 通道 + GPIO + PWM），正是检查"保留脚"的唯一合适位置。
+	// 只告警不拒绝，理由见 warnReservedPins 的注释（真源在固件，后端是可能过期的副本）。
+	warnReservedPins(node, owners)
 	return channels, nil
 }
 
@@ -202,7 +207,72 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 // collector cannot apply.
 func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemplates int) error {
 	if len(templates) > maxTemplates {
-		return fmt.Errorf("manifest has %d templates; collector limit is %d", len(templates), maxTemplates)
+		return newManifestValidationError(fmt.Sprintf("manifest has %d templates; collector limit is %d", len(templates), maxTemplates))
+	}
+	return nil
+}
+
+// validateUARTDMASlots 拒绝「显式请求的 UART DMA 数超过硬件槽位数」的 manifest。
+//
+// ⚠⚠ 2026-10-09（用户要求，两层设计）：
+//
+//	用户原话："用户手动开两条 UART DMA：ESP32应该直接报错，前端显示错误，
+//	          DMA 分不到降级为提示"
+//
+// 这是**第一层（硬报错）**：用户**显式**把多条 UART 的 DMA 打开时，配置在
+// **下发前**就被拒，错误信息直接回给前端 —— 而不是下发给设备后让资源计划
+// 拒绝整份 manifest（§211 的现场事故：2818 次 config failed、设备 ch=0
+// 永远 syncing，而 UI 上完全看不到原因）。
+//
+// 与第二层（运行期降级）的分工：
+//
+//	· 本函数（**显式冲突**）：manifest 里 dma_enabled=true 的 UART 通道数
+//	  > 硬件 UART DMA 槽位数 ⇒ 直接报错，不进设备。
+//	· bus_manager 的资源计划（**运行期不可用**）：非用户显式冲突导致的分不到
+//	  DMA ⇒ 降级 polled + 提示，**不**拒绝整份 manifest。
+//
+// 硬件事实（用户 2026-10-09 指正 + 已在 IDF 源码核实）：
+//
+//	S3 与 C6 的 UART 侧**只有 1 个 UHCI 槽位**，同一时刻只有一个 UART 能用 DMA：
+//	  S3/C6 soc_caps.h:  #define SOC_UHCI_SUPPORTED 1
+//	  uhci_ll.h:80-84    uhci_ll_attach_uart_port 写三个 uartN_ce 位时只有一个
+//	                     能为 1；后 attach 的会清掉前一个 ⇒ 前者 DMA 静默失效。
+//	两型号的 hw_dmas 表已收敛为「只有 1 条 compatible_bus 含 UART」
+//	（hw_tables.c；门禁 check_uart_dma_exclusive.py 强断言 <= 1）。
+//
+// ⚠ 为什么后端也要查（而不是只靠设备侧）：
+//
+//	设备侧报错只体现在 ConfigResult.success=false，而 §211 表明那条路径
+//	**在 UI 上几乎不可见**（用户只看到"配置失败"，不知道是 DMA）。
+//	在编码前拒绝能把原因直接放进 API 响应，前端可原样显示。
+// ValidateUARTDMASlots 是 validateUARTDMASlots 的导出别名，供 API 层在
+// **通道写入时**复用同一判据（见 api/handler_device.go validateNodeUARTDMASlots）。
+// 导出而不是让 API 层重写一套：口径只能有一份。
+func ValidateUARTDMASlots(channels []models.Channel) error {
+	return validateUARTDMASlots(channels)
+}
+
+func validateUARTDMASlots(channels []models.Channel) error {
+	requested := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		if !ch.Enabled || !ch.DmaEnabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(ch.BusType), "UART") {
+			continue
+		}
+		requested = append(requested, ch.HardwareID)
+	}
+	const slots = 1 // S3 与 C6 的 UART DMA 槽位数都是 1（用户 2026-10-09 指正）
+	if len(requested) > slots {
+		// ⚠ 这是**用户可行动**的配置错误 ⇒ ManifestValidationError ⇒ API 映射 400。
+		// 之前用裸 fmt.Errorf，API 一律映射 500，用户看到"服务端错误"，
+		// 既看不出是自己配错了，也可能被前端当成可重试故障。
+		return newManifestValidationError(fmt.Sprintf(
+			"UART DMA 槽位不足：本节点硬件只有 %d 个 UART 可同时使用 DMA"+
+				"（S3/C6 的多个 UART 共用一个 UHCI 接口），但配置里有 %d 条 UART 通道开启了 DMA：%s。"+
+				"请关闭其中 %d 条的 DMA（默认即关闭），或只保留 1 条",
+			slots, len(requested), strings.Join(requested, ", "), len(requested)-slots))
 	}
 	return nil
 }
@@ -226,7 +296,28 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		readLength uint32
 		delayMs    uint32
 	}
-	needed := make(map[string]cmdNeed) // key = normalized write_data
+	// ⚠⚠ 键必须是 (write_data, chID)，**不能**只是 write_data。
+	//
+	// 2026-10-09（§201，真机发现）：原来只以 write_data 为键 ⇒ 同一节点上
+	// **多条通道**挂同型号从机时（它们共用同一份驱动模板 ⇒ 同一 write_data），
+	// 这些从机会**塌缩成一条** cmdNeed，而 cmdNeed.chID 只保留**最后遍历到**的那个
+	// channel ⇒ 只有 1 条通道拿到 template_ids，其余通道的 template_ids 恒为空。
+	//
+	// 后果（真机实测，3 通道 × 5 从机 prs3001）：
+	//   · 只建 1 条模板、只回写 1 条通道（UART2 拿到 [47]，UART0/UART1 = NULL）
+	//   · 后端每次下发都打 "0 templates, 3 channels" 或 "1 templates, 3 channels"
+	//   · 设备侧 scheduler 因 `!t || t->write_data_len == 0` 跳过**全部**命令
+	//   · 三路 UART 一个请求都不发（对端从机 0 字节）
+	// ⚠ 它**不会**报错 —— 配置"下发成功"（success=1），只是没有任何轮询。
+	//   这正是本仓反复记的"静默失效"形态。
+	//
+	// ⚠ 单通道多从机**不受影响**（chID 相同，塌缩无害）⇒ 所以单元测试与
+	//   单通道现场都不会暴露它。触发面 = "同型号从机分布在 ≥2 条通道"。
+	type needKey struct {
+		writeData string
+		chID      uint
+	}
+	needed := make(map[needKey]cmdNeed)
 
 	var edges []models.EdgeDevice
 	db.Where("node_id = ? AND enabled = true", nodeID).Find(&edges)
@@ -278,7 +369,10 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 			if effectiveInterval <= 0 {
 				continue // 不轮询：不建模板，也不占容量
 			}
-			key := strings.ToUpper(strings.TrimSpace(cmd.WriteData))
+			key := needKey{
+				writeData: strings.ToUpper(strings.TrimSpace(cmd.WriteData)),
+				chID:      edge.ChannelID,
+			}
 			needed[key] = cmdNeed{
 				chID:       edge.ChannelID,
 				writeData:  cmd.WriteData,
@@ -296,7 +390,7 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 
 	missing := 0
 	for key := range needed {
-		if !existingKeys[key] {
+		if !existingKeys[key.writeData] {
 			missing++
 		}
 	}
@@ -304,33 +398,78 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		return false, fmt.Errorf("template reconciliation would create %d templates; collector limit is %d", len(existingTemplates)+missing, maxTemplates)
 	}
 
+	// 已有模板的 id（按 write_data 归一化键索引）。
+	//
+	// 2026-10-09（201，真机发现）：原实现只在新建模板时回写 template_ids。
+	// 于是"模板已存在（为别的通道或历史建的）"这条路径下，通道永远拿不到 id，
+	// 设备收到 0 模板，调度器跳过全部命令 —— 三路 UART 一个请求都不发，
+	// 却报 success=1（静默失效）。这与 needed 的键缺陷是两层叠加，两层都要修。
+	existingByKey := make(map[string]uint64)
+	for _, t := range existingTemplates {
+		existingByKey[strings.ToUpper(strings.TrimSpace(t.WriteData))] = uint64(t.ID)
+	}
+
 	// Create missing templates after capacity preflight succeeds.
 	created := false
 	for key, need := range needed {
-		if existingKeys[key] {
-			continue
+		tmplID := existingByKey[key.writeData]
+		if tmplID == 0 {
+			tmpl := models.ConfigTemplate{
+				NodeID:     nodeID,
+				WriteData:  need.writeData,
+				ReadLength: need.readLength,
+				DelayMs:    need.delayMs,
+			}
+			if err := db.Create(&tmpl).Error; err != nil {
+				// F2 fail-closed: a failed Create aborts the whole transaction.
+				return created, fmt.Errorf("auto-create ConfigTemplate (tx_hex_chars=%d): %w", len(need.writeData), err)
+			}
+			tmplID = uint64(tmpl.ID)
+			existingByKey[key.writeData] = tmplID
+			logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
+				tmpl.ID, len(need.writeData), need.chID)
+			created = true
 		}
-		tmpl := models.ConfigTemplate{
-			NodeID:     nodeID,
-			WriteData:  need.writeData,
-			ReadLength: need.readLength,
-			DelayMs:    need.delayMs,
+		// 回写必须幂等：reconcile 每次下发都跑，非幂等会让 template_ids 线性膨胀，
+		// 最终超过 maxTemplateIDs 使整份 manifest 被拒（真机曾见 18 > 16）。
+		if err := appendTemplateIDToChannel(db, need.chID, tmplID); err != nil {
+			return created, err
 		}
-		if err := db.Create(&tmpl).Error; err != nil {
-			// F2 fail-closed: a failed Create aborts the whole transaction.
-			return created, fmt.Errorf("auto-create ConfigTemplate (tx_hex_chars=%d): %w", len(need.writeData), err)
-		}
-		// Append template ID to channel's template_ids
-		newID := strconv.FormatUint(uint64(tmpl.ID), 10)
-		if err := db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
-			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID)).Error; err != nil {
-			return created, fmt.Errorf("append template_id %d to channel %d: %w", tmpl.ID, need.chID, err)
-		}
-		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
-			tmpl.ID, len(need.writeData), need.chID)
-		created = true
 	}
 	return created, nil
+}
+
+// appendTemplateIDToChannel 把 templateID 幂等地加入 channel.template_ids。
+//
+// 为什么必须幂等：reconcileDriverTemplates 在每次 SendConfigManifest 时都会跑。
+// 非幂等实现（如 SQL 侧 CASE ... || ',' ||）会让 template_ids 随下发次数线性增长，
+// 最终超过 maxTemplateIDs 使整份 manifest 被拒。
+//
+// 实现：先读当前值，Go 侧解析判重，再整体写回。
+func appendTemplateIDToChannel(db *gorm.DB, chID uint, templateID uint64) error {
+	if templateID == 0 || chID == 0 {
+		return nil
+	}
+	var cur string
+	if err := db.Model(&models.Channel{}).Where("id = ?", chID).
+		Select("COALESCE(template_ids, '')").Scan(&cur).Error; err != nil {
+		return fmt.Errorf("read channel %d template_ids: %w", chID, err)
+	}
+	want := strconv.FormatUint(templateID, 10)
+	for _, part := range strings.Split(cur, ",") {
+		if strings.TrimSpace(part) == want {
+			return nil // 已在其中，幂等返回
+		}
+	}
+	next := want
+	if strings.TrimSpace(cur) != "" {
+		next = cur + "," + want
+	}
+	if err := db.Model(&models.Channel{}).Where("id = ?", chID).
+		Update("template_ids", next).Error; err != nil {
+		return fmt.Errorf("append template_id %s to channel %d: %w", want, chID, err)
+	}
+	return nil
 }
 
 // getCommandTemplatesFromDriver returns command templates from a driver, or nil.
@@ -373,4 +512,84 @@ func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 		}
 	}
 	return 0
+}
+
+// reservedPinName 返回该平台某引脚是保留脚时的**用途名**（BOOT / USB_D- / USB_D+ / LED）。
+//
+// ⚠ 与 handler_periph.go:382 的 reservedPinForPlatform **有意分工、但数据同源**：
+//
+//	那个函数返回**单个** pin 且只用于**硬拒绝** GPIO/PWM 外设；
+//	本函数给出**完整清单**且只用于**告警**。
+//	⚠ 两张表应合并成一份（现为手工副本，固件扩清单时不会自动跟上）—— 登记为待办（§198）。
+//
+// 数据来源：esp32-collector/components/hw_profile/include/hw_tables.h 的 HW_RESERVED_*。
+func reservedPinName(platform string, pin int) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(platform)) {
+	case "ESP32S3", "ESP32-S3", "S3":
+		switch pin {
+		case 0:
+			return "BOOT/strapping", true
+		case 19:
+			return "USB_D-", true
+		case 20:
+			return "USB_D+", true
+		case 48:
+			return "RGB LED (WS2812)", true
+		}
+	case "ESP32C6", "ESP32-C6", "C6":
+		switch pin {
+		case 9:
+			return "BOOT/strapping", true
+		case 12:
+			return "USB_D-", true
+		case 13:
+			return "USB_D+", true
+		case 8:
+			return "RGB LED (WS2812)", true
+		}
+	}
+	return "", false
+}
+
+// warnReservedPins 对"将要编码进 manifest 的引脚里落在保留脚上的"发告警。
+//
+// ⚠⚠ 2026-10-09（§198）新增，**只告警、不拒绝**。这是有意的取舍：
+//
+//	① **真源在固件**：哪些脚保留由 hw_tables.h 的 HW_RESERVED_* 定义
+//	   （S3: 0/19/20/48，C6: 9/12/13/8）。后端这份是**手工副本**。
+//	② 把可能过期的副本当**硬拒绝**判据，会在固件新增保留脚时误伤合法配置 ——
+//	   而固件侧 validate_manifest_resources 才是权威（它真知道本芯片的保留脚）。
+//	③ 但**静默**也不行：S3P 实测上报 capabilities 里 I2C1.default_scl_pin = **48**，
+//	   而 48 正是该型号的 RGB LED 保留脚（main.c 的 rgb_led_init(48) 真在驱动它）。
+//	   后端**照单全收**并编码下发 ⇒ 设备报 ESP_ERR_INVALID_ARG ⇒
+//	   排查者只看到"引脚仲裁失败"，不知道"后端早就该提醒这个脚是保留脚"。
+//
+// ⇒ 折中：编码前告警（可观测），判据仍归固件（权威）。
+//
+// ⚠ 为什么加在 claim 的调用点而不是 channelRoutePins：
+//
+//	claim 是**所有**会被编码进 manifest 的资源的唯一汇聚点
+//	（UART/I2C/SPI 通道 + GPIO + PWM 都走它），而
+//	handler_periph.go 的 validateReportedGPIO 只覆盖 GPIO/PWM ——
+//	**总线通道的引脚（channelRoutePins）从来没查过保留脚**。
+func warnReservedPins(node models.Node, owners map[int]string) {
+	if len(owners) == 0 {
+		return
+	}
+	pins := make([]int, 0, len(owners))
+	for pin := range owners {
+		pins = append(pins, pin)
+	}
+	sort.Ints(pins)
+	for _, pin := range pins {
+		name, ok := reservedPinName(node.Platform, pin)
+		if !ok {
+			continue
+		}
+		// ⚠ 格式串写在一行或用 +：Go 不支持相邻字符串字面量跨行拼接（本轮踩过两次）。
+		logger.Warnf("[%s] manifest 将编码保留脚 GPIO%d（%s 的 %s）：若固件无法认领该脚，"+
+			"整份 manifest 会被拒（不止这一条通道）；"+
+			"⚠ 后端保留脚表是固件 hw_tables.h 的手工副本，可能过期 —— 见 §198。",
+			node.NodeID, pin, node.Platform, name)
+	}
 }

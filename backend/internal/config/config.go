@@ -12,12 +12,73 @@ import (
 type Config struct {
 	Server         ServerConfig         `yaml:"server"`
 	Database       DatabaseConfig       `yaml:"database"`
-	MQTT           MQTTConfig           `yaml:"mqtt"`
 	Log            LogConfig            `yaml:"log"`
 	Control        ControlConfig        `yaml:"control"`
 	Ingest         IngestConfig         `yaml:"ingest"`
 	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
+	Device         DeviceConfig         `yaml:"device"`
+}
+
+// DeviceConfig configures the 3.0 device-facing TCP+TLS listener.
+//
+// # This is now the ONLY device transport
+//
+// MQTT was removed from the backend on 2026-10-08, so this listener is the sole
+// way a device can reach the server (uplink AND downlink). The `enabled`
+// default of false is therefore no longer "safe because MQTT still works" --
+// with it off there is no device path at all.
+//
+// ⚠ Startup does not refuse Enabled=false: the setting is still useful for
+// API-only / test deployments, and refusing would break them. But an operator
+// who leaves it off on a real deployment gets a server that no device can talk
+// to, so the effective configuration is logged loudly at startup (see
+// cmd/server/main.go) rather than assumed.
+//
+// A half-configured listener is refused at startup rather than silently
+// skipped, because "I enabled it and nothing listens" is indistinguishable
+// from "the device cannot connect" once you are debugging at 3am.
+type DeviceConfig struct {
+	// Enabled turns the 3.0 listener on. Default false.
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the listen address, e.g. ":8443" (design §4.1 default port).
+	Addr string `yaml:"addr"`
+
+	// CertFile / KeyFile are the server certificate chain and private key.
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+
+	// ClientCAFile is the CA bundle used to verify DEVICE certificates.
+	// Required when Enabled: without it the listener would accept any client,
+	// which is the opposite of mTLS.
+	ClientCAFile string `yaml:"client_ca_file"`
+
+	// ReadTimeoutSec / WriteTimeoutSec bound a single read/write.
+	// 0 means "use the built-in default".
+	ReadTimeoutSec  int `yaml:"read_timeout_sec"`
+	WriteTimeoutSec int `yaml:"write_timeout_sec"`
+}
+
+// Validate refuses a partially configured listener.
+//
+// Called only when Enabled is true, so an operator who has not opted in is
+// never blocked by 3.0 settings they do not have yet.
+func (d DeviceConfig) Validate() error {
+	if !d.Enabled {
+		return nil
+	}
+	if d.Addr == "" {
+		return fmt.Errorf("device.addr is required when device.enabled is true")
+	}
+	if d.CertFile == "" || d.KeyFile == "" {
+		return fmt.Errorf("device.cert_file and device.key_file are required when device.enabled is true")
+	}
+	if d.ClientCAFile == "" {
+		return fmt.Errorf("device.client_ca_file is required when device.enabled is true " +
+			"(a device listener without client verification is not mTLS)")
+	}
+	return nil
 }
 
 type ControlConfig struct {
@@ -59,13 +120,6 @@ type DatabaseConfig struct {
 	SSLMode  string `yaml:"sslmode"`
 }
 
-// MQTTConfig holds MQTT broker settings
-type MQTTConfig struct {
-	Broker   string `yaml:"broker"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-}
-
 // LogConfig holds logging settings
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -105,9 +159,6 @@ func defaultConfig() *Config {
 			Password: "ehome123",
 			DBName:   "ehome",
 			SSLMode:  "disable",
-		},
-		MQTT: MQTTConfig{
-			Broker: "tcp://localhost:1883",
 		},
 		Log: LogConfig{
 			Level: "info",
@@ -159,15 +210,6 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("EHOME_DB_NAME", ""); v != "" {
 		cfg.Database.DBName = v
 	}
-	if v := getEnv("MQTT_BROKER", ""); v != "" {
-		cfg.MQTT.Broker = v
-	}
-	if v := getEnv("MQTT_USER", ""); v != "" {
-		cfg.MQTT.User = v
-	}
-	if v := getEnv("MQTT_PASSWORD", ""); v != "" {
-		cfg.MQTT.Password = v
-	}
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
 	}
@@ -210,10 +252,7 @@ func getEnv(key, defaultValue string) string {
 }
 
 // Convenience accessors for backward compatibility
-func (c *Config) MQTTBroker() string   { return c.MQTT.Broker }
-func (c *Config) MQTTUser() string     { return c.MQTT.User }
-func (c *Config) MQTTPassword() string { return c.MQTT.Password }
-func (c *Config) APIAddr() string      { return c.Server.Addr }
+func (c *Config) APIAddr() string { return c.Server.Addr }
 func (c *Config) DatabaseURL() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.Database.User, c.Database.Password, c.Database.Host,

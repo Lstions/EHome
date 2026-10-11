@@ -7,8 +7,15 @@
  */
 
 #include "sync_manager.h"
+
+/* ⚠ 2026-10-08：本文件用了 strncpy（:100/:240）却**没有**包含 <string.h>。
+ * 它之所以能在 IDF 下编过，只是因为别处**恰好**间接带进了这个声明 ——
+ * 而"恰好"不是保证：把它编进宿主目标时立刻报
+ *   "implicit declaration of function 'strncpy' [-Werror=implicit-function-declaration]"
+ * ⇒ 补上。这类"靠传递包含活着"的用法会在改动包含图时静默炸掉。 */
+#include <string.h>
+
 #include "config_mgr.h"
-#include "ehome_mqtt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "rgb_led.h"
@@ -36,6 +43,8 @@ static sync_state_t s_state = {0};
 static sync_state_enum_t s_sync_enum = SYNC_STATE_IDLE;
 static bool s_initialized = false;
 static sync_send_hello_cb_t s_send_hello_cb = NULL;
+/* 见 sync_manager.h 的说明：由 main 侧接到上行仲裁（P4：一处定义）。 */
+static sync_uplink_available_cb_t s_uplink_available_cb = NULL;
 
 /* === Forward declarations === */
 static bool should_request_sync(sync_reason_t reason);
@@ -124,6 +133,29 @@ void sync_manager_register_send_hello_cb(sync_send_hello_cb_t cb)
     s_send_hello_cb = cb;
 }
 
+void sync_manager_register_uplink_available_cb(sync_uplink_available_cb_t cb)
+{
+    s_uplink_available_cb = cb;
+}
+
+/* "现在有没有可用上行"的**唯一**判定（P4）。
+ *
+ * ⭐ 2026-10-08（§194）：MQTT 已彻底移除 ⇒ 这条函数的语义就是"3.0 传输是否已连接"，
+ *    由注入回调（main.c 的 on_sync_uplink_available → transport_any_connected）提供。
+ *
+ * ⚠ 历史教训（留着别再犯）：本模块曾**硬编码**判 mqtt_client_is_connected_impl()，
+ *    于是在"某条上行不可用但另一条可用"时，三条**主动请求同步**的路径会**永久死掉
+ *    且不报错**（只留一条 WARN）。真机实测 §164：t=334 与 t=31493 两次请求都被挡住。
+ *    ⇒ 判据要问"**这件事需要什么**"，不要问"某个特定实现是否在线"。 */
+static bool uplink_available(void)
+{
+    if (s_uplink_available_cb != NULL) return s_uplink_available_cb();
+    /* 未注入 ⇒ **保守返回 false**（不知道就说没有）：宁可少发一次同步请求，
+     * 也不要在没有上行时假装有。⚠ 这与"逐位一致"的旧兜底行为**不同**，
+     * 是有意为之 —— 旧兜底依赖的 mqtt_client_* 已经不存在。 */
+    return false;
+}
+
 void sync_manager_request_sync(sync_reason_t reason)
 {
     if (!s_initialized) {
@@ -138,9 +170,15 @@ void sync_manager_request_sync(sync_reason_t reason)
         return;
     }
 
-    /* Check MQTT connectivity */
-    if (!mqtt_client_is_connected_impl()) {
-        ESP_LOGW(TAG, "MQTT not connected, deferring sync request");
+    /* Check **uplink** availability（不是某个传输的可用性 —— 见 uplink_available() 的说明）。
+     * ⚠ 日志措辞改过两次，两次都是因为**措辞比代码活得久**：
+     *   ① 原文写死 "MQTT not connected" —— 3.0 就绪时仍这么说，操作员会去查 MQTT；
+     *   ② 改成 "MQTT 与 3.0 均未就绪" —— 但 MQTT 已于 2026-10-08 **整体移除**
+     *      （§194）⇒ 这句话在**设备日志里点名了一个不存在的传输**，
+     *      真机上实测仍会打印（C6 验证时 t=375ms 那行就是这么来的）。
+     * ⇒ 现在只说"上行"：**日志不该点名具体实现，正如判据不该**（同一族教训）。 */
+    if (!uplink_available()) {
+        ESP_LOGW(TAG, "无可用上行（3.0 链路未就绪），暂缓同步请求");
         s_sync_enum = SYNC_STATE_ERROR;
         return;
     }
@@ -154,11 +192,11 @@ void sync_manager_request_sync(sync_reason_t reason)
              reason, (unsigned long long)s_state.epoch, s_state.has_active_config);
 
     /* Invoke callback to send Hello */
-    if (s_send_hello_cb && mqtt_client_is_connected_impl()) {
+    if (s_send_hello_cb && uplink_available()) {
         s_send_hello_cb();
     } else {
-        ESP_LOGW(TAG, "Cannot send Hello: cb=%p, mqtt_connected=%d",
-                 s_send_hello_cb, mqtt_client_is_connected_impl());
+        ESP_LOGW(TAG, "Cannot send Hello: cb=%p, uplink_available=%d",
+                 s_send_hello_cb, (int)uplink_available());
         s_sync_enum = SYNC_STATE_ERROR;
     }
 }

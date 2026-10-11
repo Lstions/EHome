@@ -288,10 +288,11 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		m.triggerDeviceInit(deviceID, deviceID)
 	}
 
-	// HomeAssistant Discovery: publish on first registration or status change
-	if reg.created || oldStatus == "offline" || oldStatus == "" {
-		m.publishHADiscovery(deviceID, deviceID)
-	}
+	// ⚠ 这里原先在"首次注册或状态变化"时发布 HomeAssistant Discovery（MQTT retained）。
+	// 用户 2026-10-08 确认该集成**可以删除** ⇒ 随 MQTT 一并移除。
+	// ⚠ 这是**真实的功能净损失**，不是漏掉的一行：retained 在 3.0 **没有等价物**
+	//   （没有 broker 替离线订阅者保存最后值）。
+	// 若要恢复：走 3.0 原生设计（后端向 HA 推 REST/WS），**不要**复活一个 MQTT 客户端。
 
 	// Async ping (with timeout and WaitGroup tracking)
 	m.wg.Add(1)
