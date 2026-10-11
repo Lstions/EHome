@@ -261,6 +261,24 @@ def evidence(out, limit=6):
 # backups: 绝对路径 -> 原始字节（还原时写回并核对 md5）
 # created: 绝对路径列表（本次新建物，还原时删除）
 
+class EnvIncomplete(Exception):
+    """注入目标不存在 ⇒ 本环境判不了该配方（不是门禁缺陷）。
+
+    2026-10-11（CI 剥洋葱第二层）：prod_isolation 的两条配方注入的是
+      ../__scratch_v3/defaults/… 与 build/… —— 两者都 **gitignored**，
+      干净检出（CI）里根本不存在 ⇒ _backup 抛 FileNotFoundError ⇒
+      整个自检崩溃。与 IRAM_ELF=None 是**同一个根因家族**：
+      "把只在本机存在的产物当成了必然存在的输入"。
+    处置与 IRAM_ELF 一致：判 SKIP（并打印），而不是假红、更不是崩溃。
+    """
+
+
+def _require(path, what):
+    """注入前断言目标存在；不存在则抛 EnvIncomplete（由 run_recipe 转 SKIP）。"""
+    if not os.path.exists(path):
+        raise EnvIncomplete("%s 不存在：%s（gitignored 产物，干净检出里没有）" % (what, path))
+
+
 def _backup(backups, path):
     if path not in backups:
         with open(path, "rb") as fh:
@@ -284,6 +302,7 @@ def _patch_text(backups, path, fn, what):
 def inject_json_key(relpath, setter):
     def fn(backups, created):
         path = os.path.join(ROOT, relpath)
+        _require(path, relpath)
         raw = _backup(backups, path)
         cfg = json.loads(raw.decode("utf-8"))
         before = json.dumps(cfg, sort_keys=True)
@@ -381,6 +400,7 @@ def inject_replace(relpath, pattern, repl, what):
             assert n == 1, "%s：正则没打中（命中 %d 次）" % (what, n)
             return new
         path = os.path.join(ROOT, relpath)
+        _require(path, what)
         return _patch_text(backups, path, sub, "%s: %s" % (relpath, what))
     return fn
 
@@ -388,6 +408,7 @@ def inject_replace(relpath, pattern, repl, what):
 def inject_replace_text(relpath, fn_text):
     def fn(backups, created):
         path = os.path.join(WT, relpath)
+        _require(path, relpath)
         return _patch_text(backups, path, fn_text, relpath)
     return fn
 
@@ -955,6 +976,14 @@ def run_recipe(rec, harmless, cov_limit):
         if rec["inject"] is not None and not harmless:
             inject_note = rec["inject"](backups, created)
         bad_rc, bad_out = run_gate(bad_args)
+    except EnvIncomplete as e:
+        # 注入目标不存在（gitignored 产物）⇒ 本环境判不了这条配方。
+        # 必须与"门禁不会咬"区分开：前者是环境问题（SKIP 并打印），
+        # 后者才是缺陷。参考 IRAM_ELF 的处置（同根因家族）。
+        return dict(rec=rec, inject_note=str(e), bad_rc=None, bad_out="",
+                    bites=False, restore_ok=True, restore_note="无需还原",
+                    green_rc=None, green_out="", verdict="跳过（环境不完整：注入目标不存在）",
+                    baseline_rc=None, baseline_out="")
     finally:
         # 还原：写回原始字节 + 核对 md5；删掉本次新建物
         bad_restore = []
@@ -1186,7 +1215,8 @@ def main():
         res = run_recipe(r, harmless, cov_limit)
         results.append(res)
         v = res["verdict"]
-        mark = {"会咬": "OK ", "跳过（该门禁在本环境本来就红）": "SKIP"}.get(v, "RED")
+        mark = {"会咬": "OK ", "跳过（该门禁在本环境本来就红）": "SKIP",
+                "跳过（环境不完整：注入目标不存在）": "SKIP"}.get(v, "RED")
         print()
         print("[%s] %-42s %s" % (mark, r["name"], r["gate"]))
         print("      坏输入 : %s" % res["inject_note"])
@@ -1194,6 +1224,9 @@ def main():
               % (res["bad_rc"], res["restore_note"], res["green_rc"]))
         if v.startswith("跳过"):
             # 不静默：把"为什么这个环境里判不了"打出来。
+            if v.endswith("注入目标不存在）"):
+                print("      跳过原因：%s" % res["inject_note"])
+                continue
             print("      跳过原因：该门禁在**未注入**时就是 rc=%s ⇒ 本环境下无法判'注入是否被侦破'"
                   % res["baseline_rc"])
             for line in evidence(res["green_out"])[:3]:
