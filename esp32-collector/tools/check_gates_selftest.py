@@ -87,6 +87,17 @@ def _find_iram_elf():
 
 IRAM_ELF = _find_iram_elf()
 
+# 因**环境不完整**（缺构建产物）而未注册配方的门禁。
+#
+# 2026-10-11：`uncovered_gates` 是「有 check_*.py 但没有任何配方」的差集，
+#   它把「环境不完整」与「忘了写配方」混为一谈。缺 ELF / sdkconfig 时
+#   配方不注册（正确，避免 None 进 argv 崩溃），却因此被判「没有自检配方」⇒
+#   在干净检出（CI）里**必红**。两者的处置应当不同：
+#     · 忘了写配方 = 缺陷（会静默漏掉一条门禁）⇒ 必须红
+#     · 环境不完整 = 判不了 ⇒ SKIP，但**必须打印**（不静默）
+#   ⇒ 用本表把后者从 uncovered 差集里排除，并单独显式列出。
+ENV_SKIPPED_GATES = set()
+
 # ── 崩溃安全：写盘日志（journal）────────────────────────────────────────
 #
 # 为什么需要它（2026-10-07 实测）：
@@ -216,6 +227,16 @@ def clear_journal():
 
 def run_gate(args, timeout=900):
     """跑一条门禁，返回 (rc, 合并输出)。"""
+    # ⚠ 2026-10-11：断言 argv 里没有 None。
+    #   起因：三条 iram 配方的 green_args 直接用了可能为 None 的 IRAM_ELF，
+    #   在干净检出（CI）里 None 进 argv ⇒ subprocess 抛 TypeError ⇒
+    #   整个自检**崩溃**（不是"某条配方失败"，而是后面全不跑）。
+    #   那种失败形态极难定位：日志末尾只有一句 TypeError，看不出是哪条配方。
+    #   这里显式失败并报出配方名，让同类错误**下次一眼可见**。
+    #   （配方层已改为不存在就不注册；本断言是纵深防御。）
+    if any(a is None for a in args):
+        return 1, ("ERROR 配方 argv 含 None：%r\n"
+                   "（门禁脚本或参数未解析成功；不应把 None 传进 argv）" % (list(args),))
     try:
         p = subprocess.run([sys.executable] + list(args),
                            capture_output=True, text=True, timeout=timeout, cwd=ROOT)
@@ -554,21 +575,35 @@ def recipes():
         "新建 %s/probe.c（未被任何宿主 target 编译）⇒ 未覆盖文件数 +1" % PROBE_REL,
         extra="coverage")
 
-    add("iram_isr.no_elf_arg",
-        "check_iram_isr_safety.py", "argv", None,
-        "不给 ELF 参数（argparse 必修）—— 纯参数，仓库不动",
-        green_args=[IRAM_ELF])
+    # ⚠⚠ 2026-10-11（CI 首次在干净检出上跑本自检时暴露）：
+    #   这三条配方的 green_args 直接用 IRAM_ELF，而 _find_iram_elf() 在
+    #   **干净检出（CI）里返回 None**（没有构建产物）。原代码的 docstring 写
+    #   "找不到返回 None（该 3 条配方跳过）"，但**代码从未实现跳过** ——
+    #   None 被塞进 argv ⇒ subprocess 抛
+    #   `TypeError: expected str, bytes or os.PathLike object, not NoneType`
+    #   ⇒ 整个 gate_selftest 崩溃（ctest #73 Failed），CI 必红。
+    #
+    #   本地跑不出来：本机 __scratch_v3/build 下有 52 个 ehome_collector.elf。
+    #   ⇒ 典型的"只在 CI 红"缺陷。修法与上面 S3_SDKCONFIG 一致：
+    #     **产物不存在就不注册这三条**（而不是注册后崩溃）。
+    if not IRAM_ELF:
+        ENV_SKIPPED_GATES.add("check_iram_isr_safety.py")
+    if IRAM_ELF:
+        add("iram_isr.no_elf_arg",
+            "check_iram_isr_safety.py", "argv", None,
+            "不给 ELF 参数（argparse 必修）—— 纯参数，仓库不动",
+            green_args=[IRAM_ELF])
 
-    add("iram_isr.missing_elf",
-        "check_iram_isr_safety.py", "argv", None,
-        "给一个不存在的 ELF 路径（无法验证不得静默通过）",
-        green_args=[IRAM_ELF], bad_args=["/tmp/gate_selftest_no_such.elf"])
+        add("iram_isr.missing_elf",
+            "check_iram_isr_safety.py", "argv", None,
+            "给一个不存在的 ELF 路径（无法验证不得静默通过）",
+            green_args=[IRAM_ELF], bad_args=["/tmp/gate_selftest_no_such.elf"])
 
-    add("iram_isr.junk_elf",
-        "check_iram_isr_safety.py", "tmp",
-        inject_tmp_junk(TMP_JUNK, b"\x7fELF" + b"\x00" * 200),
-        "截断/垃圾 ELF（没有 .iram 符号 ⇒ 无法分析）",
-        green_args=[IRAM_ELF], bad_args=[TMP_JUNK])
+        add("iram_isr.junk_elf",
+            "check_iram_isr_safety.py", "tmp",
+            inject_tmp_junk(TMP_JUNK, b"\x7fELF" + b"\x00" * 200),
+            "截断/垃圾 ELF（没有 .iram 符号 ⇒ 无法分析）",
+            green_args=[IRAM_ELF], bad_args=[TMP_JUNK])
 
     add("message_types.device_only_number",
         "check_message_types.py", "probe",
@@ -728,6 +763,8 @@ def recipes():
     #     注入假键则永远有效，且直接验证「新出现的差异会被报出」。
     #   ⚠ 它同时验证**退出码**：本轮真的踩到过「打 FAIL 却退 0」
     #     （return 1 被多缩进了 4 格、落进 for 循环体）⇒ 门禁形同虚设。
+    if not (S3_SDKCONFIG and S3P_SDKCONFIG):
+        ENV_SKIPPED_GATES.add('check_model_behavior_diff.py')
     if S3_SDKCONFIG and S3P_SDKCONFIG:
         add('model_behavior_diff.unregistered_diff_bites',
             'check_model_behavior_diff.py', 'argv',
@@ -1092,7 +1129,11 @@ def main():
     gates = [g for g in gates if g != SELF]
     all_recipes = recipes()
     covered_all = {r["gate"] for r in all_recipes}
-    uncovered_gates = [g for g in gates if g not in covered_all]
+    # 环境不完整而未注册配方的门禁：从 uncovered 里排除，改为显式 SKIP 列表。
+    # 理由见 ENV_SKIPPED_GATES 定义处：缺产物 ≠ 忘写配方，两者判决必须不同。
+    uncovered_gates = [g for g in gates
+                       if g not in covered_all and g not in ENV_SKIPPED_GATES]
+    env_skipped = sorted(g for g in gates if g in ENV_SKIPPED_GATES)
     rs = list(all_recipes)
     if args.only:
         rs = [r for r in rs if args.only in r["name"]]
@@ -1163,6 +1204,14 @@ def main():
             print("      ⚠ 还原后没有重新变绿，绿跑输出：")
             for line in res["green_out"].splitlines()[:5]:
                 print("      | %s" % line)
+
+    if env_skipped and not harmless:
+        # 不静默：把"本环境判不了"的原因讲清楚，而不是让它看起来像通过。
+        print()
+        print("SKIP 以下门禁因**环境不完整**（缺构建产物）无配方可跑，本环境判不了：")
+        for g in env_skipped:
+            print("    %s" % g)
+        print("    （CI 干净检出没有 build/ 产物；本地构建后可覆盖。这不是「忘了写配方」。）")
 
     if uncovered_gates and not harmless:
         print()

@@ -4,15 +4,21 @@ import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
 import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
+import type { Node } from '@/api/node'
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
 const { mockGetDetail, mockChannelList, mockChannelDelete, mockChannelReconfigure, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
-  mockGetDetail: vi.fn(() => Promise.resolve({
+  // ⚠ 类型标注必须有（2026-10-11 CI 修复）：不标注时 vi.fn 的返回类型由下面这个
+  //   字面量**推断**得出，于是 mockResolvedValueOnce 只接受该字面量的精确形状；
+  //   后续用例传 config_status / config_sync_state 等「合法但默认值里没出现」的
+  //   可选字段就报 TS2353。标注为真实的 Node 接口后，可选字段全部合法。
+  mockGetDetail: vi.fn((): Promise<Node> => Promise.resolve({
     id: 1, node_id: 'F0F5BDFFFE02', name: '机房采集器', model: 'esp32s3', status: 'online',
     firmware_version: '2.5.18', protocol_version: '2.2', connection_type: 'wifi',
     connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
     wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
     last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+    online_duration: 187980, created_at: '2024-01-01T00:00:00Z',
     config_sync_state: 'in_sync', capabilities: {}, config: {},
   })),
   mockChannelList: vi.fn(() => Promise.resolve([
@@ -1638,6 +1644,7 @@ describe('NodeOverview (生产页)', () => {
       connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
       wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
       last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      online_duration: 187980, created_at: "2024-01-01T00:00:00Z",
       // 配置是**成功**的（applied/in_sync）—— 告警不是错误。
       config_status: "applied", config_sync_state: "in_sync",
       config_warnings: [{ code: "dma_degraded", channel_id: 49, message: "通道 49 未能使用 DMA，已自动降级为中断/轮询模式（功能正常）。" }],
@@ -1661,6 +1668,7 @@ describe('NodeOverview (生产页)', () => {
       connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
       wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
       last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      online_duration: 187980, created_at: "2024-01-01T00:00:00Z",
       config_status: "applied", config_sync_state: "in_sync",
       config_warnings: [],
       capabilities: {}, config: {},
@@ -1678,6 +1686,7 @@ describe('NodeOverview (生产页)', () => {
       connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
       wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
       last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      online_duration: 187980, created_at: "2024-01-01T00:00:00Z",
       config_status: "applied", config_sync_state: "in_sync",
       config_warnings: [null, { code: "dma_degraded" }, { message: "" }] as any,
       capabilities: {}, config: {},
