@@ -2,14 +2,14 @@
 # EHomeSystem Makefile
 # ============================================================
 # 统一环境：本地开发（本机 Go/Vite）与生产共用同一套容器基础设施
-# （docker-compose.yml：postgres/emqx）。无独立 dev 栈。
+# （docker-compose.yml：postgres）。无独立 dev 栈。
 #
 # Usage:
 #   make up             - 确保统一基础设施运行 + 启动本机前后端（默认目标）
 #   make dev            - make up 的别名（历史兼容）
 #   make down           - 停止本机前后端（统一基础设施保持运行，手动 docker compose down 停止）
 #   make restart        - 重启本机前后端（基础设施不动）
-#   make infra          - 确保统一基础设施（PG/EMQX）运行
+#   make infra          - 确保统一基础设施（PG）运行
 #   make infra-down     - 停止统一基础设施
 #   make auth-bootstrap - 初始化统一数据库并生成管理员设置凭据
 #   make backend        - 仅启动本机后端（连统一基础设施）
@@ -33,13 +33,13 @@
 #   make blackbox       - 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
 #
 # 说明：
-#   - 统一基础设施 = docker-compose.yml 的 postgres/emqx，与生产共用。
+#   - 统一基础设施 = docker-compose.yml 的 postgres，与生产共用。
 #     生产数据卷（ehome-pgdata 等）不受 make down/clean 影响。
 #   - 生产 web 服务（ehome）由 docker compose 直接管理，不受本 Makefile 控制。
 #   - 本地开发端口：前端 :5174（代理 /api、/ws → API_PORT）；
-#     API 默认走 :8080 的 ehome-web 容器（唯一连着 EMQX、真正收设备数据的实例）；
+#     API 默认走 :8080 的 ehome-web 容器（真正收设备数据的实例）；
 #     本机 Go 后端（BACKEND_PORT，默认 8090）仅在需要调试后端时启用。
-#     统一基础设施主机端口：PG :5432、EMQX :1883（仅绑定 127.0.0.1）。
+#     统一基础设施主机端口：PG :5432（仅绑定 127.0.0.1）。
 # ============================================================
 
 .DEFAULT_GOAL := up
@@ -50,7 +50,7 @@ POSTGRES_PASSWORD ?= ehome123
 POSTGRES_DB     ?= ehome
 
 # API_PORT = 开发前端代理指向的后端。默认 8080，由 ehome-web 容器提供
-# （该容器同时托管前端 SPA 与后端 API，也是唯一连着 EMQX、真正在收设备数据的实例）。
+# （该容器同时托管前端 SPA 与后端 API，也是真正在收设备数据的实例）。
 #
 # ⚠️ 历史上这里默认 8082，但 8082 已被**无关项目** digital-family-tree 的
 # 容器占用（0.0.0.0:8082->8082）。若前端代理指过去，REST 会返回该项目的
@@ -60,8 +60,8 @@ API_PORT        ?= 8080
 
 # 仅当确实需要跑「本机 Go 后端」（例如调试后端改动）时才用到。
 # 刻意避开 API_PORT：8080 归容器所有，本地再绑会抢端口。
-# ⚠️ 本地后端与容器会各自建立一条 MQTT 连接并同时消费相同 topic，
-# 除非把 MQTT_BROKER 指向独立 broker，否则会造成重复处理。
+# ⚠️ 3.0 起设备经 mTLS 直连后端；本地后端与容器**不能同时**绑定同一设备端口，
+# 否则后者启动失败（端口占用）。调试后端时请先停掉容器。
 BACKEND_PORT    ?= 8090
 FRONTEND_PORT   ?= 5174
 
@@ -83,7 +83,7 @@ BACKEND  := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend-shared
 LOG_DIR  := $(ROOT)/.logs
 
-# 统一基础设施 Compose：与生产共用 docker-compose.yml（只操作 postgres/emqx）
+# 统一基础设施 Compose：与生产共用 docker-compose.yml（只操作 postgres）
 COMPOSE := docker compose -f $(ROOT)/docker-compose.yml
 
 # 按端口杀进程（可靠，不依赖 PID 文件）
@@ -138,8 +138,6 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		MQTT_BROKER=tcp://127.0.0.1:1883 \
-		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
@@ -166,7 +164,7 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		echo "    Frontend: http://localhost:$(FRONTEND_PORT) ✓ (API 代理 → :$(API_PORT))"; \
 	else echo "    Frontend: FAILED — check $(LOG_DIR)/frontend.log"; fi
 	@echo "    Postgres: 127.0.0.1:5432 (统一基础设施)"
-	@echo "    EMQX:     127.0.0.1:1883 (dashboard: 127.0.0.1:18083)"
+	@echo "    (MQTT/EMQX 已于 2026-10-08 移除；设备经 mTLS 直连)"
 
 # ---- 首次运行认证引导 ----
 auth-bootstrap: ## 初始化统一数据库并生成一次性管理员设置凭据
@@ -218,8 +216,6 @@ restart: auth-bootstrap ## 重启本机前后端
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		MQTT_BROKER=tcp://127.0.0.1:1883 \
-		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
@@ -242,13 +238,13 @@ restart: auth-bootstrap ## 重启本机前后端
 	@echo "==> Restarted!"
 
 # ---- 统一基础设施 ----
-infra: ## 确保统一基础设施 (PG/EMQX) 运行
+infra: ## 确保统一基础设施 (PG) 运行
 	@echo "==> Ensuring unified infrastructure running (docker-compose.yml)..."
-	@$(COMPOSE) up -d --wait postgres emqx
+	@$(COMPOSE) up -d --wait postgres
 	@$(COMPOSE) exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc \
 		"SELECT 1 FROM pg_database WHERE datname = 'ehome_test'" | grep -q 1 || \
 		$(COMPOSE) exec -T postgres createdb -U $(POSTGRES_USER) ehome_test
-	@echo "==> Unified infrastructure ready (PG:5432 EMQX:1883)"
+	@echo "==> Unified infrastructure ready (PG:5432)"
 
 infra-down: ## 停止统一基础设施
 	@echo "==> Stopping unified infrastructure..."
@@ -265,8 +261,6 @@ backend: auth-bootstrap ## 仅启动本机后端（连统一基础设施）
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		MQTT_BROKER=tcp://127.0.0.1:1883 \
-		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
@@ -327,19 +321,20 @@ test-integration: infra ## 使用统一 PostgreSQL 的 ehome_test 数据库运�
 	@echo "✅ Integration tests passed"
 
 # 场景仿真验证（设计 docs/设计/场景仿真验证框架.md §8）：
-# 真实组合根子进程 + 真实 PG（ehome_sim_*）+ 真实 EMQX。
+# 真实组合根子进程 + 真实 PG（ehome_sim_*）。
+# ⚠ 2026-10-11：EMQX 已移除 —— 该目标的 TestScenarios 已作废（Skip），
+# 现在只跑结构性门禁（TestCatalogGate 等）。
 # SCENARIO=SIM-DS 只跑某个域（-run 过滤）；不带则全量。
 SCENARIO ?=
 test-scenarios: ## 运行场景仿真验证（需 make infra）
-	@echo "==> Running scenario simulation (real server + real PG + real EMQX)..."
+	@echo "==> Running simulation gates (real PG; TestScenarios 已作废/Skip)..."
 	@cd $(BACKEND) && EHOME_DB_HOST=127.0.0.1 \
 		EHOME_DB_PORT=5432 \
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
-		MQTT_BROKER=tcp://127.0.0.1:1883 \
 		go test -tags=simulation -count=1 -timeout=30m -v \
-		-run "$(if $(SCENARIO),TestScenarios/$(SCENARIO),TestScenarios|TestCatalogGate)" ./simulation/...
-	@echo "✅ Scenario simulation passed"
+		-run "$(if $(SCENARIO),TestScenarios/$(SCENARIO),TestCatalogGate|TestSimulationDriverTypes)" ./simulation/...
+	@echo "✅ Simulation gates passed"
 
 test-coverage: ## 运行全部测试并生成覆盖率报告
 	@echo "==> Running all tests with coverage..."
@@ -414,8 +409,8 @@ blackbox: ## 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 
 
 # ---- 状态 ----
 status: ## 查看服务状态
-	@echo "==> Unified infrastructure (docker-compose.yml postgres/emqx):"
-	@$(COMPOSE) ps postgres emqx
+	@echo "==> Unified infrastructure (docker-compose.yml postgres):"
+	@$(COMPOSE) ps postgres
 	@echo ""
 	@echo "==> Local services:"
 	@if lsof -ti :$(BACKEND_PORT) >/dev/null 2>&1; then \
