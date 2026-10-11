@@ -1232,6 +1232,8 @@ target_compile_definitions(session_transport_tests PRIVATE
     SESSION_TRANSPORT_HOST_TEST=1
     DEVICE_LINK_HOST_TEST=1)
 target_compile_options(session_transport_tests PRIVATE -Wall -Wextra -Werror)
+# 2026-10-11：并发共享 scratch 用例需要真线程（barrier 对齐两个发送线程）。
+target_link_libraries(session_transport_tests PRIVATE pthread)
 add_test(NAME session_transport_tests COMMAND session_transport_tests)
 
 # 3.0 链路接线里的**判定**（main/device_link_wiring.c 的纯判定部分）。

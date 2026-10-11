@@ -13,9 +13,11 @@
  * ⇒ 两条都必须用**后果**断言（不是"返回值等于某枚举"就算），
  *   尤其要覆盖"progress 已推进"这一族。
  */
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "session_transport.h"
 
@@ -359,6 +361,151 @@ static void test_uplink_partial_write_is_stream_dirty(void)
 }
 
 
+/* ════════ 13. ⚠⚠ 共享成帧缓冲：并发发送会互相覆盖（§258 同族缺陷）════════
+ *
+ * 背景（读码定位）：固件里 stx_send_frame() 的 scratch 来自
+ * main/session_transport.c 的**单个静态**数组 s_tx_scratch，而它被
+ * 所有上行任务共用：
+ *   report_tx（bus_worker 上报）、log_tx_task（日志流）、
+ *   status_task（每秒 Status/MemReport）、crash_diag、dev_link（Hello）。
+ *
+ * stx_send_frame 的流程是「整帧编码进 scratch」→「循环 write(scratch)」。
+ * 两个任务并发进入时，后者的编码会**覆盖**前者尚未写完的缓冲
+ * ⇒ 线上出现「半条帧 + 另一条帧的头」⇒ 对端定界器永久错位
+ * （症状是"链路莫名卡死"，不是一条错误日志）。
+ *
+ * 本用例把该机制**确定性地**复现：两个线程共用一个 scratch，
+ * 各自 stx_send_frame；write 回调在编码完成后用 barrier 对齐，
+ * 使两条帧的编码必然交错。断言"线上必须收到两条各自完整的帧"。
+ *
+ * ⚠ **覆盖边界（如实标注）**：这里测的是**机制**（共享 scratch + 交错编码
+ *   ⇒ 损坏），不是 session_transport.c 的 IDF 胶水段本身（那段在宿主不编，
+ *   s_tx_scratch 与 tx_lock 都在 #ifndef SESSION_TRANSPORT_HOST_TEST 内）。
+ *   ⇒ 若将来有人删掉 tx_lock，本用例**不会**变红。
+ *   tx_lock 的存在性由真机验证与 §258 的注释守护，不靠这条用例。
+ *   把边界写清楚，胜过让它看起来覆盖了它其实没覆盖的东西。
+ */
+typedef struct {
+    pthread_barrier_t encoded;   /* 两个线程都编码完毕（scratch 已被覆盖） */
+    uint8_t           buf[1024];
+    size_t            len;
+    int               calls;
+    pthread_mutex_t   mtx;       /* 保护 buf/len（模拟真实 socket 的顺序追加） */
+} shared_cap_t;
+
+static shared_cap_t s_sc;
+
+/* 串行化门（模拟修复后的 tx_lock）：false = 不串行（复现缺陷），true = 串行。
+ * 同一个用例两种模式跑，才能证明"是串行化消除了损坏"，
+ * 而不是"换个环境碰巧不坏"。
+ * ⚠ 声明必须在 shared_write 之前 —— 它要读这个标志（实测踩到编译错误）。 */
+static pthread_mutex_t s_sc_lock;
+static bool            s_sc_serialize;
+
+static link_result_t shared_write(void *ctx, const uint8_t *data, size_t len,
+                                  size_t *progress)
+{
+    shared_cap_t *c = (shared_cap_t *)ctx;
+    /* 编码已完成；等另一个线程也编码完（此时共享的 scratch 已被覆盖）。
+     * ⚠ 只在**不串行**模式等：串行模式下同一时刻只有一个线程能进到这里，
+     *   等 barrier 必然死锁（实测 EXIT=124 超时）。
+     *   串行模式不需要制造交错 —— 它要证明的恰恰是"没有交错"。 */
+    if (!s_sc_serialize) (void)pthread_barrier_wait(&c->encoded);
+    pthread_mutex_lock(&c->mtx);
+    if (c->len + len <= sizeof(c->buf)) {
+        memcpy(c->buf + c->len, data, len);
+        c->len += len;
+    }
+    c->calls++;
+    pthread_mutex_unlock(&c->mtx);
+    *progress = len;
+    return LINK_SENT_FULL;
+}
+
+typedef struct { uint8_t *scratch; size_t cap; uint8_t type; } sc_arg_t;
+
+static void *sc_sender(void *arg)
+{
+    sc_arg_t *a = (sc_arg_t *)arg;
+    if (s_sc_serialize) pthread_mutex_lock(&s_sc_lock);
+    stx_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.write = shared_write;
+    tx.ctx = &s_sc;
+    tx.scratch = a->scratch;
+    tx.scratch_cap = a->cap;
+    /* payload 首字节 = 消息类型（后端强校验 frame type == payload[0]），
+     * 两条帧用**不同** type，便于在线上区分是否串了。 */
+    uint8_t payload[64];
+    payload[0] = a->type;
+    for (size_t i = 1; i < sizeof(payload); i++) payload[i] = (uint8_t)(a->type + i);
+    (void)stx_send_frame(&tx, payload, sizeof(payload), 0);
+    if (s_sc_serialize) pthread_mutex_unlock(&s_sc_lock);
+    return NULL;
+}
+
+/* 跑一轮并发发送，返回 (0x23 条数, 0x31 条数, 线上总字节)。
+ * 不直接用 CHECK —— 因为**两种模式都要跑**，断言在调用处做。 */
+static void run_shared_scratch_case(bool serialize, int *n23, int *n31, size_t *len)
+{
+    memset(&s_sc, 0, sizeof(s_sc));
+    (void)pthread_barrier_init(&s_sc.encoded, NULL, 2);
+    (void)pthread_mutex_init(&s_sc.mtx, NULL);
+    (void)pthread_mutex_init(&s_sc_lock, NULL);
+    s_sc_serialize = serialize;
+
+    /* 关键：**同一个** scratch 给两个线程 —— 这正是固件里 s_tx_scratch 的形态 */
+    static uint8_t shared[STX_FRAME_MAX];
+    sc_arg_t a1 = { .scratch = shared, .cap = sizeof(shared), .type = 0x23 };
+    sc_arg_t a2 = { .scratch = shared, .cap = sizeof(shared), .type = 0x31 };
+
+    pthread_t t1, t2;
+    if (pthread_create(&t1, NULL, sc_sender, &a1) != 0) { *n23 = *n31 = -1; return; }
+    if (pthread_create(&t2, NULL, sc_sender, &a2) != 0) { *n23 = *n31 = -1; return; }
+    (void)pthread_join(t1, NULL);
+    (void)pthread_join(t2, NULL);
+
+    const size_t one = WIRE_HEADER_BYTES + 64;
+    *len = s_sc.len;
+    *n23 = 0; *n31 = 0;
+    for (size_t off = 0; off + one <= s_sc.len; off += one) {
+        const uint8_t *f = s_sc.buf + off;
+        if (f[0] == 0x45 && f[1] == 0x48) {
+            if (f[3] == 0x23) (*n23)++;
+            else if (f[3] == 0x31) (*n31)++;
+        }
+    }
+    (void)pthread_barrier_destroy(&s_sc.encoded);
+    (void)pthread_mutex_destroy(&s_sc.mtx);
+    (void)pthread_mutex_destroy(&s_sc_lock);
+}
+
+static void test_shared_scratch_corrupts_concurrent_sends(void)
+{
+    int n23 = 0, n31 = 0;
+    size_t len = 0;
+
+    /* ① 不串行 —— 复现缺陷：一条帧被覆盖后丢失，另一条重复 */
+    run_shared_scratch_case(false, &n23, &n31, &len);
+    CHECK(n23 + n31 > 0, "并发发送应产生输出");
+    CHECK(n23 == 0 && n31 == 2,
+          "**不串行时**必须复现损坏（期望 0x23=0/0x31=2，实际 0x23=%d/0x31=%d）—— "
+          "若这里变成 1/1，说明用例没有真正制造交错，需先修用例", n23, n31);
+
+    /* ② 串行（= 修复后的 tx_lock）—— 必须完好 */
+    run_shared_scratch_case(true, &n23, &n31, &len);
+    CHECK(n23 == 1 && n31 == 1,
+          "**串行化后**必须两种帧各一条（实际 0x23=%d/0x31=%d）", n23, n31);
+    CHECK(len == 2 * (WIRE_HEADER_BYTES + 64),
+          "串行化后线上应恰好两条完整帧 %u 字节，实际 %u",
+          (unsigned)(2 * (WIRE_HEADER_BYTES + 64)), (unsigned)len);
+
+    /* 旧版"单跑 + 自洽计数"断言已删除 —— 它是**假绿**的：
+     * 共享 scratch 被覆盖后两个线程拿到的是**同一块**缓冲，
+     * 线上是 B 帧的两份拷贝，两份都自洽 => "自洽==2" 照样通过。
+     * 必须按**类型分布**断言（一条丢失、另一条重复），见上面 ①② 两步。 */
+}
+
 int main(void)
 {
     test_only_ready_counts_as_up();
@@ -372,6 +519,7 @@ int main(void)
     test_uplink_framing_refusals();
     test_uplink_backpressure_retries_without_duplicating();
     test_uplink_partial_write_is_stream_dirty();
+    test_shared_scratch_corrupts_concurrent_sends();
 
     if (s_failures) { printf("session_transport_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("session_transport_tests: all checks passed\n");

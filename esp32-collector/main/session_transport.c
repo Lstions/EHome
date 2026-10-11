@@ -167,12 +167,44 @@ int stx_send_frame(stx_tx_t *tx, const uint8_t *payload, size_t len, uint32_t se
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "SESS_TX";
 
 typedef struct {
     session_t *sess;
+    /* 2026-10-11（§258 同族缺陷，读码定位）：上行发送必须串行化。
+     *
+     * 两个理由，各自都足以致命：
+     *
+     * (1) 成帧缓冲是共享静态的（s_tx_scratch）。
+     *     stx_send_frame() 先把整帧编码进 tx->scratch，再循环 write()。
+     *     若两个任务并发进入，后者的 devlink_encode_frame 会覆盖前者的缓冲，
+     *     而前者还在拿它 write() => 线上出现"半条帧 + 另一条帧的头"。
+     *     对端定界器一旦错位就再也无法自愈（症状是"链路莫名卡死"，
+     *     而不是一条错误日志）。
+     *
+     * (2) TLS 上下文本身不线程安全。
+     *     esp_tls / mbedtls 对本路径不加锁：
+     *       - esp_tls.c / esp_tls_mbedtls.c 里 xSemaphore|mutex = 0 命中；
+     *       - mbedtls 的 MBEDTLS_THREADING_C 只保护 ssl_cache / ssl_ticket /
+     *         x509_crt，不含 ssl_tls.c（读写路径）。
+     *     并发 mbedtls_ssl_write 会破坏 SSL 上下文内部状态。
+     *
+     * 谁会并发调用：report_tx（bus_worker 上报）、log_tx_task（日志流）、
+     * status_task（每秒 Status/MemReport）、crash_diag、dev_link（Hello）。
+     * 实测生产配置里 log_stream 是关闭的，但 status_task 与 report_tx
+     * 一直在同时发（1 Hz vs 100+ Hz）=> 这条路径本来就在被并发走。
+     *
+     * 修法：整段"成帧 + 写出"用一把互斥锁串行化。
+     * 为什么这里锁可以跨越 I/O（与 link_tcp 的租约修法不同）：
+     *   - 本临界区本来就该串行 —— 两条上行不可能同时写同一条 TCP 流
+     *     而保持帧边界，串行化是语义要求，不是为省事；
+     *   - 写路径最坏耗时是 TLS record 写（毫秒级）；backpressure 时由调用方
+     *     vTaskDelay 让出（在锁外），不会把别人挡 10s。
+     * 若将来写路径可能长时间阻塞，需改为"排队 + 单写者任务"。 */
+    SemaphoreHandle_t tx_lock;
 } sess_tx_priv_t;
 
 /* 把 session_send 包成 stx_write_fn，供**宿主可测**的成帧编排 stx_send_frame 注入。
@@ -199,6 +231,18 @@ static esp_err_t sess_tx_send(transport_t *t, const uint8_t *data, size_t len)
     }
     sess_tx_priv_t *p = (sess_tx_priv_t *)t->priv_data;
 
+    /* ⚠ 2026-10-11：整段"成帧 + 写出"必须串行。
+     * 临界区覆盖 s_tx_scratch 的使用与 TLS 写 —— 两者都不能并发：
+     *   - scratch 共享 => 并发会互相覆盖，线上出现"半条帧 + 另一条帧的头"；
+     *   - TLS 上下文无内建锁（esp_tls/mbedtls 本路径 0 命中）=> 并发写破坏状态。
+     * 详见 sess_tx_priv_t.tx_lock 处的说明。
+     * 锁失败（未建）时**不静默降级**：并发写会污染流，宁可如实报错。 */
+    if (p->tx_lock == NULL) {
+        ESP_LOGE(TAG, "tx_lock 未初始化 —— 拒绝发送（并发写会污染 TCP 流）");
+        return stx_to_esp_err(STX_SEND_NOT_READY);
+    }
+    xSemaphoreTake(p->tx_lock, portMAX_DELAY);
+
     /* ⭐ task-32：走**宿主可测**的编排（成帧 + 发送）。
      * 之前这里直接 session_send(data) —— 线上没有 12 B 头，
      * 后端 DecodeHeader 一律 ErrMagic ⇒ 链路永远进不了 READY。 */
@@ -211,10 +255,13 @@ static esp_err_t sess_tx_send(transport_t *t, const uint8_t *data, size_t len)
     tx.stats.retries = tx.stats.failed = tx.stats.retries_exhausted = 0;
 
     int rc = stx_send_frame(&tx, data, len, 0);
+    xSemaphoreGive(p->tx_lock);
+
     if (rc == 0) return ESP_OK;
     if (rc == stx_to_esp_err(STX_SEND_RETRY)) {
         /* 背压：让出 CPU —— 睡眠策略刻意留在调用方（编排层不睡眠，见其注释），
-         * 否则宿主测试里会出现真实延时。 */
+         * 否则宿主测试里会出现真实延时。
+         * ⚠ 必须在**锁外**延时：持锁 sleep 会把其他上行任务一起挡住。 */
         ESP_LOGW(TAG, "send 背压：重试 %u 次后仍未写出（载荷 %u B）",
                  (unsigned)tx.stats.retries, (unsigned)len);
         vTaskDelay(1);
@@ -302,6 +349,15 @@ transport_t *session_transport_create(session_t *s)
     if (p == NULL) { free(t); ESP_LOGE(TAG, "priv 分配失败"); return NULL; }
 
     p->sess = s;
+    /* ⚠ 锁必须在这里建：sess_tx_send 依赖它串行化"成帧 + 写出"。
+     * 建不出来就**不返回半成品**（P1）—— 否则每次上行都只能报错，
+     * 等于链路不可用却看不出根因。 */
+    p->tx_lock = xSemaphoreCreateMutex();
+    if (p->tx_lock == NULL) {
+        ESP_LOGE(TAG, "tx_lock 创建失败");
+        free(p); free(t);
+        return NULL;
+    }
     t->ops = &s_sess_tx_ops;
     t->type = TRANSPORT_TYPE_TCP;   /* 复用既有枚举：3.0 链路就是 TCP+mTLS */
     /* ⚠ 常量名是 TRANSPORT_DISCONNECTED（不是 TRANSPORT_STATE_DISCONNECTED）。
@@ -326,6 +382,11 @@ void session_transport_destroy(transport_t *t)
 {
     if (t == NULL) return;
     (void)transport_unregister(t);
+    /* 先注销再删锁：注销后不会再有新的 send 进来。 */
+    if (t->priv_data != NULL) {
+        sess_tx_priv_t *p = (sess_tx_priv_t *)t->priv_data;
+        if (p->tx_lock != NULL) vSemaphoreDelete(p->tx_lock);
+    }
     free(t->priv_data);
     free(t);
 }
