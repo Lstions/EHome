@@ -55,7 +55,25 @@ func TestMain(m *testing.M) {
 
 // TestScenarios 顺序遍历 catalog.All() 执行全部场景（设计 §5.5）：
 // 单进程单库、不开 t.Parallel，场景之间用自我清理保证互不污染。
+// TestScenarios 在当前代码基线上**已作废**（见本文件顶部 §194/§196 说明）。
+//
+// 2026-10-11（CI 收尾，实测）：它此前在 CI 里**必然红** —— 后端不再消费 MQTT，
+// 于是 harness 的"等服务端消费 MQTT 上行"探针 30s 超时：
+//
+//	--- FAIL: TestScenarios (31.71s)
+//	等待服务端 MQTT 就绪失败: 等待 30s（60 次轮询）后条件仍未满足: 服务端尚未消费 MQTT 上行
+//
+// 一个**已知作废**的用例以 FAIL 形式常驻，比它的失败本身更有害：CI 永远红 ⇒
+// 真红与假红无法区分（这正是本仓最忌讳的形态）。故改为显式 Skip，并保留
+// 恢复路径的指引。
+//
+// ⚠ Skip 不等于"通过"：它在测试输出里显示为 SKIP，不会被计入通过数。
+// 要恢复真实验证，正解是把 harness 的 6 个 MQTT 文件改成走 3.0 的 mTLS 客户端
+// （参考 backend/internal/transport 的 device 侧用法），而不是复活后端 MQTT。
 func TestScenarios(t *testing.T) {
+	t.Skip("仿真 harness 的设备侧仍是 MQTT 客户端，而后端已移除 MQTT（§194/§196）：" +
+		"该用例的链路不存在，跑它只会得到假绿或必然红。恢复需将 harness 移植到 3.0 mTLS 客户端。")
+
 	env := harness.Start(t, harness.DefaultOptions())
 
 	scenarios := catalog.All()

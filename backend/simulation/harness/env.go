@@ -117,12 +117,19 @@ const (
 )
 
 // Preflight 在不建立任何持久状态的前提下检查基础设施是否可用：
-// PG（维护库）可达、MQTT broker 可达、./cmd/server 可编译。
+// PG（维护库）可达、./cmd/server 可编译。
 //
 // 为什么需要它：设计 §5.5 要求"基础设施缺失时 TestMain 直接失败并给出
 // 可执行提示，不静默跳过"。TestMain 拿不到 *testing.T，无法调用 Start
 // （Start 的 t.Cleanup 负责杀子进程/删库，合成 T 的 Cleanup 永不执行），
 // 因此由 Preflight 承担这一步，Start 内部自然也会重复走到同样的检查。
+//
+// ⚠ 2026-10-11：**已移除 MQTT broker 可达性检查**。
+// 原先它要求 1883 可连，但后端已于 2026-10-08 整体移除 MQTT —— 为一条
+// 不存在的链路要求基础设施，代价是**把整包测试一起判死**：实测把
+// MQTT_BROKER 指向死端口时，连完全不碰 MQTT 的 TestCatalogGate（纯结构
+// 门禁，1.1s 通过）也一并 FAIL，因为它同样要过 TestMain 的 Preflight。
+// 结构性门禁与基础设施可用性必须是两件事，不能互相绑架。
 func Preflight(opts Options) error {
 	resolved := opts.withDefaults(nil)
 
@@ -137,33 +144,12 @@ func Preflight(opts Options) error {
 		return fmt.Errorf("关闭维护库连接失败: %w", err)
 	}
 
-	address, err := brokerAddress(resolved.MQTTAddr)
-	if err != nil {
-		return err
-	}
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("MQTT broker 不可达（%s）: %v；请先执行 make infra", resolved.MQTTAddr, err)
-	}
-	_ = conn.Close()
-
 	if _, err := serverBinary(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// brokerAddress 把 tcp://host:port 归一为 net.Dial 可用的 host:port。
-func brokerAddress(broker string) (string, error) {
-	trimmed := strings.TrimSpace(broker)
-	for _, prefix := range []string{"tcp://", "mqtt://", "ssl://", "tls://"} {
-		trimmed = strings.TrimPrefix(trimmed, prefix)
-	}
-	if trimmed == "" || !strings.Contains(trimmed, ":") {
-		return "", fmt.Errorf("MQTT_BROKER %q 不是合法的 host:port 形式", broker)
-	}
-	return trimmed, nil
-}
 
 // Start 完成一次仿真运行的全部准备（设计 §5.1 启动序列 1~9 步）。
 // 任一步失败都以可执行的错误信息终止测试，绝不静默降级。
