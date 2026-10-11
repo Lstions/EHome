@@ -27,7 +27,9 @@ import (
 type Options struct {
 	RunID     string // 缺省 = sim-<UTC 日期>-<4 位随机>
 	DSN       string // 缺省从 EHOME_DB_* 环境变量组装
-	MQTTAddr  string // 缺省 tcp://127.0.0.1:1883
+	// DeviceAddr 是后端 3.0 设备监听地址（mTLS），缺省 127.0.0.1:18443。
+	// ⚠ 2026-10-11：取代原 MQTTAddr（broker 地址）。
+	DeviceAddr string
 	AdminUser string // 缺省 "admin"
 	AdminPass string // 缺省随机强口令
 	KeepDB    bool   // 缺省 false：运行结束 DROP 场景库
@@ -74,8 +76,16 @@ type Env struct {
 	Options   Options
 	AdminUser string
 	AdminPass string
-	MQTTAddr  string
 	Startup   StartupRecord
+
+	// DeviceAddr 是后端 3.0 设备监听地址（mTLS），仿真设备连它。
+	//
+	// ⚠ 2026-10-11：取代原 MQTTAddr。移植前这里是 broker 地址，
+	// 而后端已无 MQTT ⇒ 该字段连同 paho 一起删除，避免留下"恒为空"的假配置。
+	DeviceAddr string
+
+	// pki 是本次运行的 mTLS 证书材料（CA + 服务端证书 + 按需签发的设备证书）。
+	pki *simPKI
 
 	owner   *testing.T // Start 的宿主 T，收尾阶段必须用它（子测试 T 已结束）
 	runDir  string
@@ -111,7 +121,8 @@ var credentialLinePattern = regexp.MustCompile("Initialization credential \\(val
 const (
 	healthTimeout     = 60 * time.Second
 	credentialTimeout = 30 * time.Second
-	mqttReadyTimeout  = 30 * time.Second
+	// deviceReadyTimeout 是"服务端开始处理设备上行"的等待上限（原 mqttReadyTimeout）。
+	deviceReadyTimeout = 30 * time.Second
 	buildTimeout      = 10 * time.Minute
 	shutdownGrace     = 12 * time.Second
 )
@@ -164,7 +175,7 @@ func Start(t *testing.T, opts Options) *Env {
 	e.RunID = e.Options.RunID
 	e.AdminUser = e.Options.AdminUser
 	e.AdminPass = e.Options.AdminPass
-	e.MQTTAddr = e.Options.MQTTAddr
+	e.DeviceAddr = e.Options.DeviceAddr
 	e.DBName = DatabaseNameForRun(e.RunID)
 
 	root := repoRoot(t)
@@ -185,10 +196,20 @@ func Start(t *testing.T, opts Options) *Env {
 	if err := os.MkdirAll(e.runDir, 0o755); err != nil {
 		t.Fatalf("创建证据目录 %s 失败: %v", e.runDir, err)
 	}
+
+	// 步骤 1.2：生成本次运行的 mTLS 证书（CA + 服务端证书落盘，设备证书按需签发）。
+	//
+	// 为什么在这里：证书必须**先于**后端子进程启动存在（它按路径读），
+	// 且必须**晚于** runDir 建好（证书写进 runDir，随 run 一起清理）。
+	pki, err := newSimPKI(filepath.Join(e.runDir, "pki"))
+	if err != nil {
+		t.Fatalf("生成仿真 mTLS 证书失败: %v", err)
+	}
+	e.pki = pki
 	e.summary = &Summary{
 		RunID:     e.RunID,
 		Database:  e.DBName,
-		MQTTAddr:  e.MQTTAddr,
+		DeviceAddr: e.DeviceAddr,
 		StartedAt: time.Now().UTC(),
 		Scenarios: []*ScenarioRecord{},
 		path:      filepath.Join(e.runDir, "summary.json"),
@@ -240,7 +261,7 @@ func Start(t *testing.T, opts Options) *Env {
 
 	// 步骤 7.5（本实现新增，见报告偏差清单）：确认服务端 MQTT 上行已就绪。
 	// 否则首批 Hello 可能落在订阅建立之前被 broker 丢弃，造成假失败。
-	e.waitMQTTReady()
+	e.waitDeviceReady()
 
 	// 步骤 8：错误凭据探针 + 真实初始化 + 管理员登录。
 	e.initialize(credential)
@@ -248,7 +269,7 @@ func Start(t *testing.T, opts Options) *Env {
 	e.note("run_id", e.RunID)
 	e.note("database", e.DBName)
 	e.note("base_url", e.BaseURL)
-	e.note("mqtt_addr", e.MQTTAddr)
+	e.note("device_addr", e.DeviceAddr)
 	e.note("admin_username", e.AdminUser)
 	e.note("credential_selector", strings.SplitN(e.Startup.Credential, ".", 2)[0])
 	e.note("state_before_initialize", e.Startup.StateBeforeInitialize)
@@ -333,8 +354,13 @@ func (e *Env) startServer(port int) error {
 		"EHOME_DB_PASSWORD":    cfg.Password,
 		"EHOME_DB_NAME":        e.DBName,
 		"EHOME_SERVER_ADDR":    fmt.Sprintf(":%d", port),
-		"MQTT_BROKER":          e.MQTTAddr,
-		"EHOME_MQTT_CLIENT_ID": "ehome-sim-" + e.RunID,
+		// 3.0 设备监听（mTLS）。MQTT_BROKER/EHOME_MQTT_CLIENT_ID 已随移植删除。
+		// 证书由本进程生成并落盘（harness/pki.go），子进程按路径读取。
+		"EHOME_DEVICE_ENABLED":        "true",
+		"EHOME_DEVICE_ADDR":           e.DeviceAddr,
+		"EHOME_DEVICE_CERT_FILE":      e.pki.serverCertFile,
+		"EHOME_DEVICE_KEY_FILE":       e.pki.serverKeyFile,
+		"EHOME_DEVICE_CLIENT_CA_FILE": e.pki.caFile,
 		"EHOME_JWT_SECRET":     randHex(32),
 		"EHOME_ENV":            "development",
 		// GIN_MODE=debug 是必须的：middleware.go 的 isDevelopmentMode() 是
@@ -448,28 +474,35 @@ func (e *Env) waitCredential() string {
 	return matches[1]
 }
 
-// waitMQTTReady 轮询直到服务端确实开始消费 MQTT 上行。
-// 判据：故意发一个协议版本非法的 Hello，服务端会打 Warn
-// "Rejecting invalid Hello before ACK"；该拒绝发生在任何入库之前，
-// 因此这个探针不产生任何节点记录。
-func (e *Env) waitMQTTReady() {
+// waitDeviceReady 轮询直到服务端确实开始处理设备上行。
+//
+// 判据（与 MQTT 时代同一套、仍有效）：故意发一个协议版本非法的 Hello，
+// 服务端会打 Warn "Rejecting invalid Hello before ACK"；该拒绝发生在任何入库之前，
+// 因此这个探针不产生任何节点记录 —— 不会污染后续场景的节点计数。
+//
+// ⚠ 2026-10-11：原名 waitMQTTReady。探针机制**原样保留**（它本就只调 Device API），
+//   变的只是"上行经什么传输"。这也再次说明移植面确实收敛在 harness 传输层。
+func (e *Env) waitDeviceReady() {
 	e.T.Helper()
 	probe := e.Device("warmup")
 	if err := probe.Connect(); err != nil {
-		e.Fatalf("仿真器连接 MQTT（%s）失败: %v；请先执行 make infra", e.MQTTAddr, err)
+		e.Fatalf("仿真器连接设备端口（%s）失败: %v\n"+
+			"该端口由后端 3.0 mTLS 监听提供，检查：\n"+
+			"  1) harness 是否注入了 EHOME_DEVICE_ENABLED/ADDR/CERT_FILE/KEY_FILE/CLIENT_CA_FILE\n"+
+			"  2) 证书是否有效（见 %s）", e.DeviceAddr, err, e.runDir)
 	}
 	defer probe.Close()
-	err := e.EventuallyEveryError(mqttReadyTimeout, 500*time.Millisecond, func() error {
+	err := e.EventuallyEveryError(deviceReadyTimeout, 500*time.Millisecond, func() error {
 		if _, err := probe.sendHello("0.0", "warmup", "warmup", 0, 0, false); err != nil {
 			return err
 		}
 		if e.Logs.Contains("Rejecting invalid Hello") {
 			return nil
 		}
-		return fmt.Errorf("服务端尚未消费 MQTT 上行")
+		return fmt.Errorf("服务端尚未处理设备上行")
 	})
 	if err != nil {
-		e.Fatalf("等待服务端 MQTT 就绪失败: %v\n服务子进程日志尾部:\n%s", err, e.Logs.Tail(40))
+		e.Fatalf("等待服务端设备链路就绪失败: %v\n服务子进程日志尾部:\n%s", err, e.Logs.Tail(40))
 	}
 }
 
@@ -889,8 +922,8 @@ func (o Options) withDefaults(t *testing.T) Options {
 	if o.RunID == "" {
 		o.RunID = "sim-" + time.Now().UTC().Format("20060102") + "-" + randHex(2)
 	}
-	if o.MQTTAddr == "" {
-		o.MQTTAddr = envOr("MQTT_BROKER", "tcp://127.0.0.1:1883")
+	if o.DeviceAddr == "" {
+		o.DeviceAddr = envOr("EHOME_SIM_DEVICE_ADDR", "127.0.0.1:18443")
 	}
 	if o.AdminUser == "" {
 		o.AdminUser = "admin"

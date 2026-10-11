@@ -372,14 +372,11 @@ export const edgeDeviceApi = {
     return response.data
   },
 
-  async getOperationHistory(id: number, limit: number = 50): Promise<any[]> {
-    const response = await client.get<unknown, ApiEnvelope<unknown[]>>(
-      `/api/v1/edge-devices/${id}/operations/history`,
-      { params: { limit } }
-    )
-    const data = response?.data
-    return Array.isArray(data) ? data : []
-  },
+  // ⚠ 2026-10-11：此处原有 getOperationHistory()，指向 `GET /edge-devices/:id/operations/history`。
+  //   该路径**后端从未实现**（实测 404），且**全仓无任何调用方**（只有它自己的单测）——
+  //   属死代码。受控操作历史**已由 `deviceOperationApi.list()` 提供**（走
+  //   `GET /edge-devices/:id/operations`，`DeviceControlPanel` 的执行时间线正在用它）。
+  //   故删除，而不是为死代码补一个重复端点。
 
   // Driver command templates
   async getDriverCommands(deviceType: string): Promise<CommandTemplate[]> {

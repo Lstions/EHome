@@ -831,23 +831,11 @@ describe('edgeDeviceApi', () => {
     })
   })
 
-  it('getOperationHistory reads the envelope data array', async () => {
-    mockClient.get.mockResolvedValue({ code: 200, message: 'ok', data: [{ id: 1 }, { id: 2 }] })
-    const res = await edgeDeviceApi.getOperationHistory(1, 10)
-    expect(res).toHaveLength(2)
-  })
-
-  it('getOperationHistory with envelope', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1 }] })
-    const res = await edgeDeviceApi.getOperationHistory(1)
-    expect(res).toHaveLength(1)
-  })
-
-  it('getOperationHistory with unexpected format', async () => {
-    mockClient.get.mockResolvedValue(null)
-    const res = await edgeDeviceApi.getOperationHistory(1)
-    expect(res).toEqual([])
-  })
+  // ⚠ 2026-10-11：原 3 条 getOperationHistory 用例已随该方法一并删除。
+  //   该方法指向 `/edge-devices/:id/operations/history` —— 后端**从未实现**（实测 404），
+  //   且全仓无任何调用方。这 3 条此前是绿的，却只证明"一个没人用的封装能解析 mock"：
+  //   锁的是死代码形状，不是对外契约 ⇒ 删方法的同批删测试。
+  //   受控操作历史的真实契约由 deviceOperationApi.list()（/operations）覆盖。
 
   it('normalize maps unknown status', async () => {
     mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, status: 'weird_status' }], total: 1 } })

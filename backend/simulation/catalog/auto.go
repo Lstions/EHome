@@ -252,7 +252,7 @@ func autoProvisionDevice(e *harness.Env, scenarioID, suffix, deviceType string) 
 	})
 
 	if err := dev.Connect(); err != nil {
-		e.Fatalf("MQTT 仿真设备连接失败（%s）: %v", dev.NodeID, err)
+		e.Fatalf("设备链路连接失败（%s）: %v", dev.NodeID, err)
 	}
 	t.Cleanup(dev.Close)
 

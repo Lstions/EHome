@@ -261,3 +261,47 @@ func TestParserShards_ClampUpperBound(t *testing.T) {
 		t.Errorf("negative ParserShards = %d, want 1", got)
 	}
 }
+
+// TestLoadDeviceListenerFromEnv 守 3.0 设备监听的环境变量覆盖。
+//
+// 为什么需要（2026-10-11，仿真移植）：仿真 harness 刻意让 CONFIG_PATH 指向一个
+// **不存在**的文件（保证子进程只用默认值 + 注入的环境变量）。而 device 段原本
+// 只能走 YAML ⇒ harness 无法启用设备监听 ⇒ 仿真设备没有可用传输。
+// 补上 env 覆盖后，这条测试钉住"五个变量都能生效"，避免将来有人只删掉其中一个。
+func TestLoadDeviceListenerFromEnv(t *testing.T) {
+	os.Setenv("CONFIG_PATH", "/nonexistent/sim-no-config.yaml")
+	os.Setenv("EHOME_DEVICE_ENABLED", "true")
+	os.Setenv("EHOME_DEVICE_ADDR", "127.0.0.1:18443")
+	os.Setenv("EHOME_DEVICE_CERT_FILE", "/tmp/x/server.crt")
+	os.Setenv("EHOME_DEVICE_KEY_FILE", "/tmp/x/server.key")
+	os.Setenv("EHOME_DEVICE_CLIENT_CA_FILE", "/tmp/x/ca.crt")
+	defer func() {
+		for _, k := range []string{"CONFIG_PATH", "EHOME_DEVICE_ENABLED", "EHOME_DEVICE_ADDR",
+			"EHOME_DEVICE_CERT_FILE", "EHOME_DEVICE_KEY_FILE", "EHOME_DEVICE_CLIENT_CA_FILE"} {
+			os.Unsetenv(k)
+		}
+	}()
+
+	cfg := Load()
+	if !cfg.Device.Enabled {
+		t.Errorf("EHOME_DEVICE_ENABLED=true 未生效")
+	}
+	if cfg.Device.Addr != "127.0.0.1:18443" {
+		t.Errorf("Addr = %q, want 127.0.0.1:18443", cfg.Device.Addr)
+	}
+	if cfg.Device.CertFile != "/tmp/x/server.crt" {
+		t.Errorf("CertFile = %q", cfg.Device.CertFile)
+	}
+	if cfg.Device.KeyFile != "/tmp/x/server.key" {
+		t.Errorf("KeyFile = %q", cfg.Device.KeyFile)
+	}
+	if cfg.Device.ClientCAFile != "/tmp/x/ca.crt" {
+		t.Errorf("ClientCAFile = %q", cfg.Device.ClientCAFile)
+	}
+	// 安全默认：不设 EHOME_DEVICE_ENABLED 时监听必须关闭。
+	os.Unsetenv("EHOME_DEVICE_ENABLED")
+	if Load().Device.Enabled {
+		t.Errorf("未设 EHOME_DEVICE_ENABLED 时设备监听不应开启")
+	}
+}
+

@@ -283,7 +283,7 @@ func depRun006(e *harness.Env) {
 	// 两个节点都要能真正接入（撞名在真实链路上的表现就是这里 409）。
 	for _, node := range []*harness.Device{first, second} {
 		if err := node.Connect(); err != nil {
-			e.Fatalf("仿真节点 %s 连接 MQTT 失败: %v", node.NodeID, err)
+			e.Fatalf("仿真节点 %s 连接设备端口失败: %v", node.NodeID, err)
 		}
 		node.Hello("2.6.0", "ESP32-C6-SIM", 0)
 	}

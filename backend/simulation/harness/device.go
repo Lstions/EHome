@@ -1,42 +1,46 @@
 //go:build simulation
 
-// ⚠⚠⚠ 2026-10-08（§194）：**本仿真的链路已经不存在了 —— 它不再是有效的验证手段。**
+// ✅ 2026-10-11：**已完成从 MQTT 到 3.0 mTLS 的移植** —— 本仿真重新成为有效验证手段。
 //
-// 原因：本文件的 Device 是一个**设备侧 MQTT 客户端**（paho），它模拟的是
-// "ESP32 通过 MQTT 发布到 broker"这条路径。而后端已于 2026-10-08
-// **整体移除 MQTT**（internal/mqtt 删除）⇒ **没有任何进程会消费它的发布**。
+// 历史（2026-10-08 §194）：Device 原先是设备侧 MQTT 客户端（paho），
+// 而后端整体移除 MQTT 后，那条链路不存在了 —— paho 仍能连上 broker 返回成功，
+// 但**后端什么都不做**（无入库、无 ACK、无 ConfigManifest），属"看似跑通、其实没验"。
 //
-// ⇒ 后果（必须明确，否则会拿它当"跑通了"的证据）：
-//   · 它能**编译**（`go vet -tags simulation ./simulation/...` rc=0）；
-//   · 它甚至可能**跑完不报错**（paho 连上 broker 就返回成功）；
-//   · 但**后端什么都不会做** —— 没有入库、没有 ACK、没有 ConfigManifest。
-//   ⇒ 典型的"看似跑通、其实什么都没验"形态，正是本仓最忌讳的那一类。
+// 现在的传输与生产**同一条**：`tls.Dial` + 客户端证书（CN = node_id）长连接，
+// 上行是 `12B 头 + payload`（pkg/protoframe 同一份实现），下行由后台 goroutine 读 socket。
+// 后端从客户端证书 CN 取 node_id（internal/transport/server.go:307 nodeIDFromCert）。
 //
-// ⚠ 本包**未删除**（有意）：22,925 行里只有 6 个文件碰 MQTT，其余
-//   （simulation/catalog 的全部用例、satisfiability 测试等）与 MQTT 无关且有价值。
-//   整包删除会连带毁掉那些基础设施；而把它移植到 3.0 是**设计工作**，不是本卡范围。
-//   ⇒ 处置：**保留 + 显式标记不可用**，并把决策登记在
-//     docs/设计/3.0-实施设计-骨架与增量-2026-10-06.md 的 §196。
+// # 移植面为什么很小（决策依据，实测）
 //
-// ⇒ 要恢复仿真能力，正解是**把这 6 个文件改成走 3.0 的 mTLS 客户端**
-//   （参考 backend/internal/transport 的 device 侧用法），而**不是**复活后端 MQTT。
+// `grep -rn 'Topic' simulation/catalog/*.go` → **0 命中**：141 个场景只调 Device 的
+// 高层 API（Connect/Hello/DataReport/AwaitFrame…），**完全不感知传输是 MQTT 还是 TLS**。
+// ⇒ 只需改本文件的三处（Connect / onMessage→读循环 / publish），场景零改动。
+//
+// # 安全红线（不变）
+//
+// NodeID 必须以 `sim-` 开头，Connect 与每次 publish 前都校验 ——
+// 同网段可能有真实设备在跑，这是"绝不干扰真实设备"的唯一执行点。
+// 证书也只签 CN=sim-*（harness/pki.go）。
 package harness
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"strings"
 	"sync"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
-
 	"ehome/backend/pkg/frame"
+	"ehome/backend/pkg/protoframe"
 )
 
 // 协议常量直接取真实实现的冻结值，避免仿真是"另一套协议"。
@@ -49,14 +53,17 @@ const (
 )
 
 // ReceivedFrame 是仿真器收到的一帧下行数据。
+// ReceivedFrame 是一帧已收到的下行帧。
+//
+// ⚠ 2026-10-11：原 Topic 字段已随 MQTT 移植删除（3.0 无 topic 概念）。
+// 保留一个恒为空的 Topic 字段会诱使后人写出"按 topic 断言"的伪验证。
 type ReceivedFrame struct {
-	Topic   string
 	MsgType uint8
 	Raw     []byte
 	At      time.Time
 }
 
-// Device 是节点仿真器：真实 MQTT 连接 + 真实二进制帧（复用 pkg/frame）。
+// Device 是节点仿真器：真实 mTLS 长连接 + 真实二进制帧（复用 pkg/frame 与 protoframe）。
 //
 // 安全红线（设计 §7-2）：Connect / 所有 Publish 之前强制校验 NodeID 以
 // "sim-" 开头，不合规直接返回 error。同网段可能有真实设备在跑，
@@ -67,9 +74,12 @@ type Device struct {
 	ChannelID    uint32
 
 	env      *Env
-	broker   string
-	client   mqtt.Client
+	addr     string // 后端设备监听地址 host:port
+	conn     net.Conn
 	clientID string
+
+	// readErr 记录读循环的终止原因（对端关闭 / 解码失败），供 Await 报错时说明。
+	readErr error
 
 	mu        sync.Mutex
 	connected bool
@@ -91,34 +101,34 @@ func newDevice(env *Env, nodeID string) *Device {
 	return &Device{
 		NodeID:   nodeID,
 		env:      env,
-		broker:   env.MQTTAddr,
+		addr:     env.DeviceAddr,
 		clientID: fmt.Sprintf("ehome-sim-%s-%s", env.RunID, randHex(4)),
 	}
 }
 
-// UpTopic 是节点上报主题（backend/internal/mqtt: nodes/<id>/up）。
-func (d *Device) UpTopic() string { return "nodes/" + d.NodeID + "/up" }
+// ⚠ 2026-10-11：UpTopic/DownTopic/ControlTopic 三个方法已随 MQTT 移植一并删除。
+//   3.0 是**点对点长连接**，没有 topic 概念：一个节点的所有上行/下行都走同一条 TLS 连接。
+//   保留它们只会诱使后人写出"按 topic 断言"的伪验证。
 
-// DownTopic 是节点下行主题（ping / HelloAck / 清单等）。
-func (d *Device) DownTopic() string { return "nodes/" + d.NodeID + "/down" }
-
-// ControlTopic 是可靠下行主题（QoS1，指令与配置清单）。
-func (d *Device) ControlTopic() string { return "nodes/" + d.NodeID + "/control" }
-
-// assertSimNode 是红线执行点：任何发布/订阅之前都必须通过。
+// assertSimNode 是红线执行点：任何发送之前都必须通过。
+//
+// ⚠ 2026-10-11：MQTT 时代这里还逐个校验三个 topic 的 `nodes/sim-` 前缀。
+//   3.0 没有 topic，**寻址由客户端证书的 CN 承担** —— 红线因此只剩 CN 校验，
+//   但强度不降：证书 CN 必须是 sim-*（harness/pki.go 只签这种 CN），
+//   且服务端 nodeIDFromCert 直接把它当 node_id ⇒ 用一个真实设备的 CN
+//   就等于冒充它，故 CN 校验就是"绝不干扰真实设备"的执行点。
 func (d *Device) assertSimNode() error {
 	if !strings.HasPrefix(d.NodeID, "sim-") {
 		return fmt.Errorf("拒绝操作节点 %q：NodeID 必须以 sim- 开头（安全红线，设计 §7-2）", d.NodeID)
 	}
-	for _, topic := range []string{d.UpTopic(), d.DownTopic(), d.ControlTopic()} {
-		if !strings.HasPrefix(topic, "nodes/sim-") {
-			return fmt.Errorf("拒绝使用主题 %q：只允许 nodes/sim-*/...（安全红线，设计 §7-2）", topic)
-		}
-	}
 	return nil
 }
 
-// Connect 建立真实 MQTT 连接，并订阅 nodes/<id>/down 与 nodes/<id>/control。
+// Connect 建立到后端的 mTLS 长连接并启动读循环。
+//
+// 与生产设备侧同构：`tls.Dial` 带客户端证书（CN=d.NodeID），
+// 服务端据此取 node_id（transport/server.go:307）。没有订阅步骤 ——
+// 3.0 是点对点连接，下行帧由读循环从同一条 socket 上收。
 func (d *Device) Connect() error {
 	if err := d.assertSimNode(); err != nil {
 		return err
@@ -130,70 +140,123 @@ func (d *Device) Connect() error {
 	}
 	d.mu.Unlock()
 
-	options := mqtt.NewClientOptions().
-		AddBroker(d.broker).
-		SetClientID(d.clientID).
-		SetCleanSession(true).
-		SetAutoReconnect(true).
-		SetConnectRetry(true).
-		SetConnectTimeout(5 * time.Second).
-		SetKeepAlive(20 * time.Second).
-		SetPingTimeout(10 * time.Second).
-		SetOrderMatters(false)
-
-	client := mqtt.NewClient(options)
-	token := client.Connect()
-	if !token.WaitTimeout(10 * time.Second) {
-		return fmt.Errorf("连接 MQTT %s 超时（节点 %s）", d.broker, d.NodeID)
+	if d.env == nil || d.env.pki == nil {
+		return fmt.Errorf("仿真 PKI 未初始化（Env.Start 未跑？）")
 	}
-	if err := token.Error(); err != nil {
-		return fmt.Errorf("连接 MQTT %s 失败（节点 %s）: %w", d.broker, d.NodeID, err)
+	certPEM, keyPEM, err := d.env.pki.devCert(d.NodeID)
+	if err != nil {
+		return fmt.Errorf("为节点 %s 签发设备证书失败: %w", d.NodeID, err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return fmt.Errorf("装载设备证书失败（节点 %s）: %w", d.NodeID, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(d.env.pki.caPEM) {
+		return fmt.Errorf("装载 CA 失败")
 	}
 
-	for _, topic := range []string{d.DownTopic(), d.ControlTopic()} {
-		subToken := client.Subscribe(topic, 1, d.onMessage)
-		if !subToken.WaitTimeout(10 * time.Second) {
-			client.Disconnect(100)
-			return fmt.Errorf("订阅 %s 超时", topic)
-		}
-		if err := subToken.Error(); err != nil {
-			client.Disconnect(100)
-			return fmt.Errorf("订阅 %s 失败: %w", topic, err)
-		}
+	conn, err := tls.Dial("tcp", d.addr, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		ServerName:   "localhost",
+	})
+	if err != nil {
+		return fmt.Errorf("连接设备端口 %s 失败（节点 %s）: %w", d.addr, d.NodeID, err)
 	}
 
 	d.mu.Lock()
-	d.client = client
+	d.conn = conn
 	d.connected = true
+	d.readErr = nil
 	d.mu.Unlock()
+
+	// 读循环：下行帧（HelloAck / ConfigManifest / Ping / DeviceOp…）
+	// 从同一条 socket 到达，逐帧推入 frames，供 Await* 系列轮询。
+	go d.readLoop(conn)
 	return nil
+}
+
+// readLoop 是唯一的收帧路径：按 12B 头切帧，读到完整帧就追加到 d.frames。
+//
+// 为什么这里自己解头而不是复用 protoframe.DecodeHeader：
+// 需要**逐个**读头→按 PayloadLen 读满 payload，这是流式语义；
+// DecodeHeader 只解 12 字节本身，两者配合使用（本函数即是）。
+func (d *Device) readLoop(conn net.Conn) {
+	hdr := make([]byte, protoframe.HeaderSize)
+	for {
+		if _, err := io.ReadFull(conn, hdr); err != nil {
+			d.setReadErr(fmt.Errorf("读帧头失败: %w", err))
+			return
+		}
+		h, err := protoframe.DecodeHeader(hdr)
+		if err != nil {
+			d.setReadErr(fmt.Errorf("解码帧头失败: %w", err))
+			return
+		}
+		// ⚠ 必须按 FrameBytes() 读满 payload **+ 可选 CRC**，而不是只看 PayloadLen。
+		//
+		// 2026-10-11（首轮实跑就踩到，30/140 场景红）：只读 PayloadLen 时，
+		// 带 CRC 的帧其 4 字节 CRC 会被当成下一帧的头 ⇒ 帧对齐整体错位，
+		// 症状是下文反复出现 `期望 0x12(HelloAck)，实际 0x45(unknown)`。
+		// 正确的读法抄自生产实现 internal/transport/server.go:478 `total := h.FrameBytes()`。
+		total := h.FrameBytes()
+		if total > int(protoframe.HeaderSize)+int(protoframe.PayloadMax)+protoframe.CRCSize {
+			d.setReadErr(fmt.Errorf("帧过大: %d 字节", total))
+			return
+		}
+		body := make([]byte, total-protoframe.HeaderSize)
+		if len(body) > 0 {
+			if _, err := io.ReadFull(conn, body); err != nil {
+				d.setReadErr(fmt.Errorf("读帧体失败: %w", err))
+				return
+			}
+		}
+		payload := body
+		if h.HasCRC() && len(body) >= protoframe.CRCSize {
+			payload = body[:len(body)-protoframe.CRCSize]
+		}
+		payload = append([]byte(nil), payload...)
+		// ⚠ 存进 frames 的是 **2.x payload**，不是整帧。
+		//   理由见 AwaitRawAfter 的注释：pkg/frame 是 2.6 protobuf 格式，
+		//   NewDecoder 把 buf[0] 当消息类型；喂整帧会让它把 3.0 magic(0x45) 当类型。
+		//   这也让 `Raw` 与 MQTT 时代语义一致 —— 那时 paho 交出来的本就是 payload。
+		received := ReceivedFrame{Raw: payload, At: time.Now()}
+		// 消息类型：payload 首字节即类型（与固件/后端一致），
+		// 无 payload 时退回头部 Type 字段。
+		if len(payload) > 0 {
+			received.MsgType = payload[0]
+		} else {
+			received.MsgType = h.Type
+		}
+		d.mu.Lock()
+		d.frames = append(d.frames, received)
+		d.mu.Unlock()
+	}
 }
 
 // Close 断开连接；可重复调用（收尾与场景自清理都会调）。
 func (d *Device) Close() {
 	d.mu.Lock()
-	if d.closed || d.client == nil {
-		d.closed = true
-		d.connected = false
-		d.mu.Unlock()
-		return
-	}
-	client := d.client
-	d.client = nil
+	conn := d.conn
+	d.conn = nil
 	d.closed = true
 	d.connected = false
 	d.mu.Unlock()
-	client.Disconnect(200)
+	if conn != nil {
+		_ = conn.Close() // 读循环会因 EOF 自行退出
+	}
 }
 
-func (d *Device) onMessage(_ mqtt.Client, message mqtt.Message) {
-	payload := append([]byte(nil), message.Payload()...)
-	received := ReceivedFrame{Topic: message.Topic(), Raw: payload, At: time.Now()}
-	if len(payload) > 0 {
-		received.MsgType = payload[0]
-	}
+// setReadErr 记录读循环的终止原因（供 Await* 在超时报错时说明"为什么没等到"）。
+//
+// 为什么必须记下来：若只报"等待 30s 超时"，调用方无法区分
+// "对端根本没发" 与 "连接已被对端关闭" —— 而这两者的排查方向完全不同。
+func (d *Device) setReadErr(err error) {
 	d.mu.Lock()
-	d.frames = append(d.frames, received)
+	if d.readErr == nil {
+		d.readErr = err
+	}
 	d.mu.Unlock()
 }
 
@@ -232,7 +295,15 @@ func (d *Device) AwaitFrameAfter(msgType uint8, after int, timeout time.Duration
 	return frame.NewDecoder(raw)
 }
 
-// AwaitRawAfter 返回匹配帧的原始字节。
+// AwaitRawAfter 返回匹配帧的**2.x payload**（即去掉 12B 头与可选 CRC 的部分）。
+//
+// ⚠ 2026-10-11：这里刻意返回 payload 而不是整帧 —— 因为 `pkg/frame` 是 **2.6 protobuf**
+// 格式（FrameMagic 0x0B + varint TLV），`frame.NewDecoder(buf)` 从 **buf[0] 当作消息类型**
+// 开始解析（frame/frame.go:238）。若把"整帧"（首字节是 3.0 的 magic 0x45）喂进去，
+// 它会把 0x45 当消息类型 ⇒ 全部字段解析失败。
+//   这也是本文件首轮实跑 30/140 红的直接原因之一：
+//   `0x45` 正是 protoframe.Magic(0x4548 "EH") 的首字节，即**帧头被误当 payload**。
+// 调用方（141 个场景）一直在断言 2.x 语义，故此处保持"返回 payload"与其契约一致。
 func (d *Device) AwaitRawAfter(msgType uint8, after int, timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -312,29 +383,72 @@ func (d *Device) LastHelloNonce() uint32 {
 func (d *Device) Pong(tsMillis uint64) error {
 	encoder := frame.NewEncoder(frame.MsgPong)
 	encoder.EncodeVarint(1, tsMillis)
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
-// publish 是所有上行发布的唯一出口：先过红线校验，再上真实 broker。
-func (d *Device) publish(topic string, payload []byte) error {
+// publish 是所有上行发送的唯一出口：先过红线校验，再写真实 TLS 连接。
+//
+// 3.0 上行 = `12B 头 + payload`，与后端/固件同一份 protoframe 实现
+// （pkg/protoframe.EncodeHeader）。不再有 topic 参数 —— 连接本身即寻址。
+func (d *Device) publish(_ string, payload []byte) error {
 	if err := d.assertSimNode(); err != nil {
 		return err
 	}
+	if len(payload) == 0 {
+		return fmt.Errorf("拒绝发送空 payload（节点 %s）", d.NodeID)
+	}
+	if len(payload) > int(protoframe.PayloadMax) {
+		return fmt.Errorf("payload 超长（%d > %d，节点 %s）", len(payload), protoframe.PayloadMax, d.NodeID)
+	}
 	d.mu.Lock()
-	client := d.client
+	conn := d.conn
 	connected := d.connected
 	d.mu.Unlock()
-	if !connected || client == nil {
-		return fmt.Errorf("节点 %s 尚未连接 MQTT（先调用 Connect）", d.NodeID)
+	if !connected || conn == nil {
+		return fmt.Errorf("节点 %s 尚未连接设备端口（先调用 Connect）", d.NodeID)
 	}
-	token := client.Publish(topic, 1, false, payload)
-	if !token.WaitTimeout(5 * time.Second) {
-		return fmt.Errorf("发布到 %s 超时", topic)
+
+	// payload 首字节即消息类型（与固件/后端约定一致）。
+	out := make([]byte, protoframe.HeaderSize+len(payload))
+	h := protoframe.Header{
+		Ver:        protoframe.Version,
+		Type:       payload[0],
+		PayloadLen: uint16(len(payload)),
 	}
-	return token.Error()
+	if err := protoframe.EncodeHeader(out, h); err != nil {
+		return fmt.Errorf("编码帧头失败（节点 %s）: %w", d.NodeID, err)
+	}
+	copy(out[protoframe.HeaderSize:], payload)
+
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("设置写超时失败: %w", err)
+	}
+	if _, err := conn.Write(out); err != nil {
+		return fmt.Errorf("写设备端口失败（节点 %s）: %w", d.NodeID, err)
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	return nil
 }
 
-// sendHello 编码并发布一帧 Hello（0x01）。
+// SendControl 发送一帧由调用方自行编码的控制面报文（复用本设备**已有的** mTLS 连接）。
+//
+// 为什么需要这个公开入口（2026-10-11）：少数场景必须发送设计 §5.3 清单之外的帧
+// （目前只有 SIM-CHAN-005 的 ConfigSyncRequest 0x13）—— 它没有等价 HTTP 端点。
+// 移植前这些场景各自新建一条 MQTT 连接；3.0 下一个节点只有一条连接（证书 CN 决定
+// node_id），自建第二条会顶掉已有会话，故统一走本入口。
+//
+// msgType 必须与 payload 首字节一致（后端按 payload[0] 路由），这里显式校验。
+func (d *Device) SendControl(msgType uint8, payload []byte) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("控制面报文为空（节点 %s）", d.NodeID)
+	}
+	if payload[0] != msgType {
+		return fmt.Errorf("msgType(0x%02X) 与 payload 首字节(0x%02X) 不一致（节点 %s）", msgType, payload[0], d.NodeID)
+	}
+	return d.publish("", payload)
+}
+
+// sendHello 编码并发送一帧 Hello（0x01）。
 // 字段编号严格对齐 backend/internal/nodemgr/handler_hello.go:parseHello。
 func (d *Device) sendHello(protocolVersion, firmwareVersion, model string, channelCount int, configEpoch uint64, nvsHasConfig bool) (uint32, error) {
 	nonce := randomNonce()
@@ -348,7 +462,7 @@ func (d *Device) sendHello(protocolVersion, firmwareVersion, model string, chann
 	encoder.EncodeString(7, "") // last_manifest
 	encoder.EncodeString(8, protocolVersion)
 	encoder.EncodeVarint(frame.HelloFieldHandshakeNonce, uint64(nonce))
-	if err := d.publish(d.UpTopic(), encoder.Bytes()); err != nil {
+	if err := d.publish("", encoder.Bytes()); err != nil {
 		return 0, err
 	}
 	d.mu.Lock()
@@ -419,7 +533,7 @@ func (d *Device) DataReport(channelID uint32, tsMillis uint64, payload []byte) e
 	encoder.EncodeVarint(3, sequence)
 	encoder.EncodeBytes(4, payload)
 	encoder.EncodeVarint(7, uint64(edgeDeviceID))
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
 // ResolveEdgeDeviceID 按 (node_id, channel_id) 反查边缘设备主键（带进程内缓存）。
@@ -482,7 +596,7 @@ func (d *Device) StatusReport(uptimeSec uint64, status string, rssi int) error {
 		sub.EncodeVarint(28, uint64(absolute))
 		encoder.EncodeBytes(9, sub.Bytes())
 	}
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
 // Loop 以 interval 周期执行 fn，模拟真实节点的上报节奏（设计 §5.3）。
@@ -648,7 +762,7 @@ func (d *Device) ResourceReport(report ResourceReportData) error {
 	encoder.EncodeBytes(3, buses.Bytes())
 	encoder.EncodeBytes(4, channels.Bytes())
 	encoder.EncodeBytes(9, engine.Bytes())
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
 // ConfigResult 发布一帧 ConfigResult(0x05)，宣告清单应用结果。
@@ -667,7 +781,7 @@ func (d *Device) ConfigResult(manifestID, syncID string, success bool) error {
 	encoder.EncodeBool(2, success)
 	encoder.EncodeVarint(3, 0) // config_epoch
 	encoder.EncodeString(4, syncID)
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
 // ConfigReport 发布一帧 ConfigReport(0x11)，回报名单容量实况。
@@ -682,7 +796,7 @@ func (d *Device) ConfigReport(manifestID string, channelCount int) error {
 	encoder.EncodeVarint(3, 0)
 	encoder.EncodeVarint(4, uint64(channelCount))
 	encoder.EncodeVarint(5, 0)
-	return d.publish(d.UpTopic(), encoder.Bytes())
+	return d.publish("", encoder.Bytes())
 }
 
 // HelloThenReport 是 Hello + ResourceReport 的原子组合，

@@ -136,7 +136,8 @@ type Summary struct {
 	RunID      string            `json:"run_id"`
 	Database   string            `json:"database"`
 	BaseURL    string            `json:"base_url"`
-	MQTTAddr   string            `json:"mqtt_addr"`
+	// DeviceAddr 取代原 MQTTAddr（2026-10-11 移植）：后端 3.0 设备监听地址。
+	DeviceAddr string            `json:"device_addr"`
 	ServerBin  string            `json:"server_binary"`
 	StartedAt  time.Time         `json:"started_at"`
 	FinishedAt time.Time         `json:"finished_at"`
