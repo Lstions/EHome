@@ -120,7 +120,7 @@ func nodeProvision(e *harness.Env, scenarioID, suffix, name string) *harness.Dev
 	nodeCreate(e, dev.NodeID, name)
 	nodeCleanupDelete(e, "/api/v1/nodes/"+dev.NodeID)
 	if err := dev.Connect(); err != nil {
-		e.T.Fatalf("节点仿真器连接 MQTT 失败 node=%s: %v", dev.NodeID, err)
+		e.T.Fatalf("节点仿真器连接设备端口失败 node=%s: %v", dev.NodeID, err)
 	}
 	e.T.Cleanup(dev.Close)
 	return dev

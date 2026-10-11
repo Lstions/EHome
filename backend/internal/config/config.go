@@ -223,6 +223,30 @@ func overrideWithEnv(cfg *Config) {
 			cfg.Control.RawDiagnosticsEnabled = enabled
 		}
 	}
+	// 3.0 设备监听（mTLS）的环境变量覆盖。
+	//
+	// 为什么需要（2026-10-11，仿真移植）：仿真 harness 刻意让 CONFIG_PATH 指向
+	// 一个不存在的文件，以保证"子进程只用代码默认值 + 注入的环境变量"，
+	// 从而杜绝仓库里的 config.yaml 影响仿真确定性。此前 device 段**只有 YAML**，
+	// 于是 harness 无法启用设备监听 ⇒ 仿真设备没有可用传输。
+	// 补上 env 覆盖后，harness 依旧不需要写 YAML，确定性前提不被破坏。
+	if v := getEnv("EHOME_DEVICE_ENABLED", ""); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Device.Enabled = enabled
+		}
+	}
+	if v := getEnv("EHOME_DEVICE_ADDR", ""); v != "" {
+		cfg.Device.Addr = v
+	}
+	if v := getEnv("EHOME_DEVICE_CERT_FILE", ""); v != "" {
+		cfg.Device.CertFile = v
+	}
+	if v := getEnv("EHOME_DEVICE_KEY_FILE", ""); v != "" {
+		cfg.Device.KeyFile = v
+	}
+	if v := getEnv("EHOME_DEVICE_CLIENT_CA_FILE", ""); v != "" {
+		cfg.Device.ClientCAFile = v
+	}
 	if v := getEnv("EHOME_ADMIN_USERNAME", ""); v != "" {
 		cfg.AdminBootstrap.Username = v
 	}

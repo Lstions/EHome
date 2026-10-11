@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
-
 	"ehome/backend/pkg/frame"
 	"ehome/backend/simulation/harness"
 )
@@ -617,41 +615,36 @@ func chanScenario004(e *harness.Env) {
 // SIM-CHAN-005
 // ---------------------------------------------------------------------------
 
-// chanConfigSyncer 是"节点主动拉取配置"（ConfigSyncRequest 0x13）的发布者。
+// chanConfigSyncer 是"节点主动拉取配置"（ConfigSyncRequest 0x13）的发送者。
 //
 // 为什么场景自己发这一帧：设计 §5.3 冻结的 Device 方法清单里没有 ConfigSyncRequest，
 // 而"设备主动拉配置"只有这一条真实入口（nodemgr/handler_response.go 处理 0x13），
 // 没有等价 HTTP 端点。这里只发一帧控制面报文，帧编码仍复用 backend/pkg/frame，
 // 落库路径完全不经过本函数（不另造数据通路）。
+//
+// ⚠ 2026-10-11（移植）：原实现自建了一个**独立的 MQTT 客户端**（另一个 paho 连接）。
+//   3.0 是点对点长连接，一个节点只能有一条连接标识（证书 CN 决定 node_id）——
+//   自建第二条连接不仅多余，还会**顶掉**该节点已建立的会话。
+//   故改为复用场景里那个 Device 的**同一条** mTLS 连接。
+//   这也是更真实的形态：真实固件的主动拉取就走它唯一的上行链路。
 type chanConfigSyncer struct {
-	broker string
-	nodeID string
+	dev *harness.Device
 }
 
-// Publish 把 ConfigSyncRequest 发到 nodes/<节点>/up。
-// 安全红线（设计 §7-2）：NodeID 前缀不合规直接拒绝发布。
+// Publish 把 ConfigSyncRequest 发给后端。
+// 安全红线（设计 §7-2）：NodeID 前缀不合规直接拒绝发送。
 func (p chanConfigSyncer) Publish(manifestID string) error {
-	if !strings.HasPrefix(p.nodeID, "sim-") {
-		return fmt.Errorf("拒绝为节点 %q 发布：NodeID 必须以 sim- 开头（安全红线，设计 §7-2）", p.nodeID)
+	if p.dev == nil {
+		return fmt.Errorf("chanConfigSyncer 未绑定设备")
+	}
+	if !strings.HasPrefix(p.dev.NodeID, "sim-") {
+		return fmt.Errorf("拒绝为节点 %q 发送：NodeID 必须以 sim- 开头（安全红线，设计 §7-2）", p.dev.NodeID)
 	}
 	encoder := frame.NewEncoder(frame.MsgConfigSyncReq)
 	encoder.EncodeString(1, "sim-recon") // reason：设备侧的自由文本
 	encoder.EncodeVarint(2, 0)           // current_epoch
 	encoder.EncodeString(3, manifestID)  // 设备持有的（此处刻意是过期的）清单代次
-	options := mqtt.NewClientOptions().
-		AddBroker(p.broker).
-		SetClientID(fmt.Sprintf("ehome-sim-cfgsync-%s-%d", p.nodeID, time.Now().UnixNano())).
-		SetConnectTimeout(5 * time.Second)
-	client := mqtt.NewClient(options)
-	if token := client.Connect(); token.WaitTimeout(5*time.Second) && token.Error() != nil {
-		return fmt.Errorf("连接 MQTT 失败: %w", token.Error())
-	}
-	defer client.Disconnect(100)
-	token := client.Publish("nodes/"+p.nodeID+"/up", 1, false, encoder.Bytes())
-	if !token.WaitTimeout(5 * time.Second) {
-		return fmt.Errorf("发布 ConfigSyncRequest 超时")
-	}
-	return token.Error()
+	return p.dev.SendControl(frame.MsgConfigSyncReq, encoder.Bytes())
 }
 
 // 守护的不变量：节点主动索要配置时，拿到的清单必须与中心端当前记录完全一致
@@ -664,7 +657,8 @@ func chanScenario005(e *harness.Env) {
 
 	// 故意报一个过期的 manifest_id：设备"重启后 NVS 里还是旧配置"的真实场景。
 	cursor := chanManifestCount(dev)
-	puller := chanConfigSyncer{broker: e.MQTTAddr, nodeID: nodeID}
+	// 复用本设备已建立的 mTLS 连接（3.0 下一个节点只有一条连接，见 chanConfigSyncer 注释）。
+	puller := chanConfigSyncer{dev: dev}
 	if err := puller.Publish("v2-stale-manifest"); err != nil {
 		e.T.Fatalf("节点主动拉取配置失败 node=%s: %v", nodeID, err)
 	}

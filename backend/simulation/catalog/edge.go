@@ -262,6 +262,12 @@ func edgeRun003(e *harness.Env) {
 
 	// (a) 同一通道上同型号同地址：必须被拒绝，且原因必须指向地址冲突
 	// （不能只说"参数错误"——用户要知道是哪个地址被占了）。
+	//
+	// ⚠ 2026-10-11：期望码由 400 改为 **409**。
+	//   本日修复（commit 7dcb2b03）把"三元重复"从 400 改为 409，依据是设计文档
+	//   边缘设备.md §7.2「三元重复 → 409」与 §1.1 冲突文案（前端按 409 渲染）。
+	//   该场景原先钉在 400，正是**旧行为**；它这次变红说明仿真确实在盯真实契约。
+	//   409 是"冲突"语义：同型号设备不能占用同一通道上的同一从机地址。
 	dup := e.Admin.Post("/api/v1/edge-devices", map[string]any{
 		"name":        e.NS("SIM-EDGE-003", "重复"),
 		"node_id":     fx.NodeID,
@@ -269,7 +275,7 @@ func edgeRun003(e *harness.Env) {
 		"type":        fx.Type,
 		"hardware_id": fx.HardwareID,
 		"enabled":     true,
-	}).Expect(http.StatusBadRequest)
+	}).Expect(http.StatusConflict)
 	if !strings.Contains(dup.Message, "already hosts") {
 		t.Fatalf("重复设备的拒绝原因没有指出地址冲突：message=%q body=%s", dup.Message, dup.BodyString())
 	}
@@ -689,7 +695,7 @@ func edgeProvision(e *harness.Env, spec edgeDeviceSpec) *edgeDevice {
 	}
 	// 5) MQTT 连接 + 可选握手（红线 §7-2 由 harness 内部把关 NodeID 前缀）。
 	if err := dev.Connect(); err != nil {
-		t.Fatalf("仿真节点连接 MQTT 失败: %v", err)
+		t.Fatalf("仿真节点连接设备端口失败: %v", err)
 	}
 	if spec.Handshake {
 		dev.Hello("sim-1.0.0", "SIM-EDGE", 1)
