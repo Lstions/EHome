@@ -241,6 +241,25 @@ func (d *PRS3001Driver) parseLegacy(raw []byte) ([]SensorData, error) {
 		return []SensorData{
 			{Name: "rainfall", Value: rainfall, Unit: "mm"},
 		}, nil
+	case 4:
+		// 2 个保持寄存器 = 雨量 + 光照度。这是 GetCommandTemplates 里
+		// read_rainfall 的 shipped 帧契约（WriteData "010300000002C40B"
+		// 读 2 个寄存器 ⇒ ReadLength 9 ⇒ bytecount 4），也是唯一能同时喂饱
+		// GetSensorDefinitions() 声明的 rainfall/illuminance 两个量的分支。
+		//
+		// 缺陷背景（2026-10-11 真机验证发现）：本 switch 原先只有
+		// {2,6,8} 三个分支，恰好不含 4，于是模板读得回来、解析却必然失败
+		// （"unexpected byte count 4, expected 2/6/8"），设备永远停在
+		// status=pending/offline，且/或 device_data 一条不落。
+		// 6/8 分支从 data[4:...] 取光照度（跳过 data[2:4]），说明该厂商布局
+		// 里光照度在第 3 个寄存器；按同样的"寄存器序"解读，2 寄存器帧的
+		// data[2:4] 就是光照度。
+		rainfall := float64(binary.BigEndian.Uint16(data[0:2])) / 10.0
+		illuminance := float64(binary.BigEndian.Uint16(data[2:4]))
+		return []SensorData{
+			{Name: "rainfall", Value: rainfall, Unit: "mm"},
+			{Name: "illuminance", Value: illuminance, Unit: "Lux"},
+		}, nil
 	case 6:
 		rainfall := float64(binary.BigEndian.Uint16(data[0:2])) / 10.0
 		illuminance := float64(binary.BigEndian.Uint16(data[4:6]))
@@ -256,7 +275,7 @@ func (d *PRS3001Driver) parseLegacy(raw []byte) ([]SensorData, error) {
 			{Name: "illuminance", Value: illuminance, Unit: "Lux"},
 		}, nil
 	default:
-		return nil, fmt.Errorf("prs3001: unexpected byte count %d, expected 2/6/8", byteCount)
+		return nil, fmt.Errorf("prs3001: unexpected byte count %d, expected 2/4/6/8", byteCount)
 	}
 }
 

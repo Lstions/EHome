@@ -15,6 +15,11 @@ import (
 
 // handler_edge_device_lifecycle.go — 创建继承后端逻辑 (方案 v3.3 §3.3 T5 P2)。
 
+// errNodeNotFound 是 POST /edge-devices 事务内"node 不存在"的哨兵，
+// 出口映射为 HTTP 404（设计文档 §7.2）。用哨兵而非 fmt.Errorf 是为了在
+// 事务出口把 404 与其它 400 校验失败区分开。
+var errNodeNotFound = errors.New("node not found")
+
 // conflictError 携带 409 语义的事务错误。POST /edge-devices 事务出口按
 // errors.As 映射为 HTTP 409, 其余错误维持 400。
 type conflictError struct{ msg string }

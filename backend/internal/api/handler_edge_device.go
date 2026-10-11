@@ -560,6 +560,18 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 
 		if err := db.Transaction(func(tx *gorm.DB) error {
+			// Node 存在性必须先判：设计文档 §7.2 要求"node 不存在 → 404"。
+			// 此前缺这一步，不存在的 node 会先撞上 channel 归属校验，报
+			// "channel does not belong to node" 400，与文档口径不符
+			// （2026-10-11 真机验证发现）。用 node_exists 哨兵把 404 与
+			// 其它 400 错误在事务出口区分开。
+			var nodeCount int64
+			if err := tx.Model(&models.Node{}).Where("node_id = ?", *dto.NodeID).Count(&nodeCount).Error; err != nil {
+				return err
+			}
+			if nodeCount == 0 {
+				return errNodeNotFound
+			}
 			var bindingChannel models.Channel
 			if effectiveChannelID > 0 {
 				// Existing channel path
@@ -659,7 +671,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			// empty we fall back to (channel_id, type) so address-less devices are
 			// still de-duplicated.
 			if err := checkDeviceUniqueness(tx, dev.ChannelID, dev.Type, dev.HardwareID, 0); err != nil {
-				return err
+				// 三元重复是冲突语义 → 409（设计文档 §7.2"三元重复 → 409"，
+				// 与本函数出口 errors.As(conflictError) 的既有映射一致）。
+				// 2026-10-11 真机验证发现此前走 400。
+				return newConflictError("%s", err.Error())
 			}
 			// 方案 v3.3 §3.3: 创建继承 (可选)。指定 logical_device_id:
 			// 事务内校验目标存在 + device_type 匹配 + merged_into IS NULL +
@@ -728,6 +743,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
+			if errors.Is(err, errNodeNotFound) {
+				Error(c, http.StatusNotFound, "node not found")
+				return
+			}
 			var conflict conflictError
 			if errors.As(err, &conflict) {
 				// §3.3-2/§3.3-3: 继承校验失败与存活实例冲突为 409 语义。
