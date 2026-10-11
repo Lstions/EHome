@@ -1090,6 +1090,10 @@ add_executable(link_tcp_tests
     link_tcp_tests.c
     ../components/link/link.c
     ../components/link_tcp/link_tcp.c
+    # ⭐ 2026-10-11：link_tcp 现在用互斥保护 handle 生命周期（真机 double-free
+    # 修复）。这里给**真**（pthread 支撑）信号量，而不是空桩 —— 否则
+    # "并发只 close 一次"这类断言在单线程下照样全绿，等于没测。
+    stubs/freertos_sem_stub.c
 )
 target_include_directories(link_tcp_tests PRIVATE
     stubs
@@ -1099,6 +1103,8 @@ target_include_directories(link_tcp_tests PRIVATE
 )
 target_compile_options(link_tcp_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+# 2026-10-11：并发释放用例需要真线程（barrier 对齐读/写两个线程的时序）。
+target_link_libraries(link_tcp_tests PRIVATE pthread)
 add_test(NAME link_tcp_tests COMMAND link_tcp_tests)
 
 add_executable(frame_header_tests
@@ -1337,8 +1343,10 @@ add_executable(link_rx_adapt_tests
     ../components/link/link.c
     ../components/rx_pump/rx_pump.c
     ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
 )
 target_include_directories(link_rx_adapt_tests PRIVATE
+    stubs
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
     ../components/link/include
@@ -1452,8 +1460,10 @@ add_executable(session_send_tests
     ../components/link/link.c
     ../components/rx_pump/rx_pump.c
     ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
 )
 target_include_directories(session_send_tests PRIVATE
+    stubs
     ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
@@ -1472,8 +1482,10 @@ add_executable(session_tests
     ../components/link/link.c
     ../components/rx_pump/rx_pump.c
     ../components/wire/wire.c
+    stubs/freertos_sem_stub.c
 )
 target_include_directories(session_tests PRIVATE
+    stubs
     ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include

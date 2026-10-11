@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 2026-10-11（§258）：handle 生命周期需要一把锁 —— 见 tcp_release_handle()
+ * 上方"两个任务并发判定连接不可用"的说明。host 测试经
+ * host_tests/stubs/freertos/ 提供桩。 */
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 /* 设计 §4.2 的退避序列（ms）：1s→2s→4s→8s→16s→30s→60s（上限）。
  * 用查表而非 1<<n：上限是 60s 而不是 64s，且序列非纯指数（30→60 只翻一倍）。 */
 static const uint32_t s_backoff_ms[] = { 1000u, 2000u, 4000u, 8000u,
@@ -19,7 +25,17 @@ static void tcp_release_handle(link_tcp_ctx_t *c);
 
 struct link_tcp_ctx {
     link_tcp_config_t cfg;                   /* 复制，不持有调用方的指针 */
+
+    /* --- handle 生命周期（2026-10-11，真机 double-free 修复）----------
+     * lock 保护下面三个字段的**全部**状态转移；它**绝不**跨越
+     * io->read / io->write / io->connect —— 那些调用最坏阻塞
+     * EHOME_DEVICE_LINK_TIMEOUT_MS(10000 ms)，持锁跨越它们会让 report_tx
+     * 等一次下行静默等满 10s（吞吐直接归零）。
+     * ⇒ 用 inflight 计数代替"持锁调用"：I/O 期间握的是**租约**，不是锁。 */
+    SemaphoreHandle_t lock;
     void             *handle;                /* io->connect 的返回值；NULL = 未连接 */
+    void             *retiring;              /* 已认领关闭、等最后一个租约归还的连接 */
+    uint32_t          inflight;              /* 正在使用 handle 的 I/O 调用数 */
     bool              handshaked;            /* 应用层握手是否完成 */
     uint32_t          reconnect_attempt;
     uint32_t          tx_sent;               /* 整帧写出次数（诊断） */
@@ -32,6 +48,45 @@ struct link_tcp_ctx {
     uint32_t          rx_closed;  /* 对端正常关闭次数（EOF，非错误） */
     uint32_t          rx_fatal;   /* 读硬错误次数 */
 };
+
+/* 取一个 I/O 租约：连接有效时返回句柄并 ++inflight，否则返回 NULL。
+ * 必须与 tcp_io_release() 成对 —— 少了它，"有人正在用句柄"这件事对
+ * tcp_release_handle() 不可见，它就会把句柄从另一个任务脚下 free 掉。 */
+static void *tcp_io_acquire(link_tcp_ctx_t *c)
+{
+    void *h = NULL;
+    if (c == NULL || c->lock == NULL) return NULL;
+    xSemaphoreTake(c->lock, portMAX_DELAY);
+    /* 只看 handle：retiring 是**另一代**连接，tcp_release_handle 已把它摘走，
+     * 不会再有新租约落到它上面。若这里还去看 retiring，就会在"旧连接等归还、
+     * 新连接已连上"时把新连接也挡住（最多 10s，等于重连后写不出去）。 */
+    if (c->handle != NULL) {
+        c->inflight++;
+        h = c->handle;
+    }
+    xSemaphoreGive(c->lock);
+    return h;
+}
+
+/* 归还 I/O 租约。若此时连接已认领关闭、且这是最后一个租约，
+ * 由本函数执行真正的 io->close()（见 tcp_release_handle() 的说明）。
+ * ⚠ io->close() 必须在**锁外**调用：它内部销毁 TLS 上下文并 free，
+ *   属于可能阻塞的工作，不能把锁带进去。 */
+static void tcp_io_release(link_tcp_ctx_t *c)
+{
+    if (c == NULL || c->lock == NULL) return;
+    void *h = NULL;
+    xSemaphoreTake(c->lock, portMAX_DELAY);
+    if (c->inflight > 0) c->inflight--;
+    if (c->retiring != NULL && c->inflight == 0) {
+        h = c->retiring;
+        c->retiring = NULL;
+    }
+    xSemaphoreGive(c->lock);
+    if (h != NULL && c->cfg.io != NULL && c->cfg.io->close != NULL) {
+        c->cfg.io->close(h);
+    }
+}
 
 static const char *const s_read_names[] = {
     [LINK_READ_DATA]      = "DATA",
@@ -52,12 +107,17 @@ link_read_result_t link_tcp_read(link_tcp_ctx_t *c, uint8_t *buf, size_t cap,
 {
     if (n_out != NULL) *n_out = 0;
     if (c == NULL || buf == NULL || cap == 0 || n_out == NULL) return LINK_READ_FATAL;
-    /* 连接未建立时没有可发起的读 —— handle 由本模块维护，
-     * 不存在"查与用之间被外部改变"的窗口（与 link_send 的 TOCTOU 情形不同）。 */
-    if (c->handle == NULL) return LINK_READ_NOT_READY;
+    /* ⚠ 2026-10-11 更正：注释原先写"handle 由本模块维护，不存在查与用之间被
+     * 外部改变"—— **那是错的**。handle 有两个任务在动：dev_link 走本函数，
+     * report_tx 走 tcp_send()，两者都可能在**对方 I/O 进行中**判定连接不可用
+     * 并释放句柄。真机后果 = 堆 double-free（tlsf_free，每 60s 崩溃 9 次）。
+     * ⇒ 现在用租约：取到句柄后 tcp_release_handle() 会等我们归还再 close。 */
     if (c->cfg.io == NULL || c->cfg.io->read == NULL) return LINK_READ_FATAL;
+    void *h = tcp_io_acquire(c);
+    if (h == NULL) return LINK_READ_NOT_READY;
 
-    int n = c->cfg.io->read(c->handle, buf, cap);
+    int n = c->cfg.io->read(h, buf, cap);
+    tcp_io_release(c);
     if (n > 0) {
         if ((size_t)n > cap) { c->rx_fatal++; return LINK_READ_FATAL; }  /* 驱动违约 */
         c->rx_bytes += (uint32_t)n;
@@ -89,11 +149,26 @@ link_tcp_ctx_t *link_tcp_new(const link_tcp_config_t *cfg)
     link_tcp_ctx_t *c = (link_tcp_ctx_t *)calloc(1, sizeof(*c));
     if (c == NULL) return NULL;
     c->cfg = *cfg;                           /* 复制：调用方可在之后释放 cfg */
+
+    /* 锁必须在这里建：tcp_open/read/send/release 都用它保护 handle 的
+     * 状态转移。建不出来就**不返回半成品**（P1）—— 一个 lock==NULL 的上下文
+     * 会让所有租约静默退化为"永远取不到句柄"，等于链路不可用却看不出原因。 */
+    c->lock = xSemaphoreCreateMutex();
+    if (c->lock == NULL) {
+        free(c);
+        return NULL;
+    }
     return c;
 }
 
 void link_tcp_free(link_tcp_ctx_t *c)
 {
+    if (c == NULL) return;
+    /* 若调用方没先 close 就 free（session.c 的几条失败路径就是这样），
+     * 这里补一次关闭 —— 否则底层 socket/TLS 泄漏（§216 的老问题）。
+     * tcp_release_handle 会在锁内摘句柄、在锁外 close。 */
+    tcp_release_handle(c);
+    if (c->lock != NULL) vSemaphoreDelete(c->lock);
     free(c);
 }
 
@@ -118,9 +193,22 @@ static link_result_t tcp_open(void *ctx)
         c->cfg.io->connect == NULL) {
         return LINK_FATAL;   /* 配置缺失是硬错，重试无意义 */
     }
-    if (c->handle != NULL) {
-        return LINK_SENT_FULL;    /* 已连接：幂等 */
+    /* ⚠ 2026-10-11：这里既看 handle 也看 retiring。
+     * retiring 非空 = 上一条连接还有 I/O 在用、尚未 close。此时**不能**建新
+     * 连接：同一时刻出现两个活着的 handle 后，inflight 是**跨代**计数，
+     * 无法分辨某个租约属于哪一代 ⇒ 归还时可能关错那一个（use-after-free）。
+     * 退避重试的代价是几秒；判错的代价是崩溃重启。 */
+    bool connected = false, retiring = false;
+    if (c->lock != NULL) {
+        xSemaphoreTake(c->lock, portMAX_DELAY);
+        connected = (c->handle != NULL);
+        retiring  = (c->retiring != NULL);
+        xSemaphoreGive(c->lock);
+    } else {
+        connected = (c->handle != NULL);
     }
+    if (connected) return LINK_SENT_FULL;    /* 已连接：幂等 */
+    if (retiring)  return LINK_NOT_READY;    /* 旧连接待回收：稍后重试 */
 
     bool hard_fatal = false;
     void *h = c->cfg.io->connect(c->cfg.io_ctx, &hard_fatal);
@@ -134,7 +222,13 @@ static link_result_t tcp_open(void *ctx)
         return LINK_NOT_READY;
     }
 
-    c->handle = h;
+    if (c->lock != NULL) {
+        xSemaphoreTake(c->lock, portMAX_DELAY);
+        c->handle = h;
+        xSemaphoreGive(c->lock);
+    } else {
+        c->handle = h;
+    }
     /* 注意：此处**不**重置 reconnect_attempt —— 设计 §4.2 规定重置条件是
      * **应用层握手**（Hello/HelloAck），不是 socket connect。
      * 否则会出现"连上但不通"时退避不断归零、永远 1s 重连的抖振。 */
@@ -162,15 +256,64 @@ static link_result_t tcp_open(void *ctx)
  *     不保证"已经被关过"。
  *   ⇒ 又一次"为多传输权衡而写的判据在真实约束下失效"（见 §216 的教训）。
  *
- * 现改为统一走本函数释放：任何"连接不可用"的路径都必须经过它。 */
+ * 现改为统一走本函数释放：任何"连接不可用"的路径都必须经过它。
+ *
+ * ⚠⚠ 2026-10-11（真机 BLOCKER）：上面这条修法**不完整** —— 它只回答了
+ * "谁负责释放"，没回答"**另一个任务正在用这个 handle 时怎么办**"。
+ *
+ * 真机现象（S3P 30EDA0A9A808，只跑正常轮询，无代码改动）：
+ *   E esp-tls-mbedtls: write error :-0x6C00 / read error :-0x004C
+ *   assert failed: tlsf_free tlsf.c:630 (!block_is_free(block)
+ *                    && "block already marked as free")
+ *   Rebooting...
+ * 实测频率：链路有负载时 **每 60s 崩溃重启 9 次**（空闲/无应答/低速率 = 0 次）。
+ * 崩溃点 backtrace：tlsf_free <- esp_tls_internal_event_tracker_destroy(
+ *   esp_tls_error_capture.c:50) <- esp_tls_conn_destroy(esp_tls.c:188)
+ *   <- tls_esp_close(tls_esp.c:253) <- tcp_release_handle(本函数)。
+ *
+ * 根因：handle 有**两个任务**在动 —— dev_link 走 link_tcp_read()，
+ * report_tx 走 tcp_send()。两者都可能在**对方 I/O 进行中**判定"连接不可用"
+ * 并调用本函数 ⇒ 同一个 handle 被 close 两次 ⇒ esp_tls_conn_destroy() 对同一个
+ * error_handle 二次 free() ⇒ tlsf 断言。
+ * （那次 backtrace 是栈扫描，两帧不构成调用链，所以"并发"的依据是下述代码事实，
+ *   不是那段栈：c->handle 无锁 + 两条路径都能走到本函数。）
+ *
+ * 修法：**延迟到最后一个租约归还时再关闭**。本函数只做"认领"：
+ *   · 在锁内把 handle 摘到 retiring，handle 立即置 NULL（新 I/O 不再取到它）；
+ *   · 若无 I/O 在飞（inflight == 0）⇒ 当场在锁外 close；
+ *   · 否则**不 close** —— 由最后一个 tcp_io_release() 负责。
+ * 关键不变量：**一个句柄只会被 close 一次**，且**只在没有使用者时**被 close。
+ * ⇒ 这既消除 double-free，也消除"free 掉别人正在用的句柄"（use-after-free）。 */
 static void tcp_release_handle(link_tcp_ctx_t *c)
 {
-    if (c == NULL || c->handle == NULL) return;
-    if (c->cfg.io != NULL && c->cfg.io->close != NULL) {
-        c->cfg.io->close(c->handle);
-    }
-    c->handle = NULL;
+    if (c == NULL || c->lock == NULL) return;
+
+    void *to_close = NULL;
+    xSemaphoreTake(c->lock, portMAX_DELAY);
     c->handshaked = false;
+    if (c->handle != NULL) {
+        void *claimed = c->handle;
+        c->handle = NULL;         /* 新 I/O 立刻取不到它（tcp_io_acquire 只认 handle） */
+        if (c->inflight == 0) {
+            /* 没有使用者在飞 ⇒ 当场关闭（close 在锁外执行） */
+            to_close = claimed;
+        } else {
+            /* 有 I/O 在飞 ⇒ 挂到 retiring，交给最后一个归还者关闭。
+             * ⚠ 这里**不能**顺手把旧的 retiring 也关掉：此刻 inflight 是
+             * 一个**跨两代**的计数，无法区分"在用旧的"还是"在用新的"，
+             * 关旧的就会 free 掉别人正在用的句柄（use-after-free）。
+             * ⇒ 代际并发由 tcp_open() 的不变量排除：只要 retiring 非空，
+             *   就不允许建立新连接（返回 NOT_READY 稍后重试）。
+             *   因此同一时刻**至多只有一个**未关闭的 handle，
+             *   inflight 这个单一计数才是可靠的。 */
+            c->retiring = claimed;
+        }
+    }
+    xSemaphoreGive(c->lock);
+
+    if (to_close != NULL && c->cfg.io != NULL && c->cfg.io->close != NULL) {
+        c->cfg.io->close(to_close);
+    }
 }
 
 static void tcp_close(void *ctx)
@@ -186,8 +329,11 @@ static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len,
         c->cfg.io->write == NULL) {
         return LINK_FATAL;
     }
-    /* 未连接：由【驱动】给出 NOT_READY（调用方不预检 —— 见 link.h"为什么不预检"）。 */
-    if (c->handle == NULL) {
+    /* 未连接：由【驱动】给出 NOT_READY（调用方不预检 —— 见 link.h"为什么不预检"）。
+     * ⚠ 2026-10-11：这里原先直接读 c->handle 再交给 io->write —— 与
+     * link_tcp_read() 是同一个 TOCTOU。改为租约（见 tcp_io_acquire）。 */
+    void *h = tcp_io_acquire(c);
+    if (h == NULL) {
         c->tx_fatal++;   /* 未连接却来发：属调用方/上层时序问题，计数可见 */
         return LINK_NOT_READY;
     }
@@ -209,7 +355,8 @@ static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len,
      */
     if (written_out != NULL) *written_out = 0;
 
-    int n = c->cfg.io->write(c->handle, data, len);
+    int n = c->cfg.io->write(h, data, len);
+    tcp_io_release(c);
     if (n > 0) {
         size_t got = ((size_t)n > len) ? len : (size_t)n;  /* 驱动不变量：不得超过请求量 */
         if (written_out != NULL) *written_out = got;
@@ -246,7 +393,14 @@ static uint32_t tcp_mtu(void *ctx)
 static bool tcp_is_ready(void *ctx)
 {
     const link_tcp_ctx_t *c = (const link_tcp_ctx_t *)ctx;
-    return c != NULL && c->handle != NULL;
+    if (c == NULL) return false;
+    /* 这是**只读观测**，不进决策（见 link.h"为什么不预检"）——
+     * 但读 handle 仍要走锁，否则可能读到被释放瞬间的中间态。 */
+    if (c->lock == NULL) return c->handle != NULL;
+    xSemaphoreTake(c->lock, portMAX_DELAY);
+    bool ready = (c->handle != NULL);
+    xSemaphoreGive(c->lock);
+    return ready;
 }
 
 static const link_driver_t s_tcp_driver = {
@@ -281,5 +435,10 @@ uint32_t link_tcp_reconnect_attempt(const link_tcp_ctx_t *c)
 
 bool link_tcp_is_connected(const link_tcp_ctx_t *c)
 {
-    return c != NULL && c->handle != NULL;
+    if (c == NULL) return false;
+    if (c->lock == NULL) return c->handle != NULL;
+    xSemaphoreTake(c->lock, portMAX_DELAY);
+    bool connected = (c->handle != NULL);
+    xSemaphoreGive(c->lock);
+    return connected;
 }

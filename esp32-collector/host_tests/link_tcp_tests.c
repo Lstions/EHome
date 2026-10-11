@@ -8,6 +8,8 @@
  *      socket connect **不**重置（防"连上但不通"的抖振）
  *   4. P2：mtu 由驱动给出（16,384，与 MBEDTLS_SSL_IN_CONTENT_LEN 对齐）
  */
+#include <pthread.h>
+#include <time.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -483,6 +485,204 @@ static void test_write_error_releases_handle(void)
     CHECK(s_io.close_calls == n + 1, "已释放后 drop 不应再 close");
 }
 
+/* ============ 13. ⚠⚠⚠ 2026-10-11 真机 BLOCKER：并发释放同一个 handle ============
+ *
+ * 真机现象（S3P 30EDA0A9A808，**只跑正常轮询、未改任何代码**）：
+ *   E esp-tls-mbedtls: write error :-0x6C00 / read error :-0x004C
+ *   assert failed: tlsf_free tlsf.c:630 (!block_is_free(block)
+ *                    && "block already marked as free")
+ *   Rebooting...
+ * 实测频率：链路有负载时**每 60s 崩溃重启 9 次**；空闲 / 从机不应答 / 低速 = 0 次。
+ * 崩溃点 backtrace（ELF 与设备 SHA256 一致）：
+ *   tlsf_free <- esp_tls_internal_event_tracker_destroy(esp_tls_error_capture.c:50)
+ *            <- esp_tls_conn_destroy(esp_tls.c:188) <- tls_esp_close(tls_esp.c:253)
+ *            <- tcp_release_handle(link_tcp.c)
+ *
+ * 根因：handle 有**两个任务**在动 —— dev_link 走 link_tcp_read()，
+ * report_tx 走 link_send()。两者都可能在**对方 I/O 进行中**判定连接不可用
+ * 并释放句柄 ⇒ 同一句柄被 close 两次 ⇒ 同一 error_handle 二次 free()。
+ *
+ * ⚠ 为什么既有用例全绿却漏了它：test_close_is_idempotent 是**单线程**幂等
+ *   （连一次、关一次、再关一次），覆盖不到"两个线程同时关闭"。
+ *   ⇒ 本用例用 pthread 造**真并发**：读线程阻塞在 read 里（持有句柄），
+ *     写线程此时打一条硬错（真机里就是 esp-tls 的 write error）触发释放。
+ *     用 barrier 对齐，**确定性**复现，不靠概率。
+ *
+ * 三条断言（缺一条都测不出这个缺陷）：
+ *   ① close 恰好一次 —— double-free 的直接判据（修复前为 2）
+ *   ② 不得在 read 仍持有句柄时 close（否则 use-after-free）
+ *   ③ 释放后新 I/O 拿不到旧句柄
+ */
+typedef struct {
+    pthread_barrier_t read_entered;   /* 读线程已进入 io->read（正持有句柄） */
+    pthread_barrier_t in_io;          /* 读/写两个线程都已进入各自的 io 调用 */
+    int               close_calls;
+    int               read_calls;
+    int               close_while_read_inflight;
+    int               read_inflight;  /* 当前是否有 read 在使用句柄 */
+    int               double_close_detected; /* 第一次 close 期间又来了第二次 */
+    /* 只有并发用例才需要对 barrier；反向用例走同一条 io->write，
+     * 若不门控就会去等一个**未初始化**的 barrier（count=0 ⇒ glibc 里
+     * 除零 ⇒ SIGFPE）。实测踩到过。 */
+    bool              sync_in_io;
+} conc_io_t;
+
+static conc_io_t s_conc;
+
+static void *conc_connect(void *io_ctx, bool *hard_fatal)
+{
+    (void)io_ctx;
+    if (hard_fatal) *hard_fatal = false;
+    return (void *)0xABCD;              /* 可辨识的假句柄 */
+}
+
+static int conc_write(void *handle, const uint8_t *data, size_t len)
+{
+    (void)handle; (void)data; (void)len;
+    if (s_conc.sync_in_io) {
+        (void)pthread_barrier_wait(&s_conc.in_io);  /* 与读线程对齐：两者都在 io 调用中 */
+    }
+    return -1;                          /* 硬错：连接已断（真机 = esp-tls write error） */
+}
+
+static int conc_read(void *handle, uint8_t *buf, size_t cap)
+{
+    (void)handle; (void)buf; (void)cap;
+    s_conc.read_calls++;
+    s_conc.read_inflight = 1;
+    (void)pthread_barrier_wait(&s_conc.read_entered);  /* 通知写线程：我已持有句柄 */
+    (void)pthread_barrier_wait(&s_conc.in_io);         /* 等写线程也进入 io->write */
+    s_conc.read_inflight = 0;
+    /* 返回 CLOSED：读线程也会走"连接不可用 -> 释放"这条路。
+     * ⇒ 两个线程**同时**到达 tcp_release_handle —— 这正是真机的形态。 */
+    return LINK_TCP_IO_CLOSED;
+}
+
+static void conc_close(void *handle)
+{
+    (void)handle;
+    s_conc.close_calls++;
+    if (s_conc.read_inflight) s_conc.close_while_read_inflight++;
+
+    /* ⭐ 确定性判据：修复前的实现是"先 close、再置 NULL"，
+     * 所以在 close() 执行期间句柄**仍对其他线程可见**。
+     * 这里让第一次 close 短暂停留，若另一个线程此时也判定"连接不可用"，
+     * 它必然走进来 ⇒ close_calls 变 2 ⇒ 真机的 tlsf double-free。
+     * 修复后句柄在**锁内**先被摘走，第二个线程看到的永远是 NULL，
+     * 因此这里等不到第二个，最多空转 _CLOSE_WAIT_MS 毫秒。 */
+    if (s_conc.close_calls == 1) {
+        for (int i = 0; i < 50 && s_conc.close_calls < 2; i++) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };  /* 1 ms */
+            nanosleep(&ts, NULL);
+        }
+        if (s_conc.close_calls > 1) s_conc.double_close_detected = 1;
+    }
+}
+
+static const link_tcp_io_t CONC_IO = {
+    .connect = conc_connect, .write = conc_write,
+    .read = conc_read, .close = conc_close,
+};
+
+typedef struct { link_t *l; link_tcp_ctx_t *c; } conc_arg_t;
+
+static void *conc_reader(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    uint8_t buf[16];
+    size_t n = 0;
+    (void)link_tcp_read(a->c, buf, sizeof(buf), &n);
+    return NULL;
+}
+
+static void *conc_writer(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    (void)pthread_barrier_wait(&s_conc.read_entered);  /* 等读线程真的进了 read */
+    /* 写硬错 —— 真机里就是 esp-tls 的 write error，会走 §216 释放路径。
+     * ⚠ progress 不能传 NULL：link_send 会直接判 FATAL 而**不调驱动**，
+     *   那样这条路径根本不会被走到（用例会变成"假绿"）。 */
+    size_t prog = 0;
+    (void)link_send(a->l, (const uint8_t *)"x", 1, &prog);
+    return NULL;
+}
+
+static void test_concurrent_release_closes_once(void)
+{
+    memset(&s_conc, 0, sizeof(s_conc));
+    s_conc.sync_in_io = true;
+    CHECK(pthread_barrier_init(&s_conc.read_entered, NULL, 2) == 0, "barrier init 失败");
+    CHECK(pthread_barrier_init(&s_conc.in_io, NULL, 2) == 0, "barrier init 失败");
+
+    link_tcp_config_t cfg = { .io = &CONC_IO, .io_ctx = NULL };
+    link_tcp_ctx_t *c = link_tcp_new(&cfg);
+    CHECK(c != NULL, "link_tcp_new 失败");
+    link_t *l = link_create(link_tcp_driver(), c);
+    CHECK(l != NULL, "link_create 失败");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    /* ⭐ 两个线程**同时**在 I/O 调用中（barrier 对齐），随后各自返回
+     * "连接不可用"（读 -> CLOSED，写 -> 硬错）⇒ 两条释放路径并发到达
+     * tcp_release_handle。这正是真机形态，且是确定性的、不靠概率。 */
+    conc_arg_t a = { .l = l, .c = c };
+    pthread_t tr, tw;
+    CHECK(pthread_create(&tr, NULL, conc_reader, &a) == 0, "reader 线程创建失败");
+    CHECK(pthread_create(&tw, NULL, conc_writer, &a) == 0, "writer 线程创建失败");
+    (void)pthread_join(tr, NULL);
+    (void)pthread_join(tw, NULL);
+
+    /* ① double-free 的直接判据：句柄只能被关闭一次。
+     * 修复前：read 与 send 各关一次 ⇒ close_calls == 2 ⇒ 真机就是 tlsf 断言。 */
+    CHECK(s_conc.close_calls == 1,
+          "并发释放必须只 close 一次（实际 %d）—— 2 次即真机的 tlsf double-free",
+          s_conc.close_calls);
+    CHECK(s_conc.double_close_detected == 0,
+          "不得出现第二次 close 进入（实际检测到）—— 那是并发 double-free");
+
+    /* ② 不得在"读进行中"释放句柄（否则是 use-after-free） */
+    CHECK(s_conc.close_while_read_inflight == 0,
+          "不得在 read 持有句柄期间 close（实际发生 %d 次）—— 那是 use-after-free",
+          s_conc.close_while_read_inflight);
+
+    /* ③ 释放后新 I/O 不得再拿到旧句柄 */
+    uint8_t buf[8];
+    size_t n = 0;
+    CHECK(link_tcp_read(c, buf, sizeof(buf), &n) == LINK_READ_NOT_READY,
+          "释放后 read 应 NOT_READY（不得再用旧句柄）");
+
+    (void)pthread_barrier_destroy(&s_conc.read_entered);
+    (void)pthread_barrier_destroy(&s_conc.in_io);
+    link_destroy(l);
+    link_tcp_free(c);
+}
+
+/* ④ 反向用例：**无并发**时释放必须立刻生效。
+ * 缺了它，一个"永不 close"的实现也能让 ① 通过（close_calls == 0）。 */
+static void test_release_without_inflight_closes_immediately(void)
+{
+    memset(&s_conc, 0, sizeof(s_conc));
+    link_tcp_config_t cfg = { .io = &CONC_IO, .io_ctx = NULL };
+    link_tcp_ctx_t *c = link_tcp_new(&cfg);
+    CHECK(c != NULL, "link_tcp_new 失败");
+    link_t *l = link_create(link_tcp_driver(), c);
+    CHECK(l != NULL, "link_create 失败");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    CHECK(s_conc.close_calls == 0, "初始不应有 close");
+
+    size_t prog = 0;
+    (void)link_send(l, (const uint8_t *)"x", 1, &prog);   /* 写硬错 -> 释放 */
+    CHECK(s_conc.close_calls == 1,
+          "无并发时释放必须**立刻** close 一次（实际 %d）", s_conc.close_calls);
+    /* 已释放后不得再关（幂等，不重复释放） */
+    prog = 0;
+    (void)link_send(l, (const uint8_t *)"x", 1, &prog);
+    CHECK(s_conc.close_calls == 1,
+          "已释放后不得再次 close（实际 %d）—— 那就是 double-free", s_conc.close_calls);
+
+    link_destroy(l);
+    link_tcp_free(c);
+}
+
 int main(void)
 {
     test_partial_write_is_continued();
@@ -498,6 +698,8 @@ int main(void)
     test_oversize_rejected_before_write();
     test_close_is_idempotent();
     test_lying_driver_is_rejected();
+    test_concurrent_release_closes_once();
+    test_release_without_inflight_closes_immediately();
 
     if (s_failures) { printf("link_tcp_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("link_tcp_tests: all checks passed\n");
