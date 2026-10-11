@@ -1040,7 +1040,28 @@ def run_recipe(rec, harmless, cov_limit):
         baseline_rc, baseline_out = run_gate(green_args)
 
     bites = bad_rc != 0
-    if green_rc != 0 and baseline_rc != 0:
+
+    # ⭐⭐ 2026-10-11（CI 剥洋葱第三层）：门禁**自己**说它判不了 ⇒ 不要判它"证不出会咬"。
+    #
+    # 起因：check_sdkconfig_symbols / check_tls_constants 在没有 IDF 的环境里
+    #   （CI 不装 IDF）会**自己**打印 `SKIP … 找不到 IDF_PATH` 并 **rc=0**。
+    #   于是注入坏输入后 rc 仍为 0 ⇒ 自检判"证不出会咬" ⇒ RED。
+    #
+    #   ⚠ 但它恰恰**不是**"这条门禁不会咬" —— 而是"本环境缺 IDF，它拒绝判"。
+    #     把它当失败，就等于**逼着门禁在它明说判不了的环境里假装判过**，
+    #     最后只能靠删门禁或塞假环境来"修绿"，两败俱伤。
+    #
+    #   为什么必须用**绿跑**判定而不是只看坏跑：坏跑 rc=0 的成因有两种 ——
+    #     ① 门禁懒得判（SKIP）  ② 门禁真不会咬。只有绿跑输出能区分：
+    #     绿跑里出现 SKIP ⇒ 环境不完整；否则才是真缺陷。
+    #   复用门禁自己的 SKIP 信号（而非在自检里硬编码"哪些门禁要 IDF"）：
+    #     门禁加新的环境依赖时，本机制自动跟上，不会漂移。
+    env_skip = green_rc == 0 and any(
+        ln.lstrip().startswith("SKIP") for ln in (green_out or "").splitlines())
+
+    if env_skip:
+        verdict = "跳过（环境不完整：门禁自身 SKIP）"
+    elif green_rc != 0 and baseline_rc != 0:
         # 门禁在本环境未注入时就红 ⇒ 无法用它判断"注入是否被侦破"。
         verdict = "跳过（该门禁在本环境本来就红）"
     elif harmless and not bites:
@@ -1216,7 +1237,8 @@ def main():
         results.append(res)
         v = res["verdict"]
         mark = {"会咬": "OK ", "跳过（该门禁在本环境本来就红）": "SKIP",
-                "跳过（环境不完整：注入目标不存在）": "SKIP"}.get(v, "RED")
+                "跳过（环境不完整：注入目标不存在）": "SKIP",
+                "跳过（环境不完整：门禁自身 SKIP）": "SKIP"}.get(v, "RED")
         print()
         print("[%s] %-42s %s" % (mark, r["name"], r["gate"]))
         print("      坏输入 : %s" % res["inject_note"])
@@ -1226,6 +1248,11 @@ def main():
             # 不静默：把"为什么这个环境里判不了"打出来。
             if v.endswith("注入目标不存在）"):
                 print("      跳过原因：%s" % res["inject_note"])
+                continue
+            if v.endswith("门禁自身 SKIP）"):
+                print("      跳过原因：门禁在本环境**主动 SKIP**（缺外部依赖），注入前后都 rc=0；")
+                for line in evidence(res["green_out"])[:2]:
+                    print("      | %s" % line)
                 continue
             print("      跳过原因：该门禁在**未注入**时就是 rc=%s ⇒ 本环境下无法判'注入是否被侦破'"
                   % res["baseline_rc"])
