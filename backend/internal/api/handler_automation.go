@@ -416,6 +416,27 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		// **逐 seq 比较** (B1 遗留债务的收口): 只比第一个动作会让"把第 2 个动作换成
 		// 另一个风险动作"保留旧授权, 那是安全漏洞。
 		changed := automationActionSetChanged(current, actions)
+		// ── P1-D: "同一次请求里既改动作集合、又声明已授权" 必须显式 400 ──
+		//
+		// 缺陷现象 (评审 verify-b2 P1-D): PUT 同时带 actions(已变) + risk_acknowledged=true
+		// + require_confirmed=false 时返回 200, 但落库是「风险动作 + require_confirmed=false
+		// + risk_acknowledged_at IS NULL」——正是 V7 声称要杜绝的规则。
+		//
+		// 根因: V7 看到请求里的 true 而放行; 随后的写入 switch 又因 changed 为真而**无条件**
+		// 清空授权列 (清空优先于请求字段)。两处判定不在同一个分支里, 于是"校验通过"与
+		// "落库结果"不一致。
+		//
+		// 为什么不静默忽略 true 而选择 400: 静默降级会存下一条"永远不会执行、且不 warn"
+		// 的风险规则, 用户以为已授权 (C5 同族)。显式报错把冲突告知用户, 并提供可执行路径:
+		// 先保存动作改动, 再单独提交一次授权确认。
+		//
+		// 与实施计划 §0.1 一致: 动作集合变化即清空授权, 强制用户**重新确认**——
+		// "重新"意味着另一次请求, 而不是在同一次请求里顺手声明。
+		if changed && req.RiskAcknowledged != nil && *req.RiskAcknowledged {
+			ErrorWithCode(c, 400, "action_changed_requires_reconfirmation",
+				"动作集合已变更: 授权已失效, 请先保存动作改动, 再单独提交一次 risk_acknowledged=true 完成重新确认")
+			return
+		}
 		acknowledged := rule.RiskAcknowledgedAt != nil
 		if changed {
 			acknowledged = false

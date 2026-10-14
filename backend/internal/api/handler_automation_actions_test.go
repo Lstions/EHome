@@ -171,6 +171,88 @@ func TestCreateSecondRiskActionWithoutAuthorizationIsRejected(t *testing.T) {
 	}
 }
 
+// ─── P1-D: 同请求"改动作集合 + risk_acknowledged=true" 必须显式 400 ───────
+//
+// 反向验证: 删掉 update 路径里的 changed && risk_acknowledged 判定 → 本用例红
+// (HTTP 200, 且落库为"风险动作 + require_confirmed=false + 无授权")。
+func TestUpdateActionChangeWithReAcknowledgementIsRejected(t *testing.T) {
+	r, db := newRiskRouter(t, riskCatalogFixture())
+	// 前置: require_confirmed=true 的风险动作规则 (走人工确认, 无需授权)。
+	body := multiRiskBody(true, nil, []map[string]interface{}{
+		actionSpec(1, "set_mos_policy", `{}`),
+	})
+	if code, resp := postRule(t, r, body); code != http.StatusOK {
+		t.Fatalf("前置规则创建失败: status=%d body=%v", code, resp)
+	}
+
+	// 同一次请求: 改动作集合 + 声明已授权 + 免确认。
+	conflict, _ := json.Marshal(map[string]interface{}{
+		"actions": []map[string]interface{}{
+			actionSpec(1, "set_mos_policy_v2", `{}`),
+		},
+		"risk_acknowledged": true,
+		"require_confirmed": false,
+	})
+	code, resp := putRule(t, r, "1", conflict)
+	if code != http.StatusBadRequest {
+		t.Fatalf("改动作 + 同请求重新授权必须被显式拒绝 (P1-D), status=%d body=%v", code, resp)
+	}
+	if resp["error_code"] != "action_changed_requires_reconfirmation" {
+		t.Fatalf("error_code=%v want action_changed_requires_reconfirmation", resp["error_code"])
+	}
+	// 被拒的请求整体不得落库: 动作原样保留, 且不得出现"免确认 + 无授权"的规则。
+	after := reloadRule(t, db, 1)
+	if after.ActionID != "set_mos_policy" {
+		t.Fatalf("被拒的更新不得改动动作: action_id=%q", after.ActionID)
+	}
+	if !after.RequireConfirmed {
+		t.Fatal("被拒的更新不得改动 require_confirmed")
+	}
+	if after.RiskAcknowledgedAt != nil {
+		t.Fatal("被拒的更新不得写入授权列")
+	}
+}
+
+// P1-D 的正向对照 1: 动作不变时携带 risk_acknowledged=true 仍须成功。
+func TestUpdateUnchangedActionWithReAcknowledgementSucceeds(t *testing.T) {
+	r, db := newRiskRouter(t, riskCatalogFixture())
+	body := multiRiskBody(false, boolPtr(true), []map[string]interface{}{
+		actionSpec(1, "set_mos_policy", `{}`),
+	})
+	if code, resp := postRule(t, r, body); code != http.StatusOK {
+		t.Fatalf("前置规则创建失败: status=%d body=%v", code, resp)
+	}
+	// 显式撤回再重新授权 (动作集合逐字段不变) → 必须成功。
+	raw, _ := json.Marshal(map[string]interface{}{"risk_acknowledged": true})
+	if code, resp := putRule(t, r, "1", raw); code != http.StatusOK {
+		t.Fatalf("动作未变时重新授权必须成功, status=%d body=%v", code, resp)
+	}
+	if reloadRule(t, db, 1).RiskAcknowledgedAt == nil {
+		t.Fatal("重新授权必须写入 risk_acknowledged_at")
+	}
+}
+
+// P1-D 的正向对照 2: 只改名称时携带 risk_acknowledged=true 仍须成功。
+func TestUpdateNameOnlyWithReAcknowledgementSucceeds(t *testing.T) {
+	r, db := newRiskRouter(t, riskCatalogFixture())
+	body := multiRiskBody(false, boolPtr(true), []map[string]interface{}{
+		actionSpec(1, "set_mos_policy", `{}`),
+	})
+	if code, resp := postRule(t, r, body); code != http.StatusOK {
+		t.Fatalf("前置规则创建失败: status=%d body=%v", code, resp)
+	}
+	raw, _ := json.Marshal(map[string]interface{}{
+		"name":              "改个名字",
+		"risk_acknowledged": true,
+	})
+	if code, resp := putRule(t, r, "1", raw); code != http.StatusOK {
+		t.Fatalf("仅改名称时重新授权必须成功, status=%d body=%v", code, resp)
+	}
+	if reloadRule(t, db, 1).RiskAcknowledgedAt == nil {
+		t.Fatal("仅改名称不得清空授权, 且重新授权须写入")
+	}
+}
+
 // ⑤ V1: seq 必须 1..N 连续无重复 (fail-closed)。
 func TestCreateRejectsNonContiguousActionSeq(t *testing.T) {
 	r, _ := newRiskRouter(t, riskCatalogFixture())
