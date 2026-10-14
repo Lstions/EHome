@@ -1559,7 +1559,9 @@ function onAutomationPush(name: string, message: unknown) {
     const rule = detail.rule_name ?? detail.rule_id ?? ''
     const seq = detail.failed_seq ?? ''
     const failed = detail.failed_action_id ?? ''
-    ElMessage.error(
+    // 必须走 feedback（I-1 收敛门禁：禁止裸 ElMessage.error）。这是**错误**级提示，
+    // 且带上下文（哪条规则、第几个动作、哪个动作），用户据此才能去人工核查。
+    feedback.error(
       `规则「${rule}」第 ${seq} 个动作 ${failed} 执行失败，剩余动作已中止 —— 设备可能处于部分变更状态，请立即人工核查。`,
     )
   }

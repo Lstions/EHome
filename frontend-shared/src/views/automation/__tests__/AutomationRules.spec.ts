@@ -5,7 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { compileStyleAsync, parse } from '@vue/compiler-sfc'
 import AutomationRules from '../AutomationRules.vue'
 import source from '../AutomationRules.vue?raw'
-import { automationApi, type AutomationEvent, type AutomationEventPage } from '@/api/automation'
+import { automationApi, type AutomationEvent, type AutomationEventPage, type PrecheckResponse } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { deviceOperationApi } from '@/api/deviceOperation'
 
@@ -770,7 +770,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
   }
 
   /** 预检返回一个风险动作（含后端给的设备名/标签/原因/参数摘要）。 */
-  function riskPrecheck() {
+  function riskPrecheck(): PrecheckResponse {
     return {
       risk_actions: [{
         seq: 1,
@@ -825,7 +825,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
 
-      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as Record<string, unknown>
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as unknown as Record<string, unknown>
       expect(payload.trigger_type).toBe('sun_event')
       expect(payload.trigger_sun_kind).toBe('sunset')
       expect(payload.trigger_sun_offset_min).toBe(-30)
