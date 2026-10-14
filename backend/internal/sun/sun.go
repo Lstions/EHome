@@ -114,50 +114,79 @@ func SunEvent(lat, lon float64, tz *time.Location, date time.Time, kind Kind) (t
 
 	// "当日" = date 在节点时区下的日历日期。
 	y, m, d := date.In(tz).Date()
+	jdBase := julianDay(y, m, d)
 
-	// NOAA 的 getJD 给的是当日 0h UT 的儒略日 (整日落在 .5)。事件时刻的绝对
-	// 瞬时 = jd0 + 计算出的 UT 分钟数/1440, 与后续"归日"无关 (归日只改显示日期)。
-	jd0 := julianDay(y, m, d)
-	inst := time.Time{}
-	for i := 0; i < 3; i++ {
-		utcMinutes, status := sunEventUTCMinutes(lat, lon, jd0, kind)
-		if status != StatusOK {
-			// 极昼/极夜: 显式状态 + 零值时间, 不编造时刻, 更不 clamp。
-			return time.Time{}, status, nil
+	// ── 归日: 找出**唯一**落在目标本地日内的事件瞬时 ──
+	//
+	// 为什么不能只算一次: 经度与时区不匹配 (例如经度 179° 却配 UTC), 或高纬地区
+	// 日落跨过本地午夜时, 用"UT 当日"直接算出的瞬时可能落在相邻的本地日。
+	//
+	// 为什么不能用"按差值平移 jd0 后迭代" (本实现的初版做法, 已被本包的门禁
+	// TestStatusMatchesIndependentSemantics 抓出为**真实缺陷**): 高纬逼近极昼时
+	// 日落每天向后漂移几分钟, 若当日事件落在次日本地日, 把 jd0 **向前**平移会
+	// 算出更晚的事件, 于是越迭代越远 —— 实测 66.0°N 的 2026-06-08 日落被漂到
+	// 06-12 00:44, 整整错 4 天。正确做法是**枚举候选 UT 日取唯一落窗者**。
+	//
+	// 候选顺序: 先目标日 (绝大多数情况一次命中, 也让缓存预热与常规路径最快),
+	// 再 ±1 日, 最后 ±2 日。窗口 ±2 日足以覆盖跨午夜与经度/时区错配的情形。
+	var inst time.Time
+	found := false
+	for _, off := range []int{0, -1, 1, -2, 2} {
+		at, ok := sunEventInstant(lat, lon, jdBase+float64(off), kind)
+		if !ok {
+			continue
 		}
-		inst = julianToTime(jd0 + utcMinutes/minutesPerDay)
-		// 归日: 要求返回的事件确实发生在 date 所代表的**节点本地日历日**内。
-		// 时区与经度不匹配的配置 (例如经度 179° 却配 UTC) 会让裸公式落到相邻本地日,
-		// 这里按天差平移 jd0 后重算 (至多 3 次; NOAA 官方实现对显示值做同款归一化)。
-		ey, em, ed := inst.In(tz).Date()
-		shift := dayDelta(y, m, d, ey, em, ed)
-		if shift == 0 {
+		ey, em, ed := at.In(tz).Date()
+		if dayDelta(y, m, d, ey, em, ed) == 0 {
+			inst, found = at, true
 			break
 		}
-		jd0 += float64(shift)
 	}
-	return inst.In(tz), StatusOK, nil
+
+	if found {
+		return inst.In(tz), StatusOK, nil
+	}
+
+	// ── 日内不存在该事件: 太阳在该本地日内**始终**在阈值同一侧 ──
+	//
+	// 判据 = 当地正午的时角余弦 (正午时角 H=0 ⇒ cos H = 1): 正午太阳在阈值之上
+	// ⟺ 1 > arg。该判据与事件种类**无关**, 因此同时覆盖三种情形:
+	//   极昼 (arg < -1)        → 正午在阈值上 → always_up
+	//   极夜 (arg >  1)        → 正午也在阈值下 → always_down
+	//   边界日 (|arg| ≤ 1 但窗口内无穿越, 例如日出已提前到本地 00:00 之前)
+	//                          → 由正午高度判定, 不再按 kind 猜
+	arg := hourAngleArg(lat, sunDeclination(julianCentury(jdBase)))
+	if arg > 1 {
+		return time.Time{}, StatusAlwaysDown, nil
+	}
+	return time.Time{}, StatusAlwaysUp, nil
 }
 
-// sunEventUTCMinutes 是 NOAA/Meeus 简化式的核心: 返回事件相对 jd0 当日 0h UT 的
-// UT 分钟数, 以及无解时的显式状态。
+// sunEventInstant 返回以 jd0 (UT 日) 为基准求解出的事件绝对瞬时。
+// 含 NOAA calcSunriseSet 的二次迭代: 先用 0h UT 的赤纬求近似时刻, 再用该时刻
+// 重算, 消除地球公转带来的误差。
 //
-// 与 NOAA 官方 main.js 的 calcSunriseSetUTC/calcSunriseSet 同构 (含二次迭代:
-// 先用 0h UT 的赤纬求近似时刻, 再用该时刻重算, 消除地球公转带来的误差)。
-func sunEventUTCMinutes(lat, lon, jd0 float64, kind Kind) (float64, EventStatus) {
-	minutes, status := sunriseSetUTCMinutes(lat, lon, jd0, kind)
-	if status != StatusOK {
-		return 0, status
+// ok=false 表示该 UT 日**不存在穿越** (时角余弦全程越界), 而不是某一种极昼/
+// 极夜状态 —— 极昼与极夜的**取向**只在 SunEvent 的无事件分支里判定一次。
+// 为什么不让本函数也返回状态: 两处判定同一件事会留下"改了 A 忘了 B"的漂移面,
+// 且调用方只关心"有没有解"。单一判定点 (本批"不过度设计"约束的体现)。
+func sunEventInstant(lat, lon, jd0 float64, kind Kind) (time.Time, bool) {
+	minutes, ok := sunriseSetUTCMinutes(lat, lon, jd0, kind)
+	if !ok {
+		return time.Time{}, false
 	}
-	// 二次迭代: 用近似时刻的儒略日重算 (NOAA calcSunriseSet 的第二行)。
-	refined, status2 := sunriseSetUTCMinutes(lat, lon, jd0+minutes/minutesPerDay, kind)
-	if status2 != StatusOK {
-		return 0, status2
+	refined, ok2 := sunriseSetUTCMinutes(lat, lon, jd0+minutes/minutesPerDay, kind)
+	if !ok2 {
+		return time.Time{}, false
 	}
-	return refined, StatusOK
+	return julianToTime(jd0 + refined/minutesPerDay), true
 }
 
-func sunriseSetUTCMinutes(lat, lon, jd float64, kind Kind) (float64, EventStatus) {
+// sunriseSetUTCMinutes 是 NOAA/Meeus 简化式的核心: 返回事件相对 jd 当日
+// 0h UT 的 UT 分钟数; ok=false 表示该 UT 日无穿越 (|cos H| 越界)。
+//
+// 与 NOAA 官方 main.js 的 calcHourAngleSunrise/calcSunriseSetUTC 同构。
+func sunriseSetUTCMinutes(lat, lon, jd float64, kind Kind) (float64, bool) {
 	t := julianCentury(jd)
 	eqTime := equationOfTime(t)   // 分钟
 	solarDec := sunDeclination(t) // 度
@@ -173,11 +202,8 @@ func sunriseSetUTCMinutes(lat, lon, jd float64, kind Kind) (float64, EventStatus
 	// 判据方向 (与 NOAA 实现一致):
 	//   haArg >  1 ⇒ 太阳**终日在地平线下** ⇒ 极夜 always_down (日出与日落都不存在)
 	//   haArg < -1 ⇒ 太阳**终日在地平线上** ⇒ 极昼 always_up
-	if haArg > 1 {
-		return 0, StatusAlwaysDown
-	}
-	if haArg < -1 {
-		return 0, StatusAlwaysUp
+	if haArg > 1 || haArg < -1 {
+		return 0, false // 该 UT 日无穿越 (极昼/极夜, 或穿越落在相邻 UT 日)
 	}
 
 	ha := math.Acos(haArg) // 弧度, ∈ [0, π]
@@ -185,7 +211,7 @@ func sunriseSetUTCMinutes(lat, lon, jd float64, kind Kind) (float64, EventStatus
 		ha = -ha // NOAA: "for sunset, use -HA"
 	}
 	delta := lon + ha*degPerRad
-	return 720 - 4*delta - eqTime, StatusOK
+	return 720 - 4*delta - eqTime, true
 }
 
 // hourAngleArg 返回 cos(时角) 的原始值 (可能越界 —— 越界即极昼/极夜信号)。
