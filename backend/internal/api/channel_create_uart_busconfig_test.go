@@ -196,6 +196,7 @@ func TestChannelCreate_UARTRejectsMalformedNonEmptyBusConfig(t *testing.T) {
 	}
 }
 
+
 // 向导内联建 UART 通道时同样不得落空 bus_config（2026-10-03）。
 //
 // 这条路径（POST /edge-devices 带 channel 子对象）原实现只在 caller 显式传 bus_config
@@ -276,7 +277,6 @@ func TestEdgeDevice_Create_InlineUARTChannelWithoutCapabilityRejects(t *testing.
 		t.Fatalf("被拒绝的内联通道仍落库了 %d 条", count)
 	}
 }
-
 // 共用布局的自证：buildUARTBusConfig 造出的串必须能被 withUARTBaudrate 读出同一波特率。
 // 若有人把其中一处改成不同偏移，这里会红。
 func TestUARTBusConfigLayout_SharedBetweenBuildAndRewrite(t *testing.T) {

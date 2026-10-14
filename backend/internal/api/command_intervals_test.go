@@ -91,7 +91,6 @@ func TestNormalizeCommandIntervals_ClampsNegatives(t *testing.T) {
 		t.Errorf("input map was mutated: read_a=%d", in["read_a"])
 	}
 }
-
 // ==================== manifest command capacity gate ====================
 //
 // 生产事故（2026-09-17，节点 F0F5BDFFFE02）：BMS 的 5 条 schedulable 指令全部

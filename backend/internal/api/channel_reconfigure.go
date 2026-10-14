@@ -116,3 +116,4 @@ func withUARTBaudrate(raw string, baudrate int) (string, error) {
 	setUARTBaudrateBytes(data, baudrate)
 	return strings.ToUpper(hex.EncodeToString(data)), nil
 }
+
