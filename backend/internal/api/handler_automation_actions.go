@@ -9,6 +9,24 @@ import (
 	"gorm.io/gorm"
 )
 
+// mirrorAction 返回动作集合里**seq 最小**的动作 —— 单动作镜像列的权威取值。
+//
+// 为什么必须统一到 seq 最小 (P2-F, 评审 verify-b2): create 路径原先取数组下标 0,
+// update 路径取 seq 最小; 两路口径在"前端提交的数组顺序与 seq 顺序不一致"时冲突,
+// 产生的镜像列不同, 而镜像列是兼容期老读路径/仿真/前端的读取对象。
+//
+// 语义: 镜像列 = 规则的动作集合里**最先执行**的那个动作 (seq 升序的第一个)。
+// 这也与 database.ReplaceRuleActions 的回写口径一致, 两路必须同源。
+func mirrorAction(actions []models.AutomationRuleAction) models.AutomationRuleAction {
+	first := actions[0]
+	for _, a := range actions[1:] {
+		if a.Seq < first.Seq {
+			first = a
+		}
+	}
+	return first
+}
+
 // automationActionInput 是多动作请求体里的单个动作 (方案 §4.1.1)。
 //
 // Seq 是 int 而不是 *int: "缺省"与"显式 0"都必须被拒绝 (seq 从 1 起), 用零值
@@ -61,10 +79,14 @@ func resolveRuleActions(reqActions []automationActionInput, current []models.Aut
 	if !scalarProvided {
 		return current
 	}
-	// 标量合并: 目标 = 现有第一个动作 (无则新建 seq=1)。
+	// 标量合并: 目标 = 现有**最先执行**的动作 (seq 最小; 无则新建 seq=1)。
+	//
+	// 为什么用 seq 最小而不是数组下标 0 (P2-F): 镜像列语义是"最先执行的动作", 数组
+	// 顺序只是请求体的书写顺序。若这里按数组下标合并、镜像列按 seq 最小回写, 两处
+	// 会指向不同动作, 老前端"只改 action_id"的请求会改错对象。
 	var target models.AutomationRuleAction
 	if len(current) > 0 {
-		target = current[0]
+		target = mirrorAction(current)
 	} else {
 		target = models.AutomationRuleAction{Seq: 1, Enabled: true}
 	}
@@ -75,7 +97,12 @@ func resolveRuleActions(reqActions []automationActionInput, current []models.Aut
 	target.ActionLevel = scalarLevel
 	if len(current) > 0 {
 		out := append([]models.AutomationRuleAction(nil), current...)
-		out[0] = target
+		for i := range out {
+			if out[i].Seq == target.Seq {
+				out[i] = target
+				break
+			}
+		}
 		return out
 	}
 	return []models.AutomationRuleAction{target}

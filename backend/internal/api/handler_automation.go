@@ -22,7 +22,13 @@ var (
 	validAutomationTriggerTypes = map[string]bool{
 		models.AutomationTriggerSensorThreshold: true,
 		models.AutomationTriggerTimeWindow:      true,
+		models.AutomationTriggerSunEvent:        true,
 		models.AutomationTriggerEvent:           true,
+	}
+	// 日出/日落事件种类 (sun_event 的 trigger_sun_kind 合法取值)。
+	validAutomationSunKinds = map[string]bool{
+		models.AutomationSunKindSunrise: true,
+		models.AutomationSunKindSunset:  true,
 	}
 	validAutomationActionTypes = map[string]bool{
 		models.AutomationActionDeviceAction: true,
@@ -223,7 +229,8 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 				return
 			}
 		}
-		first := actions[0]
+		// 镜像列/校验基准 = seq 最小的动作 (P2-F: 与 update 路径同源, 不再取数组下标 0)。
+		first := mirrorAction(actions)
 		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, first.ActionType,
 			req.TriggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
 			req.TriggerWindowStart, req.TriggerWindowEnd, req.TriggerWindowEdge,
@@ -342,8 +349,8 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		current := loadActionsOrMirror(db, rule)
 		scalarProvided := req.ActionType != nil || req.ActionID != nil || req.ActionParamsJSON != nil ||
 			req.ActionLevel != nil || req.ActionDeviceID != nil
-		// 标量候选值: 未提供的字段取当前第一个动作的值。
-		first := current[0]
+		// 标量候选值: 未提供的字段取当前**最先执行**的动作的值 (seq 最小, 与镜像列同源)。
+		first := mirrorAction(current)
 		scalarType := pickStr(req.ActionType, first.ActionType)
 		scalarDeviceID := first.ActionDeviceID
 		if req.ActionDeviceID != nil {
@@ -385,8 +392,10 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		if req.RequireConfirmed != nil {
 			rc = *req.RequireConfirmed
 		}
-		if msg := validateAutomationRuleFields(name, tt, first.ActionType, &teid, sn, cmp, &thr, ws, we, we2,
-			&first.ActionDeviceID, first.ActionID, first.ActionLevel, rc, true); msg != "" {
+		// 校验基准同样取 seq 最小的动作 (P2-F: 与镜像列/标量合并三者同源)。
+		merged := mirrorAction(actions)
+		if msg := validateAutomationRuleFields(name, tt, merged.ActionType, &teid, sn, cmp, &thr, ws, we, we2,
+			&merged.ActionDeviceID, merged.ActionID, merged.ActionLevel, rc, true); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}

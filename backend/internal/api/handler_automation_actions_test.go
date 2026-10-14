@@ -171,6 +171,80 @@ func TestCreateSecondRiskActionWithoutAuthorizationIsRejected(t *testing.T) {
 	}
 }
 
+// ─── P2-F: 镜像列口径两路必须一致 (create 与 update 同取 seq 最小) ─────────
+//
+// 反向验证: 把 create 路径的 mirrorAction(actions) 退回 actions[0] →
+// TestMirrorColumnIsSeqMinOnCreateAndUpdate 红 (数组顺序与 seq 顺序不一致时,
+// create 落库的镜像列与 update 重写后的镜像列不同)。
+func TestMirrorColumnIsSeqMinOnCreateAndUpdate(t *testing.T) {
+	r, db := newRiskRouter(t, riskCatalogFixture())
+	// 请求体的数组顺序刻意与 seq 顺序**相反**: 数组第 0 项是 seq=2。
+	// 若 create 取数组下标 0, 镜像列会被写成 seq=2 的动作 (read_rainfall);
+	// 正确口径 (seq 最小) 应写成 seq=1 的动作 (set_mos_policy)。
+	body := multiRiskBody(true, boolPtr(true), []map[string]interface{}{
+		actionSpec(2, "read_rainfall", `{}`),
+		actionSpec(1, "set_mos_policy", `{}`),
+	})
+	code, resp := postRule(t, r, body)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d want 200 (body=%v)", code, resp)
+	}
+	created := reloadRule(t, db, 1)
+	if created.ActionID != "set_mos_policy" {
+		t.Fatalf("create 后镜像列 action_id=%q want set_mos_policy (seq 最小的动作, P2-F)",
+			created.ActionID)
+	}
+
+	// 同一集合再经 update 重放一次 (动作集合逐字段不变): 镜像列必须保持一致。
+	replay, _ := json.Marshal(map[string]interface{}{
+		"actions": []map[string]interface{}{
+			actionSpec(2, "read_rainfall", `{}`),
+			actionSpec(1, "set_mos_policy", `{}`),
+		},
+	})
+	if code, resp := putRule(t, r, "1", replay); code != http.StatusOK {
+		t.Fatalf("重放更新失败: status=%d body=%v", code, resp)
+	}
+	updated := reloadRule(t, db, 1)
+	if updated.ActionID != created.ActionID ||
+		updated.ActionDeviceID != created.ActionDeviceID ||
+		updated.ActionParamsJSON != created.ActionParamsJSON {
+		t.Fatalf("同集合 create/update 后镜像列必须一致: create=%q/%v, update=%q/%v",
+			created.ActionID, created.ActionDeviceID, updated.ActionID, updated.ActionDeviceID)
+	}
+}
+
+// P2-F 补充: 老前端"只改 action_id"的标量请求必须改到 seq 最小的那个动作,
+// 而不是请求体数组里的第一个。
+func TestScalarUpdateTargetsSeqMinAction(t *testing.T) {
+	r, db := newRiskRouter(t, riskCatalogFixture())
+	body := multiRiskBody(true, boolPtr(true), []map[string]interface{}{
+		actionSpec(2, "read_rainfall", `{}`),
+		actionSpec(1, "set_mos_policy", `{}`),
+	})
+	if code, resp := postRule(t, r, body); code != http.StatusOK {
+		t.Fatalf("前置规则创建失败: status=%d body=%v", code, resp)
+	}
+	// 标量改 action_id (不带 actions 数组)。
+	raw, _ := json.Marshal(map[string]interface{}{"action_id": "set_mos_policy_v2"})
+	if code, resp := putRule(t, r, "1", raw); code != http.StatusOK {
+		t.Fatalf("标量更新失败: status=%d body=%v", code, resp)
+	}
+	var actions []models.AutomationRuleAction
+	if err := db.Order("seq ASC").Find(&actions).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("子表行数=%d want 2 (标量更新不得丢掉其它动作)", len(actions))
+	}
+	if actions[0].Seq != 1 || actions[0].ActionID != "set_mos_policy_v2" {
+		t.Fatalf("标量更新必须落在 seq 最小的动作上: %+v", actions[0])
+	}
+	if actions[1].Seq != 2 || actions[1].ActionID != "read_rainfall" {
+		t.Fatalf("其余动作必须原样保留: %+v", actions[1])
+	}
+}
+
 // ─── P1-D: 同请求"改动作集合 + risk_acknowledged=true" 必须显式 400 ───────
 //
 // 反向验证: 删掉 update 路径里的 changed && risk_acknowledged 判定 → 本用例红
