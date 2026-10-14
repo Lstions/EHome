@@ -68,6 +68,7 @@ vi.mock('@/api/automation', () => ({
     listEvents: vi.fn(),
     confirmEvent: vi.fn(),
     triggerRule: vi.fn(),
+    precheckRule: vi.fn(),
   },
 }))
 vi.mock('@/api/edgeDevice', () => ({
@@ -78,7 +79,9 @@ vi.mock('@/api/edgeDevice', () => ({
 // F18 命令回链：页面现在会**真实查询**执行记录（不再是 console.log 占位），
 // 因此必须 mock 该 api，否则点击会打到真实 axios。
 vi.mock('@/api/deviceOperation', () => ({
-  deviceOperationApi: { get: vi.fn() },
+  // actions() 是新的动作目录来源（风险徽标读后端下发的 requires_confirmation）。
+  // 不 mock 会让页面挂载时打到真实 axios。
+  deviceOperationApi: { get: vi.fn(), actions: vi.fn() },
 }))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
@@ -147,12 +150,21 @@ const eventFixture = {
   created_at: '2026-08-21T12:00:00Z',
 }
 
+/** 设备 10 的动作目录：一个风险动作（requires_confirmation=true）+ 一个普通动作。 */
+const deviceActionsFixture = [
+  { definition: { id: 'set_mos_policy', name: '设置充放电 MOS 软件策略', description: '改变充放电 MOS 软件关闭位', risk_level: 'elevated', requires_confirmation: true }, available: true },
+  { definition: { id: 'read_basic_info', name: '读取基本信息', description: '读取总压/电流', risk_level: 'normal', requires_confirmation: false }, available: true },
+]
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   mockedAutomationApi.listRules.mockResolvedValue([ruleFixture])
   mockedAutomationApi.listEvents.mockResolvedValue(eventPage([eventFixture]))
   mockedEdgeApi.getList.mockResolvedValue({ total: 1, items: [{ id: 10, name: 'ESP32-01' } as never] })
+  // 默认预检：无风险动作（既有用例大多走普通路径，保持它们的行为不变）
+  mockedAutomationApi.precheckRule.mockResolvedValue({ risk_actions: [], blocking_errors: [], warnings: [] })
+  mockedOperationApi.actions.mockResolvedValue(deviceActionsFixture as never)
 })
 
 async function mountPage() {
@@ -273,7 +285,7 @@ describe('AutomationRules.vue', () => {
     expect(ElMessage.warning).toHaveBeenCalledWith('请填写规则名称')
   })
 
-  it('创建成功后调用 API 并关闭对话框', async () => {
+  it('创建成功后调用 API 并关闭对话框（多动作契约: 提交 actions 数组, seq 由下标派生）', async () => {
     const created = { ...ruleFixture, id: 2, name: '新规则' }
     mockedAutomationApi.createRule.mockResolvedValue(created)
     const wrapper = await mountPage()
@@ -281,8 +293,9 @@ describe('AutomationRules.vue', () => {
     await wrapper.find('[data-test="field-name"]').setValue('新规则')
     await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
-    await wrapper.find('[data-test="field-action-device"]').setValue('10')
-    await wrapper.find('[data-test="field-action-id"]').setValue('gpio_set')
+    // 单动作字段组已升级为卡片列表：目标是第一张卡片（下标 0）
+    await wrapper.find('[data-test="action-device-0"]').setValue('10')
+    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
     await wrapper.find('[data-test="save-rule"]').trigger('click')
     await flushPromises()
     expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
@@ -290,9 +303,26 @@ describe('AutomationRules.vue', () => {
       name: '新规则',
       trigger_edge_device_id: 10,
       trigger_sensor_name: 'temperature',
-      action_device_id: 10,
-      action_id: 'gpio_set',
+      actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'read_basic_info' }],
     }))
+  })
+
+  it('保存前先走 precheck（风险清单的判定源在后端，前端不自己算）', async () => {
+    mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 3 })
+    const wrapper = await mountPage()
+    await wrapper.find('[data-test="create-rule"]').trigger('click')
+    await wrapper.find('[data-test="field-name"]').setValue('普通规则')
+    await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+    await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+    await wrapper.find('[data-test="action-device-0"]').setValue('10')
+    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+    await wrapper.find('[data-test="save-rule"]').trigger('click')
+    await flushPromises()
+
+    expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(1)
+    // 预检先于落库：删掉 precheck 调用本断言必红
+    expect(mockedAutomationApi.precheckRule.mock.invocationCallOrder[0])
+      .toBeLessThan(mockedAutomationApi.createRule.mock.invocationCallOrder[0])
   })
 
   it('启用/禁用切换调 setRuleEnabled', async () => {
@@ -718,6 +748,379 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       // onUnmounted 调用了 subscribe 返回的 off()，captured 中该键应被删除
       expect(captured.has('automation_pending_confirm')).toBe(false)
       vi.restoreAllMocks()
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // B4 门禁 F-1..F-10（方案 §8.2）
+  //
+  // 断言口径：能读**运行时行为**就不读源码字符串 —— 字符串包含在"代码存在但
+  // 从不被调用"时同样为绿（祖父化）。少数只能靠源码契约的（例如"不得出现某写法"）
+  // 显式标注理由。
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** 打开创建对话框并填到"可保存"的最小状态（第一张卡片用普通动作）。 */
+  async function openCreateFilled(wrapper: Awaited<ReturnType<typeof mountPage>>, name = '测试规则') {
+    await wrapper.find('[data-test="create-rule"]').trigger('click')
+    await wrapper.find('[data-test="field-name"]').setValue(name)
+    await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+    await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+    await wrapper.find('[data-test="action-device-0"]').setValue('10')
+    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+  }
+
+  /** 预检返回一个风险动作（含后端给的设备名/标签/原因/参数摘要）。 */
+  function riskPrecheck() {
+    return {
+      risk_actions: [{
+        seq: 1,
+        action_id: 'set_mos_policy',
+        action_device_id: 10,
+        action_device_name: 'BMS-01',
+        risk_level: 'elevated',
+        risk_label: '风险',
+        risk_reason: '关闭充放电 MOS 会切断电池充放电回路',
+        params_summary: 'charge_software_closed=false, discharge_software_closed=true',
+      }],
+      blocking_errors: [],
+      warnings: [],
+    }
+  }
+
+  describe('F-1 日出/日落触发器', () => {
+    it('触发器下拉含「日出」「日落」，且选择后出现偏移分钟字段与实时文案', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      const options = wrapper.find('[data-test="field-trigger-type"]').findAll('option').map(o => o.text())
+      expect(options).toContain('日出')
+      expect(options).toContain('日落')
+      // 「事件驱动」仍是 disabled（既有行为不得被顺手改掉）
+      const disabled = wrapper.find('[data-test="field-trigger-type"]').findAll('option').filter(o => o.attributes('disabled') !== undefined)
+      expect(disabled.length).toBe(1)
+
+      // 选「日落」→ 日出/日落字段组出现
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      expect(wrapper.find('[data-test="field-sun-offset"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="offset-sentence"]').text()).toBe('日落正点')
+
+      // 填 -30 → 回显"日落前 30 分钟"（用户需求原文）
+      await wrapper.find('[data-test="field-sun-offset"]').setValue('-30')
+      await flushPromises()
+      expect(wrapper.find('[data-test="offset-sentence"]').text()).toBe('日落前 30 分钟')
+      // 继承状态说明必须存在（节点级权威 + 规则级覆盖，O-3）
+      expect(wrapper.find('[data-test="sun-location-state"]').text()).toContain('继承节点')
+    })
+
+    it('提交时映射为后端契约 trigger_type=sun_event + trigger_sun_kind（下拉代理值不得泄漏）', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 9 })
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('日落关断')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await wrapper.find('[data-test="field-sun-offset"]').setValue('-30')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as Record<string, unknown>
+      expect(payload.trigger_type).toBe('sun_event')
+      expect(payload.trigger_sun_kind).toBe('sunset')
+      expect(payload.trigger_sun_offset_min).toBe(-30)
+      // 坐标留空 ⇒ 省略（继承节点），不得发空串/null
+      expect(payload).not.toHaveProperty('latitude')
+      expect(payload).not.toHaveProperty('timezone')
+    })
+  })
+
+  describe('F-2 多动作卡片', () => {
+    it('渲染 N 张卡片，可增、可删、可上移，且提交的 seq 随顺序重排', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 11 })
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('多动作')
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+
+      // 初始 1 张 → 添加两张 = 3 张
+      expect(wrapper.findAll('[data-test="action-card"]')).toHaveLength(1)
+      await wrapper.find('[data-test="add-action"]').trigger('click')
+      await wrapper.find('[data-test="add-action"]').trigger('click')
+      expect(wrapper.findAll('[data-test="action-card"]')).toHaveLength(3)
+
+      // 填三个动作（第 1 个用普通动作，避免触发风险清单）
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await wrapper.find('[data-test="action-device-1"]').setValue('10')
+      await wrapper.find('[data-test="action-id-1"]').setValue('act_b')
+      await wrapper.find('[data-test="action-device-2"]').setValue('10')
+      await wrapper.find('[data-test="action-id-2"]').setValue('act_c')
+
+      // 首行「上移」disabled；第 3 张上移后成为第 2 张
+      const ups = wrapper.findAll('[data-test="move-up"]')
+      expect(ups[0].attributes('disabled')).toBeDefined()
+      await ups[2].trigger('click')
+      await flushPromises()
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as { actions: Array<{ seq: number; action_id: string }> }
+      expect(payload.actions.map(a => a.seq)).toEqual([1, 2, 3])
+      expect(payload.actions.map(a => a.action_id)).toEqual(['read_basic_info', 'act_c', 'act_b'])
+    })
+
+    it('删除按钮减少卡片；最后一张删除被拦（后端 actions 不能为空）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="add-action"]').trigger('click')
+      expect(wrapper.findAll('[data-test="action-card"]')).toHaveLength(2)
+      await wrapper.findAll('[data-test="remove-action"]')[1].trigger('click')
+      await flushPromises()
+      expect(wrapper.findAll('[data-test="action-card"]')).toHaveLength(1)
+
+      const { ElMessage } = await import('element-plus')
+      await wrapper.findAll('[data-test="remove-action"]')[0].trigger('click')
+      await flushPromises()
+      expect(wrapper.findAll('[data-test="action-card"]')).toHaveLength(1)
+      expect(ElMessage.warning).toHaveBeenCalledWith('规则至少需要一个动作')
+    })
+  })
+
+  describe('F-3 风险徽标与原因', () => {
+    it('风险动作卡片渲染「图标 + 文字」徽标与风险原因块（非仅靠颜色）', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'set_mos_policy' }],
+      }])
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await flushPromises()
+
+      const badge = wrapper.find('[data-test="risk-badge"]')
+      expect(badge.exists()).toBe(true)
+      // 非仅靠颜色：文字 + 图标都要在
+      expect(badge.text()).toContain('风险')
+      expect(badge.text()).toContain('⚠')
+      expect(wrapper.find('[data-test="risk-reason"]').exists()).toBe(true)
+      // 卡片本身也带风险态（第四重编码）
+      expect(wrapper.find('[data-test="action-card"]').attributes('data-risk')).toBe('1')
+    })
+
+    it('普通动作卡片渲染「普通」徽标、无风险原因块、无红边（F-6）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="normal-badge"]').text()).toContain('普通')
+      expect(wrapper.find('[data-test="risk-badge"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="risk-reason"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="action-card"]').attributes('data-risk')).toBe('0')
+    })
+  })
+
+  describe('F-4 保存前风险清单弹窗（O-2 授权落地）', () => {
+    it('含风险动作时弹清单，列出全部风险动作，未勾满时「保存规则」disabled', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '日落关断 BMS')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
+      expect(wrapper.findAll('[data-test="risk-item"]')).toHaveLength(1)
+      const item = wrapper.find('[data-test="risk-item"]')
+      // 清单必须列全 动作名 + 目标设备 + 动作 ID + 参数 + 风险原因
+      expect(item.text()).toContain('设置充放电 MOS 软件策略')
+      expect(item.text()).toContain('BMS-01')
+      expect(item.text()).toContain('set_mos_policy')
+      expect(item.text()).toContain('discharge_software_closed=true')
+      expect(item.text()).toContain('关闭充放电 MOS')
+
+      const confirmBtn = wrapper.find('[data-test="confirm-save"]')
+      expect(confirmBtn.attributes('disabled')).toBeDefined()
+      expect(wrapper.find('[data-test="ack-progress"]').text()).toContain('已确认 0 / 1')
+
+      // 勾选后才解禁
+      await wrapper.find('[data-test="risk-ack-1"]').setValue(true)
+      await flushPromises()
+      expect(wrapper.find('[data-test="confirm-save"]').attributes('disabled')).toBeUndefined()
+      expect(wrapper.find('[data-test="ack-progress"]').text()).toContain('已确认 1 / 1')
+      // 未点「保存规则」前不得落库
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('勾选后点「保存规则」提交 risk_acknowledged=true（O-2 规则级授权）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 12 })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '日落关断 BMS')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      await wrapper.find('[data-test="risk-ack-1"]').setValue(true)
+      await flushPromises()
+      await wrapper.find('[data-test="confirm-save"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+      expect(mockedAutomationApi.createRule.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ risk_acknowledged: true }),
+      )
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
+    })
+
+    it('绕过弹窗直接再触发保存会被拦（未勾选时不得落库）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '日落关断 BMS')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
+
+      // 弹窗已开时再次点「保存」：必须被拒（护栏在 onSave 入口，不只靠按钮 disabled）
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+
+      // 取消后不得落库
+      await wrapper.find('[data-test="risk-cancel"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('预检不可用时 fail-closed 阻止保存（不得"当作没有风险动作"直接提交）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(null)
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '预检失败')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
+    })
+
+    it('F-6 普通动作保存不弹二次确认，直接落库', async () => {
+      // 默认预检无风险动作
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 13 })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '普通规则')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('F-8 新结果码三处映射齐全', () => {
+    // 三个新枚举：confirmation_required / partial_failure / suppressed_no_solar_event。
+    // 只改一处（例如只加 resultOptions）时必须变红 —— 这是本门禁的靶点。
+    const NEW_RESULTS = ['confirmation_required', 'partial_failure', 'suppressed_no_solar_event'] as const
+
+    it('结果筛选下拉（resultOptions）含三个新枚举且都有中文标签', async () => {
+      const wrapper = await mountPage()
+      const labels = wrapper.find('[data-test="filter-result"]').findAll('option').map(o => o.text())
+      for (const r of NEW_RESULTS) {
+        // 未映射的枚举在 resultText 里会回落到英文原串 —— 断言"不得出现英文原串"
+        expect(labels.join('|')).not.toContain(r)
+      }
+      expect(labels).toContain('需确认（未授权）')
+      expect(labels).toContain('部分失败')
+      expect(labels).toContain('无日出日落事件')
+    })
+
+    it('事件表（resultText + resultTagType）对三个新枚举都有中文与标签色', async () => {
+      mockedAutomationApi.listEvents.mockResolvedValue(eventPage(
+        NEW_RESULTS.map((result, i) => ({ ...eventFixture, id: 200 + i, result })),
+      ))
+      const wrapper = await mountWithSlotTable()
+      const rows = wrapper.findAll('[data-test="events-table"] tbody tr')
+      expect(rows).toHaveLength(3)
+      const texts = rows.map(r => r.text())
+      expect(texts[0]).toContain('需确认（未授权）')
+      expect(texts[1]).toContain('部分失败')
+      expect(texts[2]).toContain('无日出日落事件')
+      // 三处映射齐全 ⇒ 表格里不得出现英文原串
+      expect(texts.join('|')).not.toMatch(/confirmation_required|partial_failure|suppressed_no_solar_event/)
+    })
+  })
+
+  describe('F-9 订阅 automation_confirmation_required（C5 前端闭环）', () => {
+    it('订阅表含新事件名，且收到推送时给出用户可见提示（不只写事件表）', async () => {
+      const { useWebSocketStore } = await import('@/stores/websocket')
+      const pinia = createPinia()
+      const store = useWebSocketStore(pinia)
+      const captured = new Map<string, (m: unknown) => void>()
+      vi.spyOn(store, 'subscribe').mockImplementation(((type: string, handler: (m: never) => void) => {
+        captured.set(type, handler as (m: unknown) => void)
+        return () => { captured.delete(type) }
+      }) as typeof store.subscribe)
+      mount(AutomationRules, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      expect([...captured.keys()]).toContain('automation_confirmation_required')
+      expect([...captured.keys()]).toContain('automation_partial_failure')
+
+      const { ElMessage } = await import('element-plus')
+      // 代码走的是 ElMessage.warning(...)（不是 ElMessage({...})）—— 断言必须落在
+      // 真正被调用的那个 mock 上，否则会拿到空 calls 而"看起来"没有提示。
+      const warnMock = (ElMessage as unknown as { warning: { mock: { calls: unknown[][] } } }).warning
+      captured.get('automation_confirmation_required')!({
+        type: 'automation_confirmation_required',
+        payload: { detail: { rule_name: '日落关断 BMS', action_id: 'set_mos_policy' } },
+      })
+      await flushPromises()
+      // 用户可见提示必须点名规则与动作（C5 的缺陷形态就是"前端毫无提示"）
+      expect(warnMock.mock.calls.length).toBeGreaterThan(0)
+      const last = JSON.stringify(warnMock.mock.calls.at(-1))
+      expect(last).toContain('日落关断 BMS')
+      expect(last).toContain('set_mos_policy')
+      vi.restoreAllMocks()
+    })
+  })
+
+  describe('F-10 窄屏 ≤480px 断点', () => {
+    it('样式含 480px 断点，且动作卡操作区与弹窗 footer 在该断点下换行/撑满', async () => {
+      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      // 按**花括号配对**取媒体块，而不是 \n} 这种格式假设 —— 编译产物的缩进/换行
+      // 不是契约，用格式去匹配会让门禁在无关的格式变化下假红。
+      function mediaBlock(maxWidth: number): string | null {
+        // 编译产物是 `@media (max-width: 480px)`（@media 与括号之间有空格），
+        // 故必须允许 \s*；写死 "@media(" 会让门禁永远找不到该断点（假红）。
+        const start = css.search(new RegExp('@media\\s*\\(max-width:\\s*' + maxWidth + 'px\\)'))
+        if (start < 0) return null
+        const open = css.indexOf('{', start)
+        if (open < 0) return null
+        let depth = 0
+        for (let i = open; i < css.length; i++) {
+          if (css[i] === '{') depth++
+          else if (css[i] === '}') {
+            depth--
+            if (depth === 0) return css.slice(open + 1, i)
+          }
+        }
+        return null
+      }
+
+      const body = mediaBlock(480)
+      expect(body, '缺少 ≤480px 断点：窄屏下多动作卡片与弹窗布局没有兜底').not.toBeNull()
+      // 动作卡操作区换行 + 弹窗 footer 撑满（设计稿 §7 的 480px 档）
+      expect(body!).toContain('.action-card__ops')
+      expect(body!).toContain('.el-dialog__footer')
+      // 弹窗变底部抽屉：满宽
+      expect(body!).toContain('width: 100%')
+      // 触控目标补足（theme.css 的 44px 口径）
+      expect(body!).toContain('min-height: 44px')
+      // 768px 主断点也必须存在（元数据单列）
+      const wide = mediaBlock(768)
+      expect(wide).not.toBeNull()
+      expect(wide!).toContain('.action-meta')
     })
   })
 })

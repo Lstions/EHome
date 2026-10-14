@@ -1112,6 +1112,11 @@ function riskItemReason(actionId: string, deviceId: number, backendReason?: stri
  * 风险动作直接提交"（后者会让风险确认形同虚设）。
  */
 async function onSave() {
+  // 绕过护栏（F-4 反向验证的落点）：风险清单弹窗已打开时，**任何**再次触发的保存
+  // 都必须被拒 —— 否则用户可以在未勾选的情况下重复点「保存」把风险确认绕过去。
+  // 这条判定放在函数入口而不是只靠按钮 disabled：disabled 是 UI 属性，
+  // 键盘/程序化触发/未来的快捷键都可能绕过它。
+  if (riskDialogVisible.value) return
   const err = validate()
   if (err) {
     ElMessage.warning(err)
@@ -1140,12 +1145,15 @@ async function onSave() {
     riskDialogActions.value = risks.map(item => ({
       seq: item.seq,
       action_id: item.action_id,
-      action_name: actionNameOf(item.action_id, item.action_device_id, item.action_device_name),
+      action_name: actionNameOf(item.action_id, item.action_device_id),
       device_name: item.action_device_name || deviceName(item.action_device_id),
       risk_label: item.risk_label || '风险',
       risk_reason: riskItemReason(item.action_id, item.action_device_id, item.risk_reason),
+      // 摘要优先级: 后端给的摘要 → 后端回带的参数 JSON → 本地卡片里的参数 JSON。
+      // 不能写成 `paramsSummary(item.action_params_json) || ...`：paramsSummary(undefined)
+      // 返回 '无参数'（真值），会把本地兜底整段短路掉，风险清单里就看不到用户实际填的参数。
       params_summary: item.params_summary
-        || paramsSummary(item.action_params_json)
+        || (item.action_params_json ? paramsSummary(item.action_params_json) : '')
         || paramsSummary(form.actions.find(a => a.action_id === item.action_id)?.action_params_json),
     }))
     ackedSeqs.value = []
@@ -1166,8 +1174,14 @@ async function focusRiskCancel() {
   if (el && typeof el.focus === 'function') el.focus()
 }
 
-function actionNameOf(actionId: string, deviceId: number, backendName?: string): string {
-  if (backendName) return backendName
+/**
+ * 动作的人类可读名。
+ *
+ * 预检响应里只有 `action_device_name`（**设备**名），没有动作名（方案 §4.1.2 的字段表）。
+ * 故动作名只能从已加载的设备动作目录里取；目录里也没有时回落到 action_id ——
+ * 宁可显示 ID 也不能把设备名当成动作名（那会让用户确认错东西，是安全文案错误）。
+ */
+function actionNameOf(actionId: string, deviceId: number): string {
   const def = catalogDefinition({ uid: 0, action_type: 'device_action', action_device_id: deviceId, action_id: actionId, action_params_json: '', action_level: 'warning' })
   return def?.name || actionId
 }
