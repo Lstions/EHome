@@ -117,6 +117,26 @@ export function requiresConfirmation(a: ActionLike | null | undefined): boolean 
   return a?.requires_confirmation !== false
 }
 
+/**
+ * 动作卡片的**风险呈现**（唯一的判定入口）。
+ *
+ * 三种结果，刻意把"目录里明确说普通"与"目录里没有这个动作"分开：
+ *   · elevated  → 'risk'    ：红边 + ⚠「风险」+ 风险原因块（四重编码）
+ *   · normal    → 'normal'  ：灰「● 普通」，无风险元素
+ *   · 未知      → 'unknown' ：**不渲染任何等级徽标**
+ *
+ * 为什么"未知"不能当成"普通"：目录尚未加载、或该动作不在目录里时，把它显示成
+ * 「普通」就是在替后端断言"这个动作不危险" —— 而它可能正是 set_mos_policy。
+ * 安全信息宁可缺失（保存前的预检会兜住），也不能猜错。
+ */
+export type RiskPresentation = 'risk' | 'normal' | 'unknown'
+
+export function riskPresentation(a: ActionLike | null | undefined): RiskPresentation {
+  if (a?.risk_level === 'elevated') return 'risk'
+  if (a?.risk_level === 'normal') return 'normal'
+  return 'unknown'
+}
+
 /** 动作 ID → 人类可读摘要 (参数 JSON → k=v 串联, 供卡片与风险清单展示)。 */
 export function paramsSummary(actionParamsJson?: string | null): string {
   if (!actionParamsJson || !actionParamsJson.trim()) return '无参数'

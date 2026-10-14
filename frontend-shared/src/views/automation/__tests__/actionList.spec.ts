@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  NORMAL_BADGE, emptyAction, moveAction, paramsSummary, requiresConfirmation, riskBadge, toSequencedActions,
+  NORMAL_BADGE, emptyAction, moveAction, paramsSummary, requiresConfirmation, riskBadge, riskPresentation, toSequencedActions,
   type ActionDraft,
 } from '../actionList'
 
@@ -84,6 +84,15 @@ describe('F-3 风险徽标与原因', () => {
     expect(riskBadge({})).toBeNull()
     expect(riskBadge(undefined)).toBeNull()
     expect(riskBadge({ risk_level: 'high' as never })).toBeNull()
+  })
+
+  it('三态呈现把"目录里明确说普通"与"目录里没有这个动作"分开', () => {
+    expect(riskPresentation({ risk_level: 'elevated' })).toBe('risk')
+    expect(riskPresentation({ risk_level: 'normal' })).toBe('normal')
+    // 未知不得回落到 'normal'：那等于替后端断言"这个动作不危险"
+    expect(riskPresentation({})).toBe('unknown')
+    expect(riskPresentation(undefined)).toBe('unknown')
+    expect(riskPresentation({ risk_level: 'high' as never })).toBe('unknown')
   })
 
   it('普通动作徽标同样带图标与文字（信息不靠颜色区分）', () => {

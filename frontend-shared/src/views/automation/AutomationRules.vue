@@ -326,12 +326,17 @@
                 <span class="action-card__index" aria-hidden="true">{{ index + 1 }}</span>
                 <span class="action-card__name">{{ actionTitle(action) }}</span>
                 <!-- 风险徽标：**图标 + 文字**，不只用颜色（设计 D-6 四重编码）。
-                     红绿色盲用户看不到红色徽标，文字与图标是唯一能读出"风险"的路径。 -->
+                     红绿色盲用户看不到红色徽标，文字与图标是唯一能读出"风险"的路径。
+                     第三种状态（目录未加载 / 动作不在目录里）**不渲染任何等级徽标** ——
+                     把未知显示成「普通」等于替后端断言"它不危险"，见 riskPresentation 注释。 -->
                 <el-tag v-if="riskBadgeOf(action)" type="danger" size="small" class="risk-badge" data-test="risk-badge">
                   <span aria-hidden="true">{{ riskBadgeOf(action)!.icon }}</span> {{ riskBadgeOf(action)!.label }}
                 </el-tag>
-                <el-tag v-else type="info" size="small" class="normal-badge" data-test="normal-badge">
+                <el-tag v-else-if="cardRiskState(action) === 'normal'" type="info" size="small" class="normal-badge" data-test="normal-badge">
                   <span aria-hidden="true">{{ NORMAL_BADGE.icon }}</span> {{ NORMAL_BADGE.label }}
+                </el-tag>
+                <el-tag v-else type="info" size="small" effect="plain" class="unknown-badge" data-test="unknown-badge">
+                  等级未知
                 </el-tag>
                 <span class="action-card__ops">
                   <el-button
@@ -600,7 +605,7 @@ import {
   sunOffsetText, sunLocationState, sunLocationText,
 } from './sunEvent'
 import {
-  NORMAL_BADGE, emptyAction, moveAction, toSequencedActions, paramsSummary, riskBadge, type ActionDraft,
+  NORMAL_BADGE, emptyAction, moveAction, toSequencedActions, paramsSummary, riskBadge, riskPresentation, type ActionDraft,
 } from './actionList'
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
@@ -909,6 +914,11 @@ function deviceName(deviceId: number): string {
  */
 function riskBadgeOf(action: ActionDraft) {
   return riskBadge(catalogDefinition(action))
+}
+
+/** 卡片的风险呈现态：risk / normal / unknown（未知时只显示"等级未知"，不猜）。 */
+function cardRiskState(action: ActionDraft) {
+  return riskPresentation(catalogDefinition(action))
 }
 
 /** 在已加载的设备目录里找该动作的定义（找不到返回 null，徽标不渲染：不猜风险）。 */
@@ -1684,7 +1694,7 @@ onUnmounted(() => {
 .action-card__name { font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
 .action-card__ops { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .risk-badge { font-weight: 600; }
-.normal-badge { flex: 0 0 auto; }
+.normal-badge, .unknown-badge { flex: 0 0 auto; }
 .action-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; margin: 10px 0 0; }
 .action-meta > div { display: flex; gap: 6px; min-width: 0; align-items: center; }
 .action-meta > div.span2 { grid-column: 1 / -1; }

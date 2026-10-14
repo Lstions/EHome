@@ -910,6 +910,18 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="action-card"]').attributes('data-risk')).toBe('1')
     })
 
+    it('动作不在目录里时显示「等级未知」而不是「普通」（不得替后端断言不危险）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('some_unlisted_action')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="unknown-badge"]').text()).toContain('等级未知')
+      expect(wrapper.find('[data-test="normal-badge"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="risk-badge"]').exists()).toBe(false)
+    })
+
     it('普通动作卡片渲染「普通」徽标、无风险原因块、无红边（F-6）', async () => {
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
