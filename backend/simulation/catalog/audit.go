@@ -326,15 +326,17 @@ func auditRun001(e *harness.Env) {
 //
 //	executed / pending_confirm / suppressed_cooldown / suppressed_daily_limit /
 //	condition_changed / failed_gate / failed_dispatch / confirmation_required /
-//	partial_failure / notification / expired
+//	partial_failure / suppressed_no_solar_event / notification / expired
 //
 // confirmation_required 由 B1 新增（方案 §3.2.5 第 1 步）；partial_failure 由 B2
-// 新增（多动作第 k 个失败，方案 §3.2.4 / §6.3）。
+// 新增（多动作第 k 个失败，方案 §3.2.4 / §6.3）；suppressed_no_solar_event 由 B3
+// 新增（极昼/极夜不触发但必须显式审计，选型文档 §6.1 / 方案 §3.1.4 —— 该场景
+// 禁止静默 return，否则用户会以为规则坏了）。
 func auditIsDefinedResult(result string) bool {
 	switch result {
 	case "executed", "pending_confirm", "suppressed_cooldown", "suppressed_daily_limit",
 		"condition_changed", "failed_gate", "failed_dispatch", "confirmation_required",
-		"partial_failure", "notification", "expired":
+		"partial_failure", "suppressed_no_solar_event", "notification", "expired":
 		return true
 	default:
 		return false

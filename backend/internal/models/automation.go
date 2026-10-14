@@ -18,7 +18,19 @@ import (
 const (
 	AutomationTriggerSensorThreshold = "sensor_threshold" // 数据驱动: 滑动窗口连续满足
 	AutomationTriggerTimeWindow      = "time_window"      // 时钟驱动: 每日窗口 enter/exit
+	AutomationTriggerSunEvent        = "sun_event"        // 时钟驱动: 每日日出/日落瞬时点事件
 	AutomationTriggerEvent           = "event"            // 事件驱动 (本期仅占位, 未实现)
+)
+
+// 日出/日落事件种类 (TriggerSunKind 取值, 方案 §5.1.2 / O-4)。
+//
+// 为什么新增 sun_event 而不是扩展 time_window (O-4 裁决): time_window 的
+// HH:MM 字段是 size:5, 承载 "sunrise-30" 这类方言会破坏列宽与 API 契约, 且把
+// "时刻"与"区间"两种语义混进一个解析器。日出日落是**瞬时点事件**, 与区间
+// enter/exit 边沿语义不同 (方案 §6.2), 必须独立成类型。
+const (
+	AutomationSunKindSunrise = "sunrise"
+	AutomationSunKindSunset  = "sunset"
 )
 
 // 动作类型 (ActionType 取值)
@@ -60,6 +72,16 @@ const (
 	AutomationResultPartialFailure = "partial_failure" // 第 k 个动作失败且 k<N (已中止剩余动作)
 	AutomationResultNotification   = "notification"    // 纯通知动作已发出
 	AutomationResultExpired        = "expired"         // pending_confirm 超时未确认 (24h 清扫置位)
+	// AutomationResultSuppressedNoSolarEvent 是"极昼/极夜导致本日无日出/日落事件,
+	// 规则本日不触发"的专属结果码 (用户裁决 O-6; 选型文档 §6.1; 方案 §3.1.4)。
+	//
+	// 为什么必须显式落审计而不是静默 return: 高纬用户看到规则整天没触发, 而事件
+	// 表里什么也没有, 会认为规则坏了 (任务书 C5 描述的正是这种静默失败形态 ——
+	// 新能力不得复制该形态)。落一条审计后前端事件表能显示"极昼/极夜, 本日无
+	// 日出事件", 用户可自行判断。
+	//
+	// 每节点每日本事件只落一次 (与 recordSuppressed 同款同窗节流, 防刷量)。
+	AutomationResultSuppressedNoSolarEvent = "suppressed_no_solar_event"
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -133,6 +155,32 @@ type AutomationRule struct {
 	TriggerWindowEnd    string  `gorm:"size:5" json:"trigger_window_end,omitempty"`   // "HH:MM"
 	TriggerWindowEdge   string  `gorm:"size:8" json:"trigger_window_edge,omitempty"`
 	TriggerEdgeDeviceID uint    `gorm:"index" json:"trigger_edge_device_id,omitempty"` // sensor_threshold 目标设备 (0=任意设备上报该字段即触发, 不推荐)
+
+	// ── Trigger: sun_event (日出/日落, 用户裁决 O-3/O-4) ──
+	//
+	// TriggerSunKind 取值 sunrise|sunset, sun_event 规则必填 (handler V2)。
+	TriggerSunKind string `gorm:"size:8" json:"trigger_sun_kind,omitempty"`
+	// TriggerSunOffsetMin 是相对日出/日落时刻的偏移分钟, **可负** (负=提前),
+	// 范围 [-720, 720] (handler V2 校验)。0 = 恰好在该事件时刻触发。
+	//
+	// 不带 gorm default tag 之外的语义: 0 既是零值也是合法默认值, 故不存在
+	// CooldownSec 那种"显式零值无法表达"的陷阱 (该陷阱的成因是默认值 != 零值)。
+	TriggerSunOffsetMin int `gorm:"not null;default:0" json:"trigger_sun_offset_min"`
+
+	// ── 坐标与时区 (节点级为权威, 规则级可选覆盖; 用户裁决 O-3) ──
+	//
+	// 三列均可空, NULL = **继承节点值**。为什么用指针而不是零值: 经纬度 0 是
+	// 合法坐标 (几内亚湾), 用 0 表达"未配置"会让"赤道上的节点"与"没配坐标的
+	// 节点"不可区分 —— 前者应正常求值, 后者必须 fail-closed 拒绝保存 (O-7)。
+	// 时区同理: 空字符串不是合法 IANA 名, 但指针让"未配置"与"配了空串"在
+	// 类型层面就无法混淆。
+	//
+	// 权威归属: 节点级 (nodes.latitude/longitude/timezone) 是物理安装位置的
+	// 事实源; 规则级仅在"同节点下某条规则需要特例"时覆盖。解析顺序
+	// 规则值 → 节点值 → 缺失即 fail-closed (见 ResolveSunLocation, 唯一实现)。
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Longitude *float64 `json:"longitude,omitempty"`
+	Timezone  *string  `gorm:"size:64" json:"timezone,omitempty"`
 
 	// ── Conditions (全部 AND) ──
 	ConditionsJSON string `gorm:"type:text" json:"conditions_json,omitempty"`

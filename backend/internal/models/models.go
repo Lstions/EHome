@@ -72,6 +72,21 @@ type Node struct {
 	// 元素形状：{"code":"dma_degraded","channel_id":49,"message":"..."}
 	// ⚠ 空数组 = 无告警；不用 NULL 表示"未知"，避免与"没上报过"混淆。
 	ConfigWarnings string `gorm:"type:jsonb;default:'[]'" json:"config_warnings"`
+	// ── 地理坐标与 IANA 时区 (节点级权威, 用户裁决 O-3; 方案 §5.1.3) ──
+	//
+	// 节点 = 一个物理安装位置, 故坐标与时区归节点所有; automation_rules 的同名
+	// 三列是**可选覆盖** (NULL = 继承本表值)。日出日落规则求值前必须先解析出
+	// 这三项, 缺失即 fail-closed 拒绝保存 (O-7), 运行期缺失则不触发 + 审计。
+	//
+	// 全部可空且用指针: 经度 0 是合法坐标 (几内亚湾), 用零值表达"未配置"会让
+	// "赤道上的节点"与"没配坐标的节点"不可区分 —— 前者应正常求值, 后者必须
+	// fail-closed。Go 的 float64 零值无法区分这两者, 指针可以。
+	//
+	// 不参与任何设备配置下发 (不发给 ESP32): 纯后端求值用。
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Longitude *float64 `json:"longitude,omitempty"`
+	Timezone  *string  `gorm:"size:64" json:"timezone,omitempty"` // IANA 名, 如 Asia/Shanghai
+
 	// v2.5: log stream config (sent to ESP32 via ConfigManifest field 10)
 	LogStreamEnabled bool `gorm:"default:false" json:"log_stream_enabled"`
 	LogStreamLevel   int  `gorm:"default:2" json:"log_stream_level"` // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE
