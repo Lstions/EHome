@@ -974,17 +974,41 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
     })
 
-    it('绕过弹窗直接再触发保存会被拦（未勾选时不得落库）', async () => {
+    it('未勾选时「保存规则」不可用，且直接点它也不落库（不靠 UI disabled 兜底）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '日落关断 BMS')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      // ① UI 层：按钮必须 disabled。
+      expect(wrapper.find('[data-test="confirm-save"]').attributes('disabled')).toBeDefined()
+      // ② 函数层：**直接调用处理函数**绕过 DOM 的 disabled 短路。
+      //    为什么必须这样测：VTU 的 trigger('click') 对 disabled 元素直接跳过派发
+      //    （实测：只断言"点 disabled 按钮不落库"时，把函数内的 allRisksAcked 判定
+      //    删掉本用例仍然全绿 —— 门禁变成恒真）。disabled 只是 UI 属性，
+      //    键盘/程序化调用/未来快捷键都可能绕过它，函数内必须再判一次。
+      const vm = wrapper.vm as unknown as { confirmRiskSave: () => Promise<void> }
+      await vm.confirmRiskSave()
+      await flushPromises()
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('绕过弹窗直接再触发保存会被拦（onSave 入口护栏，不依赖按钮 disabled）', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
       const wrapper = await mountPage()
       await openCreateFilled(wrapper, '日落关断 BMS')
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
       expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
+      expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(1)
 
-      // 弹窗已开时再次点「保存」：必须被拒（护栏在 onSave 入口，不只靠按钮 disabled）
+      // 弹窗已开时再次点「保存」：必须在入口被拒。
+      // 断言"没有第二次预检"而不只是"没有落库" —— 后者在护栏缺失时也成立
+      // （第二次 onSave 会再弹一次清单，仍然不会 createRule，断言会假绿）。
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
+      expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(1)
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
 
       // 取消后不得落库
