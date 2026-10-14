@@ -196,6 +196,14 @@ type AutomationRule struct {
 	// —— 旧回填用 executed 行只是近似, 该列把近似变成确定值。
 	LastTriggeredAt *time.Time `gorm:"index" json:"last_triggered_at,omitempty"` // 只读: 由触发路径同事务写入, API 不接受外部赋值
 
+	// Actions 是规则的**动作集合** (方案 §3.2.3 M1: 子表为权威)。
+	//
+	// gorm:"-" 是刻意的: 该字段**不落库**, 只是 API 读路径把 automation_rule_actions
+	// 的子行组装进来的载体 (方案 §3.4 D4: 响应新增 actions 数组是附加字段)。
+	// 不加 gorm:"-" 会让 AutoMigrate 试图在 automation_rules 上建一个 JSON 列,
+	// 与"子表为唯一权威"的裁决直接冲突。
+	Actions []AutomationRuleAction `gorm:"-" json:"actions,omitempty"`
+
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `gorm:"index" json:"-"` // 软删, 保留历史归因

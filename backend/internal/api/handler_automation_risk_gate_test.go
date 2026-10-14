@@ -50,7 +50,7 @@ func (c riskCatalog) Catalog(_ context.Context, _ uint) ([]commandexec.CatalogIt
 func newRiskRouter(t *testing.T, catalog automationCatalogQuerier) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	r, db := setupTestRouter(t)
-	if err := db.AutoMigrate(&models.AutomationRule{}, &models.AutomationEvent{}); err != nil {
+	if err := db.AutoMigrate(&models.AutomationRule{}, &models.AutomationEvent{}, &models.AutomationRuleAction{}); err != nil {
 		t.Fatalf("auto migrate automation: %v", err)
 	}
 	registerAutomationRoutes(r.Group("/api/v1"), db, nil, nil, nil, catalog)

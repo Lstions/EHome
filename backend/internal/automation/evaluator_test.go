@@ -18,7 +18,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.AutomationRule{}, &models.AutomationEvent{},
+	if err := db.AutoMigrate(&models.AutomationRule{}, &models.AutomationEvent{}, &models.AutomationRuleAction{},
 		&models.Notification{}, &models.EdgeDevice{}, &models.LogicalDevice{},
 		&models.CommandExecution{}, &models.User{}); err != nil {
 		t.Fatalf("migrate: %v", err)

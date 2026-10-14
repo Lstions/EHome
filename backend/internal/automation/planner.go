@@ -151,23 +151,54 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 		return
 	}
 
-	// ── 动作分发 ──
-	switch rule.ActionType {
-	case models.AutomationActionNotification:
-		p.notifyAction(rule, at, ev.Value)
-		p.record(rule, at, ev.Value, models.AutomationResultNotification, "", "")
-	case models.AutomationActionDeviceAction:
-		// F4: 执行前复核条件 — 触发到执行间条件可能已失效 (DurationSec 长规则安全相关)。
-		// 任一条件不满足则落 condition_changed 事件并返回, 不执行动作。
+	// ── 动作分发 (多动作: 按 seq 升序串行执行, 方案 §3.2.4 / §6.3) ──
+	//
+	// 动作集合以 automation_rule_actions 子表为权威 (M1); 子表为空时回落到
+	// 单动作镜像列 —— 回填迁移尚未跑到的历史库也能正确执行, 不依赖迁移已执行。
+	actions := p.ruleActions(rule)
+	// F4: 执行前复核条件 — 触发到执行间条件可能已失效 (DurationSec 长规则安全相关)。
+	// 任一条件不满足则落 condition_changed 事件并返回, 不执行任何动作。
+	// 只在动作集合含 device_action 时复核: 纯通知规则不消耗设备状态, 与改造前一致。
+	if hasDeviceAction(actions) {
 		if reason, ok := p.checkConditionsStillSatisfied(rule); !ok {
 			p.record(rule, at, ev.Value, models.AutomationResultConditionChanged, "", reason)
 			return
 		}
-		p.executeDeviceAction(rule, at, ev.Value)
-	default:
-		p.record(rule, at, ev.Value, models.AutomationResultFailedDispatch, "",
-			"unknown action_type: "+rule.ActionType)
 	}
+	p.executeActions(rule, at, ev.Value, actions)
+}
+
+// hasDeviceAction 报告动作集合里是否存在 device_action。
+func hasDeviceAction(actions []models.AutomationRuleAction) bool {
+	for _, a := range actions {
+		if a.ActionType == models.AutomationActionDeviceAction {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleActions 加载规则的动作集合 (子表为权威, 方案 §3.2.3 M1)。
+//
+// 读路径回落 (兼容期, 方案 §3.4 D2): 子表**为空**时用单动作镜像列合成 seq=1
+// 动作。这保证两件事: ① 回填迁移尚未跑到的历史库不会被当作"无动作规则";
+// ② 单动作老规则在迁移前后的行为逐字节等价。
+//
+// 注意"为空"与"查询失败"都回落: 查询失败时回落是 fail-safe 方向 —— 用镜像列
+// 执行"用户最后一次保存的动作", 比静默不执行更符合用户预期 (且镜像列是双写期
+// 的真实投影, 不是猜测值)。
+func (p *Planner) ruleActions(rule models.AutomationRule) []models.AutomationRuleAction {
+	var actions []models.AutomationRuleAction
+	err := p.db.Where("rule_id = ?", rule.ID).Order("seq ASC").Find(&actions).Error
+	if err != nil {
+		logger.Warn("automation: load rule actions failed, falling back to mirror columns",
+			"rule_id", rule.ID, "error", err)
+		return []models.AutomationRuleAction{models.AutomationActionFromRule(rule)}
+	}
+	if len(actions) == 0 {
+		return []models.AutomationRuleAction{models.AutomationActionFromRule(rule)}
+	}
+	return actions
 }
 
 // ── 系统 actor 惰性解析 (P0: 全新安装后自动 device_action 永久失败) ──
@@ -198,55 +229,157 @@ func (p *Planner) resolveSystemActorID() (uint, error) {
 	return admin.ID, nil
 }
 
-// executeDeviceAction 走 commandexec.Service.Create (裁决 1)。
-// 幂等键 = automation:<rule_id>:<yyyymmdd>:<seq> (裁决 3) — seq 为当日该规则
-// 已执行次数+1, 保证同日多次触发幂等键不同, 跨日自然重置。
-func (p *Planner) executeDeviceAction(rule models.AutomationRule, at time.Time, value float64) {
-	params, err := rule.ParseActionParams()
-	if err != nil {
+// executeActions 串行执行规则的动作集合 (方案 §3.2.4 / §6.3 多动作状态机)。
+//
+// 语义 (O-1 裁决 (a), 实施计划 §0 用户裁决):
+//   - 按 seq **升序串行**执行, 任一动作完成后才开始下一个 (不并行);
+//   - 第 k 个动作失败 ⇒ **中止剩余动作**, 已执行的不回滚 (物理世界无法撤销);
+//   - 整体结果: 全部成功 → executed; 第 k 个失败且 k<N → partial_failure
+//     (记 action_seq=k); 第 1 个失败 → 按原因落 failed_dispatch / failed_gate /
+//     confirmation_required (action_seq=1);
+//   - 冷却锚点只在**全部动作成功**后写入, 且取触发时刻 at (不取动作完成时刻)
+//     —— 见 recordExecuted 的既有裁决, A-16 钉死该语义;
+//   - 日熔断按 rule 计数 (HandleTrigger 入口已判, 本函数不参与), A-15 钉死。
+//
+// 幂等键 (方案 §3.2.4 / §3.4 D10):
+//
+//	automation:<rule_id>:<yyyymmdd>:<trigger_seq>:<action_seq>
+//
+// 为什么必须加 action_seq 段: 同一规则的两个动作若指向**同一设备的同一
+// action_id** (例如同一 pin 的两次 set), commandexec 的幂等 scope
+// (user:<actor>:edge:<edge>:action:<action_id>:v:<version>) 完全相同。不加
+// action_seq 时第二个动作会命中第一行的幂等键: 参数相同 → replay 静默吞掉
+// (少执行一个动作), 参数不同 → ErrIdempotencyCollision (规则误报失败)。
+// 两种情况都不可接受, A-5 用反例钉死。
+func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value float64,
+	actions []models.AutomationRuleAction) {
+	if len(actions) == 0 {
 		p.record(rule, at, value, models.AutomationResultFailedDispatch, "",
-			"invalid action_params: "+err.Error())
+			"rule has no actions")
 		return
 	}
 
-	// 幂等键: 当日序号
+	// 触发序号: 当日该规则已 executed 的行数 + 1 (既有口径, 与改造前一致)。
 	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	var seq int64
+	var triggerSeq int64
 	_ = p.db.Model(&models.AutomationEvent{}).
 		Where("rule_id = ? AND triggered_at >= ? AND result = ?",
 			rule.ID, dayStart, models.AutomationResultExecuted).
-		Count(&seq).Error
-	idemKey := fmt.Sprintf("automation:%d:%s:%d", rule.ID, at.Format("20060102"), seq+1)
+		Count(&triggerSeq).Error
+	triggerSeq++
 
 	// 系统 actor 惰性解析: 全新安装下该用户在进程启动后才创建, 这里才第一次拿得到。
 	// 解析失败 = 自动路径被禁用 (未初始化 / 主体被停用): 照常留审计, 但 Detail 写
 	// 真实原因 (不是笼统的 "invalid command request"), 并补一条面向用户的通知。
-	actorID, err := p.resolveSystemActorID()
-	if err != nil {
-		eventID := p.recordRet(rule, at, value, models.AutomationResultFailedDispatch, "",
-			"system actor unavailable: "+err.Error())
-		p.notifySystemActorUnavailableOnce(at, eventID, err)
-		return
+	var actorID uint
+	if hasDeviceAction(actions) {
+		var err error
+		actorID, err = p.resolveSystemActorID()
+		if err != nil {
+			eventID := p.recordRet(rule, at, value, models.AutomationResultFailedDispatch, "",
+				"system actor unavailable: "+err.Error())
+			p.notifySystemActorUnavailableOnce(at, eventID, err)
+			return
+		}
 	}
 
-	exec, _, err := p.cmdSvc.Create(context.Background(), commandexec.CreateInput{
-		EdgeDeviceID:   rule.ActionDeviceID,
-		ActorUserID:    actorID,
-		ActorKind:      commandexec.ActorKindSystem,
-		ActionID:       rule.ActionID,
-		Params:         params,
-		IdempotencyKey: idemKey,
-		Reason:         fmt.Sprintf("automation:%d:%s", rule.ID, rule.Name),
-		// O-2 规则级授权 (实施计划 §0.1): 只有该规则真的持有用户显式授权
-		// (risk_acknowledged_at 非空) 才允许风险动作跳过确认门。NULL = 未授权,
-		// 风险动作仍会被确认门拦住并落 confirmation_required (绝不静默执行)。
-		RiskAcknowledged: rule.RiskAcknowledgedAt != nil,
-	})
-	if err != nil {
-		p.record(rule, at, value, classifyDeviceActionError(err), "", err.Error())
+	executed := 0
+	lastCommandID := ""
+	for i := range actions {
+		act := actions[i]
+		if act.ActionType == models.AutomationActionNotification {
+			// 通知动作无设备侧副作用, 失败无"半完成"风险; 但 notifyAction 本身
+			// fail-open (写失败只告警), 因此这里不把通知计入可失败动作 —— 与
+			// 改造前"通知动作恒落 notification 结果"的语义一致。
+			p.notifyActionFor(rule, act, at, value)
+			continue
+		}
+
+		params, err := parseActionParams(act)
+		if err != nil {
+			p.recordActionFailure(rule, at, value, act, executed, len(actions), false,
+				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error())
+			return
+		}
+		idemKey := fmt.Sprintf("automation:%d:%s:%d:%d",
+			rule.ID, at.Format("20060102"), triggerSeq, act.Seq)
+		exec, _, err := p.cmdSvc.Create(context.Background(), commandexec.CreateInput{
+			EdgeDeviceID:   act.ActionDeviceID,
+			ActorUserID:    actorID,
+			ActorKind:      commandexec.ActorKindSystem,
+			ActionID:       act.ActionID,
+			Params:         params,
+			IdempotencyKey: idemKey,
+			Reason:         fmt.Sprintf("automation:%d:%s", rule.ID, rule.Name),
+			// O-2 规则级授权 (实施计划 §0.1): 只有该规则真的持有用户显式授权
+			// (risk_acknowledged_at 非空) 才允许风险动作跳过确认门。NULL = 未授权,
+			// 风险动作仍会被确认门拦住并落 confirmation_required (绝不静默执行)。
+			RiskAcknowledged: rule.RiskAcknowledgedAt != nil,
+		})
+		if err != nil {
+			p.recordActionFailure(rule, at, value, act, executed, len(actions), true,
+				classifyDeviceActionError(err), err.Error())
+			return
+		}
+		executed++
+		lastCommandID = exec.CommandID
+	}
+
+	// 全部动作成功 → executed (+ 冷却锚点, 取触发时刻 at)。
+	p.recordExecuted(rule, at, value, lastCommandID)
+}
+
+// recordActionFailure 记录第 k 个动作失败时的事件行 (方案 §6.3 状态机)。
+//
+// 结果码选择 (与 §6.3 表格逐条对应):
+//   - k == 1 (第一个动作就失败, executed==0): 整体完全失败, 按原因落
+//     failed_dispatch / failed_gate / confirmation_required;
+//   - k > 1 (前面已有动作成功): **部分失败** —— 设备已被改了一半, 是危险状态,
+//     必须与"完全失败"区分, 落 partial_failure 并记 action_seq=k。
+//
+// action_seq 写入规则: 只在"存在动作维度"时写 (本函数恒写), 规则级事件
+// (熔断/冷却/条件失效/纯通知) 保持 NULL。
+func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, value float64,
+	act models.AutomationRuleAction, executed, total int, hasActionDim bool,
+	result, detail string) {
+	if executed > 0 {
+		result = models.AutomationResultPartialFailure
+		detail = fmt.Sprintf("第 %d/%d 个动作失败, 已中止剩余动作 (已成功 %d 个): %s",
+			act.Seq, total, executed, detail)
+	}
+	ev := models.AutomationEvent{
+		RuleID:      rule.ID,
+		TriggeredAt: at,
+		Result:      result,
+		Detail:      detail,
+		CreatedAt:   at,
+	}
+	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
+		ev.TriggerValue = &value
+	}
+	if hasActionDim {
+		seq := act.Seq
+		ev.ActionSeq = &seq
+	}
+	if err := p.db.Create(&ev).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+		logger.Warn("automation: failed to record action failure event",
+			"rule_id", rule.ID, "action_seq", act.Seq, "error", err)
 		return
 	}
-	p.recordExecuted(rule, at, value, exec.CommandID)
+	p.broadcastAutomationEvent(rule, ev, value, "")
+}
+
+// parseActionParams 解析动作行的参数 JSON (fail-closed)。
+func parseActionParams(act models.AutomationRuleAction) (json.RawMessage, error) {
+	if act.ActionParamsJSON == "" {
+		return json.RawMessage("{}"), nil
+	}
+	raw := json.RawMessage(act.ActionParamsJSON)
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("invalid action_params json")
+	}
+	return raw, nil
 }
 
 // recordExecuted 落 result='executed' 事件, 并在【同一事务】内更新规则行的冷却锚点
@@ -437,17 +570,31 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 		logger.Warn("automation: failed to record event", "rule_id", rule.ID, "error", err)
 		return 0
 	}
-	if p.broadcast != nil {
-		p.broadcast("automation_event", gin.H{
-			"rule_id":    rule.ID,
-			"rule_name":  rule.Name,
-			"event_id":   ev.ID,
-			"result":     result,
-			"value":      value,
-			"command_id": commandID,
-		})
-	}
+	p.broadcastAutomationEvent(rule, ev, value, commandID)
 	return ev.ID
+}
+
+// broadcastAutomationEvent 广播 automation_event (既有 WS 契约, 方案 §4.3)。
+//
+// action_seq 只在非空时进入载荷: 规则级事件不带该键, 保持与改造前逐字节兼容的
+// 载荷形状; 多动作失败事件额外带 action_seq 供前端精确展示"第几个动作失败"。
+func (p *Planner) broadcastAutomationEvent(rule models.AutomationRule, ev models.AutomationEvent,
+	value float64, commandID string) {
+	if p.broadcast == nil {
+		return
+	}
+	payload := gin.H{
+		"rule_id":    rule.ID,
+		"rule_name":  rule.Name,
+		"event_id":   ev.ID,
+		"result":     ev.Result,
+		"value":      value,
+		"command_id": commandID,
+	}
+	if ev.ActionSeq != nil {
+		payload["action_seq"] = *ev.ActionSeq
+	}
+	p.broadcast("automation_event", payload)
 }
 
 // notificationBroadcastPayload 构造自动化通知的 WS 广播载荷 (负债 D-3 契约):
@@ -594,7 +741,16 @@ func (p *Planner) notifyConfirmation(rule models.AutomationRule, at time.Time, v
 
 // notifyAction action=notification 的纯通知动作。
 func (p *Planner) notifyAction(rule models.AutomationRule, at time.Time, value float64) {
-	level := rule.ActionLevel
+	p.notifyActionFor(rule, models.AutomationActionFromRule(rule), at, value)
+}
+
+// notifyActionFor 多动作路径下的纯通知动作 (动作行携带自己的 action_level)。
+//
+// 与 notifyAction 的差异只有动作来源: 多动作下 level 取自**该动作行**,
+// 而不是规则的镜像列。两者共用同一段落库逻辑, 避免两份通知实现漂移。
+func (p *Planner) notifyActionFor(rule models.AutomationRule, act models.AutomationRuleAction,
+	at time.Time, value float64) {
+	level := act.ActionLevel
 	if level == "" {
 		level = models.AlertLevelInfo
 	}
@@ -759,64 +915,84 @@ func (p *Planner) cooldownBase(ctx context.Context, rule models.AutomationRule) 
 	return lastEv.TriggeredAt, true
 }
 
-// executeManualDeviceAction 手动触发的 device_action 执行。
+// executeManualDeviceAction 手动触发的 device_action 执行 (多动作: 串行, 同 §6.3)。
 // 跳过 F4 条件复核 (用户已确认), 但走全 commandexec.Service.Create 的
 // availability gate + 幂等 + 审计链路。
+//
+// 幂等键: automation:manual:<rule_id>:<yyyymmdd>:<trigger_seq>:<action_seq> ——
+// 与自动路径同构 (方案 §3.2.4), 手动命名空间独立, 同样必须带 action_seq 段,
+// 否则同一规则两个指向同设备同 action_id 的动作会互相吞掉 (A-5 的同款反例)。
 func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.AutomationRule,
 	at time.Time, actorID uint, sourceIP string) (models.AutomationEvent, error) {
-	params, err := rule.ParseActionParams()
-	if err != nil {
+	actions := p.ruleActions(rule)
+	if len(actions) == 0 {
 		ev := models.AutomationEvent{
 			RuleID:        rule.ID,
 			TriggeredAt:   at,
 			TriggerSource: models.AutomationTriggerSourceManual,
 			Result:        models.AutomationResultFailedDispatch,
-			Detail:        "invalid action_params: " + err.Error(),
+			Detail:        "rule has no actions",
 			CreatedAt:     at,
 		}
 		_ = p.db.WithContext(ctx).Create(&ev).Error
 		return ev, nil
 	}
 
-	// 幂等键: 手动触发独立命名空间, 当日序号
+	// 幂等键: 手动触发独立命名空间, 当日触发序号
 	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	var seq int64
+	var triggerSeq int64
 	_ = p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
 		Where("rule_id = ? AND triggered_at >= ? AND result = ? AND trigger_source = ?",
 			rule.ID, dayStart, models.AutomationResultExecuted, models.AutomationTriggerSourceManual).
-		Count(&seq).Error
-	idempotencyKey := fmt.Sprintf("automation:manual:%d:%s:%d", rule.ID, at.Format("20060102"), seq+1)
+		Count(&triggerSeq).Error
+	triggerSeq++
 
-	exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
-		EdgeDeviceID:   rule.ActionDeviceID,
-		ActorUserID:    actorID,
-		ActionID:       rule.ActionID,
-		Params:         params,
-		IdempotencyKey: idempotencyKey,
-		SourceIP:       sourceIP,
-		Reason:         fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID),
-	})
-	if err != nil {
-		result := classifyDeviceActionError(err)
-		ev := models.AutomationEvent{
+	newManualEvent := func(result, detail, commandID string, actionSeq *int) models.AutomationEvent {
+		return models.AutomationEvent{
 			RuleID:        rule.ID,
 			TriggeredAt:   at,
 			TriggerSource: models.AutomationTriggerSourceManual,
 			Result:        result,
-			Detail:        err.Error(),
+			CommandID:     commandID,
+			Detail:        detail,
+			ActionSeq:     actionSeq,
 			CreatedAt:     at,
 		}
-		_ = p.db.WithContext(ctx).Create(&ev).Error
-		return ev, nil
 	}
-	ev := models.AutomationEvent{
-		RuleID:        rule.ID,
-		TriggeredAt:   at,
-		TriggerSource: models.AutomationTriggerSourceManual,
-		Result:        models.AutomationResultExecuted,
-		CommandID:     exec.CommandID,
-		CreatedAt:     at,
+
+	executed := 0
+	lastCommandID := ""
+	for i := range actions {
+		act := actions[i]
+		if act.ActionType == models.AutomationActionNotification {
+			p.notifyActionFor(rule, act, at, 0)
+			continue
+		}
+		params, err := parseActionParams(act)
+		if err != nil {
+			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
+				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error())
+		}
+		idempotencyKey := fmt.Sprintf("automation:manual:%d:%s:%d:%d",
+			rule.ID, at.Format("20060102"), triggerSeq, act.Seq)
+		exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
+			EdgeDeviceID:   act.ActionDeviceID,
+			ActorUserID:    actorID,
+			ActionID:       act.ActionID,
+			Params:         params,
+			IdempotencyKey: idempotencyKey,
+			SourceIP:       sourceIP,
+			Reason:         fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID),
+		})
+		if err != nil {
+			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
+				classifyDeviceActionError(err), err.Error())
+		}
+		executed++
+		lastCommandID = exec.CommandID
 	}
+
+	ev := newManualEvent(models.AutomationResultExecuted, "", lastCommandID, nil)
 	// 手动触发同样要更新冷却锚点 (清理前置条件 A): 手动执行成功也是"该规则触发过"
 	// 这一事实, 且 planner.TriggerRule 的手动冷却判定正是读这个锚点。
 	if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -836,10 +1012,38 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 			"rule_name":      rule.Name,
 			"event_id":       ev.ID,
 			"result":         ev.Result,
-			"command_id":     exec.CommandID,
+			"command_id":     lastCommandID,
 			"trigger_source": models.AutomationTriggerSourceManual,
 		})
 	}
+	return ev, nil
+}
+
+// recordManualActionFailure 手动路径的动作失败事件 (部分失败语义同自动路径)。
+func (p *Planner) recordManualActionFailure(ctx context.Context, rule models.AutomationRule,
+	at time.Time, act models.AutomationRuleAction, executed, total int,
+	result, detail string) (models.AutomationEvent, error) {
+	seq := act.Seq
+	if executed > 0 {
+		result = models.AutomationResultPartialFailure
+		detail = fmt.Sprintf("第 %d/%d 个动作失败, 已中止剩余动作 (已成功 %d 个): %s",
+			act.Seq, total, executed, detail)
+	}
+	ev := models.AutomationEvent{
+		RuleID:        rule.ID,
+		TriggeredAt:   at,
+		TriggerSource: models.AutomationTriggerSourceManual,
+		Result:        result,
+		Detail:        detail,
+		ActionSeq:     &seq,
+		CreatedAt:     at,
+	}
+	if err := p.db.WithContext(ctx).Create(&ev).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+		logger.Warn("automation: failed to record manual action failure",
+			"rule_id", rule.ID, "action_seq", act.Seq, "error", err)
+	}
+	p.broadcastAutomationEvent(rule, ev, 0, "")
 	return ev, nil
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/database"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 
@@ -77,9 +78,13 @@ type createAutomationRuleRequest struct {
 	ActionID            string   `json:"action_id"`
 	ActionParamsJSON    string   `json:"action_params_json"`
 	ActionLevel         string   `json:"action_level"`
-	CooldownSec         *int     `json:"cooldown_sec"`
-	MaxDailyExec        int      `json:"max_daily_exec"`
-	RequireConfirmed    *bool    `json:"require_confirmed"`
+	// Actions 是**多动作**新形态 (方案 §4.1.1 / §3.4 D3)。与旧单动作字段二选一:
+	// 两者都给时以 Actions 为准 (数组是显式的完整集合, 标量字段是兼容形态)。
+	// 两者都缺 → 动作集合为空 → 400 (fail-closed)。
+	Actions          []automationActionInput `json:"actions"`
+	CooldownSec      *int                    `json:"cooldown_sec"`
+	MaxDailyExec     int                     `json:"max_daily_exec"`
+	RequireConfirmed *bool                   `json:"require_confirmed"`
 	// RiskAcknowledged 是用户在保存时对**风险动作**的显式确认 (O-2 规则级授权,
 	// 实施计划 §0.1)。true = 允许该规则的风险动作在自动路径上跳过人工确认。
 	//
@@ -107,9 +112,12 @@ type updateAutomationRuleRequest struct {
 	ActionID            *string  `json:"action_id"`
 	ActionParamsJSON    *string  `json:"action_params_json"`
 	ActionLevel         *string  `json:"action_level"`
-	CooldownSec         *int     `json:"cooldown_sec"`
-	MaxDailyExec        *int     `json:"max_daily_exec"`
-	RequireConfirmed    *bool    `json:"require_confirmed"`
+	// Actions 非 nil 时**整体替换**动作集合 (方案 §3.4 D3); nil 时按标量字段
+	// 合并到第一个动作 (旧单动作语义)。两者都涉及动作时以 Actions 为准。
+	Actions          []automationActionInput `json:"actions"`
+	CooldownSec      *int                    `json:"cooldown_sec"`
+	MaxDailyExec     *int                    `json:"max_daily_exec"`
+	RequireConfirmed *bool                   `json:"require_confirmed"`
 	// RiskAcknowledged 同创建接口: 显式确认/撤回对风险动作的规则级授权。
 	// 动作集合发生变化时, 既有授权会被清空, 必须在本请求里重新确认才能通过 V7。
 	RiskAcknowledged *bool `json:"risk_acknowledged"`
@@ -158,6 +166,11 @@ func listAutomationRules(db *gorm.DB) gin.HandlerFunc {
 			Error(c, 500, "查询自动化策略失败")
 			return
 		}
+		// 动作集合来自子表 (方案 §3.2.3 M1 / §3.4 D4): 一次查询批量填充, 避免 N+1。
+		if err := database.AttachRuleActions(db, items); err != nil {
+			Error(c, 500, "查询策略动作失败")
+			return
+		}
 		Success(c, items)
 	}
 }
@@ -174,7 +187,12 @@ func getAutomationRule(db *gorm.DB) gin.HandlerFunc {
 			Error(c, 500, "查询策略失败")
 			return
 		}
-		Success(c, rule)
+		attached := []models.AutomationRule{rule}
+		if err := database.AttachRuleActions(db, attached); err != nil {
+			Error(c, 500, "查询策略动作失败")
+			return
+		}
+		Success(c, attached[0])
 	}
 }
 
@@ -190,32 +208,45 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		if req.RequireConfirmed != nil {
 			createRequireConfirmed = *req.RequireConfirmed
 		}
-		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, req.ActionType,
+		// ── 动作集合解析 (多动作新形态 + 旧单动作兼容, 方案 §3.4 D3) ──
+		scalarProvided := req.ActionType != "" || req.ActionID != "" || req.ActionParamsJSON != "" ||
+			req.ActionLevel != "" || req.ActionDeviceID != nil
+		actions := resolveRuleActions(req.Actions, nil, req.ActionType, derefUint(req.ActionDeviceID),
+			req.ActionID, req.ActionParamsJSON, req.ActionLevel, scalarProvided)
+		if msg := validateActionSequence(actions); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
+		for _, a := range actions {
+			if msg := validateActionFields(a); msg != "" {
+				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+				return
+			}
+		}
+		first := actions[0]
+		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, first.ActionType,
 			req.TriggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
 			req.TriggerWindowStart, req.TriggerWindowEnd, req.TriggerWindowEdge,
-			req.ActionDeviceID, req.ActionID, req.ActionLevel,
+			&first.ActionDeviceID, first.ActionID, first.ActionLevel,
 			createRequireConfirmed, false); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
 		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + device_action 的
-		// action_id Catalog 存在性 + action_params_json CanonicalizeParams。
+		// action_id Catalog 存在性 + action_params_json CanonicalizeParams (逐动作)。
 		if msg := validateAutomationRuleConstraints(req.CooldownSec, req.MaxDailyExec); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
-		if req.ActionType == models.AutomationActionDeviceAction && req.ActionDeviceID != nil {
-			if msg := validateDeviceActionCatalog(c.Request.Context(), catalog,
-				*req.ActionDeviceID, req.ActionID, req.ActionParamsJSON); msg != "" {
-				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
-				return
-			}
+		if msg := validateActionsCatalog(c.Request.Context(), catalog, actions); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
 		}
-		// V7: 风险动作 + require_confirmed=false 且未显式授权 → 拒绝保存
+		// V7: **任一**风险动作 + require_confirmed=false 且未显式授权 → 拒绝保存
 		// (方案 §4.1.1 V7 / §3.2.5 第 4 步)。杜绝"配了一条永远不会执行的规则"。
 		riskAcknowledged := req.RiskAcknowledged != nil && *req.RiskAcknowledged
-		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
-			req.ActionType, req.ActionDeviceID, req.ActionID, createRequireConfirmed, riskAcknowledged); msg != "" {
+		if msg, code := validateRiskActionsAuthorization(c.Request.Context(), catalog,
+			actions, createRequireConfirmed, riskAcknowledged); msg != "" {
 			ErrorWithCode(c, 400, code, msg)
 			return
 		}
@@ -229,20 +260,19 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			TriggerWindowEnd:   req.TriggerWindowEnd,
 			TriggerWindowEdge:  req.TriggerWindowEdge,
 			ConditionsJSON:     req.ConditionsJSON,
-			ActionType:         req.ActionType,
-			ActionID:           req.ActionID,
-			ActionParamsJSON:   req.ActionParamsJSON,
-			ActionLevel:        req.ActionLevel,
-			MaxDailyExec:       req.MaxDailyExec,
+			// 镜像列 = seq 最小的动作 (兼容期只读投影, 方案 §3.4 D2)。
+			ActionType:       first.ActionType,
+			ActionDeviceID:   first.ActionDeviceID,
+			ActionID:         first.ActionID,
+			ActionParamsJSON: first.ActionParamsJSON,
+			ActionLevel:      first.ActionLevel,
+			MaxDailyExec:     req.MaxDailyExec,
 		}
 		if req.TriggerEdgeDeviceID != nil {
 			rule.TriggerEdgeDeviceID = *req.TriggerEdgeDeviceID
 		}
 		if req.TriggerThreshold != nil {
 			rule.TriggerThreshold = *req.TriggerThreshold
-		}
-		if req.ActionDeviceID != nil {
-			rule.ActionDeviceID = *req.ActionDeviceID
 		}
 		if req.Enabled != nil {
 			rule.Enabled = *req.Enabled
@@ -261,10 +291,25 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			now := time.Now().UTC()
 			rule.RiskAcknowledgedAt = &now
 		}
-		if err := db.Create(&rule).Error; err != nil {
+		// 规则行与动作子表必须**同事务**写入: 分两次写会留下"规则已存在、动作
+		// 还没有"的窗口, 该窗口内的触发会按空动作集合处理 (规则静默不执行)。
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&rule).Error; err != nil {
+				return err
+			}
+			for i := range actions {
+				actions[i].ID = 0
+				actions[i].RuleID = rule.ID
+				if err := tx.Create(&actions[i]).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
 			Error(c, 500, "创建策略失败: "+err.Error())
 			return
 		}
+		rule.Actions = actions
 		if evaluator != nil {
 			evaluator.Invalidate()
 		}
@@ -289,10 +334,40 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Error(c, 400, "参数错误: "+err.Error())
 			return
 		}
-		// 合并候选值后校验 (更新或现值)
+		// ── 动作集合合并 (多动作新形态 + 旧单动作兼容, 方案 §3.4 D3) ──
+		//
+		// 必须先读**库中现有动作集合**再合并: 标量字段的合并目标是"当前第一个
+		// 动作", 而不是凭空新建一个 —— 否则只改 action_id 的老前端请求会丢掉
+		// 其余动作 (多动作规则被静默降级成单动作)。
+		current := loadActionsOrMirror(db, rule)
+		scalarProvided := req.ActionType != nil || req.ActionID != nil || req.ActionParamsJSON != nil ||
+			req.ActionLevel != nil || req.ActionDeviceID != nil
+		// 标量候选值: 未提供的字段取当前第一个动作的值。
+		first := current[0]
+		scalarType := pickStr(req.ActionType, first.ActionType)
+		scalarDeviceID := first.ActionDeviceID
+		if req.ActionDeviceID != nil {
+			scalarDeviceID = *req.ActionDeviceID
+		}
+		scalarActionID := pickStr(req.ActionID, first.ActionID)
+		scalarParams := pickStr(req.ActionParamsJSON, first.ActionParamsJSON)
+		scalarLevel := pickStr(req.ActionLevel, first.ActionLevel)
+		actions := resolveRuleActions(req.Actions, current, scalarType, scalarDeviceID,
+			scalarActionID, scalarParams, scalarLevel, scalarProvided)
+		if msg := validateActionSequence(actions); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
+		for _, a := range actions {
+			if msg := validateActionFields(a); msg != "" {
+				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+				return
+			}
+		}
+		// 合并候选值后校验 (更新或现值)。trigger 校验用请求里的候选触发字段;
+		// 动作校验用**合并后的第一个动作**。
 		name := pickStr(req.Name, rule.Name)
 		tt := pickStr(req.TriggerType, rule.TriggerType)
-		at := pickStr(req.ActionType, rule.ActionType)
 		teid := rule.TriggerEdgeDeviceID
 		if req.TriggerEdgeDeviceID != nil {
 			teid = *req.TriggerEdgeDeviceID
@@ -306,23 +381,16 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		ws := pickStr(req.TriggerWindowStart, rule.TriggerWindowStart)
 		we := pickStr(req.TriggerWindowEnd, rule.TriggerWindowEnd)
 		we2 := pickStr(req.TriggerWindowEdge, rule.TriggerWindowEdge)
-		adevid := rule.ActionDeviceID
-		if req.ActionDeviceID != nil {
-			adevid = *req.ActionDeviceID
-		}
-		aid := pickStr(req.ActionID, rule.ActionID)
-		apj := pickStr(req.ActionParamsJSON, rule.ActionParamsJSON)
-		alv := pickStr(req.ActionLevel, rule.ActionLevel)
 		rc := rule.RequireConfirmed
 		if req.RequireConfirmed != nil {
 			rc = *req.RequireConfirmed
 		}
-		if msg := validateAutomationRuleFields(name, tt, at, &teid, sn, cmp, &thr, ws, we, we2, &adevid, aid, alv, rc, true); msg != "" {
+		if msg := validateAutomationRuleFields(name, tt, first.ActionType, &teid, sn, cmp, &thr, ws, we, we2,
+			&first.ActionDeviceID, first.ActionID, first.ActionLevel, rc, true); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
-		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + device_action 的
-		// action_id Catalog 存在性 + action_params_json CanonicalizeParams。
+		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + 逐动作 Catalog 校验。
 		cs := rule.CooldownSec
 		if req.CooldownSec != nil {
 			cs = *req.CooldownSec
@@ -335,28 +403,30 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
-		if at == models.AutomationActionDeviceAction {
-			if msg := validateDeviceActionCatalog(c.Request.Context(), catalog, adevid, aid, apj); msg != "" {
-				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
-				return
-			}
+		if msg := validateActionsCatalog(c.Request.Context(), catalog, actions); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
 		}
 		// ── 授权失效 (安全关键, 实施计划 §0.1): 动作集合变化即清空 risk_acknowledged_at ──
 		//
 		// 为什么必须清空: 用户授权的是"这条规则的这些动作"。若把动作从 A 改成 B
 		// (或改目标设备/参数) 而保留旧授权, 旧授权会静默地把 B 也放行 —— 用户从未
 		// 确认过 B, 而 B 可能是完全不同的物理操作。仅改名称/冷却等非动作字段不失效。
-		actionSetChanged := automationActionSetChanged(rule, at, adevid, aid, apj)
+		//
+		// **逐 seq 比较** (B1 遗留债务的收口): 只比第一个动作会让"把第 2 个动作换成
+		// 另一个风险动作"保留旧授权, 那是安全漏洞。
+		changed := actionSetChanged(db, rule, actions)
 		acknowledged := rule.RiskAcknowledgedAt != nil
-		if actionSetChanged {
+		if changed {
 			acknowledged = false
 		}
 		if req.RiskAcknowledged != nil {
 			acknowledged = *req.RiskAcknowledged
 		}
 		// V7: 清空后若仍配 require_confirmed=false 的风险动作 → 拒绝保存, 强制重新确认。
-		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
-			at, &adevid, aid, rc, acknowledged); msg != "" {
+		// 逐动作检查: 只看第一个动作会漏掉"第 2 个是风险动作"的规则。
+		if msg, code := validateRiskActionsAuthorization(c.Request.Context(), catalog,
+			actions, rc, acknowledged); msg != "" {
 			ErrorWithCode(c, 400, code, msg)
 			return
 		}
@@ -397,21 +467,6 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		if req.ConditionsJSON != nil {
 			updates["conditions_json"] = *req.ConditionsJSON
 		}
-		if req.ActionType != nil {
-			updates["action_type"] = *req.ActionType
-		}
-		if req.ActionDeviceID != nil {
-			updates["action_device_id"] = *req.ActionDeviceID
-		}
-		if req.ActionID != nil {
-			updates["action_id"] = *req.ActionID
-		}
-		if req.ActionParamsJSON != nil {
-			updates["action_params_json"] = *req.ActionParamsJSON
-		}
-		if req.ActionLevel != nil {
-			updates["action_level"] = *req.ActionLevel
-		}
 		if req.CooldownSec != nil {
 			updates["cooldown_sec"] = *req.CooldownSec
 		}
@@ -424,7 +479,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		// 授权列的写入必须显式表达"清空"(nil), 不能用 map 的省略语义 ——
 		// 省略 = 保持原值, 那正是"改动作后旧授权仍然生效"的漏洞。
 		switch {
-		case actionSetChanged:
+		case changed:
 			// 动作集合变化 → 强制清空 (无论请求是否带 risk_acknowledged)。
 			// 本条优先于请求字段: 用户不能在"改动作"的同一次请求里顺手沿用旧授权,
 			// 必须重新显式确认。
@@ -434,13 +489,27 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		case req.RiskAcknowledged != nil:
 			updates["risk_acknowledged_at"] = nil
 		}
-		if err := db.Model(&rule).Updates(updates).Error; err != nil {
+		// 规则字段更新 + 子表替换 + 镜像列回写必须**同事务**: 任何一步失败都
+		// 整体回滚, 不留"规则已改、动作没换"的中间态。
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if len(updates) > 0 {
+				if err := tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+					Updates(updates).Error; err != nil {
+					return err
+				}
+			}
+			return database.ReplaceRuleActions(tx, rule.ID, actions)
+		}); err != nil {
 			Error(c, 500, "更新策略失败: "+err.Error())
 			return
 		}
 		db.First(&rule, rule.ID)
 		if evaluator != nil {
 			evaluator.Invalidate()
+		}
+		attached := []models.AutomationRule{rule}
+		if err := database.AttachRuleActions(db, attached); err == nil {
+			rule = attached[0]
 		}
 		Success(c, rule)
 	}
