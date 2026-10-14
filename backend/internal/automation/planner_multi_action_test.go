@@ -11,8 +11,10 @@ package automation
 //	A-16 冷却锚点: 把 recordExecuted 的 at 改成 time.Now() → TestMultiActionCooldownAnchorIsTriggerTime 红
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -129,6 +131,120 @@ func commandPinOrder(t *testing.T, pl *Planner) []int {
 	}
 	sort.Ints(order)
 	return order
+}
+
+// ─── P2-E: 人工确认路径必须逐动作串行 (确认 2 动作 → 2 行 command_executions) ──
+//
+// 反向验证: 把 ConfirmEvent 退回单动作 (幂等键去掉 action_seq 段且只 Create 一次) →
+// 本用例红 (只下发 1 行, 第 2 个动作被静默丢弃)。
+func TestConfirmEventExecutesAllActionsInOrder(t *testing.T) {
+	pl, edge := setupConfirmPlanner(t)
+	newAdminOperator(t, pl.db, 7)
+	rule := confirmedMultiActionRule(t, pl, edge.ID, 2)
+
+	// 造一行 pending_confirm 事件 (人工确认的入口)。
+	ev := pendingEvent(t, pl, rule.ID, 600, pl.nowFn())
+
+	got, err := pl.ConfirmEvent(context.Background(), ev.ID, 7, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("confirm 失败: %v", err)
+	}
+	if got.Result != models.AutomationResultExecuted {
+		t.Fatalf("confirm 后 result=%q want executed (detail=%s)", got.Result, got.Detail)
+	}
+	if n := len(execRows(t, pl)); n != 2 {
+		t.Fatalf("2 动作规则人工确认后必须下发 2 行 command_executions, 实际 %d —— 第 2 个动作被静默丢弃 (P2-E)", n)
+	}
+	// 每个动作各一个幂等键 (含 action_seq 段), 不得重合。
+	keys := map[string]bool{}
+	for _, row := range execRows(t, pl) {
+		if keys[row.IdempotencyKey] {
+			t.Fatalf("幂等键重复 (缺 action_seq 段): %s", row.IdempotencyKey)
+		}
+		keys[row.IdempotencyKey] = true
+	}
+	// 冷却锚点 = 原事件的触发时刻 (pending_confirm 落库时刻)。
+	var after models.AutomationRule
+	pl.db.First(&after, rule.ID)
+	if after.LastTriggeredAt == nil || !after.LastTriggeredAt.UTC().Equal(ev.TriggeredAt.UTC()) {
+		t.Fatalf("冷却锚点=%v want %v", after.LastTriggeredAt, ev.TriggeredAt)
+	}
+}
+
+// P2-E 反向对照: 第 2 个动作失败 → partial_failure + action_seq=2 + 第 3 个未执行。
+func TestConfirmEventPartialFailureAbortsRemaining(t *testing.T) {
+	pl, edge := setupConfirmPlanner(t)
+	newAdminOperator(t, pl.db, 7)
+	rule := confirmedMultiActionRule(t, pl, edge.ID, 3)
+	// seq=2 用目录里不存在的动作 → Create 失败。
+	if err := pl.db.Model(&models.AutomationRuleAction{}).
+		Where("rule_id = ? AND seq = ?", rule.ID, 2).
+		Update("action_id", "no_such_action").Error; err != nil {
+		t.Fatal(err)
+	}
+	ev := pendingEvent(t, pl, rule.ID, 600, pl.nowFn())
+
+	got, err := pl.ConfirmEvent(context.Background(), ev.ID, 7, "127.0.0.1")
+	if err == nil {
+		t.Fatal("第 2 个动作失败时必须透传错误 (handler 据此映射状态码)")
+	}
+	if got.Result != models.AutomationResultPartialFailure {
+		t.Fatalf("result=%q want partial_failure (detail=%s)", got.Result, got.Detail)
+	}
+	if got.ActionSeq == nil || *got.ActionSeq != 2 {
+		t.Fatalf("action_seq=%v want 2", got.ActionSeq)
+	}
+	if n := len(execRows(t, pl)); n != 1 {
+		t.Fatalf("第 3 个动作必须未执行 (失败中止剩余), 实际下发 %d 行", n)
+	}
+	// 部分失败不得写冷却锚点 (P2-C 裁决)。
+	var after models.AutomationRule
+	pl.db.First(&after, rule.ID)
+	if after.LastTriggeredAt != nil {
+		t.Fatalf("部分失败不得写冷却锚点, 实际 %v", after.LastTriggeredAt)
+	}
+}
+
+// confirmedMultiActionRule 造一条 require_confirmed=true 的多动作规则 (必须过 V7 语义:
+// require_confirmed=true 时风险动作无需风险授权)。
+func confirmedMultiActionRule(t *testing.T, pl *Planner, edgeID uint, actionCount int) models.AutomationRule {
+	t.Helper()
+	for pin := 5; pin < 5+actionCount; pin++ {
+		if err := pl.db.Create(&models.GPIOConfig{
+			NodeID: "node-conf", Pin: pin, Direction: 1, Enabled: true,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rule := models.AutomationRule{
+		Name:                "确认多动作",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edgeID,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    true,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edgeID,
+		ActionID:            "gpio_set",
+		ActionParamsJSON:    `{"pin":5,"level":1}`,
+	}
+	if err := pl.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+	for seq := 1; seq <= actionCount; seq++ {
+		pin := 5 + seq - 1
+		params := `{"pin":` + strconv.Itoa(pin) + `,"level":1}`
+		if err := pl.db.Create(&models.AutomationRuleAction{
+			RuleID: rule.ID, Seq: seq, ActionType: models.AutomationActionDeviceAction,
+			ActionDeviceID: edgeID, ActionID: "gpio_set", ActionParamsJSON: params, Enabled: true,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rule
 }
 
 // ─── P1-A / P2-B: 部分失败后重试必须真的重新下发 ─────────────────────────

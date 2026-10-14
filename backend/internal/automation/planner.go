@@ -1084,11 +1084,25 @@ var (
 
 // ConfirmEvent 人工确认执行 pending_confirm 事件 (路径 B: 操作者 confirm 当下即铸即销 token)。
 //
-// 幂等防重: 确定性幂等键 automation:confirm:<ruleID>:<eventID> 与事件 1:1,
-// 重复 confirm 同 eventID 命中 command_executions 唯一索引走 replay 只读;
-// 条件 UPDATE (result='pending_confirm') 作应用层第一道防重闸。
-// TOCTOU: 现读 rule 最新动作, rule 被删/改 action_type 时 fail-closed 报错,
-// 不存 params 快照 (detail size:512 保持纯失败语义)。
+// **多动作语义与自动/手动路径同构** (P2-E 修复, 评审 verify-b2): 按 seq 升序串行执行
+// 动作集合, 每个动作各自即铸即销一个 token; 失败中止剩余; 全部成功 executed /
+// 部分成功 partial_failure / 首个失败按原因落 failed_*。
+//
+// 修复前的缺陷: 本函数只 Create 一次且幂等键是 automation:confirm:<ruleID>:<eventID>
+// (无 action_seq), 2 动作规则人工确认后只下发 1 行 command_executions —— 用户在卡片上
+// 看到 2 个动作、实际执行 1 个, 第 2 个被静默丢弃。
+//
+// 幂等防重: 每个动作的键 automation:confirm:<ruleID>:<eventID>:<action_seq>, 与
+// (事件, 动作) 1:1; 重复 confirm 同 eventID 命中 command_executions 唯一索引走 replay
+// 只读; 条件 UPDATE (result='pending_confirm') 作应用层第一道防重闸。
+// action_seq 段是必需的 (与 A-5 同源): 两个动作指向同设备同 action_id 时 scope 相同,
+// 缺该段会让第 2 个动作被 replay 吞掉或报 ErrIdempotencyCollision。
+//
+// TOCTOU: 现读 rule 最新动作, rule 被删时 fail-closed 报错; action_type 不再是
+// device_action 或动作集合为空时同样 fail-closed (错误语义与改造前一致)。
+//
+// ⚠️ 部分失败**不写冷却锚点** (已裁决, 见方案 §3.2.4 «部分失败的锚点» 与 P2-C):
+// 只执行了一部分动作不构成"该规则已完整触发", 写锚点会让规则被静默冷却。
 func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourceIP string) (models.AutomationEvent, error) {
 	var ev models.AutomationEvent
 	if err := p.db.WithContext(ctx).First(&ev, eventID).Error; err != nil {
@@ -1118,74 +1132,122 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 	if rule.ActionType != models.AutomationActionDeviceAction {
 		return ev, ErrConfirmActionChanged
 	}
-	params, err := rule.ParseActionParams()
-	if err != nil {
-		return ev, fmt.Errorf("%w: %v", ErrConfirmInvalidParams, err)
+	actions := p.ruleActions(rule)
+	if len(actions) == 0 {
+		return ev, ErrConfirmActionChanged
 	}
 
 	reason := fmt.Sprintf("automation:confirm:%d", rule.ID)
-	// 即铸: 操作者 confirm 当下铸造 (近认证门由 IssueConfirmation 内核对操作者 LastLoginAt 强制)。
-	grant, err := p.cmdSvc.IssueConfirmation(ctx, commandexec.ConfirmationInput{
-		EdgeDeviceID: rule.ActionDeviceID,
-		ActorUserID:  actorID,
-		ActionID:     rule.ActionID,
-		Params:       params,
-		Reason:       reason,
-		SourceIP:     sourceIP,
-	})
-	if err != nil {
-		return ev, err
-	}
-	// 即销: Create 携 token 消费, 走全 availability gate + 幂等 + 审计 + readback。
-	exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
-		EdgeDeviceID:      rule.ActionDeviceID,
-		ActorUserID:       actorID,
-		ActionID:          rule.ActionID,
-		Params:            params,
-		IdempotencyKey:    fmt.Sprintf("automation:confirm:%d:%d", rule.ID, ev.ID),
-		SourceIP:          sourceIP,
-		ConfirmationToken: grant.Token,
-		Reason:            reason,
-	})
-
-	// 条件 UPDATE 原事件行: 仅当仍是 pending_confirm 才翻转 (并发 confirm/expired 时
-	// RowsAffected=0, 幂等返回现值不覆写)。
-	if err == nil {
-		// 翻转 + 冷却锚点同事务 (清理前置条件 A): 确认制规则的可执行路径是
-		// pending_confirm --人工确认--> executed, 若这里不写锚点, require_confirmed=true
-		// 的规则锚点【永远不会被写】, 重启后冷却照样提前解除。
-		// 触发时刻用原事件的 TriggeredAt (pending_confirm 落库时刻), 而不是 now():
-		// 冷却窗起点是"策略判定该触发"的时刻, 与自动/手动路径同语义。
-		if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			res := tx.Model(&models.AutomationEvent{}).
-				Where("id = ? AND result = ?", ev.ID, models.AutomationResultPendingConfirm).
-				Updates(map[string]interface{}{
-					"result":     models.AutomationResultExecuted,
-					"command_id": exec.CommandID,
-				})
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 0 {
-				return nil // 并发 confirm/expired: 未翻转, 不动锚点
-			}
-			return tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
-				Update("last_triggered_at", ev.TriggeredAt).Error
-		}); err != nil {
-			logger.Warn("automation: failed to flip event + cooldown anchor",
-				"event_id", ev.ID, "rule_id", rule.ID, "error", err)
+	// 冷却锚点 (清理前置条件 A) 用原事件的 TriggeredAt (pending_confirm 落库时刻),
+	// 而不是 now(): 冷却窗起点是"策略判定该触发"的时刻, 与自动/手动路径同语义。
+	flipExecuted := func(tx *gorm.DB, commandID string) error {
+		res := tx.Model(&models.AutomationEvent{}).
+			Where("id = ? AND result = ?", ev.ID, models.AutomationResultPendingConfirm).
+			Updates(map[string]interface{}{
+				"result":     models.AutomationResultExecuted,
+				"command_id": commandID,
+			})
+		if res.Error != nil {
+			return res.Error
 		}
-		p.db.WithContext(ctx).First(&ev, ev.ID)
-		return ev, nil
+		if res.RowsAffected == 0 {
+			return nil // 并发 confirm/expired: 未翻转, 不动锚点
+		}
+		return tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+			Update("last_triggered_at", ev.TriggeredAt).Error
 	}
-	result := models.AutomationResultFailedDispatch
-	if isGateError(err) {
-		result = models.AutomationResultFailedGate
+
+	executed := 0
+	lastCommandID := ""
+	for i := range actions {
+		act := actions[i]
+		if act.ActionType == models.AutomationActionNotification {
+			// 与自动路径一致: 通知动作无设备侧副作用, 不消耗 token, 不计入可失败动作。
+			p.notifyActionFor(rule, act, ev.TriggeredAt, 0)
+			continue
+		}
+		params, err := parseActionParams(act)
+		if err != nil {
+			return p.recordConfirmFailure(ctx, &ev, rule, act, executed, len(actions),
+				models.AutomationResultFailedDispatch, err.Error(), err)
+		}
+		// 即铸: 操作者 confirm 当下为**该动作**铸造 (近认证门由 IssueConfirmation
+		// 内核对操作者 LastLoginAt 强制)。
+		grant, err := p.cmdSvc.IssueConfirmation(ctx, commandexec.ConfirmationInput{
+			EdgeDeviceID: act.ActionDeviceID,
+			ActorUserID:  actorID,
+			ActionID:     act.ActionID,
+			Params:       params,
+			Reason:       reason,
+			SourceIP:     sourceIP,
+		})
+		if err != nil {
+			return p.recordConfirmFailure(ctx, &ev, rule, act, executed, len(actions),
+				classifyDeviceActionError(err), err.Error(), err)
+		}
+		// 即销: Create 携 token 消费, 走全 availability gate + 幂等 + 审计 + readback。
+		exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
+			EdgeDeviceID:      act.ActionDeviceID,
+			ActorUserID:       actorID,
+			ActionID:          act.ActionID,
+			Params:            params,
+			IdempotencyKey:    fmt.Sprintf("automation:confirm:%d:%d:%d", rule.ID, ev.ID, act.Seq),
+			SourceIP:          sourceIP,
+			ConfirmationToken: grant.Token,
+			Reason:            reason,
+		})
+		if err != nil {
+			return p.recordConfirmFailure(ctx, &ev, rule, act, executed, len(actions),
+				classifyDeviceActionError(err), err.Error(), err)
+		}
+		executed++
+		lastCommandID = exec.CommandID
 	}
-	p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
+
+	// 全部动作成功 → 翻转事件为 executed + 写冷却锚点 (同一事务)。
+	if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return flipExecuted(tx, lastCommandID)
+	}); err != nil {
+		logger.Warn("automation: failed to flip event + cooldown anchor",
+			"event_id", ev.ID, "rule_id", rule.ID, "error", err)
+	}
+	p.db.WithContext(ctx).First(&ev, ev.ID)
+	return ev, nil
+}
+
+// recordConfirmFailure 记录人工确认路径的动作失败 (方案 §6.3 状态机)。
+//
+// 语义与 recordActionFailure / recordManualActionFailure 一致: 首个动作失败 = 完全
+// 失败 (按原因落 failed_*), 第 k>1 个失败 = partial_failure + action_seq=k。
+// **部分失败不写冷却锚点** (P2-C 裁决): 规则没有完整执行完, 锚点会静默冷却它。
+//
+// cause 是**透传给调用方**的原始错误 (Create 的 gate/确认门/参数错误)。为什么必须
+// 透传而不是吞掉: handler 依赖它映射 HTTP 状态码 (ErrRecentAuthRequired → 403 等),
+// 且既有契约 TestConfirmEventCreateFailureFlipsFailed 断言"不吞错也不留 pending 悬置"。
+// 落库失败只告警 (与 recordActionFailure 同款 fail-open), 不覆盖 cause。
+func (p *Planner) recordConfirmFailure(ctx context.Context, ev *models.AutomationEvent,
+	rule models.AutomationRule, act models.AutomationRuleAction, executed, total int,
+	result, detail string, cause error) (models.AutomationEvent, error) {
+	seq := act.Seq
+	if executed > 0 {
+		result = models.AutomationResultPartialFailure
+		detail = fmt.Sprintf("第 %d/%d 个动作失败, 已中止剩余动作 (已成功 %d 个): %s",
+			act.Seq, total, executed, detail)
+	}
+	err := p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
 		Where("id = ? AND result = ?", ev.ID, models.AutomationResultPendingConfirm).
-		Updates(map[string]interface{}{"result": result, "detail": err.Error()})
-	return ev, err
+		Updates(map[string]interface{}{
+			"result":     result,
+			"detail":     detail,
+			"action_seq": seq,
+		}).Error
+	if err != nil {
+		logger.Warn("automation: failed to record confirm action failure",
+			"event_id", ev.ID, "action_seq", act.Seq, "error", err)
+	}
+	p.db.WithContext(ctx).First(ev, ev.ID)
+	// 返回 cause (调用方的动作错误), 不是落库错误: handler 据此决定 HTTP 状态码。
+	return *ev, cause
 }
 
 // StartCleanup 启动 pending_confirm 超时清扫 goroutine (24h 未确认 → expired)。
