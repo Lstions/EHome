@@ -1148,7 +1148,14 @@ async function onSave() {
     const risks = precheck.risk_actions ?? []
     if (risks.length === 0) {
       // F-6: 普通动作**无**二次确认，直接落库。
-      await submitRule(buildPayload(form.require_confirmed ? undefined : false))
+      //
+      // ⚠️ 这里刻意**不带** risk_acknowledged 字段（既不 true 也不 false）：
+      //    · 带 false 会在每次保存普通规则时把规则级授权清掉，而"未授权的普通规则
+      //      被改成含风险动作"这一步必然触发后端 B1 的授权失效（动作集合变化即清空）
+      //      并强制重新确认 —— 故 false 不带来额外安全性，只带来无谓的状态翻转；
+      //    · 带 true 则是无依据的授权（本次保存根本没有风险动作需要确认）。
+      //    省略即"本次保存不改变授权语义"，与后端 risk_acknowledged 的 *bool 可空语义一致。
+      await submitRule(buildPayload())
       return
     }
     // 含风险动作 ⇒ 弹风险清单，逐项勾选。提交体带 risk_acknowledged=true（O-2 授权）。
