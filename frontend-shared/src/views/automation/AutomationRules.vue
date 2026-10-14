@@ -1,6 +1,9 @@
 <template>
   <div class="automation-rules-page">
-    <PageHeader title="自动化策略" subtitle="传感器数据或时间窗口触发设备动作或通知" />
+    <PageHeader
+      title="自动化策略"
+      subtitle="传感器数据、时间窗口或日出日落触发设备动作或通知"
+    />
 
     <!-- 规则表格 -->
     <section class="card rules-card">
@@ -21,11 +24,17 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="动作" min-width="140">
+        <!-- R2: 动作列由"单动作摘要"改为"多动作摘要 + 风险计数"。风险计数让用户在
+             列表页就能发现风险规则，不必逐条打开编辑器。计数读的是后端下发的
+             requires_confirmation（唯一判定点），前端不自己算风险等级。 -->
+        <el-table-column label="动作" min-width="180">
           <template #default="{ row }">
             <div class="action-cell">
               <el-tag size="small" :type="row.action_type === 'device_action' ? 'warning' : 'info'">
-                {{ row.action_type === 'device_action' ? '设备动作' : '通知' }}
+                {{ row.action_type === 'device_action' ? '设备动作' : '通知' }} ×{{ ruleActions(asRule(row)).length }}
+              </el-tag>
+              <el-tag v-if="ruleRiskCount(asRule(row))" type="danger" size="small" data-test="rule-risk-count">
+                <span aria-hidden="true">⚠</span> 含 {{ ruleRiskCount(asRule(row)) }} 个风险动作
               </el-tag>
               <span class="mono action-summary">{{ actionSummary(asRule(row)) }}</span>
             </div>
@@ -183,9 +192,17 @@
         </el-form-item>
 
         <el-form-item label="触发器类型" required>
-          <el-select v-model="form.trigger_type" data-test="field-trigger-type" @change="onTriggerTypeChange">
+          <!-- 下拉值域与后端 models.AutomationTriggerType **不同**：后端只有 sun_event
+               一个类型（日出/日落由 trigger_sun_kind 区分），而设计稿 R4 与用户需求都要求
+               下拉里直接看到「日出」「日落」两项。故这里用 calc 代理值 (sunrise/sunset)，
+               提交时再映射回 trigger_type='sun_event' + trigger_sun_kind，见 toSunTrigger()。
+               为什么不塞一个 "sun_event" 项再另设二级下拉：那会让下拉文案与用户脑中的
+               "日落前 30 分钟" 隔一层，而这句话本身就是需求原文（设计 D-2）。 -->
+          <el-select v-model="triggerSelection" data-test="field-trigger-type" @change="onTriggerTypeChange">
             <el-option label="传感器阈值" value="sensor_threshold" />
             <el-option label="时间窗口" value="time_window" />
+            <el-option label="日出" value="sunrise" />
+            <el-option label="日落" value="sunset" />
             <el-option label="事件驱动（暂不支持创建）" value="event" disabled />
           </el-select>
         </el-form-item>
@@ -231,6 +248,47 @@
           </el-form-item>
         </template>
 
+        <!-- sun_event 字段组 (设计稿 R6 / §6 D-1 D-2) -->
+        <template v-if="isSunTrigger">
+          <el-form-item label="日出 / 日落" required>
+            <el-select v-model="form.trigger_sun_kind" data-test="field-sun-kind">
+              <el-option v-for="opt in SUN_KIND_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="偏移分钟" required>
+            <div class="sun-offset-row">
+              <el-input-number
+                v-model="form.trigger_sun_offset_min"
+                :min="SUN_OFFSET_MIN"
+                :max="SUN_OFFSET_MAX"
+                :step="5"
+                data-test="field-sun-offset"
+                aria-label="相对日出/日落的偏移分钟，负值为之前"
+              />
+              <!-- 实时自然语言回显（设计 D-2）：用户需求原话就是"日落前 30 分钟"，
+                   让界面直接说出这句话，用户不必在脑内把"方向 + 绝对值"翻译一遍。 -->
+              <span class="hint" data-test="offset-sentence">{{ sunOffsetText(form.trigger_sun_kind, form.trigger_sun_offset_min) }}</span>
+            </div>
+            <div class="hint-block">范围 -720 ~ 720 分钟；负值 = 日出/日落之前，正值 = 之后，0 = 正点</div>
+          </el-form-item>
+          <!-- 坐标/时区继承状态（用户裁决 O-3: 节点级权威 + 规则级可空覆盖）。
+               为什么必须在界面上说清"留空=继承"以及"节点没配会被后端拒绝保存"：
+               后端按 O-7 fail-closed，用户在节点页配坐标前保存日出规则会拿到 400 ——
+               把这层因果提前说出来，用户才不会以为页面坏了。 -->
+          <el-form-item label="坐标与时区">
+            <div class="sun-location" data-test="sun-location">
+              <div class="sun-location__state" :data-state="sunLocationState(form)" data-test="sun-location-state">
+                {{ sunLocationText(form) }}
+              </div>
+              <div class="sun-location__fields">
+                <el-input v-model="sunLatitudeText" placeholder="纬度，如 31.23" data-test="field-latitude" aria-label="规则级纬度（留空 = 继承节点）" />
+                <el-input v-model="sunLongitudeText" placeholder="经度，如 121.47" data-test="field-longitude" aria-label="规则级经度（留空 = 继承节点）" />
+                <el-input v-model="form.timezone" placeholder="时区，如 Asia/Shanghai" data-test="field-timezone" aria-label="规则级 IANA 时区（留空 = 继承节点）" />
+              </div>
+            </div>
+          </el-form-item>
+        </template>
+
         <el-form-item label="附加条件">
           <el-input
             v-model="form.conditions_json"
@@ -241,47 +299,126 @@
           />
         </el-form-item>
 
-        <el-form-item label="动作类型" required>
-          <el-select v-model="form.action_type" data-test="field-action-type" @change="onActionTypeChange">
-            <el-option label="设备动作" value="device_action" />
-            <el-option label="通知" value="notification" />
-          </el-select>
+        <!-- R7: 动作区由「单动作字段组」升级为**多动作卡片列表**。
+             为什么用纵向卡片而不是表格（设计 D-3）：① 卡片天然容纳长度不定的
+             「风险原因」文本；② 上移/下移是**顺序语义**操作，纵向列表的视觉顺序
+             与执行顺序一致；③ 复用既有 DeviceControlPanel 的卡片语言
+             （圆角 8px + --el-border-color-lighter 边框），不引入新视觉。 -->
+        <el-form-item label="动作" required>
+          <div class="action-toolbar">
+            <span class="text-muted" data-test="action-count">
+              共 {{ form.actions.length }} 个动作{{ riskyActions.length
+                ? `，其中 ${riskyActions.length} 个风险动作（保存前需逐项确认）`
+                : '，无风险动作（保存时不会弹出二次确认）' }}
+            </span>
+            <el-button type="primary" size="small" data-test="add-action" @click="addAction">+ 添加动作</el-button>
+          </div>
+          <ul class="action-list" data-test="action-list">
+            <li
+              v-for="(action, index) in form.actions"
+              :key="action.uid"
+              class="action-card"
+              :class="{ 'is-risk': !!riskBadgeOf(action) }"
+              :data-risk="riskBadgeOf(action) ? '1' : '0'"
+              data-test="action-card"
+            >
+              <div class="action-card__head">
+                <span class="action-card__index" aria-hidden="true">{{ index + 1 }}</span>
+                <span class="action-card__name">{{ actionTitle(action) }}</span>
+                <!-- 风险徽标：**图标 + 文字**，不只用颜色（设计 D-6 四重编码）。
+                     红绿色盲用户看不到红色徽标，文字与图标是唯一能读出"风险"的路径。 -->
+                <el-tag v-if="riskBadgeOf(action)" type="danger" size="small" class="risk-badge" data-test="risk-badge">
+                  <span aria-hidden="true">{{ riskBadgeOf(action)!.icon }}</span> {{ riskBadgeOf(action)!.label }}
+                </el-tag>
+                <el-tag v-else type="info" size="small" class="normal-badge" data-test="normal-badge">
+                  <span aria-hidden="true">{{ NORMAL_BADGE.icon }}</span> {{ NORMAL_BADGE.label }}
+                </el-tag>
+                <span class="action-card__ops">
+                  <el-button
+                    link size="small" :disabled="index === 0" data-test="move-up"
+                    :aria-label="`上移第 ${index + 1} 个动作`" @click="moveCard(action.uid, -1)"
+                  >↑ 上移</el-button>
+                  <el-button
+                    link size="small" :disabled="index === form.actions.length - 1" data-test="move-down"
+                    :aria-label="`下移第 ${index + 1} 个动作`" @click="moveCard(action.uid, 1)"
+                  >↓ 下移</el-button>
+                  <el-button
+                    link type="primary" size="small" data-test="edit-action-params"
+                    :aria-label="`编辑第 ${index + 1} 个动作的参数`" @click="openParams(action.uid)"
+                  >编辑参数</el-button>
+                  <el-button
+                    link type="danger" size="small" data-test="remove-action"
+                    :aria-label="`删除第 ${index + 1} 个动作`" @click="removeAction(action.uid)"
+                  >删除</el-button>
+                </span>
+              </div>
+              <dl class="action-meta">
+                <div>
+                  <dt>动作类型</dt>
+                  <dd>
+                    <el-select v-model="action.action_type" size="small" :aria-label="`第 ${index + 1} 个动作的类型`" :data-test="`action-type-${index}`" @change="onCardTypeChange(action)">
+                      <el-option label="设备动作" value="device_action" />
+                      <el-option label="通知" value="notification" />
+                    </el-select>
+                  </dd>
+                </div>
+                <div v-if="action.action_type === 'device_action'">
+                  <dt>目标设备</dt>
+                  <dd>
+                    <el-select v-model="action.action_device_id" filterable size="small" :aria-label="`第 ${index + 1} 个动作的目标设备`" :data-test="`action-device-${index}`">
+                      <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
+                    </el-select>
+                  </dd>
+                </div>
+                <div v-else>
+                  <dt>通知级别</dt>
+                  <dd>
+                    <el-select v-model="action.action_level" size="small" :aria-label="`第 ${index + 1} 个动作的通知级别`" :data-test="`action-level-${index}`">
+                      <el-option label="信息" value="info" />
+                      <el-option label="警告" value="warning" />
+                      <el-option label="严重" value="critical" />
+                    </el-select>
+                  </dd>
+                </div>
+                <div v-if="action.action_type === 'device_action'">
+                  <dt>动作 ID</dt>
+                  <dd>
+                    <el-input v-model="action.action_id" size="small" placeholder="如 gpio_set" :aria-label="`第 ${index + 1} 个动作的 ID`" :data-test="`action-id-${index}`" />
+                  </dd>
+                </div>
+                <div class="span2">
+                  <dt>参数</dt>
+                  <dd class="mono" data-test="action-params-summary">{{ paramsSummary(action.action_params_json) }}</dd>
+                </div>
+              </dl>
+              <!-- 风险原因块：与徽标并存的第二条非颜色通道。后端 risk_reason 尚未实现
+                   （设计稿 §9 O-2），此处**如实说明原因文案未下发**，不编造危险说明
+                   —— 安全文案不得由前端想象（编造的"危险说明"比没有更危险）。 -->
+              <div v-if="riskBadgeOf(action)" class="risk-reason" data-test="risk-reason">
+                <span class="risk-reason__icon" aria-hidden="true">⚠</span>
+                <span>
+                  <span class="risk-reason__label">风险原因：</span>
+                  {{ riskReasonOf(action) }}
+                </span>
+              </div>
+            </li>
+          </ul>
         </el-form-item>
 
-        <!-- device_action 字段组 -->
-        <template v-if="form.action_type === 'device_action'">
-          <el-form-item label="目标设备" required>
-            <el-select v-model="form.action_device_id" filterable data-test="field-action-device">
-              <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="动作 ID" required>
-            <el-input v-model="form.action_id" placeholder="如：gpio_set / pwm_set_duty" data-test="field-action-id" />
-          </el-form-item>
-          <el-form-item label="动作参数">
-            <el-input
-              v-model="form.action_params_json"
-              type="textarea"
-              :rows="2"
-              placeholder='JSON 对象，如 {"pin": 12, "value": 1}'
-              data-test="field-action-params"
-            />
-          </el-form-item>
-          <el-form-item label="需人工确认">
-            <el-switch v-model="form.require_confirmed" data-test="field-require-confirmed" />
-          </el-form-item>
-        </template>
-
-        <!-- notification 字段组 -->
-        <template v-if="form.action_type === 'notification'">
-          <el-form-item label="通知级别" required>
-            <el-select v-model="form.action_level" data-test="field-action-level">
-              <el-option label="信息" value="info" />
-              <el-option label="警告" value="warning" />
-              <el-option label="严重" value="critical" />
-            </el-select>
-          </el-form-item>
-        </template>
+        <!-- R9: 「需人工确认」是**规则级**开关（触发后是否要人确认），与动作级风险徽标
+             语义不同，二者并存不合并（设计稿 §9 O-3）。
+             提示文案把后端 V7 的组合条件说清楚：风险动作 + 关掉本开关时，保存必须
+             同时带 risk_acknowledged（即下面的风险清单弹窗逐项确认）。 -->
+        <el-form-item label="需人工确认">
+          <el-switch v-model="form.require_confirmed" data-test="field-require-confirmed" />
+          <span class="hint">
+            开启则规则触发后只生成「待确认」通知，人工确认后才下发；关闭则触发即执行
+          </span>
+        </el-form-item>
+        <div v-if="!form.require_confirmed && riskyActions.length" class="ack-hint" data-test="ack-hint">
+          本规则含 {{ riskyActions.length }} 个风险动作且已关闭人工确认：保存时会要求逐项勾选确认
+          （后端按规则级授权放行，授权在动作集合变化后自动失效并需重新确认）。
+        </div>
 
         <el-form-item label="冷却时间">
           <el-input-number v-model="form.cooldown_sec" :min="0" :max="86400" :step="60" data-test="field-cooldown" />
@@ -298,6 +435,99 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" data-test="save-rule" @click="onSave">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- R8: 动作参数编辑（沿用既有"参数 JSON 文本域"形态，只改承载位置：卡片 → 叠层弹窗）。
+         为什么保留文本域而不是按 input_schema 生成表单：参数 schema 由后端 Catalog 驱动，
+         改造前就是这个形态；本次只换承载位置，不顺手改参数录入形态（不过度设计）。 -->
+    <el-dialog
+      v-model="paramsDialogVisible"
+      title="编辑动作参数"
+      width="min(520px, 92vw)"
+      data-test="edit-params-dialog"
+    >
+      <p class="hint-block">
+        目标动作：<span class="mono">{{ editingParamsActionId || '-' }}</span>
+      </p>
+      <el-input
+        v-model="paramsDraft"
+        type="textarea"
+        :rows="5"
+        placeholder='JSON 对象，如 {"pin": 12, "value": 1}'
+        data-test="params-json"
+        aria-label="动作参数 JSON"
+        @input="onParamsDraftChange"
+      />
+      <p v-if="paramsDraftError" class="params-error" data-test="params-error">{{ paramsDraftError }}</p>
+      <template #footer>
+        <el-button @click="paramsDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!!paramsDraftError" data-test="params-done" @click="applyParams">完成</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- R11: 保存前风险清单二次确认（用户裁决 O-2 = 逐规则显式授权 + 保存时强确认）。
+         为什么逐项勾选而不是一次总确认（设计 D-5）：一次总确认在 3 个以上风险动作时会
+         退化成"闭眼点确定"；逐项勾选强制用户逐条读完 动作名 + 目标设备 + 参数。
+         默认焦点在**安全侧**（取消）也沿用既有 feedback.confirmDanger 的裁决
+         （utils/feedback.ts: 不得诱导性确认）。 -->
+    <el-dialog
+      v-model="riskDialogVisible"
+      title="保存前确认"
+      width="min(560px, 92vw)"
+      data-test="save-risk-dialog"
+      class="save-risk-dialog"
+    >
+      <el-alert
+        type="error"
+        :closable="false"
+        show-icon
+        :title="`本规则包含 ${riskDialogActions.length} 个风险动作`"
+        data-test="risk-summary"
+      >
+        请核对下列动作的目标设备与参数，逐项勾选确认后才可保存。本弹窗只约束「保存这条规则」。
+      </el-alert>
+      <ul class="risk-list" data-test="risk-list">
+        <li v-for="(item, index) in riskDialogActions" :key="item.seq" class="risk-item" data-test="risk-item">
+          <div class="risk-item__name">
+            <span aria-hidden="true">⚠</span>
+            {{ item.action_name }}
+            <el-tag type="danger" size="small" data-test="risk-item-badge">
+              <span aria-hidden="true">⚠</span> {{ item.risk_label }}
+            </el-tag>
+          </div>
+          <dl class="risk-item__meta">
+            <div><dt>目标设备</dt><dd>{{ item.device_name }}</dd></div>
+            <div><dt>动作 ID</dt><dd class="mono">{{ item.action_id }}</dd></div>
+            <div><dt>参数</dt><dd class="mono">{{ item.params_summary }}</dd></div>
+            <div><dt>风险原因</dt><dd data-test="risk-item-reason">{{ item.risk_reason }}</dd></div>
+          </dl>
+          <label class="risk-ack">
+            <input
+              type="checkbox"
+              :checked="ackedSeqs.includes(item.seq)"
+              :data-test="`risk-ack-${index + 1}`"
+              :aria-label="`我已了解「${item.action_name}」对「${item.device_name}」的影响，并确认将其加入本规则`"
+              @change="toggleAck(item.seq)"
+            />
+            <span>我已了解「{{ item.action_name }}」对「{{ item.device_name }}」的影响，并确认将其加入本规则。</span>
+          </label>
+        </li>
+      </ul>
+      <template #footer>
+        <span class="ack-progress" data-test="ack-progress" role="status">
+          已确认 {{ ackedSeqs.length }} / {{ riskDialogActions.length }} 个风险动作
+        </span>
+        <el-button ref="riskCancelRef" data-test="risk-cancel" @click="cancelRiskSave">取消</el-button>
+        <el-button
+          type="danger"
+          :disabled="!allRisksAcked"
+          :loading="saving"
+          data-test="confirm-save"
+          @click="confirmRiskSave"
+        >
+          保存规则
+        </el-button>
       </template>
     </el-dialog>
 
@@ -343,7 +573,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
@@ -353,7 +583,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { useWebSocketStore } from '@/stores/websocket'
 import { logger } from '@/utils/logger'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
-import { deviceOperationApi, type DeviceOperation } from '@/api/deviceOperation'
+import { deviceOperationApi, type ActionDefinition, type DeviceOperation } from '@/api/deviceOperation'
 import {
   automationApi,
   type AutomationRule,
@@ -361,11 +591,17 @@ import {
   type AutomationEventResult,
   type AutomationComparator,
   type AutomationTriggerType,
-  type AutomationActionType,
-  type AutomationActionLevel,
+  type SunEventKind,
   type CreateAutomationRuleRequest,
   type UpdateAutomationRuleRequest,
 } from '@/api/automation'
+import {
+  SUN_KIND_OPTIONS, SUN_OFFSET_MIN, SUN_OFFSET_MAX,
+  sunOffsetText, sunLocationState, sunLocationText,
+} from './sunEvent'
+import {
+  NORMAL_BADGE, emptyAction, moveAction, toSequencedActions, paramsSummary, riskBadge, type ActionDraft,
+} from './actionList'
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
 const asRule = (row: unknown) => row as AutomationRule
@@ -403,6 +639,9 @@ const lastEventFilter = ref({ ...EVENT_FILTER_INITIAL })
 const eventFilterRuleId = ref<number | undefined>(EVENT_FILTER_INITIAL.ruleId)
 const eventFilterResult = ref<AutomationEventResult | undefined>(EVENT_FILTER_INITIAL.result)
 
+// F-8: 新结果枚举必须在**三处**映射齐全（resultOptions / resultText / resultTagType），
+// 否则新结果码会以英文原串直接显示给用户（"字面量泄漏"）。三处同源维护：
+// 新增枚举时若只改一处，tests 里的 F-8 门禁会红。
 const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
   { value: 'executed', label: '已执行' },
   { value: 'pending_confirm', label: '待确认' },
@@ -413,6 +652,9 @@ const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
   { value: 'failed_dispatch', label: '下发失败' },
   { value: 'notification', label: '已通知' },
   { value: 'expired', label: '已过期' },
+  { value: 'confirmation_required', label: '需确认（未授权）' },
+  { value: 'partial_failure', label: '部分失败' },
+  { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
 ]
 
 async function fetchEvents() {
@@ -464,10 +706,23 @@ const comparators: Array<{ value: AutomationComparator; label: string }> = [
   { value: 'neq', label: '≠' },
 ]
 
+/**
+ * 表单模型。
+ *
+ * 两处与改造前的结构性差异：
+ *   ① `trigger_type` 是**下拉代理值**（sunrise|sunset 代表 sun_event + kind）；
+ *      提交前由 toTriggerPayload() 映射回后端契约，见该函数注释。
+ *   ② 动作由单值字段组变成 `actions: ActionDraft[]`，提交前由 toSequencedActions()
+ *      按下标重排 seq（后端 V1 要求 1..N 连续无重复）。
+ * 以下字段改名自设计评审中的措辞，源码里保持与后端 JSON 同名，便于对照。
+ */
 function emptyForm() {
   return {
     name: '',
+    /** 后端契约的触发器类型（sun_event 由 trigger_sun_kind 细分；下拉代理值见 triggerSelection） */
     trigger_type: 'sensor_threshold' as AutomationTriggerType,
+    trigger_sun_kind: 'sunset' as SunEventKind,
+    trigger_sun_offset_min: 0,
     trigger_sensor_name: '',
     trigger_comparator: 'gt' as AutomationComparator,
     trigger_threshold: 0,
@@ -476,12 +731,11 @@ function emptyForm() {
     trigger_window_end: '',
     trigger_window_edge: 'enter' as const,
     trigger_edge_device_id: 0,
+    latitude: undefined as number | undefined,
+    longitude: undefined as number | undefined,
+    timezone: '' as string | undefined,
     conditions_json: '',
-    action_type: 'device_action' as AutomationActionType,
-    action_device_id: 0,
-    action_id: '',
-    action_params_json: '',
-    action_level: 'warning' as AutomationActionLevel,
+    actions: [emptyAction(1)] as ActionDraft[],
     cooldown_sec: 300,
     max_daily_exec: 0,
     require_confirmed: false,
@@ -491,9 +745,57 @@ function emptyForm() {
 
 const form = reactive(emptyForm())
 
+/**
+ * 规则级经/纬度用文本 ref 承载，而不是直接绑 model 上的 number。
+ *
+ * 为什么必须多这一层：`v-model.number` 在输入框被清空时给出**空串**，写进
+ * 数字字段后 JSON.stringify 会把它序列化成 `""`（后端 float64 直接 400）。
+ * 清空 = "改为继承节点" 是正常用户操作，不能因此报错。故文本层独立，
+ * 只在填写了合法数字时同步到 model。
+ */
+const sunLatitudeText = ref('')
+const sunLongitudeText = ref('')
+
+/** 下拉当前值：sun_event 规则展开为 sunrise/sunset 供下拉显示，其余原样。 */
+const triggerSelection = computed<AutomationTriggerType | SunEventKind>({
+  get: () => {
+    if (form.trigger_type === 'sun_event') return form.trigger_sun_kind
+    return form.trigger_type
+  },
+  set: (value) => {
+    if (value === 'sunrise' || value === 'sunset') {
+      form.trigger_type = 'sun_event'
+      form.trigger_sun_kind = value
+    } else {
+      form.trigger_type = value as AutomationTriggerType
+    }
+  },
+})
+
+const isSunTrigger = computed(() => form.trigger_type === 'sun_event')
+
+/** 数字文本 → 有限数字或 undefined（空串/非法一律视为"未填"，即继承节点）。 */
+function parseCoordinate(text: string): number | undefined {
+  const trimmed = text.trim()
+  if (!trimmed) return undefined
+  const value = Number(trimmed)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function syncCoordinates() {
+  form.latitude = parseCoordinate(sunLatitudeText.value)
+  form.longitude = parseCoordinate(sunLongitudeText.value)
+}
+
+function uidSeed(): number {
+  return Date.now() + Math.floor(Math.random() * 1000)
+}
+
 function openCreate() {
   editingId.value = null
   Object.assign(form, emptyForm())
+  sunLatitudeText.value = ''
+  sunLongitudeText.value = ''
   dialogVisible.value = true
 }
 
@@ -502,6 +804,8 @@ function openEdit(rule: AutomationRule) {
   Object.assign(form, {
     name: rule.name,
     trigger_type: rule.trigger_type,
+    trigger_sun_kind: rule.trigger_sun_kind ?? 'sunset',
+    trigger_sun_offset_min: rule.trigger_sun_offset_min ?? 0,
     trigger_sensor_name: rule.trigger_sensor_name ?? '',
     trigger_comparator: rule.trigger_comparator ?? 'gt',
     trigger_threshold: rule.trigger_threshold ?? 0,
@@ -510,22 +814,32 @@ function openEdit(rule: AutomationRule) {
     trigger_window_end: rule.trigger_window_end ?? '',
     trigger_window_edge: rule.trigger_window_edge ?? 'enter',
     trigger_edge_device_id: rule.trigger_edge_device_id ?? 0,
+    latitude: rule.latitude,
+    longitude: rule.longitude,
+    timezone: rule.timezone ?? '',
     conditions_json: rule.conditions_json ?? '',
-    action_type: rule.action_type,
-    action_device_id: rule.action_device_id ?? 0,
-    action_id: rule.action_id ?? '',
-    action_params_json: rule.action_params_json ?? '',
-    action_level: rule.action_level ?? 'warning',
+    actions: ruleActions(rule).map((a, index) => ({
+      uid: index + 1,
+      action_type: a.action_type === 'notification' ? 'notification' : 'device_action',
+      action_device_id: a.action_device_id ?? 0,
+      action_id: a.action_id ?? '',
+      action_params_json: a.action_params_json ?? '',
+      action_level: (a.action_level as ActionDraft['action_level']) ?? 'warning',
+    })) as ActionDraft[],
     cooldown_sec: rule.cooldown_sec,
     max_daily_exec: rule.max_daily_exec,
     require_confirmed: rule.require_confirmed,
     enabled: rule.enabled,
   })
+  // 编辑既有规则时下拉必须显示真值（而不是空）—— 用文本层回显规则级覆盖值，
+  // 未配置（undefined）保持空串以表达"继承节点"。
+  sunLatitudeText.value = typeof rule.latitude === 'number' ? String(rule.latitude) : ''
+  sunLongitudeText.value = typeof rule.longitude === 'number' ? String(rule.longitude) : ''
   dialogVisible.value = true
 }
 
 function onTriggerTypeChange() {
-  // 切换触发器类型时清空互斥字段
+  // 切换触发器类型时清空互斥字段（既有行为保留），并同步清掉 sun_event 专属值。
   if (form.trigger_type === 'sensor_threshold') {
     form.trigger_window_start = ''
     form.trigger_window_end = ''
@@ -533,19 +847,121 @@ function onTriggerTypeChange() {
     form.trigger_sensor_name = ''
     form.trigger_threshold = 0
     form.trigger_duration_sec = 0
+  } else if (form.trigger_type !== 'sun_event') {
+    form.trigger_sun_offset_min = 0
   }
 }
 
-function onActionTypeChange() {
-  if (form.action_type === 'notification') {
-    form.action_device_id = 0
-    form.action_id = ''
-    form.action_params_json = ''
-    form.require_confirmed = false
+// ── 多动作卡片 (R7) ───────────────────────────────────────────────────────
+
+function addAction() {
+  form.actions.push(emptyAction(uidSeed()))
+}
+
+function removeAction(uid: number) {
+  // 至少保留一个动作：空动作集合后端会 400（"actions 不能为空"），
+  // 让用户删到 0 再报错不如当场拦住。
+  if (form.actions.length <= 1) {
+    ElMessage.warning('规则至少需要一个动作')
+    return
+  }
+  form.actions = form.actions.filter(a => a.uid !== uid)
+}
+
+function moveCard(uid: number, delta: number) {
+  form.actions = moveAction(form.actions, uid, delta)
+}
+
+function onCardTypeChange(action: ActionDraft) {
+  // 与既有单动作版的 onActionTypeChange 同口径：切到通知即清掉设备动作专属字段。
+  if (action.action_type === 'notification') {
+    action.action_device_id = 0
+    action.action_id = ''
+    action.action_params_json = ''
   } else {
-    form.action_level = 'warning'
+    action.action_level = 'warning'
   }
 }
+
+/** 卡片标题：动作 ID 优先（用户填的），通知类回落到级别文案。 */
+function actionTitle(action: ActionDraft): string {
+  if (action.action_type !== 'device_action') return '通知'
+  return action.action_id.trim() || '未命名动作'
+}
+
+/** 已选目标设备的展示名（找不到时回退 #id，不留空白）。 */
+function deviceName(deviceId: number): string {
+  const hit = devices.value.find(d => d.id === deviceId)
+  return hit ? hit.name : `#${deviceId}`
+}
+
+/**
+ * 卡片风险徽标。
+ *
+ * 判定源 = 后端下发的 `requires_confirmation`（`deviceaction.RiskLevel.RequiresConfirmation()`
+ * 的对外派生，唯一判定点）。**不读 4 级 risk 字面量** —— 那是驱动出厂方言，
+ * 前端自己比较它就会出现第二份判定（R2 防漂移门禁）。
+ *
+ * ⚠️ 为什么这里不用预检结果：卡片是"编辑中"的状态，动作可能刚被改动、尚未预检；
+ * 预检失败（后端未实现/网络失败）时若靠它渲染徽标，风险动作会**静默变成普通动作**。
+ * 故卡片徽标从已加载的设备目录（/edge-devices/:id/actions）推导，预检只用于
+ * **保存前**（弹窗与放行判定），二者分工明确。
+ */
+function riskBadgeOf(action: ActionDraft) {
+  return riskBadge(catalogDefinition(action))
+}
+
+/** 在已加载的设备目录里找该动作的定义（找不到返回 null，徽标不渲染：不猜风险）。 */
+function catalogDefinition(action: ActionDraft) {
+  if (action.action_type !== 'device_action' || !action.action_device_id || !action.action_id) return null
+  const entry = actionCatalog.value.get(`${action.action_device_id}:${action.action_id}`)
+  return entry ?? null
+}
+
+/**
+ * 风险原因文案。
+ *
+ * 后端 Catalog 目前只下发 risk_level / requires_confirmation，**没有面向用户的
+ * "为什么危险"字段**（设计稿 §9 O-2 记录：前端硬编码映射表会漂移，且驱动层的
+ * description 是操作说明不是危险说明）。故此处如实说明"原因文案尚未下发"，
+ * **不编造危险说明** —— 编造的安全文案比没有更危险（用户会据此做判断）。
+ * 后端补上 risk_reason 后，这里改为直接消费（弹窗已按该字段设计）。
+ */
+function riskReasonOf(action: ActionDraft): string {
+  const def = catalogDefinition(action)
+  if (def?.description) {
+    return `后端未下发风险原因，以下是该动作的操作说明（非危险说明）：${def.description}`
+  }
+  return '后端未下发风险原因文案，请自行确认该动作对目标设备的影响'
+}
+
+/** 规则动作的显示辅助（列表页与编辑回填共用）。 */
+function ruleActions(rule: AutomationRule) {
+  if (rule.actions && rule.actions.length > 0) return rule.actions
+  // 兼容期回落：后端尚未回填 actions 子表时用单动作镜像列合成 seq=1。
+  if (rule.action_type === 'device_action' && rule.action_id) {
+    return [{ seq: 1, action_type: rule.action_type, action_id: rule.action_id, action_device_id: rule.action_device_id }]
+  }
+  if (rule.action_type === 'notification') {
+    return [{ seq: 1, action_type: rule.action_type, action_level: rule.action_level }]
+  }
+  return []
+}
+
+/** 列表页「含 N 个风险动作」计数：读后端下发的 requires_confirmation。 */
+function ruleRiskCount(rule: AutomationRule): number {
+  return ruleActions(rule).filter(a => riskBadge(a)).length
+}
+
+/**
+ * 编辑中的风险动作卡片。
+ *
+ * ⚠️ 这是**界面提示**用的计数（"其中 N 个风险动作（保存前需逐项确认）"），
+ * 它读的是已加载的设备目录。真正决定"要不要弹风险清单、能不能保存"的判定
+ * 走**后端预检端点**（onSave 里），因为风险等级的唯一事实源在后端。
+ * 目录尚未加载完时此值为 0 —— 提示文案会少说一句，但不会漏掉二次确认。
+ */
+const riskyActions = computed(() => form.actions.filter(a => riskBadgeOf(a)))
 
 function validate(): string | null {
   if (!form.name.trim()) return '请填写规则名称'
@@ -555,10 +971,32 @@ function validate(): string | null {
   } else if (form.trigger_type === 'time_window') {
     if (!form.trigger_window_start.trim()) return '请填写开始时间'
     if (!form.trigger_window_end.trim()) return '请填写结束时间'
+  } else if (form.trigger_type === 'sun_event') {
+    // V2 的界面侧前置校验：日出/日落必须有 kind，且坐标/时区三项要"全有或全无"。
+    // 全无 = 继承节点（后端会按节点值解析，节点也没有则 400）；部分填写是无意义组合，
+    // 后端必拒，前端提前拦下来说清原因（见 sunLocationText）。
+    if (!form.trigger_sun_kind) return '请选择日出或日落'
+    if (sunLocationState(form) === 'partial') return '纬度、经度、时区必须同时填写，或全部留空以继承节点'
+    if (form.trigger_sun_offset_min < SUN_OFFSET_MIN || form.trigger_sun_offset_min > SUN_OFFSET_MAX) {
+      return `偏移分钟必须在 ${SUN_OFFSET_MIN} ~ ${SUN_OFFSET_MAX} 之间`
+    }
   }
-  if (form.action_type === 'device_action') {
-    if (!form.action_device_id) return '请选择目标设备'
-    if (!form.action_id.trim()) return '请填写动作 ID'
+  if (form.actions.length === 0) return '请至少添加一个动作'
+  for (const [index, action] of form.actions.entries()) {
+    const where = `第 ${index + 1} 个动作`
+    if (action.action_type === 'device_action') {
+      if (!action.action_device_id) return `${where}：请选择目标设备`
+      if (!action.action_id.trim()) return `${where}：请填写动作 ID`
+      if (action.action_params_json.trim()) {
+        try {
+          JSON.parse(action.action_params_json)
+        } catch {
+          return `${where}：动作参数 JSON 格式错误`
+        }
+      }
+    } else if (!action.action_level) {
+      return `${where}：请选择通知级别`
+    }
   }
   // JSON 校验
   if (form.conditions_json.trim()) {
@@ -569,18 +1007,110 @@ function validate(): string | null {
       return '附加条件 JSON 格式错误'
     }
   }
-  if (form.action_type === 'device_action' && form.action_params_json.trim()) {
-    try {
-      JSON.parse(form.action_params_json)
-    } catch {
-      return '动作参数 JSON 格式错误'
-    }
-  }
   if (form.cooldown_sec < 0 || form.cooldown_sec > 86400) return '冷却时间必须在 0-86400 秒之间'
   if (form.max_daily_exec < 0 || form.max_daily_exec > 1000) return '每日上限必须在 0-1000 之间'
   return null
 }
 
+/**
+ * 组装提交体。
+ *
+ * 三处必须显式处理的映射（都会导致后端 400，且都不是"格式小问题"）：
+ *   ① 下拉代理值 sunrise/sunset → trigger_type='sun_event' + trigger_sun_kind；
+ *   ② 动作卡片 → actions 数组，seq 按**下标**重排（后端 V1: 1..N 连续无重复）；
+ *   ③ 坐标只在整个"全有或全无"组合下提交，否则省略（= 继承节点）。
+ */
+function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
+  syncCoordinates()
+  const payload: CreateAutomationRuleRequest = {
+    name: form.name.trim(),
+    trigger_type: form.trigger_type,
+    conditions_json: form.conditions_json.trim() || undefined,
+    actions: toSequencedActions(form.actions),
+    cooldown_sec: form.cooldown_sec,
+    max_daily_exec: form.max_daily_exec,
+    require_confirmed: form.require_confirmed,
+    enabled: form.enabled,
+  }
+  if (riskAcknowledged !== undefined) payload.risk_acknowledged = riskAcknowledged
+  if (form.trigger_type === 'sensor_threshold') {
+    payload.trigger_sensor_name = form.trigger_sensor_name.trim()
+    payload.trigger_comparator = form.trigger_comparator
+    payload.trigger_threshold = form.trigger_threshold
+    payload.trigger_duration_sec = form.trigger_duration_sec
+    payload.trigger_edge_device_id = form.trigger_edge_device_id
+  } else if (form.trigger_type === 'time_window') {
+    payload.trigger_window_start = form.trigger_window_start.trim()
+    payload.trigger_window_end = form.trigger_window_end.trim()
+    payload.trigger_window_edge = form.trigger_window_edge
+  } else if (form.trigger_type === 'sun_event') {
+    // 后端 fail-closed 的三组字段（方案 §4.1.1）。空串/undefined 一律**省略**，
+    // 而不是发空串 —— 后端用指针区分"未提供"（继承节点）与"提供了空值"。
+    payload.trigger_type = 'sun_event'
+    payload.trigger_sun_kind = form.trigger_sun_kind
+    payload.trigger_sun_offset_min = form.trigger_sun_offset_min
+    if (sunLocationState(form) === 'override') {
+      payload.latitude = form.latitude
+      payload.longitude = form.longitude
+      payload.timezone = form.timezone?.trim()
+    }
+  }
+  return payload
+}
+
+// ── 保存前风险清单二次确认 (R11 / F-4, 用户裁决 O-2) ──────────────────────
+
+interface RiskCheckItem {
+  seq: number
+  action_id: string
+  action_name: string
+  device_name: string
+  /** 后端下发的展示标签（缺失时用 2 级契约的固定文案） */
+  risk_label: string
+  risk_reason: string
+  params_summary: string
+}
+
+const riskDialogVisible = ref(false)
+const riskDialogActions = ref<RiskCheckItem[]>([])
+const ackedSeqs = ref<number[]>([])
+/** 保存成功后真的要执行的提交（避免把已确认的风险清单状态带进下一次保存）。 */
+const pendingSubmit = ref<CreateAutomationRuleRequest | null>(null)
+const riskCancelRef = ref<{ $el?: HTMLElement } | null>(null)
+
+const allRisksAcked = computed(
+  () => riskDialogActions.value.length > 0 && ackedSeqs.value.length === riskDialogActions.value.length,
+)
+
+function toggleAck(seq: number) {
+  ackedSeqs.value = ackedSeqs.value.includes(seq)
+    ? ackedSeqs.value.filter(s => s !== seq)
+    : [...ackedSeqs.value, seq]
+}
+
+function cancelRiskSave() {
+  riskDialogVisible.value = false
+  ackedSeqs.value = []
+  pendingSubmit.value = null
+}
+
+/** 弹窗内某个动作的风险原因：后端 risk_reason 优先，其次回落到卡片同款说明。 */
+function riskItemReason(actionId: string, deviceId: number, backendReason?: string): string {
+  if (backendReason && backendReason.trim()) return backendReason
+  const draft = form.actions.find(a => a.action_id === actionId && a.action_device_id === deviceId)
+  return draft ? riskReasonOf(draft) : '后端未下发风险原因文案，请自行确认该动作对目标设备的影响'
+}
+
+/**
+ * 走**预检端点**决定要不要弹风险清单。
+ *
+ * 为什么不能让前端自己判断"有没有风险动作"：风险等级的唯一事实源在后端
+ * （deviceaction.RiskLevel）。前端自己按 action_id 猜，就等于持有第二份判定 ——
+ * 后端改映射时前端静默漂移，风险清单会被静默跳过。这正是 F-4 反向验证要抓的形态。
+ *
+ * 预检端点不可用时** fail-closed**：拿不到风险清单就不放行保存，而不是"当作没有
+ * 风险动作直接提交"（后者会让风险确认形同虚设）。
+ */
 async function onSave() {
   const err = validate()
   if (err) {
@@ -589,58 +1119,88 @@ async function onSave() {
   }
   saving.value = true
   try {
-    const base = {
-      name: form.name.trim(),
-      trigger_type: form.trigger_type,
-      conditions_json: form.conditions_json.trim() || undefined,
-      action_type: form.action_type,
-      cooldown_sec: form.cooldown_sec,
-      max_daily_exec: form.max_daily_exec,
-      require_confirmed: form.require_confirmed,
-      enabled: form.enabled,
+    const payload = buildPayload()
+    const precheck = await automationApi.precheckRule(payload)
+    if (precheck === null) {
+      feedback.error('保存前风险预检不可用，已阻止保存：无法确认本规则是否包含风险动作（请稍后重试）')
+      return
     }
-    if (form.trigger_type === 'sensor_threshold') {
-      Object.assign(base, {
-        trigger_sensor_name: form.trigger_sensor_name.trim(),
-        trigger_comparator: form.trigger_comparator,
-        trigger_threshold: form.trigger_threshold,
-        trigger_duration_sec: form.trigger_duration_sec,
-        trigger_edge_device_id: form.trigger_edge_device_id,
-      })
-    } else if (form.trigger_type === 'time_window') {
-      Object.assign(base, {
-        trigger_window_start: form.trigger_window_start.trim(),
-        trigger_window_end: form.trigger_window_end.trim(),
-        trigger_window_edge: form.trigger_window_edge,
-      })
+    const blocking = precheck.blocking_errors ?? []
+    if (blocking.length > 0) {
+      ElMessage.warning(blocking[0])
+      return
     }
-    if (form.action_type === 'device_action') {
-      Object.assign(base, {
-        action_device_id: form.action_device_id,
-        action_id: form.action_id.trim(),
-        action_params_json: form.action_params_json.trim() || undefined,
-      })
-    } else {
-      Object.assign(base, {
-        action_level: form.action_level,
-      })
+    const risks = precheck.risk_actions ?? []
+    if (risks.length === 0) {
+      // F-6: 普通动作**无**二次确认，直接落库。
+      await submitRule(buildPayload(form.require_confirmed ? undefined : false))
+      return
     }
-
-    if (editingId.value) {
-      await automationApi.updateRule(editingId.value, base as UpdateAutomationRuleRequest)
-      ElMessage.success('规则已更新')
-    } else {
-      await automationApi.createRule(base as CreateAutomationRuleRequest)
-      ElMessage.success('规则已创建')
-    }
-    dialogVisible.value = false
-    void fetchRules()
-    void fetchEvents()
+    // 含风险动作 ⇒ 弹风险清单，逐项勾选。提交体带 risk_acknowledged=true（O-2 授权）。
+    riskDialogActions.value = risks.map(item => ({
+      seq: item.seq,
+      action_id: item.action_id,
+      action_name: actionNameOf(item.action_id, item.action_device_id, item.action_device_name),
+      device_name: item.action_device_name || deviceName(item.action_device_id),
+      risk_label: item.risk_label || '风险',
+      risk_reason: riskItemReason(item.action_id, item.action_device_id, item.risk_reason),
+      params_summary: item.params_summary
+        || paramsSummary(item.action_params_json)
+        || paramsSummary(form.actions.find(a => a.action_id === item.action_id)?.action_params_json),
+    }))
+    ackedSeqs.value = []
+    pendingSubmit.value = payload
+    riskDialogVisible.value = true
+    await focusRiskCancel()
   } catch {
     feedback.error('保存失败')
   } finally {
     saving.value = false
   }
+}
+
+/** 默认焦点落在**安全侧**（取消），沿用 utils/feedback.ts 的既有裁决（不得诱导性确认）。 */
+async function focusRiskCancel() {
+  await nextTick()
+  const el = riskCancelRef.value?.$el
+  if (el && typeof el.focus === 'function') el.focus()
+}
+
+function actionNameOf(actionId: string, deviceId: number, backendName?: string): string {
+  if (backendName) return backendName
+  const def = catalogDefinition({ uid: 0, action_type: 'device_action', action_device_id: deviceId, action_id: actionId, action_params_json: '', action_level: 'warning' })
+  return def?.name || actionId
+}
+
+/** 逐项勾满后才可调用（按钮 disabled 的同时在函数里再判一次：绕过 UI 也必须被拒）。 */
+async function confirmRiskSave() {
+  if (!allRisksAcked.value) return
+  const payload = pendingSubmit.value
+  if (!payload) return
+  saving.value = true
+  try {
+    await submitRule({ ...payload, risk_acknowledged: true })
+    riskDialogVisible.value = false
+    ackedSeqs.value = []
+    pendingSubmit.value = null
+  } catch {
+    feedback.error('保存失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function submitRule(payload: CreateAutomationRuleRequest) {
+  if (editingId.value) {
+    await automationApi.updateRule(editingId.value, payload as UpdateAutomationRuleRequest)
+    ElMessage.success('规则已更新')
+  } else {
+    await automationApi.createRule(payload)
+    ElMessage.success('规则已创建')
+  }
+  dialogVisible.value = false
+  void fetchRules()
+  void fetchEvents()
 }
 
 async function onToggle(rule: AutomationRule, enabled: boolean) {
@@ -772,6 +1332,48 @@ function operationStatusText(status: string): string {
   return map[status] ?? status
 }
 
+// ── 动作参数编辑弹窗 (R8) ──
+const paramsDialogVisible = ref(false)
+const paramsEditingUid = ref<number | null>(null)
+const paramsDraft = ref('')
+const paramsDraftError = ref('')
+const editingParamsActionId = computed(
+  () => form.actions.find(a => a.uid === paramsEditingUid.value)?.action_id ?? '',
+)
+
+function openParams(uid: number) {
+  const action = form.actions.find(a => a.uid === uid)
+  if (!action) return
+  paramsEditingUid.value = uid
+  paramsDraft.value = action.action_params_json
+  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+  paramsDialogVisible.value = true
+}
+
+/** 空值 = 无参数（合法）；非空必须是 JSON **对象**（数组/标量过不了后端 CanonicalizeParams）。 */
+function validateParamsJson(text: string): string {
+  if (!text.trim()) return ''
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '动作参数必须是 JSON 对象'
+    return ''
+  } catch {
+    return '动作参数 JSON 格式错误'
+  }
+}
+
+function onParamsDraftChange() {
+  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+}
+
+function applyParams() {
+  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+  if (paramsDraftError.value) return
+  const action = form.actions.find(a => a.uid === paramsEditingUid.value)
+  if (action) action.action_params_json = paramsDraft.value.trim()
+  paramsDialogVisible.value = false
+}
+
 // ── 显示辅助 ──
 /** 事件只持久化 rule_id：回链规则名展示，规则已被删除时回退 #id（不留空白）。 */
 function ruleName(ruleId: number): string {
@@ -779,8 +1381,12 @@ function ruleName(ruleId: number): string {
   return hit ? hit.name : `#${ruleId}`
 }
 function triggerTypeText(t: AutomationTriggerType): string {
-  return t === 'sensor_threshold' ? '传感器阈值' : t === 'time_window' ? '时间窗口' : '事件驱动'
+  if (t === 'sensor_threshold') return '传感器阈值'
+  if (t === 'time_window') return '时间窗口'
+  if (t === 'sun_event') return '日出/日落'
+  return '事件驱动'
 }
+/** 触发器摘要：日出/日落与表单里的实时文案**同源**（sunOffsetText），避免两套措辞。 */
 function triggerSummary(rule: AutomationRule): string {
   if (rule.trigger_type === 'sensor_threshold') {
     const cmp = comparators.find(c => c.value === rule.trigger_comparator)?.label ?? rule.trigger_comparator
@@ -790,13 +1396,20 @@ function triggerSummary(rule: AutomationRule): string {
     const edge = rule.trigger_window_edge === 'enter' ? '进入' : rule.trigger_window_edge === 'exit' ? '离开' : '持续'
     return `${rule.trigger_window_start}-${rule.trigger_window_end} ${edge}`
   }
+  if (rule.trigger_type === 'sun_event') {
+    return sunOffsetText(rule.trigger_sun_kind, rule.trigger_sun_offset_min)
+  }
   return UNKNOWN
 }
+/** 动作列摘要：多动作下把所有动作 ID 串起来（单值摘要已无法表达）。 */
 function actionSummary(rule: AutomationRule): string {
-  if (rule.action_type === 'device_action') {
-    return rule.action_id ?? UNKNOWN
-  }
-  return rule.action_level === 'critical' ? '严重' : rule.action_level === 'warning' ? '警告' : '信息'
+  const actions = ruleActions(rule)
+  if (actions.length === 0) return UNKNOWN
+  return actions
+    .map(a => a.action_type === 'notification'
+      ? `通知(${a.action_level === 'critical' ? '严重' : a.action_level === 'warning' ? '警告' : '信息'})`
+      : (a.action_id ?? UNKNOWN))
+    .join(', ')
 }
 function resultText(r: AutomationEventResult): string {
   const map: Record<AutomationEventResult, string> = {
@@ -809,13 +1422,18 @@ function resultText(r: AutomationEventResult): string {
     failed_dispatch: '下发失败',
     notification: '已通知',
     expired: '已过期',
+    confirmation_required: '需确认（未授权）',
+    partial_failure: '部分失败',
+    suppressed_no_solar_event: '无日出日落事件',
   }
   return map[r] ?? r
 }
 function resultTagType(r: AutomationEventResult): 'success' | 'warning' | 'danger' | 'info' {
   if (r === 'executed' || r === 'notification') return 'success'
-  if (r === 'pending_confirm') return 'warning'
-  if (r.startsWith('failed_') || r === 'expired') return 'danger'
+  if (r === 'pending_confirm' || r === 'confirmation_required') return 'warning'
+  // partial_failure 是**危险状态**（设备已被改了一半，需人工介入），必须比 failed_* 更显眼，
+  // 故与 expired/failed_* 同为 danger。
+  if (r.startsWith('failed_') || r === 'expired' || r === 'partial_failure') return 'danger'
   return 'info'
 }
 function formatValue(v: number): string {
@@ -826,6 +1444,48 @@ function formatTime(t?: string | null): string {
   return new Date(t).toLocaleString()
 }
 
+/**
+ * 设备 ID:动作 ID → ActionDefinition 的索引。
+ *
+ * 为什么需要它：动作卡片要显示"目标设备 / 动作名 / 风险徽标"，而这些信息只存在于
+ * 各设备自己的受控操作目录里（GET /edge-devices/:id/actions）。逐卡片各发一次请求
+ * 会变成 N+1，故页面挂载时一次性把**用到的**设备目录取回来建索引。
+ *
+ * 为什么风险徽标走目录而不走预检：见 riskBadgeOf 的注释（预检失败时风险动作会静默
+ * 降级为普通动作）。目录失败时索引为空 ⇒ 徽标不渲染（不猜风险），保存前的预检
+ * 仍会把风险动作拦下来，故不会漏确认。
+ */
+const actionCatalog = ref(new Map<string, ActionDefinition>())
+const catalogLoading = ref(false)
+
+async function loadActionCatalog() {
+  const ids = new Set<number>()
+  for (const rule of rules.value) {
+    for (const action of ruleActions(rule)) {
+      if (action.action_type === 'device_action' && action.action_device_id) ids.add(action.action_device_id)
+    }
+  }
+  if (ids.size === 0) {
+    actionCatalog.value = new Map()
+    return
+  }
+  catalogLoading.value = true
+  const next = new Map(actionCatalog.value)
+  await Promise.all([...ids].map(async (id) => {
+    try {
+      const items = await deviceOperationApi.actions(id)
+      for (const item of items) {
+        const def = item.definition
+        next.set(`${id}:${def.id}`, def)
+      }
+    } catch {
+      /* 单个设备目录失败不阻塞页面：该卡片不渲染风险徽标，保存前的预检仍会拦风险动作 */
+    }
+  }))
+  actionCatalog.value = next
+  catalogLoading.value = false
+}
+
 onMounted(async () => {
   await Promise.all([fetchRules(), fetchEvents()])
   try {
@@ -834,6 +1494,7 @@ onMounted(async () => {
   } catch {
     /* 设备下拉加载失败不阻塞页面 */
   }
+  await loadActionCatalog()
 })
 
 // ── G5：人工确认事件到达时自动刷新，不要求用户手动翻页/重进 ──
@@ -847,23 +1508,57 @@ onMounted(async () => {
 // 订阅的事件名是**后端实际推送的字面量**（`planner.go:474/525/550`），
 // 它们尚未收进 `events/events.ts` 的 WS_EVENT 枚举（枚举缺失是既有债，
 // 这里先用字面量并注释出处，避免为 3 个事件扩枚举引发更大范围的改动）。
+//
+// B4 新增两个事件名的订阅（方案 §4.3）：
+//   · `automation_confirmation_required` —— C5 消除的**前端闭环**：自动路径上的风险动作
+//     被确认门拦住时，前端必须给出用户可见的提示，而不是只往事件表里写一行
+//     （改造前该结果落 failed_dispatch，与"传输失败"在界面上无法区分，用户看不到
+//     任何可行动信号）。这里**显式提示 + 带规则名**，并把事件表刷出来。
+//   · `automation_partial_failure` —— 多动作执行到第 k 个失败、剩余已中止。这是
+//     危险状态（设备已被改了一半），必须显式提示"需要人工介入"，不能等用户翻事件表。
 const wsStore = useWebSocketStore()
 const AUTOMATION_PUSH_EVENTS = [
   'automation_pending_confirm',
   'automation_daily_limit',
   'automation_system_actor_unavailable',
+  'automation_confirmation_required',
+  'automation_partial_failure',
 ] as const
 let unsubscribeAutomationPushes: Array<() => void> = []
 
+/** WS 载荷可能嵌一层 notification 实体，detail 里才有规则名/动作名。 */
+function pushDetail(message: { payload?: { detail?: Record<string, unknown> } } & Record<string, unknown>): Record<string, unknown> {
+  const payload = (message.payload ?? {}) as Record<string, unknown>
+  const detail = (payload.detail ?? {}) as Record<string, unknown>
+  return { ...payload, ...detail }
+}
+
+function onAutomationPush(name: string, message: unknown) {
+  const detail = pushDetail(message as { payload?: { detail?: Record<string, unknown> } })
+  if (name === 'automation_confirmation_required') {
+    const rule = detail.rule_name ?? detail.rule_id ?? ''
+    const action = detail.action_id ?? ''
+    ElMessage.warning(
+      `规则「${rule}」的风险动作 ${action} 未获授权，已被确认门拦下：请在本页「触发历史」中对相应事件执行确认，或在编辑规则时勾选风险确认。`,
+    )
+  } else if (name === 'automation_partial_failure') {
+    const rule = detail.rule_name ?? detail.rule_id ?? ''
+    const seq = detail.failed_seq ?? ''
+    const failed = detail.failed_action_id ?? ''
+    ElMessage.error(
+      `规则「${rule}」第 ${seq} 个动作 ${failed} 执行失败，剩余动作已中止 —— 设备可能处于部分变更状态，请立即人工核查。`,
+    )
+  }
+  // 只刷事件表（确认动作就是针对事件行的）；规则表结构不受推送影响。
+  // 失败不打扰用户：这是被动刷新，页面上仍有手动「刷新」按钮兜底。
+  void fetchEvents().catch((err: unknown) => {
+    logger.warn('自动化推送触发的刷新失败', { error: String(err), event: name })
+  })
+}
+
 onMounted(() => {
   try {
-    unsubscribeAutomationPushes = AUTOMATION_PUSH_EVENTS.map(name => wsStore.subscribe(name, () => {
-      // 只刷事件表（确认动作就是针对事件行的）；规则表结构不受推送影响。
-      // 失败不打扰用户：这是被动刷新，页面上仍有手动「刷新」按钮兜底。
-      void fetchEvents().catch((err: unknown) => {
-        logger.warn('自动化推送触发的刷新失败', { error: String(err), event: name })
-      })
-    }))
+    unsubscribeAutomationPushes = AUTOMATION_PUSH_EVENTS.map(name => wsStore.subscribe(name, message => onAutomationPush(name, message)))
   } catch (err: unknown) {
     // 订阅失败不得阻塞页面（无 WS 时页面仍可手动刷新）。
     logger.warn('自动化推送订阅失败', { error: String(err) })
@@ -902,4 +1597,151 @@ onUnmounted(() => {
 .table-empty { color: var(--el-text-color-secondary); }
 .table-empty p { margin: 0; }
 .table-empty-hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
+
+/* ============================================================================
+   日出/日落字段组 (设计稿 §5 R6 / §6 D-2)
+   ========================================================================== */
+.sun-offset-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 提示行与输入框同排时 margin-left:8px（.hint 既有口径），此处不需要额外偏移 */
+.sun-offset-row .hint { margin-left: 0; }
+.hint-block { margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
+.sun-location { width: 100%; }
+.sun-location__state {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+/* 部分填写是**错误状态**（后端必拒），用 warning 色提前告警；仅靠颜色不够，
+   文案本身已说明"必须同时填写"（见 sunLocationText）。 */
+.sun-location__state[data-state="partial"] { color: var(--el-color-warning); font-weight: 600; }
+.sun-location__fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+
+/* ============================================================================
+   多动作卡片列表 (设计稿 §5 R7-R8 / §6 D-3 D-6)
+   ========================================================================== */
+.action-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.action-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.action-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--el-bg-color);
+}
+/* 风险卡片的**第一条非颜色通道**：左侧红边 + 浅红底（徽标与原因块是另外两条）。
+   四重编码见设计 D-6：图标 / 文字 / 徽标色 / 卡片边。 */
+.action-card.is-risk {
+  border-color: var(--el-color-danger-light-5);
+  border-left: 3px solid var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+}
+.action-card__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.action-card__index {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  font-size: 12px; font-weight: 600; flex: 0 0 auto;
+}
+.action-card__name { font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
+.action-card__ops { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.risk-badge { font-weight: 600; }
+.normal-badge { flex: 0 0 auto; }
+.action-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; margin: 10px 0 0; }
+.action-meta > div { display: flex; gap: 6px; min-width: 0; align-items: center; }
+.action-meta > div.span2 { grid-column: 1 / -1; }
+.action-meta dt { flex: 0 0 auto; color: var(--el-text-color-secondary); font-size: 12px; }
+.action-meta dd { margin: 0; font-size: 12px; color: var(--el-text-color-regular); overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.action-meta dd :deep(.el-select) { width: 100%; }
+/* 风险原因块：第二条非颜色通道（与徽标并存的文本块）。 */
+.risk-reason {
+  display: flex; gap: 8px; align-items: flex-start; margin-top: 10px;
+  padding: 8px 10px; border-left: 3px solid var(--el-color-danger);
+  border-radius: 4px; background: var(--el-bg-color);
+  font-size: 12px; color: var(--el-text-color-regular); line-height: 1.6;
+}
+.risk-reason__icon { color: var(--el-color-danger); font-weight: 700; flex: 0 0 auto; }
+.risk-reason__label { font-weight: 600; color: var(--el-color-danger); }
+.ack-hint {
+  margin: -6px 0 12px 110px;
+  padding: 6px 10px;
+  border: 1px dashed var(--el-color-warning-light-5);
+  border-radius: 4px;
+  background: var(--el-color-warning-light-9);
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+.params-error { margin: 6px 0 0; font-size: 12px; color: var(--el-color-danger); }
+
+/* ============================================================================
+   保存前风险清单弹窗 (设计稿 §5 R11 / §6 D-5)
+   ========================================================================== */
+.risk-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.risk-item {
+  border: 1px solid var(--el-color-danger-light-5);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--el-bg-color);
+}
+.risk-item__name {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-weight: 600; color: var(--el-text-color-primary); font-size: 14px;
+}
+.risk-item__meta { display: grid; grid-template-columns: 1fr; gap: 2px; margin: 8px 0 0; }
+.risk-item__meta > div { display: flex; gap: 6px; font-size: 12px; min-width: 0; }
+.risk-item__meta dt { flex: 0 0 60px; color: var(--el-text-color-secondary); }
+.risk-item__meta dd { margin: 0; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+.risk-ack { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; font-size: 13px; color: var(--el-text-color-regular); cursor: pointer; line-height: 1.6; }
+.risk-ack input { width: 16px; height: 16px; margin: 3px 0 0; flex: 0 0 auto; accent-color: var(--el-color-danger); }
+.risk-ack input:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
+.ack-progress { margin-right: auto; font-size: 12px; color: var(--el-text-color-secondary); }
+
+/* ============================================================================
+   窄屏：768px 主断点（与 theme.css / useResponsive 同源）
+   ========================================================================== */
+@media (max-width: 768px) {
+  .action-meta { grid-template-columns: 1fr; }
+  .sun-location__fields { grid-template-columns: 1fr; }
+  .ack-hint { margin-left: 0; }
+}
+
+/* ============================================================================
+   窄屏：480px 加强档 (F-10；设计稿 §7)
+   为什么弹窗要变底部抽屉：640px 宽的规则编辑器在 390px 视口下即使 92vw 也只有
+   359px 可用宽，表单标签 + 控件会被压到逐字换行；而保存前确认弹窗内容长度不可控
+   （风险动作越多越长），全屏抽屉能让内容区独立滚动且 footer 常驻可达。
+   ========================================================================== */
+@media (max-width: 480px) {
+  .card { padding: 12px; }
+  /* 动作卡操作区换行到第二行、右对齐，并补足触控高度（theme.css 的 36px/44px 口径）。 */
+  .action-card__head { align-items: flex-start; }
+  .action-card__name { flex: 1 1 100%; }
+  .action-card__ops { margin-left: 0; width: 100%; justify-content: flex-end; gap: 2px; }
+  .action-card__ops :deep(.el-button) { min-height: 36px; }
+  /* dt/dd 上下堆叠：避免"风险原因"这类长标签挤压正文。 */
+  .action-meta > div { flex-direction: column; gap: 0; align-items: stretch; }
+  .risk-item__meta > div { flex-direction: column; gap: 0; }
+  .risk-item__meta dt { flex: none; }
+  /* 弹窗改为底部抽屉：满宽、贴底、顶部圆角、内容区独立滚动。 */
+  :deep(.el-dialog) {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    border-radius: 12px 12px 0 0 !important;
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+  }
+  :deep(.el-dialog__body) { overflow: auto; }
+  :deep(.el-dialog__footer) { display: flex; flex-wrap: wrap; gap: 8px; }
+  :deep(.el-dialog__footer .el-button) { flex: 1 1 auto; min-height: 44px; }
+  .ack-progress { flex: 1 1 100%; margin: 0 0 4px; }
+}
 </style>
