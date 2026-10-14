@@ -1,4 +1,5 @@
 import client from './client'
+import type { RiskLevel } from './deviceOperation'
 
 /**
  * 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1 + 设计/自动化确认制闭环实现方案.md)。
@@ -8,11 +9,20 @@ import client from './client'
  *   人工经 confirmEvent 确认后才真正下发 commandexec。
  */
 
-/** 触发器类型 (与后端 models/automation.go:18-22 对齐) */
+/** 触发器类型 (与后端 models/automation.go:18-23 对齐) */
 export type AutomationTriggerType =
   | 'sensor_threshold' // 数据驱动: 滑动窗口连续满足
   | 'time_window'      // 时钟驱动: 每日窗口 enter/exit/inside
+  | 'sun_event'        // 时钟驱动: 每日日出/日落瞬时点事件 (用户裁决 O-4)
   | 'event'            // 事件驱动 (本期占位; 创建时后端禁配, 更新兼容存量)
+
+/**
+ * 日出/日落事件种类 (后端 models/automation.go:31-34 的 AutomationSunKind*)。
+ *
+ * 为什么是独立字段而不是把 "sunrise-30" 写进 time_window 的 HH:MM 字段:
+ * 那个列是 size:5、"时刻"语义, 承载方言会破坏列宽与解析器 (O-4 裁决)。
+ */
+export type SunEventKind = 'sunrise' | 'sunset'
 
 /** 比较符 (复用 alert 阈值原语) */
 export type AutomationComparator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'
@@ -42,6 +52,9 @@ export type AutomationEventResult =
   | 'failed_dispatch'         // commandexec.Create 调用失败
   | 'notification'            // 纯通知动作已发出
   | 'expired'                 // pending_confirm 超时未确认 (24h 清扫置位)
+  | 'confirmation_required'   // 自动路径被确认门拦住 (规则未授权风险动作); 与 failed_dispatch 分开, 是"需人工确认"不是"故障"
+  | 'partial_failure'         // 多动作执行到第 k 个失败、剩余已中止 (危险状态: 设备已被改了一半, 需人工介入)
+  | 'suppressed_no_solar_event' // 极昼/极夜: 本日无日出/日落事件, 规则本日不触发 (显式审计, 不静默)
 
 /** 自动化策略规则 */
 export interface AutomationRule {
@@ -61,15 +74,38 @@ export interface AutomationRule {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  /** sun_event: 日出/日落二选一 (后端 fail-closed 必填, 方案 V2) */
+  trigger_sun_kind?: SunEventKind
+  /** sun_event: 相对日出/日落时刻的偏移分钟, **可负** (负=提前), 范围 [-720, 720] */
+  trigger_sun_offset_min?: number
+  /** 规则级坐标覆盖; 缺省 (undefined) = 继承节点值 (用户裁决 O-3: 节点级为权威) */
+  latitude?: number
+  longitude?: number
+  /** 规则级时区覆盖 (IANA 名); 缺省 = 继承节点值 */
+  timezone?: string
   /** 附加条件 AND 列表 JSON (同一解析后字段批内复核) */
   conditions_json?: string
 
-  // ── Action ──
+  // ── Action (兼容期镜像列 = seq 最小的动作; 多动作用下面的 actions 数组) ──
   action_type: AutomationActionType
   action_device_id?: number
   action_id?: string
   action_params_json?: string
   action_level?: AutomationActionLevel
+
+  /**
+   * 动作集合 (后端 automation_rule_actions 子表, 方案 §3.2.3 M1)。
+   *
+   * 为什么与单动作镜像列并存: 兼容期后端双写, 老客户端读镜像列、新客户端读本数组。
+   * 本数组按 seq 升序, 是**完整的动作集合**; 前端一律以它为准。
+   */
+  actions?: AutomationAction[]
+  /**
+   * 风险动作的规则级授权时刻 (用户裁决 O-2)。只读 —— 由后端在保存时写入,
+   * 客户端不得直接赋值 (写入途径是请求体的 risk_acknowledged)。
+   * null/undefined = 未授权: 该规则的风险动作在自动路径上仍会被确认门拦住。
+   */
+  risk_acknowledged_at?: string | null
 
   // ── 执行约束 ──
   /** 冷却期 (默认 300s), 触发后抑制 */
@@ -81,6 +117,69 @@ export interface AutomationRule {
 
   created_at: string
   updated_at: string
+}
+
+/**
+ * 单个动作 (后端 automation_rule_actions 子表, 方案 §4.1.1)。
+ *
+ * risk_level / requires_confirmation 是**预检端点回填的派生值** (后端据目标设备的
+ * Action Catalog 归一化后下发), 规则列表/详情的 actions 里不含这两个字段。
+ * 前端只做样式映射, 不得自行判断风险等级 (防漂移门禁 F-7)。
+ */
+export interface AutomationAction {
+  /** 1 起, 同规则内唯一, 升序串行执行 (后端唯一索引 (rule_id, seq) 兜底) */
+  seq: number
+  action_type: AutomationActionType
+  /** device_action 必填 */
+  action_device_id?: number
+  /** device_action 必填 */
+  action_id?: string
+  /** 参数 JSON 串 (后端逐动作过 CanonicalizeParams) */
+  action_params_json?: string
+  /** notification 必填 */
+  action_level?: AutomationActionLevel
+  /** 单个动作开关 (后端缺省 true) */
+  enabled?: boolean
+  /** 后端下发的 2 级风险契约 (仅预检响应回填) */
+  risk_level?: RiskLevel
+  /** 后端下发的确认要求 (仅预检响应回填) —— 前端一律读它, 不自己算风险 */
+  requires_confirmation?: boolean
+}
+
+/** 提交时的动作输入 (字段与 AutomationAction 相同, 服务端字段为只读不下发) */
+export type AutomationActionInput = AutomationAction
+
+/** 预检响应里的单个风险动作 (方案 §4.1.2)。 */
+export interface PrecheckRiskAction {
+  seq: number
+  action_id: string
+  action_device_id: number
+  /** 后端回填的目标设备名 (前端不必自己查表, 避免与后端不一致) */
+  action_device_name?: string
+  risk_level?: RiskLevel
+  /** 后端给的展示标签 (如"风险"); 缺失时前端才回落到 risk_level 映射 */
+  risk_label?: string
+  /**
+   * **风险原因**: 后端可选的面向用户的"为什么危险"说明。
+   *
+   * 用户裁决 O-2 = 后端 risk_reason 字段为单一事实源; 该字段当前后端未实现
+   * (设计稿 §9 O-2 记录在前端硬编码会漂移, 故不落地前端映射表)。字段缺失时
+   * 前端**如实说明原因文案尚未提供**, 不得编造危险说明 (安全文案不得编造)。
+   */
+  risk_reason?: string
+  /** 后端给的参数摘要 (缺失时前端用 action_params_json 自行格式化) */
+  params_summary?: string
+  /** 后端可能回带参数 JSON 原文 (若后端只给摘要则此处为空) */
+  action_params_json?: string
+}
+
+/** POST /api/v1/automation-rules/precheck 响应 data (方案 §4.1.2, 只读无副作用) */
+export interface PrecheckResponse {
+  /** **全部**风险动作 (含 seq/设备/参数), 前端据此渲染保存前风险清单 */
+  risk_actions?: PrecheckRiskAction[]
+  /** 与 V1-V7 相同的校验失败 (前端可在弹窗前拦截并逐条展示) */
+  blocking_errors?: string[]
+  warnings?: string[]
 }
 
 export interface CreateAutomationRuleRequest {
@@ -95,15 +194,30 @@ export interface CreateAutomationRuleRequest {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  /** sun_event 必填 (后端 V2) */
+  trigger_sun_kind?: SunEventKind
+  /** 偏移分钟, 可负; 缺省 0 (恰好在事件时刻) */
+  trigger_sun_offset_min?: number
+  /** 规则级坐标/时区覆盖; 省略 = 继承节点 (null 与省略语义不同, 见后端 V2/V3) */
+  latitude?: number
+  longitude?: number
+  timezone?: string
   conditions_json?: string
-  action_type: AutomationActionType
+  action_type?: AutomationActionType
   action_device_id?: number
   action_id?: string
   action_params_json?: string
   action_level?: AutomationActionLevel
+  /** 多动作新形态: 与旧单动作字段二选一, 同时给且不一致时后端 400 */
+  actions?: AutomationActionInput[]
   cooldown_sec?: number
   max_daily_exec?: number
   require_confirmed?: boolean
+  /**
+   * O-2 规则级授权: 保存含风险动作的规则时, 用户已在风险清单弹窗逐项确认。
+   * 注意这与 require_confirmed=false 是**两个**条件, 后端 V7 要求二者齐备才放行。
+   */
+  risk_acknowledged?: boolean
 }
 
 export interface UpdateAutomationRuleRequest {
@@ -118,15 +232,24 @@ export interface UpdateAutomationRuleRequest {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  trigger_sun_kind?: SunEventKind
+  trigger_sun_offset_min?: number
+  latitude?: number
+  longitude?: number
+  timezone?: string
   conditions_json?: string
   action_type?: AutomationActionType
   action_device_id?: number
   action_id?: string
   action_params_json?: string
   action_level?: AutomationActionLevel
+  /** 非空数组时**整体替换**动作集合 (后端语义) */
+  actions?: AutomationActionInput[]
   cooldown_sec?: number
   max_daily_exec?: number
   require_confirmed?: boolean
+  /** 同创建: 显式确认/撤回对风险动作的规则级授权 */
+  risk_acknowledged?: boolean
 }
 
 /** 策略触发/执行审计 (后端 AutomationEvent, 一行 = 一次触发决策) */
@@ -143,6 +266,11 @@ export interface AutomationEvent {
   result: AutomationEventResult
   /** 关联 commandexecutions (device_action 执行时回填) */
   command_id?: string
+  /**
+   * 多动作执行中"失败/部分失败发生在第几个动作" (1 起, 与 automation_rule_actions.seq 同域)。
+   * 规则级事件 (冷却抑制/日熔断/待确认) 无动作维度, 后端给 null ⇒ 此处 undefined。
+   */
+  action_seq?: number | null
   /** 失败/抑制原因 */
   detail?: string
   created_at: string
@@ -199,6 +327,23 @@ export const automationApi = {
   },
   async updateRule(id: number, data: UpdateAutomationRuleRequest): Promise<AutomationRule> {
     return unwrap<AutomationRule>(client.put(`/api/v1/automation-rules/${id}`, data))
+  },
+  /**
+   * 保存前风险预检 (**只读, 无副作用** —— 方案 §8 A-12 要求该端点不得落库)。
+   *
+   * 为什么需要它: 风险清单弹窗必须列出"**全部**风险动作"及其目标设备/参数/原因,
+   * 而风险等级的唯一事实源在后端 (deviceaction.RiskLevel)。前端自己按 action_id
+   * 猜风险等级就会出现第二份判定 —— 后端改映射时前端静默漂移。
+   *
+   * 返回 null 表示预检端点不可用 (后端未实现 / 网络失败): 调用方**必须 fail-closed**
+   * 处理 —— 风险动作清单拿不到时不得放行保存, 否则风险清单弹窗会被静默跳过。
+   */
+  async precheckRule(data: CreateAutomationRuleRequest): Promise<PrecheckResponse | null> {
+    try {
+      return await unwrap<PrecheckResponse>(client.post('/api/v1/automation-rules/precheck', data))
+    } catch {
+      return null
+    }
   },
   async deleteRule(id: number): Promise<void> {
     await client.delete(`/api/v1/automation-rules/${id}`)
