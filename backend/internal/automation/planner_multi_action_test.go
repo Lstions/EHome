@@ -13,12 +13,12 @@ package automation
 import (
 	"encoding/json"
 	"sort"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/models"
+
+	"gorm.io/gorm"
 )
 
 // multiActionRule 造一条自动触发 + 多动作的规则 (无冷却/无限额, 走真实 commandexec)。
@@ -68,39 +68,52 @@ func addAction(t *testing.T, pl *Planner, ruleID uint, seq int, actionID, params
 	}
 }
 
-// execRows 取回本次触发生成的 command_executions, 按"执行顺序"返回。
+// recordPinOrder 记录 action_executions 的**真实调用顺序** (每次 Create 成功时追加)。
 //
-// 排序判据 = 幂等键里的 action_seq 段。为什么不用 created_at: 三个动作在同一
-// 毫秒内落库 (SQLite 的 time 列精度到毫秒), created_at 不构成全序; 而 idempotency_key
-// 里的 action_seq 是 planner 明确写入的执行序号, 是"顺序"这件事在数据里的直接投影。
-// 用 rowid 之类的方言列更不行 —— 该文件必须同时能在 PG 测试库 (EHOME_TEST_DB=postgres) 上跑。
+// 为什么必须记录调用顺序, 而不是查库后排序: 三个动作在同一毫秒内落库, 查询侧
+// 没有任何可靠的全序判据 (created_at 精度不够; rowid 是 SQLite 方言; 幂等键里的
+// action_seq 是 planner 写进去的, 与"谁先被调用"无关)。第一版判据正是排序式的,
+// 反向验证时把 Order("seq ASC") 改成 DESC 仍然绿 —— 那是假绿, 已废弃。
+//
+// 用 GORM 的 Create 回调记录: 回调按语句执行顺序同步触发, 因此追加顺序就是
+// planner 的调用顺序。
+func recordPinOrder(t *testing.T, pl *Planner) *[]int {
+	t.Helper()
+	order := &[]int{}
+	err := pl.db.Callback().Create().After("gorm:create").Register("test:record-pin-order",
+		func(tx *gorm.DB) {
+			if tx.Statement.Table != "command_executions" {
+				return
+			}
+			row, ok := tx.Statement.Dest.(*models.CommandExecution)
+			if !ok {
+				return
+			}
+			var params struct {
+				Pin int `json:"pin"`
+			}
+			if err := json.Unmarshal([]byte(row.ParamsJSON), &params); err != nil {
+				return
+			}
+			*order = append(*order, params.Pin)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return order
+}
+
+// execRows 取回全部 command_executions (无序 —— 需要顺序的断言请用 recordPinOrder)。
 func execRows(t *testing.T, pl *Planner) []models.CommandExecution {
 	t.Helper()
 	var rows []models.CommandExecution
 	if err := pl.db.Find(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		return actionSeqOf(t, rows[i].IdempotencyKey) < actionSeqOf(t, rows[j].IdempotencyKey)
-	})
 	return rows
 }
 
-// actionSeqOf 从幂等键 automation:<rule>:<date>:<trigger_seq>:<action_seq> 取最后一段。
-func actionSeqOf(t *testing.T, key string) int {
-	t.Helper()
-	parts := strings.Split(key, ":")
-	if len(parts) == 0 {
-		t.Fatalf("幂等键为空, 无法判定执行顺序")
-	}
-	v, err := strconv.Atoi(parts[len(parts)-1])
-	if err != nil {
-		t.Fatalf("幂等键 %q 的最后一段不是 action_seq: %v", key, err)
-	}
-	return v
-}
-
-// commandPinOrder 返回该规则触发生成的 command_executions 的 pin 顺序 (按执行顺序)。
+// commandPinOrder 返回该规则触发生成的 command_executions 的 pin 集合, 顺序不定。
 func commandPinOrder(t *testing.T, pl *Planner) []int {
 	t.Helper()
 	rows := execRows(t, pl)
@@ -114,6 +127,7 @@ func commandPinOrder(t *testing.T, pl *Planner) []int {
 		}
 		order = append(order, params.Pin)
 	}
+	sort.Ints(order)
 	return order
 }
 
@@ -128,18 +142,24 @@ func TestMultiActionExecutesInSeqOrder(t *testing.T) {
 	addAction(t, pl, rule.ID, 2, "gpio_set", `{"pin":6,"level":1}`)
 	addAction(t, pl, rule.ID, 3, "gpio_set", `{"pin":5,"level":1}`)
 
+	// 记录**真实调用顺序** (回调按语句执行顺序追加), 而不是查库后排序 —— 见
+	// recordPinOrder 的说明: 同毫秒落库让查询侧没有可靠的全序判据, 第一版
+	// 排序式判据在"倒序执行"的注入下仍然绿, 属假绿。
+	callOrder := recordPinOrder(t, pl)
 	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
 
-	got := commandPinOrder(t, pl)
 	want := []int{7, 6, 5}
-	if len(got) != len(want) {
-		t.Fatalf("command_executions 行数=%d want %d (%v)", len(got), len(want), got)
+	if len(*callOrder) != len(want) {
+		t.Fatalf("实际执行的动作数=%d want %d (%v)", len(*callOrder), len(want), *callOrder)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("第 %d 个执行的动作 pin=%d want %d —— 必须严格按 seq 升序串行 (%v)",
-				i+1, got[i], want[i], got)
+		if (*callOrder)[i] != want[i] {
+			t.Fatalf("第 %d 个被调用执行的 pin=%d want %d —— 必须严格按 seq 升序串行 (%v)",
+				i+1, (*callOrder)[i], want[i], *callOrder)
 		}
+	}
+	if got := commandPinOrder(t, pl); len(got) != len(want) {
+		t.Fatalf("command_executions 行数=%d want %d", len(got), len(want))
 	}
 	// 规则级只落一条事件 (方案 §3.2.4 审计)。
 	var events int64
@@ -164,11 +184,8 @@ func TestMultiActionSameActionIDNotSwallowed(t *testing.T) {
 	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
 
 	got := commandPinOrder(t, pl)
-	if len(got) != 2 {
-		t.Fatalf("同设备同 action_id 的两个动作必须各产生一行 command_executions, 实际 %d 行 (%v) —— 幂等键缺 action_seq 段会吞掉第二个", len(got), got)
-	}
-	if got[0] != 5 || got[1] != 6 {
-		t.Fatalf("两个动作的 pin 顺序=%v want [5 6]", got)
+	if len(got) != 2 || got[0] != 5 || got[1] != 6 {
+		t.Fatalf("同设备同 action_id 的两个动作必须各产生一行 command_executions (pin 集合 [5 6]), 实际 %v —— 幂等键缺 action_seq 段会吞掉第二个", got)
 	}
 	var ev models.AutomationEvent
 	pl.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev)
@@ -201,7 +218,7 @@ func TestMultiActionPartialFailureAbortsRemaining(t *testing.T) {
 	// 第 1 个动作已执行 (1 行), 第 3 个动作必须**未执行** (失败中止剩余)。
 	got := commandPinOrder(t, pl)
 	if len(got) != 1 || got[0] != 5 {
-		t.Fatalf("command_executions=%v want [5] —— 失败后必须中止剩余动作, 且已执行的不回滚", got)
+		t.Fatalf("command_executions=%v want [5] —— 失败后必须中止剩余动作 (第 3 个的 pin=6 绝不出现), 且已执行的不回滚", got)
 	}
 }
 

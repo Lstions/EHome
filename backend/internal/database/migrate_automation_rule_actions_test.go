@@ -124,6 +124,44 @@ func TestMigrateAutomationRuleActionsDoesNotOverwriteExisting(t *testing.T) {
 	}
 }
 
+// 反向验证的第二只眼 (真正的"会咬"判据): 把唯一索引摘掉再注入"没有 NOT EXISTS"。
+//
+// 为什么需要它: 唯一索引 (rule_id, seq) 本身就挡住了重复插入 —— 只靠"行数不变"
+// 或"第二次不报错"判幂等时, 去掉 NOT EXISTS 判据依然绿 (索引把错误吞成了跳过),
+// 门禁是假绿。本用例先把索引摘掉, 让重复插入成为**可以真的发生**的事, 再断言
+// "行数仍为 1" —— 此时幂等只能由 SQL 里的 NOT EXISTS 判据自己保证。
+//
+// 注入验证: 去掉 NOT EXISTS 判据 → 本用例行数变 2 → 红。
+//
+// 摘索引只作用于本用例自己创建的临时索引名, 不改模型与生产 DDL; t.Cleanup 还原。
+func TestBackfillIdempotencyJudgementActuallyBites(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	seedLegacyRule(t, db, "咬合规则", "set_mos_policy")
+
+	// 摘掉 (rule_id, seq) 唯一索引: 这样"重复插入 seq=1"不再被 DB 拒绝,
+	// 幂等必须由 SQL 里的 NOT EXISTS 判据自己保证。
+	if err := db.Exec("DROP INDEX idx_automation_rule_actions_rule_seq").Error; err != nil {
+		t.Fatalf("摘除唯一索引失败 (测试环境与预期 schema 不符): %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_rule_actions_rule_seq ON automation_rule_actions(rule_id, seq)")
+	})
+
+	if _, err := MigrateAutomationRuleActions(db); err != nil {
+		t.Fatalf("首次回填失败: %v", err)
+	}
+	if got := countRuleActions(t, db); got != 1 {
+		t.Fatalf("首次回填后行数=%d want 1", got)
+	}
+
+	if _, err := MigrateAutomationRuleActions(db); err != nil {
+		t.Fatalf("第二次回填失败: %v", err)
+	}
+	if got := countRuleActions(t, db); got != 1 {
+		t.Fatalf("行数=%d want 1 —— 无唯一索引兜底时, 幂等必须由 NOT EXISTS 判据本身保证", got)
+	}
+}
+
 // 边界: 空库 / 无规则时不得报错, 也不得产生行。
 func TestMigrateAutomationRuleActionsOnEmptyDatabase(t *testing.T) {
 	db := testutil.OpenTestDB(t)
