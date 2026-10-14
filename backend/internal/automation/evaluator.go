@@ -16,6 +16,7 @@ import (
 
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sun"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/parser"
 
@@ -86,6 +87,35 @@ type Evaluator struct {
 	// 若在窗口内则触发, exit 规则首次 tick 若在窗口内则不触发)。
 	windowStates map[uint]bool
 
+	// sunStates 记录 sun_event 规则"本节点本地日是否已触发过" (rule ID → 本地日期)。
+	//
+	// 为什么是日期而不是 bool: 日出日落是瞬时点事件, 1 分钟 tick 会在事件时刻之后
+	// 的每一分钟命中同一个事件。记录"已触发的本地日期"后, 日期翻转即天然表示
+	// "新一日可再触发", 不需要额外的跨日清理逻辑 (方案 §6.2 状态机)。
+	//
+	// 重启后清空 + **首 tick 保守不触发** (见 evalSunEventRule):
+	// 与 windowStates 的区间边沿语义不同, 点事件无法区分"重启前已触发"与
+	// "重启错过了", 故一律按保守处理 (方案 §6.2)。
+	sunStates map[uint]string
+
+	// sunCache 是日出日落计算的进程内缓存 (key 含 lat/lon/tzName/localDate/kind)。
+	// 纯内存, 重启后首次 tick 重算 —— 重算成本是一次纯函数调用, 无外部依赖
+	// (方案 §3.1.4: 与 windowStates 重启清空同族, 可接受)。
+	sunCache *sun.Cache
+
+	// sunLocationErr 记录"当前缓存里哪些 sun_event 规则解析坐标/时区失败",
+	// 用于**每天只落一条**审计 (防刷量), key=ruleID → 已落审计的本地日期。
+	sunLocationAudit map[uint]string
+
+	// firstSunTick 标记"本进程尚未执行过任何 sun_event tick"。
+	//
+	// 语义 (方案 §6.2, A-3 钉死): 首个 tick 只**登记状态、不触发**。理由:
+	// 重启后无法区分"事件已过且已触发过"与"重启错过了事件", 而冷却锚点
+	// last_triggered_at 已在 rebuildCooldowns 恢复 —— 若当日已触发过, 冷却会拦;
+	// 若未触发过, 说明重启发生在事件时刻之前, 此时 now >= eventTime 不成立。
+	// 故"保守不触发"与锚点恢复配合后不会漏触发真实事件。
+	firstSunTick bool
+
 	stopCh chan struct{}
 	once   sync.Once
 }
@@ -93,13 +123,17 @@ type Evaluator struct {
 // NewEvaluator 构造求值器并全量加载 enabled 规则缓存。
 func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 	e := &Evaluator{
-		db:           db,
-		handler:      handler,
-		rules:        make(map[uint]models.AutomationRule),
-		windows:      make(map[uint][]sample),
-		triggered:    make(map[uint]time.Time),
-		windowStates: make(map[uint]bool),
-		stopCh:       make(chan struct{}),
+		db:               db,
+		handler:          handler,
+		rules:            make(map[uint]models.AutomationRule),
+		windows:          make(map[uint][]sample),
+		triggered:        make(map[uint]time.Time),
+		windowStates:     make(map[uint]bool),
+		sunStates:        make(map[uint]string),
+		sunCache:         sun.NewCache(),
+		sunLocationAudit: make(map[uint]string),
+		firstSunTick:     true,
+		stopCh:           make(chan struct{}),
 	}
 	e.LoadRules()
 	e.rebuildCooldowns()
@@ -204,13 +238,25 @@ func parseDBTime(s string) (time.Time, error) {
 	return time.Time{}, err
 }
 
-// LoadRules 全量加载 enabled 的 sensor_threshold + time_window 规则 (CRUD 写路径经 Invalidate
-// 即时调用; Start 兜底刷新仅作保险)。time_window 规则不挂传感器回调, 由独立 ticker 求值。
+// LoadRules 全量加载 enabled 的 sensor_threshold + time_window + sun_event 规则
+// (CRUD 写路径经 Invalidate 即时调用; Start 兜底刷新仅作保险)。
+// time_window / sun_event 规则不挂传感器回调, 由**同一个** ticker 求值 (方案 §3.1.5)。
+//
+// 清理语义 (收口既有缺陷 A-17): 规则的窗口/日出日落状态必须按**内容白名单**
+// 清理, 而不是只在"规则从缓存移除"时清理。原因: 规则仍在缓存但窗口字段被改
+// (例如 08:00→09:00) 时, 旧状态会让边沿判定用错误的基准。
+//
+// ⚠️ 必须**显式白名单**, 不能"任何差异都清": Start() 每 30s 兜底调用本函数,
+// 按 UpdatedAt 或"全部字段"比较会让无关字段的漂移每 30 秒清空一次状态,
+// 边沿反复触发 —— 比原缺陷更危险 (方案 §3.1.5 末段)。
 func (e *Evaluator) LoadRules() {
 	var rules []models.AutomationRule
 	if err := e.db.Where("enabled = ? AND trigger_type IN ?",
-		true, []string{models.AutomationTriggerSensorThreshold, models.AutomationTriggerTimeWindow}).
-		Find(&rules).Error; err != nil {
+		true, []string{
+			models.AutomationTriggerSensorThreshold,
+			models.AutomationTriggerTimeWindow,
+			models.AutomationTriggerSunEvent,
+		}).Find(&rules).Error; err != nil {
 		logger.Warn("automation: failed to load rules", "error", err)
 		return
 	}
@@ -219,6 +265,7 @@ func (e *Evaluator) LoadRules() {
 		next[r.ID] = r
 	}
 	e.mu.Lock()
+	prev := e.rules
 	e.rules = next
 	for id := range e.windows {
 		if _, ok := next[id]; !ok {
@@ -226,13 +273,66 @@ func (e *Evaluator) LoadRules() {
 			delete(e.triggered, id)
 		}
 	}
-	// time_window 规则清理: 从缓存移除的规则同时清理窗口状态。
+	// 状态清理: 规则移除 → 清; 规则仍在但**影响求值的字段**变化 → 也清。
 	for id := range e.windowStates {
-		if _, ok := next[id]; !ok {
+		if old, ok := prev[id]; !ok || !sameWindowStateFields(old, next[id]) {
 			delete(e.windowStates, id)
 		}
 	}
+	for id := range e.sunStates {
+		if old, ok := prev[id]; !ok || !sameWindowStateFields(old, next[id]) {
+			delete(e.sunStates, id)
+		}
+	}
+	for id := range e.sunLocationAudit {
+		if _, ok := next[id]; !ok {
+			delete(e.sunLocationAudit, id)
+		}
+	}
 	e.mu.Unlock()
+}
+
+// sameWindowStateFields 是"影响窗口/日出日落判定"的字段**白名单**比较 (A-17)。
+//
+// 任一字段变化即返回 false ⇒ 调用方清除该规则的窗口状态与日出日落状态。
+// 白名单必须**显式枚举** (方案 §3.1.5): 用 reflect.DeepEqual 比整个结构体会把
+// UpdatedAt、Name 等非语义字段的漂移也算成变化 —— 而 LoadRules 每 30 秒被兜底
+// 调用一次, 那会让状态每 30 秒清空, 边沿反复触发 (比原缺陷更危险)。
+//
+// 为什么这些字段: 它们全部直接参与 evalWindowRule / evalSunEventRule 的判定。
+//   - TriggerType: 规则在两个时钟驱动路径之间迁移时, 旧状态语义完全不适用;
+//   - TriggerWindowStart/End/Edge: 窗口几何;
+//   - TriggerSunEventKind/TriggerSunOffsetMin/lat/lon/tz: 日出日落时刻与归日;
+//   - Enabled: 停用再启用后不应继承停用前的边沿状态。
+//
+// 刻意**不含** UpdatedAt / Name / CooldownSec / MaxDailyExec / 动作集合:
+// 它们不影响"上一次 tick 在不在窗口内"这一状态的语义 (冷却与熔断各自有独立
+// 状态与判定, 不依赖 windowStates)。
+func sameWindowStateFields(a, b models.AutomationRule) bool {
+	return a.TriggerType == b.TriggerType &&
+		a.TriggerWindowStart == b.TriggerWindowStart &&
+		a.TriggerWindowEnd == b.TriggerWindowEnd &&
+		a.TriggerWindowEdge == b.TriggerWindowEdge &&
+		a.TriggerSunKind == b.TriggerSunKind &&
+		a.TriggerSunOffsetMin == b.TriggerSunOffsetMin &&
+		floatPtrEq(a.Latitude, b.Latitude) &&
+		floatPtrEq(a.Longitude, b.Longitude) &&
+		strPtrEq(a.Timezone, b.Timezone) &&
+		a.Enabled == b.Enabled
+}
+
+func floatPtrEq(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func strPtrEq(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // Invalidate CRUD 写路径直接失效重载缓存。
@@ -312,20 +412,224 @@ func (e *Evaluator) StartWindowTicker(ctx context.Context) {
 	}()
 }
 
-// evalTimeWindows 对所有 time_window 规则执行一次 tick 求值。
+// evalTimeWindows 对所有时钟驱动规则 (time_window + sun_event) 执行一次 tick 求值。
 // 由 StartWindowTicker 每 1min 调用; 时间源一律用后端本地时间 (time.Now())。
+//
+// sun_event **复用本 ticker, 不新增 ticker** (方案 §3.1.5): 新增 ticker 会让两条
+// 时钟驱动路径的求值时刻错开, 冷却判定与日熔断的"当日"口径出现竞态。
 func (e *Evaluator) evalTimeWindows(now time.Time) {
 	e.mu.RLock()
-	var windowRules []models.AutomationRule
+	var windowRules, sunRules []models.AutomationRule
 	for _, r := range e.rules {
-		if r.TriggerType == models.AutomationTriggerTimeWindow {
+		switch r.TriggerType {
+		case models.AutomationTriggerTimeWindow:
 			windowRules = append(windowRules, r)
+		case models.AutomationTriggerSunEvent:
+			sunRules = append(sunRules, r)
 		}
+	}
+	// 首个 sun_event tick 的"保守不触发"标记在此原子翻转: 本 tick 内所有规则
+	// 都按"首 tick"处理, 下一个 tick 起正常求值。
+	firstSunTick := e.firstSunTick
+	if len(sunRules) > 0 {
+		e.firstSunTick = false
 	}
 	e.mu.RUnlock()
 
 	for _, rule := range windowRules {
 		e.evalWindowRule(rule, now)
+	}
+	for _, rule := range sunRules {
+		e.evalSunEventRule(rule, now, firstSunTick)
+	}
+}
+
+// evalSunEventRule 单条 sun_event 规则求值 (方案 §6.2 状态机)。
+//
+// 状态机:
+//
+//	未求值 ──(tick 且 now >= eventTime+offset)──▶ 已触发
+//	未求值 ──(tick 且 now <  eventTime+offset)──▶ 未求值
+//	已触发 ──(节点本地日期翻转)─────────────────▶ 未求值 (新一日)
+//	任意   ──(极昼/极夜)───────────────────────▶ 本日不触发 + 显式审计
+//
+// 三条硬约束:
+//  1. **首 tick 保守不触发** (firstSunTick): 重启后无法区分"事件已过且已触发"
+//     与"重启错过了", 一律不补触发 (方案 §6.2)。A-3 门禁钉死。
+//  2. 每节点本地日**只触发一次**: 由 sunStates[ruleID] = 本地日期 保证。
+//  3. 极昼/极夜**不静默**: 落一条显式审计 (suppressed_no_solar_event, O-6),
+//     每日本事件只落一条 (防刷量)。
+func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, firstSunTick bool) {
+	resolved, _, err := e.resolveRuleSun(rule)
+	if err != nil {
+		// 运行期解析失败 (节点被删/坐标被清空/时区名失效): 不触发 + 审计,
+		// **绝不回落 UTC 或 0 坐标** (选型 §6.2/§6.3: 回落会让窗口静默偏移)。
+		e.recordSunNoEvent(rule, now, "resolve_failed: "+err.Error())
+		return
+	}
+
+	kind := sun.Kind(rule.TriggerSunKind)
+	if !kind.Valid() {
+		e.recordSunNoEvent(rule, now, "invalid_trigger_sun_kind: "+rule.TriggerSunKind)
+		return
+	}
+
+	eventAt, status, err := e.sunCache.Lookup(resolved.Latitude, resolved.Longitude,
+		resolved.Location, now, kind)
+	if err != nil {
+		e.recordSunNoEvent(rule, now, "compute_failed: "+err.Error())
+		return
+	}
+	if status != sun.StatusOK {
+		// 极昼/极夜 (O-6): 不触发 + 显式审计 (前端可见), 每日本事件一条。
+		e.recordSunNoEvent(rule, now, string(status))
+		return
+	}
+
+	// 偏移分钟 (可负 = 提前)。范围由 handler 校验; 运行期若见到越界值按不触发处理。
+	offset := rule.TriggerSunOffsetMin
+	if offset < -sunMaxOffsetMin || offset > sunMaxOffsetMin {
+		e.recordSunNoEvent(rule, now, fmt.Sprintf("offset_out_of_range: %d", offset))
+		return
+	}
+	fireAt := eventAt.Add(time.Duration(offset) * time.Minute)
+
+	// 节点本地日 (归日口径 = 节点时区, 不是后端进程时区; 方案 §3.1.3)。
+	localDate := now.In(resolved.Location).Format("2006-01-02")
+
+	e.mu.Lock()
+	// 冷却判定 (与 sensor_threshold / time_window 共用 triggered map 与 cooldownFor)。
+	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
+		if cooldown := cooldownFor(rule); cooldown > 0 && now.Sub(firedAt) < cooldown {
+			e.mu.Unlock()
+			return // 冷却期内不触发 (冷却语义与其它触发类型一致)
+		}
+		delete(e.triggered, rule.ID)
+	}
+	// 本日是否已触发过 (日期翻转即自然复位)。
+	alreadyFiredToday := e.sunStates[rule.ID] == localDate
+
+	// **首 tick 保守不触发** (方案 §6.2 / A-3)。
+	//
+	// 精确语义 (必须严格照方案): 保守**只适用于"事件时刻已经过去"的情形** ——
+	// 此时无法区分"重启前已触发过"与"重启错过了", 故不补触发, 并把该本地日标记
+	// 为已处理 (否则下一 tick 仍会认为"本日未触发"而补触发, 保守窗口就退化成一个
+	// tick)。
+	//
+	// 反之, 若首 tick 时**事件尚未到达** (now < fireAt), 说明重启发生在事件之前
+	// —— 这没有任何歧义, 后续 tick 必须正常触发, 否则每到事件前重启一次就永远
+	// 不触发。该条件初版遗漏, 被 A-1/A-2 门禁抓住 (前置 tick 曾把全天标记为已触发)。
+	if firstSunTick && !now.Before(fireAt) {
+		e.sunStates[rule.ID] = localDate
+		e.mu.Unlock()
+		logger.Infof("automation: sun_event 首 tick 保守跳过已过事件 rule_id=%d event=%s (方案 §6.2: 重启不补触发)",
+			rule.ID, fireAt.Format(time.RFC3339))
+		return
+	}
+
+	// 边沿判定: 只在 [now-1tick, now] 跨过 fireAt 时触发, 且本日未触发过。
+	// 用 "!now.Before(fireAt)" + 本日未触发 两个条件 —— 前者覆盖"到点且已过",
+	// 后者保证同一本地日只触发一次。绝不使用 "now >= fireAt 恒真" 这种写法。
+	if now.Before(fireAt) || alreadyFiredToday {
+		if !now.Before(fireAt) {
+			// 本日已触发过: 记录但不重复提交 (sunStates 已持有该日期)。
+			e.mu.Unlock()
+			return
+		}
+		e.mu.Unlock()
+		return
+	}
+	e.sunStates[rule.ID] = localDate
+	e.triggered[rule.ID] = now
+	e.mu.Unlock()
+
+	if e.handler != nil {
+		e.handler.HandleTrigger(TriggerEvent{
+			Rule: rule,
+			At:   now,
+		})
+	}
+}
+
+// sunMaxOffsetMin 是日出日落偏移分钟的取值范围上界 (与 handler V2 校验同源)。
+const sunMaxOffsetMin = 720
+
+// resolveRuleSun 解析规则生效的坐标与时区 (规则覆盖 → 节点权威 → 失败)。
+//
+// 归属解析的**唯一实现**在 models.ResolveSunLocation** (保存校验与运行期求值
+// 共用同一套顺序), 本方法只负责"把规则的触发设备/动作设备映射到节点行"。
+func (e *Evaluator) resolveRuleSun(rule models.AutomationRule) (models.SunLocation, models.SunLocationSource, error) {
+	node, err := e.nodeForRule(rule)
+	if err != nil {
+		return models.SunLocation{}, models.SunLocationSource{}, err
+	}
+	return models.ResolveRuleSunLocation(rule, node)
+}
+
+// nodeForRule 找出该规则对应的节点行 (日出日落坐标的权威载体)。
+//
+// 口径 (节点级为权威 + 规则级可空覆盖, O-3):
+//   - 优先用触发设备 (sensor_threshold 语义) 的节点;
+//   - 否则用**动作设备**的节点 —— sun_event 规则通常不配触发设备, 动作设备
+//     (例如某台 BMS) 所在节点才是它的物理安装位置;
+//   - 都取不到时返回 nil (此时只有规则级覆盖值可用; 仍缺则 fail-closed)。
+//
+// 为什么不用规则表新增 node_id 列: 方案的列清单 (§5.1.2) 未含该列, 且引入它
+// 会与"节点级为权威"的推导重复 (设备→节点已可确定)。这符合本批"不过度设计"。
+func (e *Evaluator) nodeForRule(rule models.AutomationRule) (*models.Node, error) {
+	edgeDeviceID := rule.TriggerEdgeDeviceID
+	if edgeDeviceID == 0 {
+		edgeDeviceID = rule.ActionDeviceID
+	}
+	if edgeDeviceID == 0 {
+		return nil, nil
+	}
+	var dev models.EdgeDevice
+	if err := e.db.Select("id", "node_id").First(&dev, edgeDeviceID).Error; err != nil {
+		return nil, fmt.Errorf("lookup edge device %d: %w", edgeDeviceID, err)
+	}
+	if dev.NodeID == "" {
+		return nil, nil
+	}
+	var node models.Node
+	if err := e.db.Where("node_id = ?", dev.NodeID).First(&node).Error; err != nil {
+		return nil, fmt.Errorf("lookup node %q: %w", dev.NodeID, err)
+	}
+	return &node, nil
+}
+
+// recordSunNoEvent 落一条"本日无日出/日落事件/无法求值"的显式审计 (O-6)。
+//
+// 为什么必须显式落审计而不是静默 return: 高纬用户看到规则整天没触发、事件表
+// 里什么也没有, 会认为规则坏了 —— 这正是任务书 C5 描述的静默失败形态, 新能力
+// 不得复制它。前端事件表据此显示"极昼/极夜, 本日无日出事件"。
+//
+// 节流: 同一规则同一**本地日**只落一条 (否则每 1 分钟 tick 都会写一行, 极夜
+// 期间 1440 行/天)。与 recordSuppressed 的同窗节流同旨。
+func (e *Evaluator) recordSunNoEvent(rule models.AutomationRule, now time.Time, reason string) {
+	localDate := now.UTC().Format("2006-01-02")
+	if resolved, _, err := e.resolveRuleSun(rule); err == nil && resolved.Location != nil {
+		localDate = now.In(resolved.Location).Format("2006-01-02")
+	}
+
+	e.mu.Lock()
+	if e.sunLocationAudit[rule.ID] == localDate {
+		e.mu.Unlock()
+		return
+	}
+	e.sunLocationAudit[rule.ID] = localDate
+	e.mu.Unlock()
+
+	ev := models.AutomationEvent{
+		RuleID:      rule.ID,
+		TriggeredAt: now,
+		Result:      models.AutomationResultSuppressedNoSolarEvent,
+		Detail:      "no solar event today: " + reason,
+		CreatedAt:   now,
+	}
+	if err := e.db.Create(&ev).Error; err != nil {
+		logger.Warn("automation: failed to record suppressed_no_solar_event",
+			"rule_id", rule.ID, "reason", reason, "error", err)
 	}
 }
 
