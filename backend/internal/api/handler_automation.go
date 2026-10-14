@@ -245,7 +245,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		// V7: **任一**风险动作 + require_confirmed=false 且未显式授权 → 拒绝保存
 		// (方案 §4.1.1 V7 / §3.2.5 第 4 步)。杜绝"配了一条永远不会执行的规则"。
 		riskAcknowledged := req.RiskAcknowledged != nil && *req.RiskAcknowledged
-		if msg, code := validateRiskActionsAuthorization(c.Request.Context(), catalog,
+		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
 			actions, createRequireConfirmed, riskAcknowledged); msg != "" {
 			ErrorWithCode(c, 400, code, msg)
 			return
@@ -415,7 +415,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		//
 		// **逐 seq 比较** (B1 遗留债务的收口): 只比第一个动作会让"把第 2 个动作换成
 		// 另一个风险动作"保留旧授权, 那是安全漏洞。
-		changed := actionSetChanged(db, rule, actions)
+		changed := automationActionSetChanged(current, actions)
 		acknowledged := rule.RiskAcknowledgedAt != nil
 		if changed {
 			acknowledged = false
@@ -425,7 +425,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		}
 		// V7: 清空后若仍配 require_confirmed=false 的风险动作 → 拒绝保存, 强制重新确认。
 		// 逐动作检查: 只看第一个动作会漏掉"第 2 个是风险动作"的规则。
-		if msg, code := validateRiskActionsAuthorization(c.Request.Context(), catalog,
+		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
 			actions, rc, acknowledged); msg != "" {
 			ErrorWithCode(c, 400, code, msg)
 			return
@@ -823,31 +823,31 @@ func validateDeviceActionCatalog(ctx context.Context, catalog automationCatalogQ
 // automationActionSetChanged 判定更新请求是否**改变了规则的动作集合**。
 //
 // 口径 (实施计划 §0.1 的授权失效规则): 增删动作、或任一动作的 action_id /
-// action_device_id 变化 → 视为变化。仅改名称、冷却、触发条件等非动作字段不失效。
+// action_device_id / action_type / action_params_json 变化 → 视为变化。
+// 仅改名称、冷却、触发条件等非动作字段不失效。
 //
-// 诚实边界: 本批 (B1) 规则仍是**单动作**模型 (action_type/action_device_id/
-// action_id/action_params_json 四个列, models/automation.go:126-130)。
-// B2 引入 automation_rule_actions 子表后, 本函数必须扩展为"比较动作集合"
-// (逐 seq 比较 action_id/action_device_id/action_type)。届时若忘记扩展,
-// 多动作的"换动作"会保留旧授权 —— 这是本函数留给 B2 的显式债务, 记录在此。
+// 【B2 收口 · 原 B1 显式债务】本函数在 B1 期间只比较单动作四列, 并在注释里留下
+// "B2 上子表后必须扩展为逐 seq 比较动作集合" 的债务。现已扩展: 比较对象是
+// **整个动作集合** (长度 + 逐 seq 字段)。为什么必须扩展 —— 只比第一个动作时,
+// 多动作规则"把第 2 个动作换成另一个风险动作"会保留旧授权, 而用户从未确认过
+// 新动作, 旧授权却把它放行 (安全漏洞)。回归锁见
+// TestUpdateSecondActionChangeClearsAcknowledgement。
 //
-// action_params_json 也计入变化: 参数决定物理动作的具体效果 (例如同一
-// set_mos_policy 的充/放电两位翻转), 参数变了就是不同的物理操作。
-func automationActionSetChanged(rule models.AutomationRule, actionType string,
-	actionDeviceID uint, actionID, actionParamsJSON string) bool {
-	return rule.ActionType != actionType ||
-		rule.ActionDeviceID != actionDeviceID ||
-		rule.ActionID != actionID ||
-		rule.ActionParamsJSON != actionParamsJSON
+// current 必须由调用方按"库中当前动作集合"传入 (子表为空时回落镜像列)。
+func automationActionSetChanged(current, incoming []models.AutomationRuleAction) bool {
+	return !actionSetsEqual(current, incoming)
 }
 
 // validateRiskActionAuthorization 实现校验 V7 (方案 §4.1.1 V7 / §8 A-10):
-// **含风险动作** 且 require_confirmed=false 且未授权 → 拒绝保存。
+// **集合中含风险动作** 且 require_confirmed=false 且未授权 → 拒绝保存。
 //
 // 为什么是 fail-closed: 不拦的话会存下一条"永远不会执行"的规则 —— 自动路径遇
 // 确认门落 confirmation_required, 用户在无人值守场景下等不到任何物理动作。
 // C5 的根因之一正是"用户不知道自己的规则不可能成功", 所以在保存入口收口比事后
 // 通知更强 (方案 §3.2.5 第 4 步)。
+//
+// 为什么**逐动作**检查 (B2): 只看第一个动作时, "第 1 个普通、第 2 个风险"的规则
+// 会绕过 V7 落库, 结局同样是"永远不会执行"。
 //
 // 返回 (错误文案, 错误码)。错误码固定为 risk_action_requires_confirmation (A-10 契约)。
 //
@@ -855,30 +855,31 @@ func automationActionSetChanged(rule models.AutomationRule, actionType string,
 // 同款取舍), 此时跳过 V7 而不是猜测 —— 猜测会把风险动作误判成普通动作 (fail-open)。
 // 生产装配路径上 catalog 恒非 nil (routes.go 注入 commandexec.Service)。
 func validateRiskActionAuthorization(ctx context.Context, catalog automationCatalogQuerier,
-	actionType string, actionDeviceID *uint, actionID string,
-	requireConfirmed, acknowledged bool) (string, string) {
+	actions []models.AutomationRuleAction, requireConfirmed, acknowledged bool) (string, string) {
 	const code = "risk_action_requires_confirmation"
-	if actionType != models.AutomationActionDeviceAction || requireConfirmed || acknowledged {
+	if requireConfirmed || acknowledged || catalog == nil {
 		return "", ""
 	}
-	if catalog == nil || actionDeviceID == nil || *actionDeviceID == 0 {
-		return "", ""
-	}
-	items, err := catalog.Catalog(ctx, *actionDeviceID)
-	if err != nil {
-		// Catalog 查不到目标设备时, 前面的 validateDeviceActionCatalog 已经给出
-		// 更准确的报错; 这里不重复报, 也不据此判定风险 (避免误报 V7)。
-		return "", ""
-	}
-	for _, item := range items {
-		if item.Definition.ID != actionID {
+	for _, a := range actions {
+		if a.ActionType != models.AutomationActionDeviceAction || a.ActionDeviceID == 0 {
 			continue
 		}
-		if item.Definition.RiskLevel.RequiresConfirmation() {
-			return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
-				code
+		items, err := catalog.Catalog(ctx, a.ActionDeviceID)
+		if err != nil {
+			// Catalog 查不到目标设备时, 前面的 validateActionsCatalog 已经给出
+			// 更准确的报错; 这里不重复报, 也不据此判定风险 (避免误报 V7)。
+			continue
 		}
-		return "", ""
+		for _, item := range items {
+			if item.Definition.ID != a.ActionID {
+				continue
+			}
+			if item.Definition.RiskLevel.RequiresConfirmation() {
+				return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
+					code
+			}
+			break
+		}
 	}
 	return "", ""
 }

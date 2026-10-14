@@ -317,12 +317,24 @@ func auditRun001(e *harness.Env) {
 // SIM-AUDT-002 执行类事件能关联到具体指令执行记录
 // ---------------------------------------------------------------------------
 
-// auditIsDefinedResult 判定结果码是否属于 models/automation.go 冻结的 9 种取值。
-// 用途：审计表必须只承载声明过的结果码 —— 出现第 10 种说明引擎写入了未定义状态。
+// auditIsDefinedResult 判定结果码是否属于 models/automation.go 冻结的结果码集合。
+// 用途：审计表必须只承载声明过的结果码 —— 出现未定义取值说明引擎写入了未定义状态。
+//
+// 名单必须与 models/automation.go 的 AutomationResult* 常量**逐项对应**（本函数
+// 是仿真侧的白名单，改一处必须改另一处；漏同步会让仿真把合法结果码判成"未定义"
+// 而误红 —— B1 评审 P2-4 记的正是这个债）：
+//
+//	executed / pending_confirm / suppressed_cooldown / suppressed_daily_limit /
+//	condition_changed / failed_gate / failed_dispatch / confirmation_required /
+//	partial_failure / notification / expired
+//
+// confirmation_required 由 B1 新增（方案 §3.2.5 第 1 步）；partial_failure 由 B2
+// 新增（多动作第 k 个失败，方案 §3.2.4 / §6.3）。
 func auditIsDefinedResult(result string) bool {
 	switch result {
 	case "executed", "pending_confirm", "suppressed_cooldown", "suppressed_daily_limit",
-		"condition_changed", "failed_gate", "failed_dispatch", "notification", "expired":
+		"condition_changed", "failed_gate", "failed_dispatch", "confirmation_required",
+		"partial_failure", "notification", "expired":
 		return true
 	default:
 		return false

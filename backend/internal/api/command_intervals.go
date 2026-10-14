@@ -78,6 +78,7 @@ func validateAndNormalizeCommandIntervals(driverRegistry *drivers.Registry, devT
 	}
 	return raw, nil
 }
+
 // CountManifestCandidates returns how many of the driver's schedulable commands
 // would actually be encoded as per-command polling sub-frames in the
 // ConfigManifest, given the intervals that will be stored.

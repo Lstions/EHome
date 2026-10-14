@@ -123,42 +123,6 @@ func validateActionFields(a models.AutomationRuleAction) string {
 	return ""
 }
 
-// validateRiskActionsAuthorization 对**动作集合**逐项执行 V7 (方案 §4.1.1 V7 / §8 A-10)。
-//
-// 与单动作版本同语义: 任一风险动作 + require_confirmed=false 且未授权 → 拒绝保存。
-// 逐项检查是必须的 —— 只查第一个动作会让"第 2 个动作是风险动作"的规则绕过 V7,
-// 存下一条永远不会执行的规则 (C5 根因之一)。
-//
-// catalog 为 nil 时无法判定风险等级: 跳过 V7 而不是猜测 (与单动作版本同款取舍)。
-func validateRiskActionsAuthorization(ctx context.Context, catalog automationCatalogQuerier,
-	actions []models.AutomationRuleAction, requireConfirmed, acknowledged bool) (string, string) {
-	const code = "risk_action_requires_confirmation"
-	if requireConfirmed || acknowledged || catalog == nil {
-		return "", ""
-	}
-	for _, a := range actions {
-		if a.ActionType != models.AutomationActionDeviceAction || a.ActionDeviceID == 0 {
-			continue
-		}
-		items, err := catalog.Catalog(ctx, a.ActionDeviceID)
-		if err != nil {
-			// Catalog 查不到目标设备时, validateDeviceActionCatalog 已给出更准确的报错。
-			continue
-		}
-		for _, item := range items {
-			if item.Definition.ID != a.ActionID {
-				continue
-			}
-			if item.Definition.RiskLevel.RequiresConfirmation() {
-				return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
-					code
-			}
-			break
-		}
-	}
-	return "", ""
-}
-
 // validateActionsCatalog 对动作集合里的每个 device_action 校验 Catalog 存在性 +
 // 参数规范化 (沿用 validateDeviceActionCatalog, 逐项)。
 func validateActionsCatalog(ctx context.Context, catalog automationCatalogQuerier,
@@ -183,26 +147,10 @@ func loadActionsOrMirror(db *gorm.DB, rule models.AutomationRule) []models.Autom
 	return actions
 }
 
-// derefUint 解引用可空 uint (nil → 0)。
-func derefUint(p *uint) uint {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-
-// actionSetChanged 判定请求是否改变了动作集合 (逐 seq 比较, B1 遗留债务的收口)。
+// actionSetsEqual 逐 seq 比较两个动作集合 (顺序无关: 先按 seq 归一)。
 //
-// 与 database.RuleActionSetChanged 的分工: 本函数接受"已组装好的 incoming"
-// (含请求里的新动作), 因此比较的是**请求态 vs 库态**; 库态回落镜像列。
-func actionSetChanged(db *gorm.DB, rule models.AutomationRule,
-	incoming []models.AutomationRuleAction) bool {
-	current := loadActionsOrMirror(db, rule)
-	return !actionSetsEqual(current, incoming)
-}
-
-// actionSetsEqual 逐 seq 比较两个动作集合 (与 database 内的同名函数同口径;
-// 此处保留一份是因为 api 包不导出该判据的私有实现, 且两处输入形态不同)。
+// 位置说明: 本函数是 automationActionSetChanged 的唯一判据实现, 放在本文件
+// (动作集合工具集) 而调用点在 handler_automation.go 的 update 路径。
 func actionSetsEqual(a, b []models.AutomationRuleAction) bool {
 	if len(a) != len(b) {
 		return false
@@ -224,4 +172,12 @@ func actionSetsEqual(a, b []models.AutomationRuleAction) bool {
 		}
 	}
 	return true
+}
+
+// derefUint 解引用可空 uint (nil → 0)。
+func derefUint(p *uint) uint {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
