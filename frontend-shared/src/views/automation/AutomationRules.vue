@@ -365,7 +365,7 @@
                 <div v-if="action.action_type === 'device_action'">
                   <dt>目标设备</dt>
                   <dd>
-                    <el-select v-model="action.action_device_id" filterable size="small" :aria-label="`第 ${index + 1} 个动作的目标设备`" :data-test="`action-device-${index}`">
+                    <el-select v-model="action.action_device_id" filterable size="small" :aria-label="`第 ${index + 1} 个动作的目标设备`" :data-test="`action-device-${index}`" @change="onCardDeviceChange">
                       <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
                     </el-select>
                   </dd>
@@ -1470,22 +1470,24 @@ function formatTime(t?: string | null): string {
  * 仍会把风险动作拦下来，故不会漏确认。
  */
 const actionCatalog = ref(new Map<string, ActionDefinition>())
-const catalogLoading = ref(false)
+/** 已请求过的设备 ID（含失败）：避免同一设备重复打接口。 */
+const catalogRequested = ref(new Set<number>())
 
-async function loadActionCatalog() {
-  const ids = new Set<number>()
-  for (const rule of rules.value) {
-    for (const action of ruleActions(rule)) {
-      if (action.action_type === 'device_action' && action.action_device_id) ids.add(action.action_device_id)
-    }
-  }
-  if (ids.size === 0) {
-    actionCatalog.value = new Map()
-    return
-  }
-  catalogLoading.value = true
+/**
+ * 取一批设备的受控操作目录并建索引（幂等：已请求过的设备跳过）。
+ *
+ * 为什么需要"编辑中新增的设备"也走这条路：徽标只在**已加载目录**的设备上渲染。
+ * 若只加载既有规则用到的设备，用户在新建规则里选一台从未配过规则的设备时，
+ * 风险动作会**没有徽标**（看起来像普通动作）—— 这是安全信息缺失，不是视觉问题。
+ */
+async function ensureActionCatalog(deviceIds: Iterable<number>) {
+  const pending = [...new Set(deviceIds)].filter(id => id > 0 && !catalogRequested.value.has(id))
+  if (pending.length === 0) return
+  const requested = new Set(catalogRequested.value)
+  for (const id of pending) requested.add(id)
+  catalogRequested.value = requested
   const next = new Map(actionCatalog.value)
-  await Promise.all([...ids].map(async (id) => {
+  await Promise.all(pending.map(async (id) => {
     try {
       const items = await deviceOperationApi.actions(id)
       for (const item of items) {
@@ -1497,7 +1499,21 @@ async function loadActionCatalog() {
     }
   }))
   actionCatalog.value = next
-  catalogLoading.value = false
+}
+
+/** 卡片切换目标设备时按需加载该设备的目录（否则风险徽标会缺失）。 */
+function onCardDeviceChange(deviceId: number) {
+  void ensureActionCatalog([deviceId])
+}
+
+async function loadActionCatalog() {
+  const ids: number[] = []
+  for (const rule of rules.value) {
+    for (const action of ruleActions(rule)) {
+      if (action.action_type === 'device_action' && action.action_device_id) ids.push(action.action_device_id)
+    }
+  }
+  await ensureActionCatalog(ids)
 }
 
 onMounted(async () => {
