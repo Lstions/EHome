@@ -533,7 +533,12 @@ func TestMultiActionCooldownAnchorIsTriggerTime(t *testing.T) {
 	}
 }
 
-// 部分失败时**不得**写冷却锚点: 规则没有完整执行完, 锚点会静默把规则冷却掉。
+// 部分失败时**不得**写冷却锚点。
+//
+// 这是显式裁决（方案 §3.2.4「部分失败的锚点」，P2-C），不是实现细节：锚点表达
+// "该规则完整触发过"；只执行一部分动作时写锚点会让规则被静默冷却整个冷却窗，
+// 用户既看不到也无法在窗口内重试恢复（堵死 P1-A 的恢复路径）。失败方向应为
+// "宁可让用户重试（审计可见 partial_failure）"，不可"静默冷却掉一条规则"。
 func TestMultiActionPartialFailureDoesNotWriteAnchor(t *testing.T) {
 	pl, edge := setupConfirmPlanner(t)
 	rule := multiActionRule(t, pl, edge.ID, "部分失败不写锚点", 2)

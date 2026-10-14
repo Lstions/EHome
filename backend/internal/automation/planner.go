@@ -276,6 +276,10 @@ func (p *Planner) nextTriggerSeq(ctx context.Context, ruleID uint, at time.Time,
 //     confirmation_required (action_seq=1);
 //   - 冷却锚点只在**全部动作成功**后写入, 且取触发时刻 at (不取动作完成时刻)
 //     —— 见 recordExecuted 的既有裁决, A-16 钉死该语义;
+//   - **部分失败不写冷却锚点** (显式裁决, 方案 §3.2.4「部分失败的锚点」/ P2-C):
+//     锚点表达"该规则完整触发过"; 只执行一部分时写锚点会让规则被静默冷却整个
+//     冷却窗, 用户无法在窗口内重试恢复。失败方向: 宁可让用户重试 (审计可见),
+//     不可静默冷却掉规则;
 //   - 日熔断按 rule 计数 (HandleTrigger 入口已判, 本函数不参与), A-15 钉死。
 //
 // 幂等键 (方案 §3.2.4 / §3.4 D10):
