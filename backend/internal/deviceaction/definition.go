@@ -60,30 +60,39 @@ type AddressCompiler func(json.RawMessage, uint8) (SingleStep, error)
 type AddressVerifier func(json.RawMessage, []byte, uint8) ([]drivers.SensorData, error)
 
 type Definition struct {
-	ID                 string          `json:"id"`
-	Version            int             `json:"version"`
-	Name               string          `json:"name"`
-	Description        string          `json:"description"`
-	DeviceType         string          `json:"device_type"`
-	Semantics          string          `json:"semantics"`
-	Risk               string          `json:"risk"`
-	ExecutionShape     string          `json:"execution_shape"`
-	Verification       string          `json:"verification"`
-	AtMostOnce         bool            `json:"at_most_once"`
-	MaxSteps           uint8           `json:"max_steps"`
-	Enabled            bool            `json:"enabled"`
-	Transport          string          `json:"transport"`
-	InputSchema        ParameterSchema `json:"input_schema"`
-	AvailabilityCode   string          `json:"availability_code,omitempty"`
-	AvailabilityReason string          `json:"availability_reason,omitempty"`
-	SingleStep         SingleStep      `json:"-"`
-	Plan               BoundedPlan     `json:"-"`
-	compiler           Compiler
-	addressCompiler    AddressCompiler
-	planCompiler       PlanCompiler
-	planAddrCompiler   PlanAddressCompiler
-	verifier           Verifier
-	addressVerifier    AddressVerifier
+	ID          string `json:"id"`
+	Version     int    `json:"version"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	DeviceType  string `json:"device_type"`
+	Semantics   string `json:"semantics"`
+	// Risk 是**驱动出厂方言**的 4 级严重度 (low/medium/high/critical)。
+	// 兼容期保留原样输出, 供既有的严重度文案 ("严重风险" vs "高风险") 与
+	// 仿真断言使用; 新的对外契约是下面的 RiskLevel (方案 §3.4 D1)。
+	Risk string `json:"risk"`
+	// RiskLevel 是归一化后的 2 级系统契约 (normal/elevated), 由 Register 从
+	// Risk 派生 —— 调用方不得手工赋值, 否则就绕过了唯一归一化点 (方案 §3.3.3)。
+	RiskLevel RiskLevel `json:"risk_level"`
+	// RequiresConfirmation 是 RiskLevel 的对外派生字段, 供前端直接消费,
+	// 使前端不必持有任何风险字面量 (方案 §3.4 D1 / §8 F-5)。
+	RequiresConfirmation bool            `json:"requires_confirmation"`
+	ExecutionShape       string          `json:"execution_shape"`
+	Verification         string          `json:"verification"`
+	AtMostOnce           bool            `json:"at_most_once"`
+	MaxSteps             uint8           `json:"max_steps"`
+	Enabled              bool            `json:"enabled"`
+	Transport            string          `json:"transport"`
+	InputSchema          ParameterSchema `json:"input_schema"`
+	AvailabilityCode     string          `json:"availability_code,omitempty"`
+	AvailabilityReason   string          `json:"availability_reason,omitempty"`
+	SingleStep           SingleStep      `json:"-"`
+	Plan                 BoundedPlan     `json:"-"`
+	compiler             Compiler
+	addressCompiler      AddressCompiler
+	planCompiler         PlanCompiler
+	planAddrCompiler     PlanAddressCompiler
+	verifier             Verifier
+	addressVerifier      AddressVerifier
 }
 
 type Registry struct {
@@ -93,9 +102,18 @@ type Registry struct {
 func NewRegistry() *Registry { return &Registry{byType: make(map[string]map[string]Definition)} }
 
 func (r *Registry) Register(def Definition) error {
-	if def.ID == "" || def.Version <= 0 || def.DeviceType == "" || !allowedSemantics(def.Semantics) || !allowedRisk(def.Risk) || !allowedTransport(def.Transport) {
+	if def.ID == "" || def.Version <= 0 || def.DeviceType == "" || !allowedSemantics(def.Semantics) || !allowedTransport(def.Transport) {
 		return fmt.Errorf("invalid restricted action definition %q", def.ID)
 	}
+	// 4 级驱动方言 → 2 级系统契约的唯一归一化点 (方案 §3.3.3 落点 2)。
+	// 未知字面量 fail-closed: 注册期直接拒绝, 不进入目录 (A-8 反向验证:
+	// 删掉 medium 分支 → 含 medium 的驱动注册失败 → 目录构建 panic / 映射测试红)。
+	riskLevel, ok := RiskLevelFromDriver(def.Risk)
+	if !ok {
+		return fmt.Errorf("invalid risk %q for action %q", def.Risk, def.ID)
+	}
+	def.RiskLevel = riskLevel
+	def.RequiresConfirmation = riskLevel.RequiresConfirmation()
 	if def.ExecutionShape == "" {
 		def.ExecutionShape = "single"
 	}
@@ -181,15 +199,6 @@ func allowedSemantics(value string) bool {
 
 func allowedTransport(value string) bool {
 	return value == ChannelCmdV2Adapter || value == PeriphCmdAdapter
-}
-
-func allowedRisk(value string) bool {
-	switch value {
-	case "low", "medium", "high", "critical":
-		return true
-	default:
-		return false
-	}
 }
 
 func (def Definition) Compile(params json.RawMessage) (SingleStep, error) {
