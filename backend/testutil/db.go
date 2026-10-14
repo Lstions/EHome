@@ -84,6 +84,8 @@ var allModels = []interface{}{
 	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)
 	&models.AutomationRule{},
 	&models.AutomationEvent{},
+	// 多动作子表 (方案 §3.2.3 M1 / §5.1.1; 与生产 AutoMigrate 列表同步)
+	&models.AutomationRuleAction{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

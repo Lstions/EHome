@@ -50,8 +50,16 @@ const (
 	// 与"传输失败"在审计上无法区分, 前端也拿不到任何可行动信号 (C5 缺陷)。
 	// 确认门拒绝不是故障, 而是"需要人来确认"—— 分开后前端可据此弹提示并跳转确认入口。
 	AutomationResultConfirmationRequired = "confirmation_required" // 被确认门拦住 (需人工确认或规则未授权)
-	AutomationResultNotification         = "notification"          // 纯通知动作已发出
-	AutomationResultExpired              = "expired"               // pending_confirm 超时未确认 (24h 清扫置位)
+	// AutomationResultPartialFailure 是"多动作执行到第 k 个失败、剩余动作已中止"的
+	// 专属结果码 (方案 §3.2.4 整体结果 / §6.3 多动作执行状态机, 实施计划 §2 B2)。
+	//
+	// 为什么必须与 failed_dispatch 分开: 部分成功是**危险状态**——设备已被改了一半
+	// (例如"关充电 MOS"成功、"关放电 MOS"失败), 需要人工介入。归入 failed_dispatch
+	// 会让前端把它显示成"完全失败", 用户误以为设备没被动过。事件行的 action_seq
+	// 记录失败发生在第几个动作, 供前端精确展示。
+	AutomationResultPartialFailure = "partial_failure" // 第 k 个动作失败且 k<N (已中止剩余动作)
+	AutomationResultNotification   = "notification"    // 纯通知动作已发出
+	AutomationResultExpired        = "expired"         // pending_confirm 超时未确认 (24h 清扫置位)
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -207,7 +215,76 @@ type AutomationEvent struct {
 	Result        string    `gorm:"size:32;not null;index" json:"result"`
 	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
 	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
-	CreatedAt     time.Time `json:"created_at"`
+	// ActionSeq 记录多动作执行中"失败/部分失败发生在第几个动作" (方案 §5.1.4)。
+	//
+	// 为什么可空: 规则级事件 (suppressed_daily_limit / pending_confirm / 纯通知等)
+	// 没有动作维度, NULL 表达"无动作维度", 而不是用 0 冒充"第 0 个动作"。
+	// 多动作下的失败事件才填 seq (1 起, 与 automation_rule_actions.seq 同域)。
+	ActionSeq *int      `json:"action_seq,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (AutomationEvent) TableName() string { return "automation_events" }
+
+// AutomationRuleAction 规则动作子表 (方案 §3.2.3 推荐 M1 独立子表 / §5.1.1)。
+//
+// 为什么用子表而不是 JSON 列: 顺序语义 (seq) 需要 DB 级唯一约束兜底, 部分失败
+// 归因需要"第 k 个动作"可被 SQL 直接查询, 幂等键需要动作维度天然唯一
+// (方案 §3.2.2 逐项对比)。子表同时让每个动作独立过 CanonicalizeParams 校验。
+//
+// 兼容期 (方案 §3.4 D2): automation_rules 的单动作四列**保留但降级为只读镜像**,
+// 由写入路径双写, 读路径以本表为准。回滚时镜像列仍持有最后一次写入的动作。
+type AutomationRuleAction struct {
+	ID     uint `gorm:"primaryKey" json:"id"`
+	RuleID uint `gorm:"not null;index;uniqueIndex:idx_automation_rule_actions_rule_seq,priority:1" json:"rule_id"`
+	// Seq 动作序号 (1 起, 同规则内唯一, 升序串行执行)。
+	// 唯一索引 (rule_id, seq) 是"顺序"这一语义的物理保证 (方案 §3.2.3 推荐理由 2)。
+	Seq              int    `gorm:"not null;uniqueIndex:idx_automation_rule_actions_rule_seq,priority:2" json:"seq"`
+	ActionType       string `gorm:"size:20;not null" json:"action_type"`
+	ActionDeviceID   uint   `gorm:"index" json:"action_device_id,omitempty"`
+	ActionID         string `gorm:"size:96" json:"action_id,omitempty"`
+	ActionParamsJSON string `gorm:"type:text" json:"action_params_json,omitempty"`
+	ActionLevel      string `gorm:"size:10" json:"action_level,omitempty"` // notification 级别
+	// Enabled 单动作级开关 (方案 §5.1.1)。不带 default tag —— 与
+	// AutomationRule.Enabled 同款 GORM 零值陷阱, 默认 true 由写入路径显式赋值。
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (AutomationRuleAction) TableName() string { return "automation_rule_actions" }
+
+// AutomationActionFromRule 把规则的单动作镜像列组装成 seq=1 的动作。
+//
+// 用途 (双写兼容期 + 读路径回落):
+//   - 写入规则时若无 actions 子表输入, 用本函数得到"唯一那个动作"再落子表,
+//     保证子表与镜像列一致;
+//   - 读取时若子表为空 (回填尚未跑到的历史库), 用本函数得到等价动作集合,
+//     读路径不依赖迁移是否已执行。
+func AutomationActionFromRule(rule AutomationRule) AutomationRuleAction {
+	return AutomationRuleAction{
+		RuleID:           rule.ID,
+		Seq:              1,
+		ActionType:       rule.ActionType,
+		ActionDeviceID:   rule.ActionDeviceID,
+		ActionID:         rule.ActionID,
+		ActionParamsJSON: rule.ActionParamsJSON,
+		ActionLevel:      rule.ActionLevel,
+		Enabled:          true,
+	}
+}
+
+// ApplyMirrorAction 把动作写回规则的单动作镜像列 (双写兼容期, 方案 §3.4 D2)。
+//
+// 语义: 镜像列恒等于 seq 最小的动作 —— 老客户端/老读路径只看这四列时, 行为与
+// 改造前一致。子表是权威, 镜像只是兼容期投影。
+func (a AutomationRuleAction) ApplyMirrorAction(rule *AutomationRule) {
+	if rule == nil {
+		return
+	}
+	rule.ActionType = a.ActionType
+	rule.ActionDeviceID = a.ActionDeviceID
+	rule.ActionID = a.ActionID
+	rule.ActionParamsJSON = a.ActionParamsJSON
+	rule.ActionLevel = a.ActionLevel
+}

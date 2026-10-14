@@ -132,6 +132,10 @@ func AutoMigrate() error {
 		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)
 		&models.AutomationRule{},
 		&models.AutomationEvent{},
+		// 多动作子表 (方案 §3.2.3 M1 / §5.1.1, 实施计划 §2 B2)。
+		// 唯一索引 (rule_id, seq) 由模型 tag 建出; 历史规则的 seq=1 回填由
+		// MigrateAutomationRuleActions (本文件尾部调用) 幂等完成。
+		&models.AutomationRuleAction{},
 
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
@@ -176,6 +180,12 @@ func AutoMigrate() error {
 	// 单测跑 SQLite 内存库（按模型现建表，无此列）所以从未暴露 —— 属"旧库 schema
 	// 漂移"而非模型/逻辑缺陷。在此幂等 DROP（列不存在则零 DDL 副作用）。
 	if _, err = MigrateOTATaskDropLegacyCollectorID(DB); err != nil {
+		return err
+	}
+	// 多动作子表数据回填 (2026-10-14, 实施计划 §2 B2): 存量规则的单动作镜像列
+	// 回填为 automation_rule_actions 的 seq=1 子行。幂等 (INSERT ... WHERE
+	// NOT EXISTS), 重跑零副作用; 原动作列一个字节都不改, 回滚时仍可读。
+	if _, err = MigrateAutomationRuleActions(DB); err != nil {
 		return err
 	}
 	return err
