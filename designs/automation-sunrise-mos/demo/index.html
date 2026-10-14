@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交互设计稿 demo · 日出日落 + 多动作 + 风险二次确认</title>
+<style>
+
+/* ============================================================================
+   交互设计稿 demo · 手工复刻 Element Plus 2.14 视觉语言
+   颜色/间距/圆角/断点全部取自 frontend-shared/src/styles/theme.css 的亮色块
+   （--color-* :27-35、--text-color-* :48-51、--border-color :54-56、
+     EP 桥接 --el-color-*-light-9 :212-257、断点 :8-13、.el-dialog max-width:92vw :729-733）
+   本文件不加载任何外部资源，不依赖 element-plus。
+   ========================================================================== */
+:root{
+  --breakpoint-xs:480px; --breakpoint-md:768px;
+  --color-primary:#1f5ad8; --color-success:#147a3a; --color-warning:#9a5b06; --color-danger:#b91c1c; --color-info:#5e6673;
+  --bg-color-page:#f5f7fa; --bg-color:#ffffff; --bg-color-overlay:#ffffff; --bg-color-secondary:#f8f9fb;
+  --text-color-primary:#303133; --text-color-regular:#4b5563; --text-color-secondary:#5e6673; --text-color-placeholder:#6b7280;
+  --border-color:#e8eaec; --border-color-light:#ebeef5; --border-color-lighter:#f2f6fc;
+  --card-bg:#ffffff; --card-border:#e8eaec; --card-shadow:0 2px 12px rgba(0,0,0,0.08);
+  --shadow-sm:0 1px 3px rgba(0,0,0,0.06); --shadow-md:0 4px 12px rgba(0,0,0,0.08); --shadow-lg:0 8px 24px rgba(0,0,0,0.12);
+  --radius-sm:4px; --radius-md:8px; --radius-lg:12px;
+  --el-color-primary:#1f5ad8; --el-color-primary-light-3:#628ce4; --el-color-primary-light-5:#8fadec;
+  --el-color-primary-light-7:#bccef3; --el-color-primary-light-8:#d2def7; --el-color-primary-light-9:#e9effb;
+  --el-color-success:#147a3a; --el-color-success-light-8:#d0e4d8; --el-color-success-light-9:#e8f2eb;
+  --el-color-warning:#9a5b06; --el-color-warning-light-5:#cdad83; --el-color-warning-light-7:#e1ceb4; --el-color-warning-light-9:#f5efe6;
+  --el-color-danger:#b91c1c; --el-color-danger-light-3:#ce6060; --el-color-danger-light-5:#dc8e8e; --el-color-danger-light-7:#eabbbb; --el-color-danger-light-9:#f8e8e8;
+  --el-color-info:#5e6673; --el-color-info-light-5:#afb3b9; --el-color-info-light-9:#eff0f1;
+  --el-fill-color-light:#f5f7fa; --el-fill-color-lighter:#f8f9fb;
+  --el-text-color-primary:#303133; --el-text-color-regular:#4b5563; --el-text-color-secondary:#5e6673; --el-text-color-placeholder:#6b7280;
+  --el-border-color:#e8eaec; --el-border-color-lighter:#ebeef5;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg-color-page);color:var(--text-color-primary);font-size:14px;line-height:1.5;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue','Noto Sans CJK SC','WenQuanYi Micro Hei','Microsoft YaHei',Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:'DejaVu Sans Mono',Consolas,Menlo,'Courier New',monospace}
+.hint{margin-left:8px;color:var(--text-color-secondary);font-size:12px}
+.text-muted{color:var(--text-color-secondary)}
+
+/* ---------- 演示脚手架（非设计稿内容，?bar=0 可隐藏） ---------- */
+.demo-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;background:#fffbe6;border-bottom:1px dashed var(--el-color-warning);font-size:12px;color:var(--text-color-secondary)}
+.demo-bar b{color:var(--text-color-primary)}
+.demo-bar .demo-sep{flex:1 1 100%;height:0}
+.demo-bar button{font-family:inherit;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid var(--el-color-warning-light-5);background:#fff;color:var(--el-color-warning);cursor:pointer}
+.demo-bar button:hover{background:var(--el-color-warning-light-9)}
+.demo-bar button[aria-pressed="true"]{background:var(--el-color-warning);border-color:var(--el-color-warning);color:#fff}
+
+/* ---------- PageHeader（复刻 components/common/PageHeader.vue:34-85） ---------- */
+.page-header{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;background:var(--bg-color);border-bottom:1px solid var(--border-color);margin-bottom:16px}
+.page-header-left{display:flex;align-items:center;gap:12px}
+.page-header-left h2{margin:0;font-size:20px;font-weight:500;color:var(--text-color-primary)}
+.page-header-subtitle{margin:4px 0 0;font-size:13px;color:var(--text-color-secondary)}
+.page-header-right{display:flex;align-items:center;gap:8px}
+
+.page{display:flex;flex-direction:column;gap:16px;padding:0 24px 32px}
+/* 复刻 AutomationRules.vue:881 .card */
+.card{background:var(--el-bg-color);border-radius:8px;padding:16px}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;flex-wrap:wrap}
+.card-title{font-size:15px;font-weight:600;display:inline-flex;align-items:center;gap:8px}
+.count-tag{margin-left:0}
+
+/* ---------- el-button ---------- */
+.el-button{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 15px;
+  border:1px solid var(--el-border-color);border-radius:var(--radius-sm);background:var(--bg-color);
+  color:var(--text-color-regular);font-size:14px;font-family:inherit;cursor:pointer;
+  transition:border-color .15s,background-color .15s,color .15s;white-space:nowrap;
+}
+.el-button:hover{border-color:var(--el-color-primary-light-5);color:var(--el-color-primary);background:var(--el-color-primary-light-9)}
+.el-button--primary{background:var(--el-color-primary);border-color:var(--el-color-primary);color:#fff}
+.el-button--primary:hover{background:var(--el-color-primary-light-3);border-color:var(--el-color-primary-light-3);color:#fff}
+.el-button--danger{background:var(--el-color-danger);border-color:var(--el-color-danger);color:#fff}
+.el-button--danger:hover{background:var(--el-color-danger-light-3);border-color:var(--el-color-danger-light-3);color:#fff}
+.el-button--small{height:24px;padding:0 9px;font-size:12px;border-radius:var(--radius-sm)}
+.el-button.is-link{border-color:transparent;background:transparent;height:24px;padding:0 4px;font-size:12px;color:var(--el-color-primary)}
+.el-button.is-link:hover{background:transparent;color:var(--el-color-primary-light-3);border-color:transparent}
+.el-button.is-link.el-link--danger{color:var(--el-color-danger)}
+.el-button.is-link.el-link--danger:hover{color:var(--el-color-danger-light-3)}
+.el-button:disabled,.el-button[disabled]{opacity:.55;cursor:not-allowed}
+.el-button:disabled:hover{border-color:var(--el-border-color);color:var(--text-color-regular);background:var(--bg-color)}
+.el-button--danger:disabled:hover{background:var(--el-color-danger);border-color:var(--el-color-danger);color:#fff}
+.el-button:focus-visible,.el-switch:focus-visible,.op-item:focus-visible,.el-select__wrapper:focus-visible,.risk-ack input:focus-visible{
+  outline:2px solid var(--el-color-primary);outline-offset:1px
+}
+
+/* ---------- el-tag ---------- */
+.el-tag{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:var(--radius-sm);font-size:12px;line-height:1;border:1px solid transparent;white-space:nowrap}
+.el-tag--primary{background:var(--el-color-primary-light-9);color:var(--el-color-primary)}
+.el-tag--success{background:var(--el-color-success-light-9);color:var(--el-color-success)}
+.el-tag--warning{background:var(--el-color-warning-light-9);color:var(--el-color-warning)}
+.el-tag--danger{background:var(--el-color-danger-light-9);color:var(--el-color-danger)}
+.el-tag--info{background:var(--el-color-info-light-9);color:var(--el-color-info)}
+.el-tag.is-plain{background:var(--bg-color);border-color:currentColor}
+.el-tag--small{height:20px;font-size:11px;padding:0 6px}
+
+/* ---------- el-alert ---------- */
+.el-alert{display:flex;gap:8px;align-items:flex-start;padding:8px 12px;border-radius:var(--radius-sm);font-size:13px;margin-bottom:12px}
+.el-alert--warning{background:var(--el-color-warning-light-9);color:var(--el-color-warning)}
+.el-alert--error{background:var(--el-color-danger-light-9);color:var(--el-color-danger)}
+.el-alert--info{background:var(--el-color-info-light-9);color:var(--el-color-info)}
+.el-alert__icon{flex:0 0 auto;font-weight:700}
+.el-alert__title{font-weight:600}
+.el-alert__desc{color:var(--text-color-regular);margin-top:2px}
+
+/* ---------- 表单 ---------- */
+.el-form-item{display:flex;gap:12px;margin-bottom:18px}
+.el-form-item__label{flex:0 0 110px;text-align:right;padding-top:6px;color:var(--text-color-regular);font-size:14px;line-height:22px}
+.el-form-item__label.is-required::before{content:'*';color:var(--el-color-danger);margin-right:4px}
+.el-form-item__content{flex:1;min-width:0}
+.el-input,.el-textarea{width:100%;border:1px solid var(--el-border-color);border-radius:var(--radius-sm);background:var(--bg-color);color:var(--text-color-regular);font-size:14px;font-family:inherit}
+.el-input{height:32px;padding:0 11px}
+.el-textarea{padding:6px 11px;resize:vertical;line-height:1.5}
+.el-input:focus,.el-textarea:focus{outline:none;border-color:var(--el-color-primary);box-shadow:0 0 0 1px var(--el-color-primary) inset}
+.el-input[readonly]{background:var(--el-fill-color-light);color:var(--text-color-secondary)}
+.el-input--number{width:120px}
+.inline-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* ---------- el-select（含 ARIA combobox） ---------- */
+.el-select{position:relative;width:100%}
+.el-select__wrapper{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;padding:0 11px;border:1px solid var(--el-border-color);border-radius:var(--radius-sm);background:var(--bg-color);cursor:pointer}
+.el-select__wrapper:hover{border-color:var(--el-color-primary-light-5)}
+.el-select__wrapper[aria-expanded="true"]{border-color:var(--el-color-primary);box-shadow:0 0 0 1px var(--el-color-primary) inset}
+.el-select__caret{color:var(--text-color-placeholder);font-size:12px}
+.el-select__dropdown{position:absolute;z-index:30;left:0;right:0;top:calc(100% + 4px);margin:0;padding:6px 0;list-style:none;max-height:240px;overflow:auto;background:var(--bg-color-overlay);border:1px solid var(--border-color);border-radius:var(--radius-sm);box-shadow:var(--shadow-md)}
+.el-select__item{display:flex;align-items:center;justify-content:space-between;gap:8px;height:34px;padding:0 20px;font-size:14px;color:var(--text-color-regular);cursor:pointer}
+.el-select__item.is-active,.el-select__item:hover{background:var(--el-fill-color-light)}
+.el-select__item[aria-selected="true"]{color:var(--el-color-primary);font-weight:600}
+.el-select__item[aria-disabled="true"]{color:var(--text-color-placeholder);cursor:not-allowed}
+
+/* ---------- el-switch ---------- */
+.el-switch{position:relative;display:inline-flex;flex:0 0 auto;width:40px;height:20px;border-radius:10px;background:var(--el-color-info-light-5);cursor:pointer;transition:background-color .2s}
+.el-switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .2s}
+.el-switch.is-checked{background:var(--el-color-primary)}
+.el-switch.is-checked::after{left:22px}
+
+/* ---------- el-table（复刻，仅用于规则列表） ---------- */
+.el-table{width:100%;border-collapse:collapse;font-size:14px}
+.el-table th{background:var(--el-fill-color-light);color:var(--text-color-primary);font-weight:600;text-align:left;padding:10px 12px;border-bottom:1px solid var(--el-border-color);font-size:13px;white-space:nowrap}
+.el-table td{padding:10px 12px;border-bottom:1px solid var(--el-border-color-lighter);color:var(--text-color-regular);vertical-align:middle}
+.el-table tr:last-child td{border-bottom:none}
+.cell-flex{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+/* ---------- 多动作卡片列表 ---------- */
+.action-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.action-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.action-card{border:1px solid var(--el-border-color-lighter);border-radius:var(--radius-md);padding:12px;background:var(--bg-color)}
+.action-card[data-risk="1"]{border-color:var(--el-color-danger-light-5);background:linear-gradient(0deg,var(--el-color-danger-light-9),var(--el-color-danger-light-9))}
+.action-card__head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.action-card__index{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--el-color-primary-light-9);color:var(--el-color-primary);font-size:12px;font-weight:600;flex:0 0 auto}
+.action-card__name{font-size:14px;font-weight:600;color:var(--text-color-primary)}
+.action-card__ops{margin-left:auto;display:flex;align-items:center;gap:4px}
+.action-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 16px;margin:10px 0 0}
+.action-meta>div{display:flex;gap:6px;min-width:0}
+.action-meta>div.span2{grid-column:1 / -1}
+.action-meta dt{flex:0 0 auto;color:var(--text-color-secondary);font-size:12px}
+.action-meta dd{margin:0;font-size:12px;color:var(--text-color-regular);overflow-wrap:anywhere}
+.risk-badge{font-weight:600}
+.risk-reason{display:flex;gap:8px;align-items:flex-start;margin-top:10px;padding:8px 10px;border-left:3px solid var(--el-color-danger);border-radius:var(--radius-sm);background:var(--bg-color);font-size:12px;color:var(--text-color-regular)}
+.risk-reason__icon{color:var(--el-color-danger);font-weight:700;flex:0 0 auto}
+.risk-reason__label{font-weight:600;color:var(--el-color-danger)}
+.assumption-note{margin-top:10px;padding:6px 10px;border:1px dashed var(--el-color-warning-light-5);border-radius:var(--radius-sm);background:var(--el-color-warning-light-9);font-size:12px;color:var(--text-color-regular)}
+
+/* ---------- 设备控制面板（复刻 DeviceControlPanel.vue 的 .op-list） ---------- */
+.ops-sub{margin:0 0 10px;font-size:12px;color:var(--text-color-secondary)}
+.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:var(--radius-md);background:var(--bg-color);cursor:pointer;text-align:left;font-family:inherit;font-size:14px;color:inherit}
+.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--shadow-sm)}
+.op-item[data-risk="1"]{border-color:var(--el-color-danger-light-5)}
+.op-icon{flex:0 0 auto;margin-top:2px;color:var(--el-color-primary);font-size:18px}
+.op-text{display:block;min-width:0}
+.op-name{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;font-weight:500;color:var(--text-color-primary)}
+.op-desc{margin-top:4px;font-size:12px;color:var(--text-color-secondary);overflow-wrap:anywhere}
+
+/* ---------- el-dialog / el-overlay ---------- */
+.el-overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:flex-start;justify-content:center;padding:6vh 16px 16px;overflow:auto;background:rgba(0,0,0,.45)}
+.el-dialog{width:min(640px,92vw);max-height:88vh;display:flex;flex-direction:column;background:var(--bg-color-overlay);border-radius:2px;box-shadow:var(--shadow-lg)}
+.el-dialog--sm{width:min(440px,92vw)}
+.el-dialog__header{padding:16px;padding-bottom:8px;font-size:16px;font-weight:600;color:var(--text-color-primary)}
+.el-dialog__body{padding:0 16px 16px;overflow:auto}
+.el-dialog__footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:16px;padding-top:8px}
+.el-dialog__footer .ack-progress{margin-right:auto;font-size:12px;color:var(--text-color-secondary)}
+.risk-line{margin:12px 0;color:var(--text-color-secondary);font-size:13px}
+.risk-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.risk-item{border:1px solid var(--el-color-danger-light-5);border-radius:var(--radius-md);padding:10px 12px;background:var(--bg-color)}
+.risk-item__name{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;color:var(--text-color-primary);font-size:14px}
+.risk-item__meta{display:grid;grid-template-columns:1fr;gap:2px;margin:8px 0 0}
+.risk-item__meta>div{display:flex;gap:6px;font-size:12px;min-width:0}
+.risk-item__meta dt{flex:0 0 60px;color:var(--text-color-secondary)}
+.risk-item__meta dd{margin:0;color:var(--text-color-regular);overflow-wrap:anywhere}
+.risk-ack{display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:13px;color:var(--text-color-regular);cursor:pointer}
+.risk-ack input{width:16px;height:16px;margin:2px 0 0;flex:0 0 auto;accent-color:var(--el-color-danger)}
+.param-echo{margin-top:8px;padding:8px 10px;border-radius:var(--radius-sm);background:var(--el-fill-color-light);font-size:12px}
+
+/* ---------- el-message ---------- */
+#toast-root{position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center}
+.el-message{display:flex;align-items:center;gap:8px;padding:11px 15px;border-radius:var(--radius-sm);border:1px solid var(--el-color-success-light-8);background:var(--el-color-success-light-9);color:var(--el-color-success);font-size:14px;box-shadow:var(--shadow-md)}
+
+/* ============================================================================
+   响应式：768px 与仓库 useResponsive/theme.css 同断点；480px 为任务书要求的窄屏档
+   ========================================================================== */
+@media (max-width:768px){
+  .page-header{padding:14px 16px;align-items:flex-start;gap:12px}
+  .page-header-left h2{font-size:18px}
+  .page-header-right{flex-wrap:wrap;justify-content:flex-end}
+  .page{padding:0 16px 24px}
+  .op-list{grid-template-columns:1fr}
+  .action-meta{grid-template-columns:1fr}
+  .el-form-item{display:block}
+  .el-form-item__label{flex:none;display:block;text-align:left;padding:0 0 6px}
+  .el-dialog{width:92vw}
+}
+@media (max-width:480px){
+  body{font-size:13px}
+  .page{padding:0 12px 24px;gap:12px}
+  .card{padding:12px}
+  /* 弹窗改为底部抽屉：单列、贴底、占满宽度，避免 640px 宽弹窗在 390px 上被裁 */
+  .el-overlay{padding:0;align-items:flex-end}
+  .el-dialog,.el-dialog--sm{width:100%;max-width:100%;max-height:92vh;border-radius:var(--radius-lg) var(--radius-lg) 0 0}
+  .el-dialog__header,.el-dialog__body,.el-dialog__footer{padding-left:14px;padding-right:14px}
+  .el-dialog__footer{flex-wrap:wrap}
+  .el-dialog__footer .ack-progress{flex:1 1 100%;margin:0 0 4px}
+  .el-dialog__footer .el-button{flex:1 1 auto;min-height:44px}
+  /* 触控目标：窄屏行内按钮补足 44px（theme.css:801-816 同口径） */
+  .el-button{min-height:36px}
+  .el-button--small,.el-button.is-link{height:auto;min-height:36px;min-width:36px}
+  .action-card__ops{margin-left:0;width:100%;justify-content:flex-end;gap:2px}
+  .action-card__head{align-items:flex-start}
+  .action-card__name{flex:1 1 100%}
+  .action-meta>div{flex-direction:column;gap:0}
+  .risk-item__meta>div{flex-direction:column;gap:0}
+  .risk-item__meta dt{flex:none}
+  .rules-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .el-table{min-width:560px}
+  .mobile-table-hint{display:block}
+}
+.spotlight{outline:2px dashed var(--el-color-primary);outline-offset:2px;border-radius:var(--radius-sm)}
+.mode-choice{margin:0 0 12px;padding:10px 12px;border:1px dashed var(--el-color-warning-light-5);border-radius:var(--radius-sm);background:var(--el-color-warning-light-9);font-size:12px;color:var(--text-color-regular)}
+.mode-choice__title{display:flex;gap:6px;align-items:center;font-weight:600;color:var(--el-color-warning);margin-bottom:6px}
+.mode-choice__row{display:flex;gap:8px;margin-top:4px}
+.mode-choice__k{flex:0 0 48px;font-weight:600;color:var(--text-color-primary)}
+.mode-choice__foot{margin-top:8px;padding-top:6px;border-top:1px dashed var(--el-color-warning-light-5);color:var(--text-color-secondary)}
+.mode-chip{margin:0 0 12px;padding:8px 12px;border-radius:var(--radius-sm);background:var(--el-color-primary-light-9);color:var(--el-color-primary);font-size:12px}
+@media (max-width:480px){.mode-choice__row{flex-direction:column;gap:0}.mode-choice__k{flex:none}}
+.mobile-table-hint{display:none;font-size:12px;color:var(--text-color-secondary);text-align:center;padding:4px 0 8px;user-select:none}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast-root"></div>
+<script>
+
+(function () {
+  'use strict';
+
+  /* ==========================================================================
+     1. 数据模型（与既有后端/前端契约对齐，字段名取自 AutomationRules.vue 的表单模型）
+        · 触发器枚举现状 = sensor_threshold | time_window | event
+          （frontend-shared/src/api/automation.ts:12-15）
+        · 本设计稿新增 sunrise | sunset，并把 time_window 的静态 HH:MM 窗口
+          扩展为「日出/日落 + 偏移分钟」
+        · 动作风险原四级 low|medium|high|critical
+          （backend/internal/deviceaction/definition.go:186-193）
+          本设计稿收敛为两级：普通 / 风险
+     ========================================================================== */
+  var TRIGGER_OPTIONS = [
+    { v: 'sensor_threshold', l: '传感器阈值' },
+    { v: 'time_window', l: '时间窗口' },
+    { v: 'sunrise', l: '日出' },
+    { v: 'sunset', l: '日落' },
+    { v: 'event', l: '事件驱动（暂不支持创建）', disabled: true }
+  ];
+  var SUN_OPTIONS = [
+    { v: 'sunrise', l: '日出' },
+    { v: 'sunset', l: '日落' }
+  ];
+  var BOOL_OPTIONS = [ { v: 'true', l: '是（关闭）' }, { v: 'false', l: '否' } ];
+  var PRIORITY_OPTIONS = [ { v: 'user', l: 'user' }, { v: 'operator', l: 'operator' } ];
+
+  var DEVICES = [
+    { id: 3, name: '储能柜 BMS（嘉佰达）' },
+    { id: 1, name: '温室控制器 #1' }
+  ];
+
+  /* 动作目录：名称/描述/风险等级/参数 schema 均取自后端定义
+     · set_mos_policy / bms_restart / read_basic_info:
+       backend/internal/drivers/jiabaida_control.go:34-63
+     · gpio_set / pwm_set_duty: backend/internal/deviceaction/periph.go:32-75 */
+  var ACTION_CATALOG = {
+    3: [
+      { id: 'set_mos_policy', name: '设置充放电 MOS 软件策略', risk: 'high', semantics: 'set',
+        desc: '一次提交充电/放电两个软件关闭位；bounded 写+读回 fet_status 对账' },
+      { id: 'bms_restart', name: '重启 BMS', risk: 'critical', semantics: 'reset',
+        desc: '重启后必须观察离线窗口或 restart counter，不能以 ACK 判定成功' },
+      { id: 'read_basic_info', name: '读取基本信息', risk: 'low', semantics: 'read',
+        desc: '总压、电流、容量、SOC、温度与 FET 状态' }
+    ],
+    1: [
+      { id: 'gpio_set', name: 'GPIO 电平设置', risk: 'medium', semantics: 'set',
+        desc: '设置节点 GPIO 引脚输出电平 (PeriphCmd 0x1B, action=SetLow/SetHigh)' },
+      { id: 'pwm_set_duty', name: 'PWM 占空比设置', risk: 'medium', semantics: 'set',
+        desc: '设置节点 PWM 通道占空比 (PeriphCmd 0x1B, action=SetDuty, 0-10000 = 0.00%-100.00%)' }
+    ]
+  };
+
+  /* 风险原因：设计稿示例文案（面向用户的"为什么危险"），非后端字段。
+     —— 后端当前只给 risk 字面量，没有面向用户的原因串（见 README §7 待裁决 O-2）。 */
+  var RISK_REASON = {
+    set_mos_policy: '关闭充放电 MOS 会切断电池的充放电回路：关闭放电 MOS 会让负载立即断电，关闭充电 MOS 会让电池停止充电。恢复必须重新下发指令，期间设备可能离线且无法自动回滚。',
+    bms_restart: '重启期间 BMS 会离线数十秒，采样与保护全部中断；正在执行的动作会被打断且无法回滚。'
+  };
+
+  /* 两级映射（单一事实源在 README §4；此处只是把映射结果呈现到界面）
+     普通 ← low | medium      风险 ← high | critical
+     注意：medium（GPIO/PWM）按用户"两级"口径归入普通，但它仍保留
+     ActionConfirmationDialog 的既有二次确认行为（DeviceControlPanel.vue:148）。 */
+  function riskLevelOf(a) { return (a.risk === 'high' || a.risk === 'critical') ? 'risk' : 'normal'; }
+  function isRisk(a) { return riskLevelOf(a) === 'risk'; }
+  function riskLevelText(a) { return isRisk(a) ? '风险' : '普通'; }
+
+  function findAction(deviceId, actionId) {
+    var list = ACTION_CATALOG[deviceId] || [];
+    for (var i = 0; i < list.length; i++) { if (list[i].id === actionId) return list[i]; }
+    return null;
+  }
+  function deviceName(id) {
+    for (var i = 0; i < DEVICES.length; i++) { if (DEVICES[i].id === id) return DEVICES[i].name; }
+    return '#' + id;
+  }
+  function paramsText(params) {
+    var keys = Object.keys(params || {});
+    if (!keys.length) return '无参数';
+    return keys.map(function (k) { return k + '=' + JSON.stringify(params[k]); }).join(', ');
+  }
+  function esc(v) {
+    return String(v === null || v === undefined ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function offsetText(kind, off) {
+    var base = kind === 'sunrise' ? '日出' : '日落';
+    if (!off) return base + '正点';
+    return base + (off < 0 ? '前 ' : '后 ') + Math.abs(off) + ' 分钟';
+  }
+  function triggerTypeText() {
+    var t = state.trigger.type;
+    if (t === 'sensor_threshold') return '传感器阈值';
+    if (t === 'time_window') return '时间窗口';
+    if (t === 'sunrise') return '日出';
+    if (t === 'sunset') return '日落';
+    return '事件驱动';
+  }
+  function triggerSummary() {
+    var t = state.trigger.type;
+    if (t === 'sunrise' || t === 'sunset') return offsetText(t, state.trigger.offset);
+    if (t === 'time_window') return '08:00-18:00 进入';
+    if (t === 'sensor_threshold') return 'temperature > 30';
+    return '—';
+  }
+
+  /* ==========================================================================
+     2. 状态
+     ========================================================================== */
+  var state = {
+    currentState: '',
+    view: 'rules',
+    onlyNormal: false,
+    name: '日落关断储能柜 BMS',
+    trigger: { type: 'sunset', offset: -30 },
+    actions: [
+      { uid: 1, deviceId: 3, actionId: 'set_mos_policy',
+        params: { charge_software_closed: false, discharge_software_closed: true, priority: 'user' } },
+      { uid: 2, deviceId: 3, actionId: 'bms_restart', params: {} },
+      { uid: 3, deviceId: 1, actionId: 'gpio_set', params: { pin: 12, level: 1 } }
+    ],
+    nextUid: 4,
+    acked: {},
+    openSelect: null,
+    selectActive: {},
+    dialogs: [],
+    editingUid: null,
+    paramsDraft: '',
+    manualDeviceId: 3,
+    manualActionId: 'set_mos_policy',
+    manualReason: '现场巡检确认负载已断开，按计划在日落前切断放电 MOS。',
+    manualParams: { charge_software_closed: false, discharge_software_closed: true, priority: 'user' },
+    spotlight: '',
+    scrollTo: '',
+    focusKey: '',
+    autofocus: false
+  };
+
+  var params = new URLSearchParams(location.search);
+  var showBar = params.get('bar') !== '0';
+
+  function findCard(uid) {
+    for (var i = 0; i < state.actions.length; i++) { if (state.actions[i].uid === uid) return state.actions[i]; }
+    return null;
+  }
+  function visibleActions() {
+    if (!state.onlyNormal) return state.actions.slice();
+    return state.actions.filter(function (c) {
+      var a = findAction(c.deviceId, c.actionId);
+      return a && !isRisk(a);
+    });
+  }
+  function riskActions() {
+    return visibleActions().filter(function (c) {
+      var a = findAction(c.deviceId, c.actionId);
+      return a && isRisk(a);
+    });
+  }
+
+  /* ==========================================================================
+     3. 选项解析（combobox 的 data-opts 键 → 选项数组）
+     ========================================================================== */
+  var OPTION_SETS = { trigger: TRIGGER_OPTIONS, sun: SUN_OPTIONS, bool: BOOL_OPTIONS, priority: PRIORITY_OPTIONS };
+  function opts(key) {
+    if (key && key.indexOf('actions-') === 0) {
+      var deviceId = Number(key.slice(8));
+      return (ACTION_CATALOG[deviceId] || []).map(function (a) {
+        return { v: a.id, l: a.name + (isRisk(a) ? '（风险）' : '') };
+      });
+    }
+    if (key === 'device') {
+      return DEVICES.map(function (d) { return { v: d.id, l: d.name }; });
+    }
+    return OPTION_SETS[key] || [];
+  }
+  function valueOfSelect(id) {
+    if (id === 'trigger-type' || id === 'sun-kind') return state.trigger.type;
+    if (id.indexOf('card-device-') === 0) { var c = findCard(Number(id.slice(12))); return c ? c.deviceId : ''; }
+    if (id.indexOf('card-action-') === 0) { var c2 = findCard(Number(id.slice(12))); return c2 ? c2.actionId : ''; }
+    if (id === 'bool-charge') return String(state.manualParams.charge_software_closed);
+    if (id === 'bool-discharge') return String(state.manualParams.discharge_software_closed);
+    if (id === 'priority') return state.manualParams.priority;
+    return '';
+  }
+
+  /* ==========================================================================
+     4. 片段渲染
+     ========================================================================== */
+  function formItem(label, content, required) {
+    return '<div class="el-form-item"><span class="el-form-item__label' + (required ? ' is-required' : '') + '">'
+      + esc(label) + '</span><div class="el-form-item__content">' + content + '</div></div>';
+  }
+
+  /* 自绘 combobox：role=combobox + role=listbox/option，键盘 ↑↓ Enter Esc 全通
+     （Element Plus 的 el-select 在真实仓库里是同一套 ARIA 语义） */
+  function selectHtml(id, optsKey, ariaLabel) {
+    var list = opts(optsKey);
+    var value = valueOfSelect(id);
+    var open = state.openSelect === id;
+    var cur = null, curIdx = -1;
+    for (var i = 0; i < list.length; i++) { if (String(list[i].v) === String(value)) { cur = list[i]; curIdx = i; } }
+    var active = state.selectActive[id];
+    if (active === undefined || active === null) active = curIdx < 0 ? 0 : curIdx;
+    var items = list.map(function (o, idx) {
+      return '<li class="el-select__item" role="option" id="' + id + '-opt-' + idx + '"'
+        + ' aria-selected="' + (String(o.v) === String(value) ? 'true' : 'false') + '"'
+        + (o.disabled ? ' aria-disabled="true"' : '')
+        + ' data-act="option" data-select="' + id + '" data-opts="' + optsKey + '" data-index="' + idx + '"'
+        + ' data-value="' + esc(o.v) + '" data-focus-key="' + id + '-opt-' + idx + '" tabindex="-1">'
+        + esc(o.l) + '</li>';
+    }).join('');
+    return '<div class="el-select">'
+      + '<div class="el-select__wrapper" role="combobox" aria-haspopup="listbox" aria-expanded="' + (open ? 'true' : 'false') + '"'
+      + ' aria-controls="' + id + '-listbox" aria-label="' + esc(ariaLabel) + '" tabindex="0"'
+      + ' data-act="toggle-select" data-select="' + id + '" data-opts="' + optsKey + '" data-focus-key="sel-' + id + '"'
+      + (open ? ' aria-activedescendant="' + id + '-opt-' + active + '"' : '') + '>'
+      + '<span>' + esc(cur ? cur.l : '请选择') + '</span><span class="el-select__caret" aria-hidden="true">&#9662;</span></div>'
+      + (open ? '<ul class="el-select__dropdown" role="listbox" id="' + id + '-listbox" aria-label="' + esc(ariaLabel) + '">' + items + '</ul>' : '')
+      + '</div>';
+  }
+
+  function switchHtml(key, checked, ariaLabel) {
+    return '<span class="el-switch' + (checked ? ' is-checked' : '') + '" role="switch" aria-checked="' + (checked ? 'true' : 'false') + '"'
+      + ' tabindex="0" aria-label="' + esc(ariaLabel) + '" data-act="switch" data-switch="' + key + '" data-focus-key="sw-' + key + '"></span>';
+  }
+
+  /* 风险徽标：**不只用颜色** —— 有 ⚠ 图标 + "风险" 文字 + 卡片左侧红边 + 独立原因块 */
+  function riskTag(a) {
+    if (!a || !isRisk(a)) {
+      return '<span class="el-tag el-tag--info el-tag--small" data-test="risk-tag-normal">'
+        + '<span aria-hidden="true">&#9679;</span> 普通</span>';
+    }
+    return '<span class="el-tag el-tag--danger el-tag--small is-plain risk-badge" data-test="risk-tag-risk">'
+      + '<span aria-hidden="true">&#9888;</span> 风险</span>';
+  }
+  function riskReasonHtml(actionId) {
+    var a = findAction(state.manualDeviceId, actionId) || findAction(3, actionId) || findAction(1, actionId);
+    var reason = RISK_REASON[actionId] || '该动作会改变设备运行状态，可能造成不可自动回滚的后果。';
+    return '<div class="risk-reason" data-test="risk-reason">'
+      + '<span class="risk-reason__icon" aria-hidden="true">&#9888;</span>'
+      + '<span><span class="risk-reason__label">风险原因：</span>' + esc(reason)
+      + (a ? ' <span class="text-muted">（原四级判定：' + esc(a.risk) + '）</span>' : '') + '</span></div>';
+  }
+
+  function overlay(name, title, body, footer, cls) {
+    return '<div class="el-overlay" data-dialog="' + name + '">'
+      + '<div class="el-dialog ' + (cls || '') + '" role="dialog" aria-modal="true" aria-labelledby="' + name + '-title">'
+      + '<div class="el-dialog__header" id="' + name + '-title">' + esc(title) + '</div>'
+      + '<div class="el-dialog__body">' + body + '</div>'
+      + '<div class="el-dialog__footer">' + footer + '</div>'
+      + '</div></div>';
+  }
+
+  /* ---------- 动作卡片 ---------- */
+  function actionCardHtml(c, idx, total) {
+    var a = findAction(c.deviceId, c.actionId) || { id: c.actionId, name: c.actionId, risk: 'low' };
+    var risk = isRisk(a);
+    return '<li class="action-card' + (state.spotlight === 'action-' + c.uid ? ' spotlight' : '') + '"'
+      + ' id="action-card-' + c.uid + '" data-risk="' + (risk ? '1' : '0') + '" data-test="action-card">'
+      + '<div class="action-card__head">'
+      + '<span class="action-card__index" aria-hidden="true">' + (idx + 1) + '</span>'
+      + '<span class="action-card__name">' + esc(a.name) + '</span>'
+      + riskTag(a)
+      + '<span class="action-card__ops">'
+      + '<button class="el-button is-link" data-act="move-up" data-uid="' + c.uid + '"' + (idx === 0 ? ' disabled' : '')
+      + ' aria-label="上移第 ' + (idx + 1) + ' 个动作">&#8593; 上移</button>'
+      + '<button class="el-button is-link" data-act="move-down" data-uid="' + c.uid + '"' + (idx === total - 1 ? ' disabled' : '')
+      + ' aria-label="下移第 ' + (idx + 1) + ' 个动作">&#8595; 下移</button>'
+      + '<button class="el-button is-link" data-act="edit-params" data-uid="' + c.uid + '"'
+      + ' aria-label="编辑第 ' + (idx + 1) + ' 个动作「' + esc(a.name) + '」的参数">编辑参数</button>'
+      + '<button class="el-button is-link el-link--danger" data-act="remove-action" data-uid="' + c.uid + '"'
+      + ' aria-label="删除第 ' + (idx + 1) + ' 个动作「' + esc(a.name) + '」">删除</button>'
+      + '</span></div>'
+      + '<dl class="action-meta">'
+      + '<div><dt>目标设备</dt><dd>' + esc(deviceName(c.deviceId)) + ' <span class="mono text-muted">#' + c.deviceId + '</span></dd></div>'
+      + '<div><dt>动作</dt><dd><span class="mono">' + esc(a.id) + '</span> <span class="text-muted">v1</span></dd></div>'
+      + '<div class="span2"><dt>参数</dt><dd class="mono">' + esc(paramsText(c.params)) + '</dd></div>'
+      + '</dl>'
+      + (risk ? riskReasonHtml(a.id) : '')
+      + '</li>';
+  }
+
+  function actionSectionHtml() {
+    var list = visibleActions();
+    var risks = riskActions();
+    var cards = list.map(function (c, i) { return actionCardHtml(c, i, list.length); }).join('');
+    return formItem('动作',
+      '<div class="action-toolbar" id="action-section">'
+      + '<span class="text-muted">共 ' + list.length + ' 个动作' + (risks.length
+        ? '，其中 <strong>' + risks.length + ' 个风险动作</strong>（保存前需逐项确认）'
+        : '，无风险动作（保存时不会弹出二次确认）') + '</span>'
+      + '<button class="el-button el-button--primary el-button--small" data-act="add-action" data-test="add-action">+ 添加动作</button>'
+      + '</div>'
+      + '<ul class="action-list" data-test="action-list">' + cards + '</ul>'
+      + (state.onlyNormal
+        ? '<div class="assumption-note" data-test="normal-note">对照模式：本规则只含普通动作 —— 卡片无风险色、无风险原因块，点「保存」直接落库，不弹二次确认。</div>'
+        : ''), true);
+  }
+
+  /* ---------- 规则编辑器弹窗 ---------- */
+  function ruleDialogHtml() {
+    var t = state.trigger;
+    var sun = (t.type === 'sunrise' || t.type === 'sunset');
+    var triggerBlock = '<div' + (state.spotlight === 'trigger' ? ' class="spotlight"' : '') + '>'
+      + formItem('触发器类型', selectHtml('trigger-type', 'trigger', '触发器类型'), true)
+      + (sun
+        ? formItem('日出 / 日落', selectHtml('sun-kind', 'sun', '日出 / 日落'), true)
+          + formItem('偏移分钟',
+            '<div class="inline-row">'
+            + '<input class="el-input el-input--number" type="number" step="1" value="' + t.offset + '"'
+            + ' data-act="sun-offset" data-test="field-sun-offset" data-focus-key="sun-offset" aria-label="相对日出/日落的偏移分钟，负值为之前">'
+            + '<span class="hint" id="offset-sentence" data-test="offset-sentence">' + esc(offsetText(t.type, t.offset)) + '</span>'
+            + '<span class="hint">分钟；负值 = 日出/日落之前</span>'
+            + '</div>')
+        : '')
+      + '</div>';
+    return overlay('rule', '创建规则',
+      formItem('名称',
+        '<input class="el-input" value="' + esc(state.name) + '" data-act="rule-name" data-test="field-name"'
+        + ' placeholder="如：高温自动开窗" data-focus-key="rule-name">', true)
+      + triggerBlock
+      + formItem('附加条件',
+        '<textarea class="el-textarea" rows="2" data-test="field-conditions"'
+        + ' placeholder=\'JSON 数组，如 [{"sensor":"humidity","comparator":"lt","threshold":30}]\'></textarea>')
+      + actionSectionHtml()
+      + formItem('冷却时间', '<input class="el-input el-input--number" type="number" value="300"> <span class="hint">秒，0-86400</span>')
+      + formItem('每日上限', '<input class="el-input el-input--number" type="number" value="0"> <span class="hint">0 = 不限，最大 1000</span>')
+      + formItem('启用', switchHtml('rule-enabled', true, '规则启用')),
+      '<button class="el-button" data-act="close-dialog" data-dialog="rule">取消</button>'
+      + '<button class="el-button el-button--primary" data-act="save" data-test="save-rule">保存</button>');
+  }
+
+  /* O-1 待裁决：风险动作在规则触发时「自动下发」还是「转待确认通知」。
+     本设计稿**不预设**结论：默认渲染两个选项并列，仅在 URL 显式给出
+     ?variant=auto|pending 时才展示某一侧的已裁决文案（供截图对比，不代表已批准）。 */
+  var VARIANT = params.get('variant');
+  function handleModeHtml() {
+    if (VARIANT === 'auto') {
+      return '<div class="mode-chip" data-test="variant-chip">O-1 已裁决演示（变体 A）：规则触发时<strong>自动下发</strong>'
+        + ' —— 需后端放开 system 执行者的确认门（现 commandexec/service.go:521-522 只豁免 low/medium）。</div>';
+    }
+    if (VARIANT === 'pending') {
+      return '<div class="mode-chip" data-test="variant-chip">O-1 已裁决演示（变体 B）：规则触发时<strong>转为「待确认」通知</strong>，'
+        + '人工在通知中心确认后才下发 —— 与现状铁律 4（automation/planner.go:31）一致，事件结果 = pending_confirm。</div>';
+    }
+    return '<div class="mode-choice" data-test="mode-choice">'
+      + '<div class="mode-choice__title"><span aria-hidden="true">&#9888;</span> 规则触发时的处理方式：<strong>待裁决 O-1</strong>，本设计稿不预设</div>'
+      + '<div class="mode-choice__row"><span class="mode-choice__k">选项 A</span><span>触发时<strong>自动下发</strong>：需后端放开 system 执行者的确认门（当前实现下 high/critical 对 system 必然 ErrConfirmationRequired，事件落 failed_dispatch 且前端无提示）。</span></div>'
+      + '<div class="mode-choice__row"><span class="mode-choice__k">选项 B</span><span>触发时<strong>转为「待确认」通知</strong>，人工在通知中心确认后才下发：与现状铁律 4 一致，事件结果 = pending_confirm。</span></div>'
+      + '<div class="mode-choice__foot">无论选 A 还是 B，本弹窗的逐项勾选确认都必须保留 —— 它约束的是「保存这条规则」，不是「触发时是否自动执行」。</div>'
+      + '</div>';
+  }
+  /* ---------- 保存前风险清单二次确认 ---------- */
+  function saveRiskDialogHtml() {
+    var risks = riskActions();
+    var ackedCount = risks.filter(function (c) { return state.acked[c.uid]; }).length;
+    var allAcked = risks.length > 0 && ackedCount === risks.length;
+    var items = risks.map(function (c, i) {
+      var a = findAction(c.deviceId, c.actionId) || { id: c.actionId, name: c.actionId, risk: 'high' };
+      return '<li class="risk-item" data-test="risk-item">'
+        + '<div class="risk-item__name"><span aria-hidden="true">&#9888;</span>' + esc(a.name) + riskTag(a) + '</div>'
+        + '<dl class="risk-item__meta">'
+        + '<div><dt>目标设备</dt><dd>' + esc(deviceName(c.deviceId)) + ' <span class="mono text-muted">#' + c.deviceId + '</span></dd></div>'
+        + '<div><dt>动作 ID</dt><dd class="mono">' + esc(a.id) + '</dd></div>'
+        + '<div><dt>参数</dt><dd class="mono">' + esc(paramsText(c.params)) + '</dd></div>'
+        + '<div><dt>风险原因</dt><dd>' + esc(RISK_REASON[a.id] || '该动作会改变设备运行状态，可能造成不可自动回滚的后果。') + '</dd></div>'
+        + '</dl>'
+        + '<label class="risk-ack"><input type="checkbox" data-act="ack" data-uid="' + c.uid + '"'
+        + ' data-test="risk-ack-' + (i + 1) + '" data-focus-key="ack-' + c.uid + '"' + (state.acked[c.uid] ? ' checked' : '') + '>'
+        + '<span>我已了解「' + esc(a.name) + '」对「' + esc(deviceName(c.deviceId)) + '」的影响，并确认将其加入本规则。</span></label>'
+        + '</li>';
+    }).join('');
+    return overlay('save-risk', '保存前确认',
+      '<div class="el-alert el-alert--error"><span class="el-alert__icon" aria-hidden="true">&#9888;</span>'
+      + '<span><span class="el-alert__title">本规则包含 ' + risks.length + ' 个风险动作</span>'
+      + '<div class="el-alert__desc">请核对下列动作的目标设备与参数，逐项勾选确认后才可保存。'
+      + '风险动作在<strong>规则触发时</strong>如何处理见下方待裁决项 —— 本弹窗只约束「保存这条规则」，不代表已批准触发时自动执行。</div></span></div>'
+      + handleModeHtml()
+      + '<ul class="risk-list" data-test="risk-list">' + items + '</ul>',
+      '<span class="ack-progress" data-test="ack-progress" role="status">已确认 ' + ackedCount + ' / ' + risks.length + ' 个风险动作</span>'
+      + '<button class="el-button" data-act="cancel-save" data-autofocus="1" data-test="cancel-save">取消</button>'
+      + '<button class="el-button el-button--danger" data-act="confirm-save" data-test="confirm-save"'
+      + (allAcked ? '' : ' disabled') + '>保存规则</button>');
+  }
+
+  function editParamsDialogHtml() {
+    var c = findCard(state.editingUid);
+    if (!c) return '';
+    return overlay('edit-params', '编辑动作参数',
+      '<p class="hint" style="margin:0 0 8px">目标动作：<span class="mono">' + esc(c.actionId) + '</span>'
+      + '（与既有页面的「动作参数 JSON 文本域」同形态，AutomationRules.vue:261-268）</p>'
+      + '<textarea class="el-textarea" rows="5" data-act="params-json" data-test="params-json" aria-label="动作参数 JSON">'
+      + esc(state.paramsDraft) + '</textarea>',
+      '<button class="el-button" data-act="close-dialog" data-dialog="edit-params">取消</button>'
+      + '<button class="el-button el-button--primary" data-act="params-done" data-test="params-done">完成</button>');
+  }
+
+  /* ---------- 设备页：参数表单 + 二次确认（复刻 ActionForm.vue / ActionConfirmationDialog.vue） ---------- */
+  function manualFormDialogHtml() {
+    var a = findAction(state.manualDeviceId, state.manualActionId);
+    if (!a) return '';
+    return overlay('manual-form', '受控操作 · ' + a.name,
+      '<div class="el-alert el-alert--warning"><span class="el-alert__icon" aria-hidden="true">&#9888;</span>'
+      + '<span class="el-alert__title">' + esc(a.name) + ' 将向设备发送参数变更</span></div>'
+      + formItem('charge_software_closed', selectHtml('bool-charge', 'bool', '关闭充电 MOS'))
+      + formItem('discharge_software_closed', selectHtml('bool-discharge', 'bool', '关闭放电 MOS'))
+      + formItem('priority', selectHtml('priority', 'priority', '优先级'))
+      + formItem('风险等级', riskTag(a) + ' <span class="hint">原四级判定：' + esc(a.risk) + '</span>'),
+      '<button class="el-button" data-act="close-dialog" data-dialog="manual-form">取消</button>'
+      + '<button class="el-button el-button--primary" data-act="manual-form-next" data-test="manual-form-next">继续</button>');
+  }
+
+  function manualConfirmDialogHtml() {
+    var a = findAction(state.manualDeviceId, state.manualActionId);
+    if (!a) return '';
+    var reasonOk = state.manualReason.trim().length > 0;
+    return overlay('manual-confirm', '确认受控操作',
+      '<div class="el-alert el-alert--warning"><span class="el-alert__icon" aria-hidden="true">&#9888;</span>'
+      + '<span class="el-alert__title">' + esc(a.name) + ' 将向设备发送参数变更</span></div>'
+      + '<p class="risk-line">风险等级：<strong>风险</strong>（原四级判定：' + esc(a.risk) + '）。确认后会创建可审计操作，成功前仅显示排队状态。</p>'
+      + riskReasonHtml(a.id)
+      + '<div class="param-echo" data-test="manual-echo">'
+      + '<div><strong>目标设备：</strong>' + esc(deviceName(state.manualDeviceId)) + ' <span class="mono text-muted">#' + state.manualDeviceId + '</span></div>'
+      + '<div><strong>动作：</strong><span class="mono">' + esc(a.id) + '</span> <span class="text-muted">v1</span></div>'
+      + '<div><strong>参数：</strong><span class="mono">' + esc(paramsText(state.manualParams)) + '</span></div></div>'
+      + formItem('操作理由',
+        '<textarea class="el-textarea" rows="3" maxlength="512" data-act="manual-reason" data-test="manual-reason"'
+        + ' placeholder="说明本次变更的目的与观察安排">' + esc(state.manualReason) + '</textarea>', true),
+      '<button class="el-button" data-act="close-dialog" data-dialog="manual-confirm" data-autofocus="1" data-test="manual-cancel">取消</button>'
+      + '<button class="el-button el-button--danger" data-act="manual-confirm-submit" data-test="manual-confirm"'
+      + (reasonOk ? '' : ' disabled') + '>确认并排队</button>', 'el-dialog--sm');
+  }
+
+  /* ---------- 列表视图 ---------- */
+  function rulesViewHtml() {
+    var risks = riskActions();
+    return '<section class="card">'
+      + '<div class="card-head"><span class="card-title">规则'
+      + '<span class="el-tag el-tag--primary el-tag--small count-tag">1</span></span>'
+      + '<button class="el-button el-button--primary" data-act="open-rule" data-test="create-rule">创建规则</button></div>'
+      + '<div class="rules-scroll"><div class="mobile-table-hint">&#8592; 左右滑动查看完整表格 &#8594;</div>'
+      + '<table class="el-table" data-test="rules-table"><thead><tr>'
+      + '<th>名称</th><th>触发器</th><th>动作</th><th>冷却/熔断</th><th>确认制</th><th>启用</th><th>操作</th>'
+      + '</tr></thead><tbody><tr>'
+      + '<td>' + esc(state.name) + '</td>'
+      + '<td><div class="cell-flex"><span class="el-tag el-tag--primary el-tag--small">' + triggerTypeText() + '</span>'
+      + '<span class="mono">' + esc(triggerSummary()) + '</span></div></td>'
+      + '<td><div class="cell-flex"><span class="el-tag el-tag--warning el-tag--small">设备动作 ×' + visibleActions().length + '</span>'
+      + (risks.length ? '<span class="el-tag el-tag--danger el-tag--small"><span aria-hidden="true">&#9888;</span> 含 ' + risks.length + ' 个风险动作</span>' : '')
+      + '<span class="mono">' + esc(visibleActions().map(function (c) { var a = findAction(c.deviceId, c.actionId); return a ? a.id : c.actionId; }).join(', ')) + '</span>'
+      + '</div></td>'
+      + '<td class="mono">300s / 不限</td>'
+      + '<td>' + (risks.length ? '<span class="el-tag el-tag--warning el-tag--small">需确认</span>' : '<span class="text-muted">-</span>') + '</td>'
+      + '<td>' + switchHtml('rule-enabled-list', true, state.name + ' 启用') + '</td>'
+      + '<td><button class="el-button is-link" data-act="open-rule" data-test="edit-rule">编辑</button>'
+      + '<button class="el-button is-link el-link--danger" data-act="delete-rule">删除</button></td>'
+      + '</tr></tbody></table></div></section>';
+  }
+
+  /* ---------- 设备控制面板视图 ---------- */
+  function deviceViewHtml() {
+    var ops = ACTION_CATALOG[state.manualDeviceId] || [];
+    var items = ops.map(function (a) {
+      var risk = isRisk(a);
+      var icon = a.semantics === 'read' ? '&#128065;' : '&#9998;';
+      return '<button class="op-item' + (state.spotlight === 'op-' + a.id ? ' spotlight' : '') + '"'
+        + ' data-risk="' + (risk ? '1' : '0') + '" data-act="op" data-op="' + a.id + '" data-test="op-item">'
+        + '<span class="op-icon" aria-hidden="true">' + icon + '</span>'
+        + '<span class="op-text"><span class="op-name"><span>' + esc(a.name) + '</span>' + riskTag(a) + '</span>'
+        + '<span class="op-desc">' + esc(a.desc) + '</span></span></button>';
+    }).join('');
+    return '<section class="card">'
+      + '<div class="card-head"><span class="card-title">' + esc(deviceName(state.manualDeviceId)) + ' · MOS 状态</span>'
+      + '<span class="el-tag el-tag--info el-tag--small">实时连接断开</span></div>'
+      + '<div class="cell-flex">'
+      + '<span class="el-tag el-tag--success el-tag--small">充电MOS ON</span>'
+      + '<span class="el-tag el-tag--success el-tag--small">放电MOS ON</span>'
+      + '<span class="hint">开关控制请使用下方「受控操作」（BmsDetailPage.vue:112 既有口径）</span>'
+      + '</div></section>'
+      + '<section class="card">'
+      + '<div class="card-head"><span class="card-title">受控操作</span></div>'
+      + '<p class="ops-sub">当前设备可执行的受控操作</p>'
+      + '<div class="op-list" data-test="op-list">' + items + '</div>'
+      + '<div class="assumption-note" data-test="device-note">风险操作（如「设置充放电 MOS 软件策略」）：点击 → 填参数 → <strong>再弹「确认受控操作」二次确认</strong>，必须填写操作理由才可提交。'
+      + '普通操作：点击后直接排队，无二次确认（对照 DeviceControlPanel.vue:148 的 requiresConfirmation）。</div>'
+      + '</section>';
+  }
+
+  function pageHeaderHtml() {
+    return '<div class="page-header"><div class="page-header-left"><div>'
+      + '<h2>自动化策略</h2><p class="page-header-subtitle">传感器数据或时间窗口触发设备动作或通知</p>'
+      + '</div></div><div class="page-header-right">'
+      + '<span class="el-tag el-tag--info el-tag--small">交互设计稿 demo · 非生产页面</span>'
+      + '</div></div>';
+  }
+
+  function demoBarHtml() {
+    var states = [
+      ['sunrise', '1 日出/日落触发器'], ['actions', '2 多动作列表'], ['risk', '3 风险徽标'],
+      ['save-risk', '4 保存二次确认'], ['manual', '5 手动开关确认'], ['normal', '6 普通动作对照']
+    ];
+    return '<div class="demo-bar" role="region" aria-label="演示脚手架（非交付页面内容）">'
+      + '<b>演示脚手架</b>'
+      + states.map(function (s) {
+        return '<button data-act="goto-state" data-state="' + s[0] + '" aria-pressed="' + (state.currentState === s[0]) + '">' + s[1] + '</button>';
+      }).join('')
+      + '<span class="demo-sep"></span><b>视图</b>'
+      + '<button data-act="view" data-view="rules" aria-pressed="' + (state.view === 'rules') + '">规则编辑器</button>'
+      + '<button data-act="view" data-view="device" aria-pressed="' + (state.view === 'device') + '">设备控制面板</button>'
+      + '<button data-act="toggle-normal" aria-pressed="' + (state.onlyNormal ? 'true' : 'false') + '">对照模式：仅普通动作</button>'
+      + '<span class="demo-sep"></span><b>O-1 文案变体</b>'
+      + '<button data-act="variant" data-variant="" aria-pressed="' + (!VARIANT) + '">未裁决（默认）</button>'
+      + '<button data-act="variant" data-variant="auto" aria-pressed="' + (VARIANT === 'auto') + '">A 自动下发</button>'
+      + '<button data-act="variant" data-variant="pending" aria-pressed="' + (VARIANT === 'pending') + '">B 转待确认</button>'
+      + '</div>';
+  }
+
+  function dialogsHtml() {
+    return state.dialogs.map(function (d) {
+      if (d === 'rule') return ruleDialogHtml();
+      if (d === 'save-risk') return saveRiskDialogHtml();
+      if (d === 'edit-params') return editParamsDialogHtml();
+      if (d === 'manual-form') return manualFormDialogHtml();
+      if (d === 'manual-confirm') return manualConfirmDialogHtml();
+      return '';
+    }).join('');
+  }
+
+  /* ==========================================================================
+     5. 渲染 + 焦点/滚动恢复
+     ========================================================================== */
+  function render() {
+    var open = state.dialogs.length > 0;
+    document.getElementById('app').innerHTML = (showBar ? demoBarHtml() : '')
+      + '<div id="page"' + (open ? ' aria-hidden="true"' : '') + '>'
+      + pageHeaderHtml()
+      + '<div class="page">' + (state.view === 'rules' ? rulesViewHtml() : deviceViewHtml()) + '</div>'
+      + '</div>'
+      + dialogsHtml();
+    restoreFocus();
+    applyScroll();
+    state.autofocus = false;
+  }
+  function restoreFocus() {
+    if (state.autofocus) {
+      var a = document.querySelector('[data-autofocus="1"]');
+      if (a) { a.focus(); return; }
+    }
+    if (state.focusKey) {
+      var el = document.querySelector('[data-focus-key="' + state.focusKey + '"]');
+      if (el) el.focus();
+    }
+  }
+  function applyScroll() {
+    if (!state.scrollTo) return;
+    var target = document.getElementById(state.scrollTo);
+    if (!target) return;
+    var body = target.closest ? target.closest('.el-dialog__body') : null;
+    if (!body) return;
+    body.scrollTop = Math.max(0, target.offsetTop - 8);
+  }
+
+  var toastTimer = null;
+  function toast(msg) {
+    var root = document.getElementById('toast-root');
+    root.innerHTML = '<div class="el-message" role="status"><span aria-hidden="true">&#10003;</span>' + esc(msg) + '</div>';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { root.innerHTML = ''; }, 3200);
+  }
+
+  /* ==========================================================================
+     6. 交互
+     ========================================================================== */
+  function applySelect(id, raw) {
+    state.openSelect = null;
+    if (id === 'trigger-type' || id === 'sun-kind') {
+      state.trigger.type = raw;
+    } else if (id.indexOf('card-device-') === 0) {
+      var c = findCard(Number(id.slice(12)));
+      if (c) {
+        c.deviceId = Number(raw);
+        var first = (ACTION_CATALOG[c.deviceId] || [])[0];
+        if (first) c.actionId = first.id;
+        c.params = {};
+      }
+    } else if (id.indexOf('card-action-') === 0) {
+      var c2 = findCard(Number(id.slice(12)));
+      if (c2) { c2.actionId = raw; c2.params = {}; }
+    } else if (id === 'bool-charge') {
+      state.manualParams.charge_software_closed = (raw === 'true');
+    } else if (id === 'bool-discharge') {
+      state.manualParams.discharge_software_closed = (raw === 'true');
+    } else if (id === 'priority') {
+      state.manualParams.priority = raw;
+    }
+    state.focusKey = 'sel-' + id;
+    render();
+  }
+  function focusOption(id, idx) {
+    state.selectActive[id] = idx;
+    state.focusKey = id + '-opt-' + idx;
+    render();
+  }
+  function currentIndex(id, optsKey) {
+    var list = opts(optsKey), value = valueOfSelect(id);
+    for (var i = 0; i < list.length; i++) { if (String(list[i].v) === String(value)) return i; }
+    return 0;
+  }
+  function closeDialog(name) {
+    state.dialogs = state.dialogs.filter(function (d) { return d !== name; });
+    state.focusKey = '';
+    render();
+  }
+  function onSave() {
+    var risks = riskActions();
+    if (!risks.length) {
+      state.dialogs = [];
+      render();
+      toast('规则已保存（无风险动作，未弹出二次确认）');
+      return;
+    }
+    state.acked = {};
+    state.dialogs = ['rule', 'save-risk'];
+    state.autofocus = true;
+    render();
+  }
+  function addAction() {
+    var uid = state.nextUid++;
+    state.actions.push({ uid: uid, deviceId: 1, actionId: 'gpio_set', params: { pin: 13, level: 1 } });
+    render();
+  }
+  function moveAction(uid, delta) {
+    var i = -1;
+    for (var k = 0; k < state.actions.length; k++) { if (state.actions[k].uid === uid) i = k; }
+    if (i < 0) return;
+    var j = i + delta;
+    if (j < 0 || j >= state.actions.length) return;
+    var tmp = state.actions[i];
+    state.actions[i] = state.actions[j];
+    state.actions[j] = tmp;
+    render();
+  }
+
+  document.addEventListener('click', function (e) {
+    var node = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+    var act = node ? node.dataset.act : '';
+    if (state.openSelect && !(e.target.closest && e.target.closest('.el-select'))) {
+      state.openSelect = null;
+      if (!act) { render(); return; }
+    }
+    if (!act) return;
+    if (act === 'toggle-select') {
+      var id = node.dataset.select;
+      if (state.openSelect === id) { state.openSelect = null; }
+      else { state.openSelect = id; state.selectActive[id] = currentIndex(id, node.dataset.opts); }
+      state.focusKey = 'sel-' + id;
+      render();
+      return;
+    }
+    if (act === 'option') {
+      var list = opts(node.dataset.opts);
+      var o = list[Number(node.dataset.index)];
+      if (!o || o.disabled) return;
+      applySelect(node.dataset.select, String(o.v));
+      return;
+    }
+    if (act === 'switch') { node.setAttribute('aria-checked', node.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+      node.classList.toggle('is-checked'); return; }
+    if (act === 'open-rule') { state.dialogs = ['rule']; state.currentState = ''; state.spotlight = ''; state.scrollTo = ''; state.focusKey = ''; render(); return; }
+    if (act === 'close-dialog') { closeDialog(node.dataset.dialog); return; }
+    if (act === 'save') { onSave(); return; }
+    if (act === 'add-action') { addAction(); return; }
+    if (act === 'move-up') { moveAction(Number(node.dataset.uid), -1); return; }
+    if (act === 'move-down') { moveAction(Number(node.dataset.uid), 1); return; }
+    if (act === 'remove-action') {
+      var uid = Number(node.dataset.uid);
+      state.actions = state.actions.filter(function (c) { return c.uid !== uid; });
+      delete state.acked[uid];
+      render();
+      return;
+    }
+    if (act === 'edit-params') {
+      var c = findCard(Number(node.dataset.uid));
+      state.editingUid = c ? c.uid : null;
+      state.paramsDraft = c ? JSON.stringify(c.params, null, 2) : '{}';
+      state.dialogs = state.dialogs.concat(['edit-params']);
+      render();
+      return;
+    }
+    if (act === 'params-done') {
+      var cc = findCard(state.editingUid);
+      try {
+        var parsed = JSON.parse(state.paramsDraft);
+        if (cc) cc.params = parsed && typeof parsed === 'object' ? parsed : {};
+        closeDialog('edit-params');
+      } catch (err) {
+        toast('动作参数 JSON 格式错误');
+      }
+      return;
+    }
+    if (act === 'ack') { return; }
+    if (act === 'cancel-save') { state.acked = {}; closeDialog('save-risk'); return; }
+    if (act === 'confirm-save') {
+      var n = riskActions().length;
+      state.dialogs = [];
+      state.acked = {};
+      render();
+      toast('规则已保存（' + n + ' 个风险动作已逐项确认）');
+      return;
+    }
+    if (act === 'op') {
+      var opId = node.dataset.op;
+      var action = findAction(state.manualDeviceId, opId);
+      if (!action) return;
+      state.manualActionId = opId;
+      if (isRisk(action)) {
+        state.dialogs = ['manual-form'];
+        state.focusKey = '';
+      } else {
+        toast('操作已排队：' + action.name + '（普通动作，无二次确认）');
+      }
+      render();
+      return;
+    }
+    if (act === 'manual-form-next') { state.dialogs = ['manual-confirm']; state.autofocus = true; render(); return; }
+    if (act === 'manual-confirm-submit') {
+      var a = findAction(state.manualDeviceId, state.manualActionId);
+      state.dialogs = [];
+      render();
+      toast('操作已排队：' + (a ? a.name : '') + '（已记录操作理由）');
+      return;
+    }
+    if (act === 'variant') {
+      var q = new URLSearchParams(location.search);
+      if (node.dataset.variant) q.set('variant', node.dataset.variant); else q.delete('variant');
+      location.search = q.toString();
+      return;
+    }
+    if (act === 'view') { state.view = node.dataset.view; state.currentState = ''; state.spotlight = ''; render(); return; }
+    if (act === 'toggle-normal') { state.onlyNormal = !state.onlyNormal; state.acked = {}; render(); return; }
+    if (act === 'goto-state') { applyState(node.dataset.state); render(); return; }
+    if (act === 'delete-rule') {
+      toast('演示稿：删除规则沿用既有 confirmDanger 危险确认（AutomationRules.vue:655-671）');
+      return;
+    }
+  });
+
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t && t.dataset && t.dataset.act === 'ack') {
+      state.acked[t.dataset.uid] = t.checked;
+      state.focusKey = 'ack-' + t.dataset.uid;
+      render();
+    }
+  });
+
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.dataset) return;
+    if (t.dataset.act === 'rule-name') { state.name = t.value; return; }
+    if (t.dataset.act === 'sun-offset') {
+      var v = parseInt(t.value, 10);
+      if (isNaN(v)) v = 0;
+      state.trigger.offset = v;
+      var s = document.getElementById('offset-sentence');
+      if (s) s.textContent = offsetText(state.trigger.type, v);
+      return;
+    }
+    if (t.dataset.act === 'manual-reason') {
+      state.manualReason = t.value;
+      var btn = document.querySelector('[data-act="manual-confirm-submit"]');
+      if (btn) btn.disabled = state.manualReason.trim().length === 0;
+      return;
+    }
+    if (t.dataset.act === 'params-json') { state.paramsDraft = t.value; return; }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var t = e.target;
+    if (!t || !t.dataset) return;
+    var act = t.dataset.act;
+    if (act === 'toggle-select') {
+      var id = t.dataset.select;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (state.openSelect !== id) {
+          state.openSelect = id;
+          state.selectActive[id] = currentIndex(id, t.dataset.opts);
+          state.focusKey = 'sel-' + id;
+          render();
+        } else {
+          focusOption(id, state.selectActive[id] || 0);
+        }
+        return;
+      }
+      if (e.key === 'Escape' && state.openSelect) { state.openSelect = null; render(); }
+      return;
+    }
+    if (act === 'option') {
+      var oid = t.dataset.select;
+      var list = opts(t.dataset.opts);
+      var idx = Number(t.dataset.index);
+      if (e.key === 'ArrowDown') { e.preventDefault(); focusOption(oid, Math.min(idx + 1, list.length - 1)); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); focusOption(oid, Math.max(idx - 1, 0)); }
+      else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (list[idx] && !list[idx].disabled) applySelect(oid, String(list[idx].v));
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        state.openSelect = null;
+        state.focusKey = 'sel-' + oid;
+        render();
+      }
+      return;
+    }
+    if (act === 'switch' && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      t.setAttribute('aria-checked', t.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+      t.classList.toggle('is-checked');
+      return;
+    }
+  });
+
+  /* ==========================================================================
+     7. 六个演示状态的深链（?state=xxx）
+     ========================================================================== */
+  function applyState(name) {
+    state.currentState = name;
+    state.dialogs = [];
+    state.openSelect = null;
+    state.acked = {};
+    state.spotlight = '';
+    state.scrollTo = '';
+    state.autofocus = false;
+    state.focusKey = '';
+    state.view = 'rules';
+    state.onlyNormal = false;
+    state.editingUid = null;
+    if (name === 'sunrise') {
+      state.dialogs = ['rule']; state.spotlight = 'trigger'; state.focusKey = 'sel-trigger-type';
+    } else if (name === 'actions') {
+      state.dialogs = ['rule']; state.scrollTo = 'action-section';
+    } else if (name === 'risk') {
+      state.dialogs = ['rule']; state.scrollTo = 'action-card-1'; state.spotlight = 'action-1';
+    } else if (name === 'save-risk') {
+      state.dialogs = ['rule', 'save-risk']; state.autofocus = true;
+    } else if (name === 'manual') {
+      state.view = 'device'; state.dialogs = ['manual-confirm']; state.spotlight = 'op-set_mos_policy'; state.autofocus = true;
+    } else if (name === 'normal') {
+      state.onlyNormal = true; state.dialogs = ['rule']; state.scrollTo = 'action-section'; state.spotlight = 'action-3';
+    }
+  }
+
+  var initial = params.get('state');
+  if (initial) applyState(initial);
+  render();
+})();
+
+</script>
+</body>
+</html>
