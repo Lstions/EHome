@@ -8,6 +8,7 @@ function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefini
   return {
     id: 'test_action', version: 1, name: '测试操作', description: 'desc',
     device_type: 'prs3001', semantics: 'set', risk: 'high',
+    risk_level: 'elevated', requires_confirmation: true,
     transport: 'channel_cmd_v2', ...overrides,
   }
 }
@@ -22,7 +23,8 @@ describe('ActionConfirmationDialog', () => {
   it('renders risk level and action name from definition', () => {
     const wrapper = mountDialog()
     expect(wrapper.text()).toContain('测试操作 将向设备发送参数变更')
-    expect(wrapper.text()).toContain('风险等级：high')
+    // 2 级契约的中文标签 (不再是驱动 4 级方言原文)。
+    expect(wrapper.text()).toContain('风险等级：风险')
   })
 
   it('disables confirm button when reason is empty or whitespace only', async () => {

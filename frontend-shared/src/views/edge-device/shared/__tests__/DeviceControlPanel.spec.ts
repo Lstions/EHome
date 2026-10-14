@@ -29,10 +29,13 @@ describe('DeviceControlPanel catalog-driven action cards (design: 受控操作)'
     expect(source).toContain("action.semantics === 'set' ? EditPen")
   })
 
-  it('marks high/critical risk on the card and keeps cards keyboard-accessible', () => {
-    expect(source).toContain("action.definition.risk === 'critical'")
-    expect(source).toContain('严重风险')
-    expect(source).toContain('高风险')
+  // 语义变更 (B1 风险两级收敛): 徽标不再由前端按 4 级 risk 字面量渲染，而是由后端
+  // 下发的 risk_level (normal|elevated) 经 riskBadge 映射。本用例断言的是**消费点**
+  // 存在且读的是后端字段；"前端不得持有 4 级字面量"由 riskLiteralGate.spec.ts (R2) 把守。
+  it('marks elevated risk on the card from the backend-provided risk_level', () => {
+    expect(source).toContain("action.risk_level")
+    expect(source).toContain("requires_confirmation === true")
+    expect(source).toContain('风险')
     expect(source).toContain('tabindex="0"')
     expect(source).toContain('@keydown.enter.space.prevent')
   })

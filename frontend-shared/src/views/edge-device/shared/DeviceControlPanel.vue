@@ -37,8 +37,7 @@
           <div class="op-text">
             <div class="op-name">
               <span>{{ action.definition.name }}</span>
-              <el-tag v-if="action.definition.risk === 'critical'" type="danger" size="small" effect="plain">严重风险</el-tag>
-              <el-tag v-else-if="action.definition.risk === 'high'" type="warning" size="small" effect="plain">高风险</el-tag>
+              <el-tag v-if="riskBadge(action.definition)" :type="riskBadge(action.definition)!.type" size="small" effect="plain">{{ riskBadge(action.definition)!.label }}</el-tag>
             </div>
             <div v-if="action.definition.description" class="op-desc">{{ action.definition.description }}</div>
           </div>
@@ -145,7 +144,19 @@ async function load() { if (props.deviceId > 0) await store.refresh(props.device
 // P1-1 的可用性文案契约：reason 由后端给出，前端只保证「未提供时不留白」。
 // reason_code 只用于**分派可行动指引**（见 staleGuidance），不直接展示给用户。
 function availabilityReason(action: EffectiveAction) { if (!action.available) return action.reason || '当前不可用'; const fields = Object.values(action.definition.input_schema?.properties ?? {}); if (fields.some(field => !['string', 'boolean', 'integer', 'number'].includes(field.type) || field.enum && field.type !== 'string')) return '客户端不支持该参数 Schema'; return '' }
-function requiresConfirmation(action: ActionDefinition) { return action.risk === 'medium' || action.risk === 'high' || action.risk === 'critical' }
+// 风险判定与样式**全部**来自后端下发的 2 级值 —— 前端不再持有任何 risk 字面量。
+// requiresConfirmation 直接读后端的 requires_confirmation 布尔（它是
+// deviceaction.RiskLevel.RequiresConfirmation() 的对外派生），因此前后端判定不会漂移。
+function requiresConfirmation(action: ActionDefinition) { return action.requires_confirmation === true }
+// riskBadge 是**唯一的**风险样式映射表。后端只下发 normal/elevated 两个值，
+// 这里据此给出徽标；未识别的值不渲染徽标（fail-closed：不猜风险等级）。
+function riskBadge(action: ActionDefinition): { type: 'danger' | 'warning'; label: string } | null {
+  switch (action.risk_level) {
+    case 'elevated': return { type: 'danger', label: '风险' }
+    case 'normal': return null
+    default: return null
+  }
+}
 function actionIcon(action: ActionDefinition) { return action.semantics === 'reset' ? RefreshLeft : action.semantics === 'read' ? View : action.semantics === 'set' ? EditPen : Operation }
 function begin(action: ActionDefinition) { selectedAction.value = action; const fields = Object.keys(action.input_schema?.properties ?? {}); if (fields.length === 0) { prepare({}); return }; formVisible.value = true }
 async function submitSelected(params: Record<string, unknown>) { formVisible.value = false; prepare(params) }

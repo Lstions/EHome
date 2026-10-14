@@ -3,7 +3,11 @@ import client, { type ApiEnvelope } from './client'
 export type OperationStatus = 'QUEUED' | 'DISPATCHED' | 'DEVICE_ACCEPTED' | 'VERIFYING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED'
 export interface ActionParameter { type: 'string' | 'boolean' | 'integer' | 'number'; minimum?: number; maximum?: number; min_length?: number; max_length?: number; enum?: string[] }
 export interface ActionParameterSchema { properties?: Record<string, ActionParameter>; required?: string[] }
-export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; execution_shape?: 'single' | 'bounded_sequence'; verification?: 'none' | 'ack' | 'readback' | 'observation'; at_most_once?: boolean; max_steps?: number; availability_code?: string; availability_reason?: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
+// RiskLevel 是后端下发的**2 级系统契约** (deviceaction.RiskLevel)。前端只做样式映射，
+// 不得再持有任何 4 级字面量（low/medium/high/critical）—— 那是驱动的出厂方言，
+// 由后端在 Register 期归一化。防漂移门禁见 __tests__/riskLiteralGate.spec.ts。
+export type RiskLevel = 'normal' | 'elevated'
+export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; risk_level?: RiskLevel; requires_confirmation?: boolean; execution_shape?: 'single' | 'bounded_sequence'; verification?: 'none' | 'ack' | 'readback' | 'observation'; at_most_once?: boolean; max_steps?: number; availability_code?: string; availability_reason?: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
 export interface EffectiveAction { definition: ActionDefinition; available: boolean; reason?: string; reason_code?: string }
 export interface VerifiedSensorValue { name: string; value: number; unit?: string; string_value?: string }
 export interface ConfirmationGrant { token: string; expires_at: string }
