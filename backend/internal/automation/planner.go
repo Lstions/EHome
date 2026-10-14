@@ -229,6 +229,43 @@ func (p *Planner) resolveSystemActorID() (uint, error) {
 	return admin.ID, nil
 }
 
+// nextTriggerSeq 返回该规则**当日第几次触发决策**, 用作幂等键的 trigger_seq 段。
+//
+// 口径 = 当日该规则已落库的 automation_events 行数 + 1。
+//
+// 为什么不能用"当日 executed 行数 + 1" (P1-A / P2-B 的根因): 部分失败**不写**
+// executed 行, 于是"失败 → 修配置 → 重试"时 trigger_seq 与上一次完全相同, 第 1 个
+// 动作的 Create 直接命中上次的幂等键:
+//
+//   - 参数与上次相同 → replay 返回旧结果, planner 记 executed=成功, 而本次实际
+//     只有后面的动作真正下发 (静默少执行, 安全相关);
+//   - 参数被用户改过 → RequestHash 不同 → ErrIdempotencyCollision, 该规则当天
+//     永久 failed_dispatch, 直到次日 (P2-B)。
+//
+// 计数单位换成"触发决策"后, 每一次进入动作循环都拿到一个**新**的 trigger_seq,
+// 键不再重合 —— 重试必然真的重新下发。
+//
+// 为什么把被抑制的事件也算进来: 计数的唯一职责是"单调递增且不复用", 不是"统计
+// 成功次数"。suppressed_* / condition_changed / failed_* 全部计入只会让序号跳得更
+// 快, 失败方向是"跳号"而不是"复用" (宁可跳号, 不可复用)。
+//
+// 并发边界 (诚实声明): 本函数是"读-计数-加一"式, 同一规则被两个 worker 同时触发
+// 时仍有极小概率取到同一个 trigger_seq —— 该窗口在改造前就存在 (旧口径同样是先查
+// 后写), 不是本批引入。命中时 command_executions 的 (scope, key) 唯一索引与
+// RequestHash 比对会把它挡成 ErrIdempotencyCollision (fail-closed, 绝不静默少执行)。
+// 规则级执行串行化不在本批范围。
+func (p *Planner) nextTriggerSeq(ctx context.Context, ruleID uint, at time.Time, triggerSource string) int64 {
+	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
+	q := p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND triggered_at >= ?", ruleID, dayStart)
+	if triggerSource != "" {
+		q = q.Where("trigger_source = ?", triggerSource)
+	}
+	var n int64
+	_ = q.Count(&n).Error
+	return n + 1
+}
+
 // executeActions 串行执行规则的动作集合 (方案 §3.2.4 / §6.3 多动作状态机)。
 //
 // 语义 (O-1 裁决 (a), 实施计划 §0 用户裁决):
@@ -259,14 +296,8 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		return
 	}
 
-	// 触发序号: 当日该规则已 executed 的行数 + 1 (既有口径, 与改造前一致)。
-	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	var triggerSeq int64
-	_ = p.db.Model(&models.AutomationEvent{}).
-		Where("rule_id = ? AND triggered_at >= ? AND result = ?",
-			rule.ID, dayStart, models.AutomationResultExecuted).
-		Count(&triggerSeq).Error
-	triggerSeq++
+	// 触发序号 = 当日该规则的第几次触发决策 (P1-A/P2-B 修复, 见 nextTriggerSeq)。
+	triggerSeq := p.nextTriggerSeq(context.Background(), rule.ID, at, "")
 
 	// 系统 actor 惰性解析: 全新安装下该用户在进程启动后才创建, 这里才第一次拿得到。
 	// 解析失败 = 自动路径被禁用 (未初始化 / 主体被停用): 照常留审计, 但 Detail 写
@@ -938,14 +969,8 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 		return ev, nil
 	}
 
-	// 幂等键: 手动触发独立命名空间, 当日触发序号
-	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	var triggerSeq int64
-	_ = p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
-		Where("rule_id = ? AND triggered_at >= ? AND result = ? AND trigger_source = ?",
-			rule.ID, dayStart, models.AutomationResultExecuted, models.AutomationTriggerSourceManual).
-		Count(&triggerSeq).Error
-	triggerSeq++
+	// 幂等键: 手动触发独立命名空间, 当日触发序号 (口径同自动路径, 见 nextTriggerSeq)。
+	triggerSeq := p.nextTriggerSeq(ctx, rule.ID, at, models.AutomationTriggerSourceManual)
 
 	newManualEvent := func(result, detail, commandID string, actionSeq *int) models.AutomationEvent {
 		return models.AutomationEvent{

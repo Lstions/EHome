@@ -131,6 +131,115 @@ func commandPinOrder(t *testing.T, pl *Planner) []int {
 	return order
 }
 
+// ─── P1-A / P2-B: 部分失败后重试必须真的重新下发 ─────────────────────────
+//
+// 反向验证: 把 nextTriggerSeq 退回"当日 executed 行数 + 1" →
+// TestMultiActionRetryAfterPartialFailureRedispatches 红 (第 1 个动作被 replay
+// 吞掉: 新增行数不足, 且日志记 executed)。
+func TestMultiActionRetryAfterPartialFailureRedispatches(t *testing.T) {
+	pl, edge := setupConfirmPlanner(t)
+	rule := multiActionRule(t, pl, edge.ID, "部分失败后重试", 2)
+	addAction(t, pl, rule.ID, 1, "gpio_set", `{"pin":5,"level":1}`)
+	addAction(t, pl, rule.ID, 2, "gpio_set", `{"pin":6,"level":1}`)
+
+	// 第 1 次触发: 两个动作都成功 → 动作 1/2 各一行 command_executions。
+	at1 := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: at1})
+	if got := len(execRows(t, pl)); got != 2 {
+		t.Fatalf("第 1 次触发应下发 2 个动作, 实际 %d", got)
+	}
+
+	// 把第 2 个动作改成目录里不存在的动作 → 模拟"配置坏了"的部分失败。
+	if err := pl.db.Model(&models.AutomationRuleAction{}).
+		Where("rule_id = ? AND seq = ?", rule.ID, 2).
+		Update("action_id", "no_such_action").Error; err != nil {
+		t.Fatal(err)
+	}
+	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: at1.Add(time.Minute)})
+	var partial models.AutomationEvent
+	pl.db.Where("rule_id = ? AND result = ?", rule.ID, models.AutomationResultPartialFailure).
+		Order("id DESC").First(&partial)
+	if partial.ID == 0 {
+		t.Fatal("前置条件失败: 第 2 次触发应落 partial_failure")
+	}
+	// 此时共 3 行 (第 1 次两个 + 第 2 次的动作 1)。
+	if got := len(execRows(t, pl)); got != 3 {
+		t.Fatalf("部分失败后应有 3 行 command_executions, 实际 %d", got)
+	}
+
+	// 修好配置并重试: 动作 1 必须**真的重新下发**, 而不是被 replay 复用。
+	if err := pl.db.Model(&models.AutomationRuleAction{}).
+		Where("rule_id = ? AND seq = ?", rule.ID, 2).
+		Update("action_id", "gpio_set").Error; err != nil {
+		t.Fatal(err)
+	}
+	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: at1.Add(2 * time.Minute)})
+
+	if got := len(execRows(t, pl)); got != 5 {
+		t.Fatalf("重试后 command_executions 应新增 2 行 (共 5 行), 实际 %d —— 动作 1 被幂等 replay 吞掉了"+
+			" (P1-A: 部分失败后重试静默复用上次结果)", got)
+	}
+	// 最新事件必须是 executed (两个动作都真的成功)。
+	var last models.AutomationEvent
+	pl.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&last)
+	if last.Result != models.AutomationResultExecuted {
+		t.Fatalf("重试后 result=%q want executed (detail=%s)", last.Result, last.Detail)
+	}
+	// 三个触发决策 = 三个不同的 trigger_seq: 幂等键不得重合。
+	keys := map[string]bool{}
+	for _, row := range execRows(t, pl) {
+		if keys[row.IdempotencyKey] {
+			t.Fatalf("幂等键重复 (trigger_seq 未推进): %s", row.IdempotencyKey)
+		}
+		keys[row.IdempotencyKey] = true
+	}
+}
+
+// P2-B: 部分失败后**改动作**重试, 不得因 RequestHash 不同落 ErrIdempotencyCollision。
+func TestMultiActionRetryAfterChangingActionDoesNotCollide(t *testing.T) {
+	pl, edge := setupConfirmPlanner(t)
+	rule := multiActionRule(t, pl, edge.ID, "改动作重试", 2)
+	addAction(t, pl, rule.ID, 1, "gpio_set", `{"pin":5,"level":1}`)
+	addAction(t, pl, rule.ID, 2, "no_such_action", `{}`)
+
+	at := time.Date(2026, 5, 2, 9, 0, 0, 0, time.UTC)
+	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: at})
+	var partial models.AutomationEvent
+	pl.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&partial)
+	if partial.Result != models.AutomationResultPartialFailure {
+		t.Fatalf("前置条件失败: result=%q want partial_failure", partial.Result)
+	}
+
+	// 修好第 2 个动作 (换回 gpio_set 并给出合法参数) + **改掉第 1 个动作的参数**
+	// (让它的 RequestHash 与上次不同 —— 这正是 P2-B 的碰撞触发条件)。
+	if err := pl.db.Model(&models.AutomationRuleAction{}).Where("rule_id = ? AND seq = ?", rule.ID, 2).
+		Updates(map[string]interface{}{
+			"action_id":          "gpio_set",
+			"action_params_json": `{"pin":6,"level":1}`,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := pl.db.Model(&models.AutomationRuleAction{}).Where("rule_id = ? AND seq = ?", rule.ID, 1).
+		Update("action_params_json", `{"pin":5,"level":0}`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	pl.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: at.Add(time.Minute)})
+
+	var last models.AutomationEvent
+	pl.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&last)
+	if last.Result == models.AutomationResultFailedDispatch {
+		t.Fatalf("改动作重试不得落 failed_dispatch (P2-B: trigger_seq 冻结导致 ErrIdempotencyCollision); detail=%s",
+			last.Detail)
+	}
+	if last.Result != models.AutomationResultExecuted {
+		t.Fatalf("result=%q want executed (detail=%s)", last.Result, last.Detail)
+	}
+	if got := len(execRows(t, pl)); got != 3 {
+		t.Fatalf("重试后 command_executions 应为 3 行 (第 1 次动作1 + 重试 2 个), 实际 %d", got)
+	}
+}
+
 // ─── A-4: 多动作按 seq 升序串行执行 ───────────────────────────────────────
 func TestMultiActionExecutesInSeqOrder(t *testing.T) {
 	pl, edge := setupConfirmPlanner(t)
