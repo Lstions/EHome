@@ -598,6 +598,8 @@ import {
   type AutomationComparator,
   type AutomationTriggerType,
   type SunEventKind,
+  type PrecheckResponse,
+  type PrecheckRiskAction,
   type CreateAutomationRuleRequest,
   type UpdateAutomationRuleRequest,
 } from '@/api/automation'
@@ -1113,14 +1115,63 @@ function riskItemReason(actionId: string, deviceId: number, backendReason?: stri
 }
 
 /**
- * 走**预检端点**决定要不要弹风险清单。
+ * 把**预检响应**转换成风险清单条目。
  *
- * 为什么不能让前端自己判断"有没有风险动作"：风险等级的唯一事实源在后端
- * （deviceaction.RiskLevel）。前端自己按 action_id 猜，就等于持有第二份判定 ——
- * 后端改映射时前端静默漂移，风险清单会被静默跳过。这正是 F-4 反向验证要抓的形态。
+ * 清单必须列全 动作名 / 目标设备 / 动作 ID / 参数 / 风险原因（需求 §1.3"列出风险操作"）。
+ * 动作名只能从本地设备目录取 —— 预检响应只有 `action_device_name`（设备名），
+ * 没有动作名字段，把设备名当动作名会让用户确认错对象（安全文案错误）。
+ */
+function buildRiskItems(risks: PrecheckRiskAction[]): RiskCheckItem[] {
+  return risks.map(item => ({
+    seq: item.seq,
+    action_id: item.action_id,
+    action_name: actionNameOf(item.action_id, item.action_device_id),
+    device_name: item.action_device_name || deviceName(item.action_device_id),
+    risk_label: item.risk_label || '风险',
+    risk_reason: riskItemReason(item.action_id, item.action_device_id, item.risk_reason),
+    // 摘要优先级: 后端给的摘要 → 后端回带的参数 JSON → 本地卡片里的参数 JSON。
+    // 不能写成 `paramsSummary(item.action_params_json) || ...`：paramsSummary(undefined)
+    // 返回 '无参数'（真值），会把本地兜底整段短路掉，风险清单里就看不到用户实际填的参数。
+    params_summary: item.params_summary
+      || (item.action_params_json ? paramsSummary(item.action_params_json) : '')
+      || paramsSummary(form.actions.find(a => a.action_id === item.action_id)?.action_params_json),
+  }))
+}
+
+function openRiskDialog(risks: PrecheckRiskAction[], payload: CreateAutomationRuleRequest) {
+  riskDialogActions.value = buildRiskItems(risks)
+  ackedSeqs.value = []
+  pendingSubmit.value = payload
+  riskDialogVisible.value = true
+}
+
+/**
+ * 保存入口：先探后端预检端点，再按结果分派。
  *
- * 预检端点不可用时** fail-closed**：拿不到风险清单就不放行保存，而不是"当作没有
- * 风险动作直接提交"（后者会让风险确认形同虚设）。
+ * ## 为什么必须有"端点不可用"的降级分支（而不是一律 fail-closed）
+ *
+ * 方案 §4.1.2 的 `POST /automation-rules/precheck` 是**新增端点**，B4 前端不得假定
+ * 它已随本批上线：实测后端 routes 里**只有** GET/POST ""、GET/:id、PUT/:id、
+ * DELETE/:id、PATCH /:id/enabled、POST /:id/trigger —— **没有 precheck**。
+ * 若在端点缺失时一律 fail-closed，用户将**完全无法保存任何规则**（含普通规则），
+ * 这比"风险清单拿不到"严重得多。
+ *
+ * ## 降级到什么？（关键：不能降级成"当作没有风险动作"）
+ *
+ * 后端**已经**通过规则详情下发动作集合（`actions` 数组），并已在动作目录
+ * （`GET /edge-devices/:id/actions`）里下发风险等级（`risk_level` /
+ * `requires_confirmation`）。二者合起来足以判定"这条规则是否含风险动作" ——
+ * 判定源仍是**后端下发的字段**，前端没有第二份风险等级表（不违反 R2/F-7）。
+ *
+ * 因此降级语义是"用后端下发的动作集合自行拼装清单"，而**不是**"跳过确认"：
+ *   · 判定源 = requires_confirmation（后端字段，与后端确认门同一判定点）；
+ *   · 风险原因 = 后端 Catalog 的 description，并**明确标注它不是危险说明**
+ *     （后端未实现 risk_reason，见设计稿 §9 O-2；编造危险说明比没有更危险）；
+ *   · 设备名 = 本地设备列表（后端未给时的等价来源）。
+ *
+ * ⚠️ 唯一的真实缺口：目录**尚未加载**的设备上的动作无法判定等级。此时**不得**
+ * 静默放行 —— 必须显式告知用户"无法判定风险，请重试/刷新"并阻止保存，
+ * 而不是把未知当普通（那正是 F-3/F-6 要防的"猜风险"）。
  */
 async function onSave() {
   // 绕过护栏（F-4 反向验证的落点）：风险清单弹窗已打开时，**任何**再次触发的保存
@@ -1136,53 +1187,81 @@ async function onSave() {
   saving.value = true
   try {
     const payload = buildPayload()
+    // 普通动作**无**二次确认，直接落库。此处刻意**不带** risk_acknowledged 字段
+    // （既不 true 也不 false）：带 false 会在每次保存普通规则时清掉规则级授权，而
+    // "未授权的普通规则被改成含风险动作"必然触发后端 B1 的授权失效（动作集合变化即
+    // 清空）并强制重新确认 —— 故 false 不带来额外安全性，只带来无谓的状态翻转；
+    // 带 true 则是无依据的授权。省略 = "本次保存不改变授权语义"，与后端 *bool 可空语义一致。
+    const submitPlain = async () => { await submitRule(payload) }
+
+    // ① 后端预检端点（方案 §4.1.2，**尚未实现**）。
     const precheck = await automationApi.precheckRule(payload)
-    if (precheck === null) {
-      feedback.error('保存前风险预检不可用，已阻止保存：无法确认本规则是否包含风险动作（请稍后重试）')
+    if (precheck !== null) {
+      const blocking = precheck.blocking_errors ?? []
+      if (blocking.length > 0) {
+        ElMessage.warning(blocking[0])
+        return
+      }
+      const risks = precheck.risk_actions ?? []
+      if (risks.length === 0) {
+        await submitPlain()
+        return
+      }
+      openRiskDialog(risks, payload)
+      await focusRiskCancel()
       return
     }
-    const blocking = precheck.blocking_errors ?? []
-    if (blocking.length > 0) {
-      ElMessage.warning(blocking[0])
+
+    // ② 降级：端点不可用（未实现/网络失败）。用后端已下发的动作目录判定，
+    //    **绝不**把"无法判定"当成"没有风险动作"（见 onSave 顶部注释）。
+    const fallback = riskActionsFromCatalog()
+    if (fallback === null) {
+      feedback.error('无法判定本规则是否包含风险动作（设备动作目录尚未加载），已阻止保存：请稍后重试')
       return
     }
-    const risks = precheck.risk_actions ?? []
-    if (risks.length === 0) {
-      // F-6: 普通动作**无**二次确认，直接落库。
-      //
-      // ⚠️ 这里刻意**不带** risk_acknowledged 字段（既不 true 也不 false）：
-      //    · 带 false 会在每次保存普通规则时把规则级授权清掉，而"未授权的普通规则
-      //      被改成含风险动作"这一步必然触发后端 B1 的授权失效（动作集合变化即清空）
-      //      并强制重新确认 —— 故 false 不带来额外安全性，只带来无谓的状态翻转；
-      //    · 带 true 则是无依据的授权（本次保存根本没有风险动作需要确认）。
-      //    省略即"本次保存不改变授权语义"，与后端 risk_acknowledged 的 *bool 可空语义一致。
-      await submitRule(buildPayload())
+    if (fallback.length === 0) {
+      await submitPlain()
       return
     }
-    // 含风险动作 ⇒ 弹风险清单，逐项勾选。提交体带 risk_acknowledged=true（O-2 授权）。
-    riskDialogActions.value = risks.map(item => ({
-      seq: item.seq,
-      action_id: item.action_id,
-      action_name: actionNameOf(item.action_id, item.action_device_id),
-      device_name: item.action_device_name || deviceName(item.action_device_id),
-      risk_label: item.risk_label || '风险',
-      risk_reason: riskItemReason(item.action_id, item.action_device_id, item.risk_reason),
-      // 摘要优先级: 后端给的摘要 → 后端回带的参数 JSON → 本地卡片里的参数 JSON。
-      // 不能写成 `paramsSummary(item.action_params_json) || ...`：paramsSummary(undefined)
-      // 返回 '无参数'（真值），会把本地兜底整段短路掉，风险清单里就看不到用户实际填的参数。
-      params_summary: item.params_summary
-        || (item.action_params_json ? paramsSummary(item.action_params_json) : '')
-        || paramsSummary(form.actions.find(a => a.action_id === item.action_id)?.action_params_json),
-    }))
-    ackedSeqs.value = []
-    pendingSubmit.value = payload
-    riskDialogVisible.value = true
+    openRiskDialog(fallback, payload)
     await focusRiskCancel()
   } catch {
     feedback.error('保存失败')
   } finally {
     saving.value = false
   }
+}
+
+/**
+ * 降级路径：从**后端已下发的动作目录**里挑出风险动作，拼成预检同形的清单。
+ *
+ * 返回 `null` 表示**无法判定**（有 device_action 的目录尚未加载）——调用方必须
+ * 据此阻止保存，而不是当作"无风险动作"。
+ */
+function riskActionsFromCatalog(): PrecheckRiskAction[] | null {
+  const risks: NonNullable<PrecheckResponse['risk_actions']> = []
+  for (const [index, action] of form.actions.entries()) {
+    if (action.action_type !== 'device_action' || !action.action_device_id || !action.action_id) continue
+    const def = catalogDefinition(action)
+    if (!def) return null // 目录未加载 ⇒ 无法判定，不得猜
+    if (!riskBadge(def)) continue
+    risks.push({
+      seq: index + 1,
+      action_id: action.action_id,
+      action_device_id: action.action_device_id,
+      action_device_name: deviceName(action.action_device_id),
+      risk_level: def.risk_level,
+      risk_label: '风险',
+      // 刻意**不填** risk_reason：后端未实现该字段，而 Catalog 的 description 是
+      // **操作说明**不是**危险说明**（例如 set_mos_policy 的 description 写的是
+      // "一次提交充放电两个关闭位；bounded 写+读回 fet_status 对账"，直接当风险原因
+      // 用户读不懂 —— 设计稿 §9 O-2 记录的正是这一点）。留空后 riskItemReason 会
+      // 回落到 riskReasonOf()，那里会**显式标注"非危险说明"**并说明后端未下发原因。
+      // 编造一条听起来像危险说明的文案，比如实说"未下发"更危险。
+      params_summary: paramsSummary(action.action_params_json),
+    })
+  }
+  return risks
 }
 
 /** 默认焦点落在**安全侧**（取消），沿用 utils/feedback.ts 的既有裁决（不得诱导性确认）。 */

@@ -1030,10 +1030,57 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
     })
 
-    it('预检不可用时 fail-closed 阻止保存（不得"当作没有风险动作"直接提交）', async () => {
+    // ── 预检端点不可用时的降级（后端 precheck 尚未实现，必须能保存） ──────────
+    //
+    // 降级**不得**等于"跳过风险确认"：判定源换成后端已下发的动作目录
+    // （GET /edge-devices/:id/actions 的 risk_level / requires_confirmation），
+    // 仍然是后端字段、仍然没有第二份风险等级表。下面三条分别钉住三种结局。
+
+    it('预检不可用 + 普通动作：降级判定为无风险动作，正常保存（不得把端点缺失变成"谁都不能存"）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(null)
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 14 })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '预检缺失但普通')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+    })
+
+    it('预检不可用 + 风险动作：降级仍弹风险清单（不得静默放行）', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(null)
       const wrapper = await mountPage()
-      await openCreateFilled(wrapper, '预检失败')
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('降级风险')
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await flushPromises()
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
+      expect(wrapper.findAll('[data-test="risk-item"]')).toHaveLength(1)
+      // 降级路径的风险原因来自 Catalog description，且必须**显式标注它不是危险说明**
+      // （后端未实现 risk_reason，编造安全文案比没有更危险）
+      expect(wrapper.find('[data-test="risk-item"]').text()).toContain('非危险说明')
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('预检不可用 + 动作目录未加载：无法判定风险 ⇒ 阻止保存（不得把未知当普通）', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue(null)
+      // 目录加载失败（模拟：接口报错）⇒ 索引里没有该动作，等级不可判定
+      mockedOperationApi.actions.mockRejectedValue(new Error('catalog unavailable'))
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('目录缺失')
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await flushPromises()
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
 
