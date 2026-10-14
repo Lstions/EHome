@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
@@ -79,6 +80,13 @@ type createAutomationRuleRequest struct {
 	CooldownSec         *int     `json:"cooldown_sec"`
 	MaxDailyExec        int      `json:"max_daily_exec"`
 	RequireConfirmed    *bool    `json:"require_confirmed"`
+	// RiskAcknowledged 是用户在保存时对**风险动作**的显式确认 (O-2 规则级授权,
+	// 实施计划 §0.1)。true = 允许该规则的风险动作在自动路径上跳过人工确认。
+	//
+	// 为什么必须有这个字段: 授权载体是 automation_rules.risk_acknowledged_at,
+	// 但客户端不能直接写时间戳 (那等于自行授权且无法审计"谁在何时确认的")。
+	// 请求只表达"我确认过了", 时间戳由服务端在保存成功时写入。
+	RiskAcknowledged *bool `json:"risk_acknowledged"`
 }
 
 type updateAutomationRuleRequest struct {
@@ -102,6 +110,9 @@ type updateAutomationRuleRequest struct {
 	CooldownSec         *int     `json:"cooldown_sec"`
 	MaxDailyExec        *int     `json:"max_daily_exec"`
 	RequireConfirmed    *bool    `json:"require_confirmed"`
+	// RiskAcknowledged 同创建接口: 显式确认/撤回对风险动作的规则级授权。
+	// 动作集合发生变化时, 既有授权会被清空, 必须在本请求里重新确认才能通过 V7。
+	RiskAcknowledged *bool `json:"risk_acknowledged"`
 }
 
 // registerAutomationRoutes 注册自动化策略规则/事件 API (设计/自动化策略引擎方案.md v0.1)。
@@ -200,6 +211,14 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 				return
 			}
 		}
+		// V7: 风险动作 + require_confirmed=false 且未显式授权 → 拒绝保存
+		// (方案 §4.1.1 V7 / §3.2.5 第 4 步)。杜绝"配了一条永远不会执行的规则"。
+		riskAcknowledged := req.RiskAcknowledged != nil && *req.RiskAcknowledged
+		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
+			req.ActionType, req.ActionDeviceID, req.ActionID, createRequireConfirmed, riskAcknowledged); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
+			return
+		}
 		rule := models.AutomationRule{
 			Name:               req.Name,
 			TriggerType:        req.TriggerType,
@@ -237,6 +256,10 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		}
 		if req.RequireConfirmed != nil {
 			rule.RequireConfirmed = *req.RequireConfirmed
+		}
+		if riskAcknowledged {
+			now := time.Now().UTC()
+			rule.RiskAcknowledgedAt = &now
 		}
 		if err := db.Create(&rule).Error; err != nil {
 			Error(c, 500, "创建策略失败: "+err.Error())
@@ -318,6 +341,25 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 				return
 			}
 		}
+		// ── 授权失效 (安全关键, 实施计划 §0.1): 动作集合变化即清空 risk_acknowledged_at ──
+		//
+		// 为什么必须清空: 用户授权的是"这条规则的这些动作"。若把动作从 A 改成 B
+		// (或改目标设备/参数) 而保留旧授权, 旧授权会静默地把 B 也放行 —— 用户从未
+		// 确认过 B, 而 B 可能是完全不同的物理操作。仅改名称/冷却等非动作字段不失效。
+		actionSetChanged := automationActionSetChanged(rule, at, adevid, aid, apj)
+		acknowledged := rule.RiskAcknowledgedAt != nil
+		if actionSetChanged {
+			acknowledged = false
+		}
+		if req.RiskAcknowledged != nil {
+			acknowledged = *req.RiskAcknowledged
+		}
+		// V7: 清空后若仍配 require_confirmed=false 的风险动作 → 拒绝保存, 强制重新确认。
+		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
+			at, &adevid, aid, rc, acknowledged); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
+			return
+		}
 		updates := map[string]interface{}{}
 		if req.Name != nil {
 			updates["name"] = *req.Name
@@ -378,6 +420,19 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		}
 		if req.RequireConfirmed != nil {
 			updates["require_confirmed"] = *req.RequireConfirmed
+		}
+		// 授权列的写入必须显式表达"清空"(nil), 不能用 map 的省略语义 ——
+		// 省略 = 保持原值, 那正是"改动作后旧授权仍然生效"的漏洞。
+		switch {
+		case actionSetChanged:
+			// 动作集合变化 → 强制清空 (无论请求是否带 risk_acknowledged)。
+			// 本条优先于请求字段: 用户不能在"改动作"的同一次请求里顺手沿用旧授权,
+			// 必须重新显式确认。
+			updates["risk_acknowledged_at"] = nil
+		case req.RiskAcknowledged != nil && *req.RiskAcknowledged:
+			updates["risk_acknowledged_at"] = time.Now().UTC()
+		case req.RiskAcknowledged != nil:
+			updates["risk_acknowledged_at"] = nil
 		}
 		if err := db.Model(&rule).Updates(updates).Error; err != nil {
 			Error(c, 500, "更新策略失败: "+err.Error())
@@ -692,6 +747,71 @@ func validateDeviceActionCatalog(ctx context.Context, catalog automationCatalogQ
 		return "action_params_json 非法: " + err.Error()
 	}
 	return ""
+}
+
+// ── 风险动作的规则级授权 (O-2, 实施计划 §0.1) ──────────────────────────────
+
+// automationActionSetChanged 判定更新请求是否**改变了规则的动作集合**。
+//
+// 口径 (实施计划 §0.1 的授权失效规则): 增删动作、或任一动作的 action_id /
+// action_device_id 变化 → 视为变化。仅改名称、冷却、触发条件等非动作字段不失效。
+//
+// 诚实边界: 本批 (B1) 规则仍是**单动作**模型 (action_type/action_device_id/
+// action_id/action_params_json 四个列, models/automation.go:126-130)。
+// B2 引入 automation_rule_actions 子表后, 本函数必须扩展为"比较动作集合"
+// (逐 seq 比较 action_id/action_device_id/action_type)。届时若忘记扩展,
+// 多动作的"换动作"会保留旧授权 —— 这是本函数留给 B2 的显式债务, 记录在此。
+//
+// action_params_json 也计入变化: 参数决定物理动作的具体效果 (例如同一
+// set_mos_policy 的充/放电两位翻转), 参数变了就是不同的物理操作。
+func automationActionSetChanged(rule models.AutomationRule, actionType string,
+	actionDeviceID uint, actionID, actionParamsJSON string) bool {
+	return rule.ActionType != actionType ||
+		rule.ActionDeviceID != actionDeviceID ||
+		rule.ActionID != actionID ||
+		rule.ActionParamsJSON != actionParamsJSON
+}
+
+// validateRiskActionAuthorization 实现校验 V7 (方案 §4.1.1 V7 / §8 A-10):
+// **含风险动作** 且 require_confirmed=false 且未授权 → 拒绝保存。
+//
+// 为什么是 fail-closed: 不拦的话会存下一条"永远不会执行"的规则 —— 自动路径遇
+// 确认门落 confirmation_required, 用户在无人值守场景下等不到任何物理动作。
+// C5 的根因之一正是"用户不知道自己的规则不可能成功", 所以在保存入口收口比事后
+// 通知更强 (方案 §3.2.5 第 4 步)。
+//
+// 返回 (错误文案, 错误码)。错误码固定为 risk_action_requires_confirmation (A-10 契约)。
+//
+// catalog 为 nil 时**无法判定风险等级**: 这是单测兼容路径 (与 validateDeviceActionCatalog
+// 同款取舍), 此时跳过 V7 而不是猜测 —— 猜测会把风险动作误判成普通动作 (fail-open)。
+// 生产装配路径上 catalog 恒非 nil (routes.go 注入 commandexec.Service)。
+func validateRiskActionAuthorization(ctx context.Context, catalog automationCatalogQuerier,
+	actionType string, actionDeviceID *uint, actionID string,
+	requireConfirmed, acknowledged bool) (string, string) {
+	const code = "risk_action_requires_confirmation"
+	if actionType != models.AutomationActionDeviceAction || requireConfirmed || acknowledged {
+		return "", ""
+	}
+	if catalog == nil || actionDeviceID == nil || *actionDeviceID == 0 {
+		return "", ""
+	}
+	items, err := catalog.Catalog(ctx, *actionDeviceID)
+	if err != nil {
+		// Catalog 查不到目标设备时, 前面的 validateDeviceActionCatalog 已经给出
+		// 更准确的报错; 这里不重复报, 也不据此判定风险 (避免误报 V7)。
+		return "", ""
+	}
+	for _, item := range items {
+		if item.Definition.ID != actionID {
+			continue
+		}
+		if item.Definition.RiskLevel.RequiresConfirmation() {
+			return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
+				code
+		}
+		return "", ""
+	}
+	return "", ""
 }
 
 // pickStr 合并候选值辅助 (alert 同款风格)。
