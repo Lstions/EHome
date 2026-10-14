@@ -61,24 +61,29 @@ func confInput(edge uint, actionID string) ConfirmationInput {
 	return ConfirmationInput{EdgeDeviceID: edge, ActorUserID: 42, ActionID: actionID, Params: json.RawMessage(`{}`), Reason: "test reason", SourceIP: "127.0.0.1"}
 }
 
-// --- confirmationRequired ---
-
-func TestConfirmationRequired(t *testing.T) {
+// --- 确认要求判定源 (收敛后) ---
+//
+// 本用例过去测的是 commandexec 自己那份 confirmationRequired(risk string)
+// 字面量比较。判定源收敛到 deviceaction 后该函数已删除 (方案 §3.3.5 I3 /
+// R3): 这里改为断言**唯一判定点**对 4 级驱动方言给出与旧语义一致的结果。
+// "本地不得再出现第二份判定"由 TestConfirmationDecisionHasSingleImplementation 门禁负责。
+func TestConfirmationRequiredViaSingleSourceOfTruth(t *testing.T) {
 	tests := []struct {
-		risk string
-		want bool
+		driver string
+		want   bool
 	}{
 		{"low", false},
-		{"", false},
-		{"medium", true},
+		{"medium", true}, // O-5 裁决: medium → 风险, 需确认
 		{"high", true},
 		{"critical", true},
-		{"MEDIUM", false}, // case-sensitive
-		{"bogus", false},
 	}
 	for _, tt := range tests {
-		if got := confirmationRequired(tt.risk); got != tt.want {
-			t.Errorf("confirmationRequired(%q) = %v, want %v", tt.risk, got, tt.want)
+		level, ok := deviceaction.RiskLevelFromDriver(tt.driver)
+		if !ok {
+			t.Fatalf("驱动风险 %q 无法归一化 —— 判定源出现缺口", tt.driver)
+		}
+		if got := level.RequiresConfirmation(); got != tt.want {
+			t.Errorf("%q → RequiresConfirmation() = %v, want %v", tt.driver, got, tt.want)
 		}
 	}
 }

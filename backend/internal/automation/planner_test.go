@@ -772,8 +772,13 @@ func TestTriggerRuleManualNotification(t *testing.T) {
 
 // TestHandleTriggerAutoSystemActorSkipsMediumConfirmation 集成断言:
 // planner 自动触发 (executeDeviceAction) 走 ActorKind=system 调 commandexec.Create,
-// 对 medium risk 动作跳过 confirmation; command_executions 落库 + audit 落 actor_type=system。
+// 对该规则**已显式授权**的 medium risk 动作跳过 confirmation; command_executions 落库
+// + audit 落 actor_type=system。
 // 用 gpio_set (periph transport, medium) — ChannelCmdV2 transport 只接 low risk, 用 channel 动作过不了 transport gate。
+//
+// 语义变更说明 (O-2 落地, 不是放宽断言): 授权载体是 automation_rules.risk_acknowledged_at,
+// 因此本用例必须给规则**真的写上**授权时间戳。授权缺失时自动路径仍落 confirmation_required
+// —— 该反向用例见 TestHandleTriggerAutoRiskActionWithoutAuthorizationIsNotDispatched。
 func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
 
@@ -801,6 +806,10 @@ func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
 		ActionID:            "gpio_set",
 		ActionParamsJSON:    `{"pin":5,"level":1}`,
 	}
+	// O-2 规则级授权: 用户在保存时显式确认过该风险动作。
+	// 取指针是必须的 —— 授权时间戳是 *time.Time, 零值表达"未授权"。
+	ackAt := time.Now().UTC()
+	rule.RiskAcknowledgedAt = &ackAt
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1022,5 +1031,111 @@ func TestHandleTriggerAutoSystemActorUnavailableNotifiesOnce(t *testing.T) {
 	}
 	if !strings.Contains(note.Message, "auth/initialize") {
 		t.Fatalf("通知文案=%q 应指引用户完成系统初始化", note.Message)
+	}
+}
+
+// ═══ A-11 / C5 消除: 自动路径遇确认门落 confirmation_required, 不落 failed_dispatch ═══
+//
+// 反向验证: 把 classifyDeviceActionError 的确认门分支删掉 (退回 isGateError 单判定)
+// → 本用例红 (结果变成 failed_dispatch)。命令与输出见 commit 正文。
+
+// autoRiskRule 造一条自动触发 + 风险动作 (gpio_set, medium) + require_confirmed=false 的规则。
+// acknowledge=false 时不写 risk_acknowledged_at (未授权)。
+func autoRiskRule(t *testing.T, p *Planner, edgeID uint, acknowledge bool) models.AutomationRule {
+	t.Helper()
+	if err := p.db.Create(&models.GPIOConfig{
+		NodeID: "node-conf", Pin: 5, Direction: 1, Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	rule := models.AutomationRule{
+		Name:                "auto-risk-confirmation-gate",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edgeID,
+		TriggerSensorName:   "humidity",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    80,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edgeID,
+		ActionID:            "gpio_set",
+		ActionParamsJSON:    `{"pin":5,"level":1}`,
+	}
+	if acknowledge {
+		ackAt := time.Now().UTC()
+		rule.RiskAcknowledgedAt = &ackAt
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+	return rule
+}
+
+// 未授权的风险动作在自动路径上必须落 confirmation_required (而非 failed_dispatch),
+// 且**不得**产生任何 command_executions —— 这是 C5 消除的核心断言。
+func TestHandleTriggerAutoRiskActionWithoutAuthorizationIsNotDispatched(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	rule := autoRiskRule(t, p, edge.ID, false)
+
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
+
+	var ev models.AutomationEvent
+	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if ev.Result != models.AutomationResultConfirmationRequired {
+		t.Fatalf("result = %q, want %q (C5: 确认门不得再落 failed_dispatch; detail=%s)",
+			ev.Result, models.AutomationResultConfirmationRequired, ev.Detail)
+	}
+	if ev.Result == models.AutomationResultFailedDispatch {
+		t.Fatal("确认门被错误地记为 failed_dispatch (C5 复发)")
+	}
+	var execs int64
+	p.db.Model(&models.CommandExecution{}).Count(&execs)
+	if execs != 0 {
+		t.Fatalf("未授权的风险动作不得产生 command_executions, 实际 %d 条", execs)
+	}
+}
+
+// 授权后同一条规则必须真的执行 (证明授权是有效的、且 confirmation_required 不是恒真)。
+func TestHandleTriggerAutoRiskActionWithAuthorizationIsDispatched(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	rule := autoRiskRule(t, p, edge.ID, true)
+
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
+
+	var ev models.AutomationEvent
+	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if ev.Result != models.AutomationResultExecuted {
+		t.Fatalf("result = %q, want %q (detail: %s)", ev.Result, models.AutomationResultExecuted, ev.Detail)
+	}
+}
+
+// classifyDeviceActionError 的三分映射必须各自可达 (防止某分支成为死代码)。
+func TestClassifyDeviceActionErrorMapsThreeOutcomes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"确认门 (无 token)", commandexec.ErrConfirmationRequired, models.AutomationResultConfirmationRequired},
+		{"确认门 (近认证过期)", commandexec.ErrRecentAuthRequired, models.AutomationResultConfirmationRequired},
+		{"确认门 (token 无效)", commandexec.ErrConfirmationInvalid, models.AutomationResultConfirmationRequired},
+		{"availability gate", commandexec.ErrActionUnavailable, models.AutomationResultFailedGate},
+		{"参数非法 (既非 gate 也非确认门)", commandexec.ErrInvalidParams, models.AutomationResultFailedDispatch},
+	}
+	for _, c := range cases {
+		if got := classifyDeviceActionError(c.err); got != c.want {
+			t.Errorf("%s: classifyDeviceActionError(%v) = %q, want %q", c.name, c.err, got, c.want)
+		}
+	}
+	// 包装错误也必须被识别 (Create 用 fmt.Errorf("%w: %v") 包装过参数错误)。
+	wrapped := fmt.Errorf("create: %w", commandexec.ErrConfirmationRequired)
+	if got := classifyDeviceActionError(wrapped); got != models.AutomationResultConfirmationRequired {
+		t.Errorf("包装后的确认门错误分类 = %q, want %q", got, models.AutomationResultConfirmationRequired)
 	}
 }

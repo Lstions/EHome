@@ -237,14 +237,13 @@ func (p *Planner) executeDeviceAction(rule models.AutomationRule, at time.Time, 
 		Params:         params,
 		IdempotencyKey: idemKey,
 		Reason:         fmt.Sprintf("automation:%d:%s", rule.ID, rule.Name),
+		// O-2 规则级授权 (实施计划 §0.1): 只有该规则真的持有用户显式授权
+		// (risk_acknowledged_at 非空) 才允许风险动作跳过确认门。NULL = 未授权,
+		// 风险动作仍会被确认门拦住并落 confirmation_required (绝不静默执行)。
+		RiskAcknowledged: rule.RiskAcknowledgedAt != nil,
 	})
 	if err != nil {
-		// gate fail-closed 与 dispatch 失败分流记录 (裁决: 审计可读性)
-		result := models.AutomationResultFailedDispatch
-		if isGateError(err) {
-			result = models.AutomationResultFailedGate
-		}
-		p.record(rule, at, value, result, "", err.Error())
+		p.record(rule, at, value, classifyDeviceActionError(err), "", err.Error())
 		return
 	}
 	p.recordExecuted(rule, at, value, exec.CommandID)
@@ -375,6 +374,42 @@ func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (str
 // 能可靠穿透。此处不再保留文案兜底: 文案比对正是这个缺陷的成因, 留着只会再次腐烂。
 func isGateError(err error) bool {
 	return errors.Is(err, commandexec.ErrActionUnavailable)
+}
+
+// isConfirmationGateError 判定 commandexec 返回错误是否来自**确认门**。
+//
+// 覆盖三个哨兵 (方案 §3.2.5 第 2 步):
+//   - ErrConfirmationRequired: 没有 token / token 为空 → 需要人工确认;
+//   - ErrRecentAuthRequired:   近认证窗口已过 → 需要用户重新验证身份;
+//   - ErrConfirmationInvalid:  token 无效/过期/已用 → 需要重新走确认流程。
+//
+// 注意这不是把确认门归为 availability gate —— failed_gate 仍然只表示 availability
+// gate 的 fail-closed。确认门是**预期安全行为**(需要人), 必须与传输失败、门禁拒绝
+// 在审计上三分, 否则自动路径遇确认门会继续落 failed_dispatch, 前端拿不到可行动信号
+// (这正是 C5 缺陷)。
+func isConfirmationGateError(err error) bool {
+	return errors.Is(err, commandexec.ErrConfirmationRequired) ||
+		errors.Is(err, commandexec.ErrRecentAuthRequired) ||
+		errors.Is(err, commandexec.ErrConfirmationInvalid)
+}
+
+// classifyDeviceActionError 把 commandexec.Create 的错误映射到 automation_events
+// 的 result 枚举。**唯一的错误分类入口** —— 自动路径与手动路径共用, 避免两处
+// 各自演化出不一致的映射 (本文件里 isGateError 死分支的教训)。
+//
+// 顺序说明: 先判确认门再判 availability gate。两者在 Create 内互斥 (availability
+// gate 循环在确认门之前短路返回 ErrActionUnavailable, 走到确认门说明 gate 全过),
+// 因此该顺序不会遮蔽 failed_gate 的既有语义; 写成 switch 也让"新增一类错误"必须
+// 显式落到某个枚举, 而不是被兜底吞掉。
+func classifyDeviceActionError(err error) string {
+	switch {
+	case isConfirmationGateError(err):
+		return models.AutomationResultConfirmationRequired
+	case isGateError(err):
+		return models.AutomationResultFailedGate
+	default:
+		return models.AutomationResultFailedDispatch
+	}
 }
 
 // record 落审计行 (fail-open: 写失败只计指标不阻塞, 对齐 alert 风格)。
@@ -762,10 +797,7 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 		Reason:         fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID),
 	})
 	if err != nil {
-		result := models.AutomationResultFailedDispatch
-		if isGateError(err) {
-			result = models.AutomationResultFailedGate
-		}
+		result := classifyDeviceActionError(err)
 		ev := models.AutomationEvent{
 			RuleID:        rule.ID,
 			TriggeredAt:   at,

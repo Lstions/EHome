@@ -365,11 +365,17 @@ func itoa(v int) string {
 	return "1"
 }
 
-// TestSystemActorSkipsMediumConfirmation 验证 system actor 路径跳过 medium risk 的 confirmation:
-// automation planner 以 ActorKind=system 调 Create, gpio_set (medium) 无需 token 即可下发,
-// 且审计落 ActorType=system。
+// TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation 验证 system actor 路径在
+// **规则级显式授权**下跳过 medium risk 的 confirmation (O-2 裁决, 实施计划 §0.1):
+// automation planner 以 ActorKind=system + RiskAcknowledged=true 调 Create,
+// gpio_set (medium) 无需 token 即可下发, 且审计落 ActorType=system。
+//
+// 语义变更说明 (不是放宽断言): 改造前 system 路径按**风险等级**豁免 medium;
+// O-2 裁决后改为按**规则是否被用户显式授权**豁免 —— 风险动作本身仍然要确认,
+// 未授权的自动路径照样被拦 (反向用例见 commandexec/risk_ack_gate_test.go 的
+// TestSystemActorWithoutRiskAcknowledgedStillRequiresConfirmation)。
 // 对照: 同一动作以默认 ActorKind (空=user) 调用则仍须 ErrConfirmationRequired。
-func TestSystemActorSkipsMediumConfirmation(t *testing.T) {
+func TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := setupPeriphNode(t, db)
 	s := NewService(db, periphActions(t))
@@ -382,10 +388,11 @@ func TestSystemActorSkipsMediumConfirmation(t *testing.T) {
 		EdgeDeviceID: node.ID, ActorUserID: 7, ActorKind: ActorKindSystem,
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
 		IdempotencyKey: "system-actor-gpio-1", Reason: "automation:1:test",
+		RiskAcknowledged: true,
 	}
 	exec, replayed, err := s.Create(context.Background(), systemIn)
 	if err != nil {
-		t.Fatalf("system actor medium action must skip confirmation: %v", err)
+		t.Fatalf("已授权的 system actor medium action must skip confirmation: %v", err)
 	}
 	if replayed {
 		t.Fatal("first call must not be a replay")

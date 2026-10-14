@@ -43,8 +43,15 @@ const (
 	AutomationResultConditionChanged     = "condition_changed"      // 触发到执行间条件失效
 	AutomationResultFailedGate           = "failed_gate"            // availability gate fail-closed
 	AutomationResultFailedDispatch       = "failed_dispatch"        // Create 调用失败
-	AutomationResultNotification         = "notification"           // 纯通知动作已发出
-	AutomationResultExpired              = "expired"                // pending_confirm 超时未确认 (24h 清扫置位)
+	// AutomationResultConfirmationRequired 是"被确认门拦住"这一**预期安全行为**
+	// 的专属结果码 (方案 §3.2.5 第 1 步 / §8 A-11)。
+	//
+	// 为什么必须与 failed_dispatch 分开: 改造前自动路径遇确认门会落 failed_dispatch,
+	// 与"传输失败"在审计上无法区分, 前端也拿不到任何可行动信号 (C5 缺陷)。
+	// 确认门拒绝不是故障, 而是"需要人来确认"—— 分开后前端可据此弹提示并跳转确认入口。
+	AutomationResultConfirmationRequired = "confirmation_required" // 被确认门拦住 (需人工确认或规则未授权)
+	AutomationResultNotification         = "notification"          // 纯通知动作已发出
+	AutomationResultExpired              = "expired"               // pending_confirm 超时未确认 (24h 清扫置位)
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -142,6 +149,24 @@ type AutomationRule struct {
 	CooldownSec      int  `gorm:"not null;default:0" json:"cooldown_sec"`
 	RequireConfirmed bool `gorm:"default:false" json:"require_confirmed"` // true=仅生成待确认通知
 	MaxDailyExec     int  `gorm:"default:0" json:"max_daily_exec"`        // 每日执行上限, 0=不限 (熔断)
+
+	// ── 风险动作的规则级显式授权 (用户裁决 O-2, 实施计划 §0.1) ──
+	//
+	// 语义: 该规则**已经过用户在保存时显式确认**，允许其风险动作在自动路径上
+	// 跳过人工确认直接执行。NULL = 未授权 —— 风险动作在自动路径上仍会落
+	// confirmation_required，绝不会静默执行。
+	//
+	// 为什么是时间戳而不是 bool: 审计需要回答"何时被授权的"。bool 只能回答
+	// "是否授权过"，且 GORM 的 default 陷阱 (见 Enabled/CooldownSec 的既有教训)
+	// 会让 false 无法表达"显式拒绝"。
+	//
+	// 授权失效 (安全关键, 实施计划 §0.1): 规则的**动作集合发生变化**时必须清空该列
+	// (见 handler_automation.go 的 updateAutomationRule)，强制用户重新确认。否则
+	// 用户授权了动作 A, 之后把动作改成 B, 旧授权会静默地把 B 也放行。
+	//
+	// 只读语义: 由保存路径写入/清空, 不接受请求体直接赋值 (API 请求结构体里没有
+	// 该字段, 因此客户端无法自行授权)。
+	RiskAcknowledgedAt *time.Time `json:"risk_acknowledged_at,omitempty"`
 
 	// ── 冷却锚点 (清理前置条件 A, docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md) ──
 	//

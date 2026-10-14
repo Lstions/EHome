@@ -47,13 +47,6 @@ type ConfirmationGrant struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// Parameterized writes are intentionally confirmed from medium risk upward.
-// This is stricter than the minimum high/critical policy and keeps the first
-// recoverable setter from becoming a one-click physical change.
-func confirmationRequired(risk string) bool {
-	return risk == "medium" || risk == "high" || risk == "critical"
-}
-
 // IssueConfirmation binds a single use token to the actor, target, action
 // version and canonical request hash. It intentionally checks the same
 // current availability facts as Create, so confirmation cannot mint a grant
@@ -81,7 +74,7 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 			if !ok || !definition.Enabled || !deviceaction.CurrentEngineAllows(definition) {
 				return ErrActionUnavailable
 			}
-			if !confirmationRequired(definition.Risk) {
+			if !definition.RiskLevel.RequiresConfirmation() {
 				return ErrConfirmationNotNeeded
 			}
 			params, err := deviceaction.CanonicalizeParams(definition.InputSchema, in.Params)
@@ -113,7 +106,7 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 		if !ok || !definition.Enabled {
 			return ErrActionUnavailable
 		}
-		if !confirmationRequired(definition.Risk) {
+		if !definition.RiskLevel.RequiresConfirmation() {
 			return ErrConfirmationNotNeeded
 		}
 		params, err := deviceaction.CanonicalizeParams(definition.InputSchema, in.Params)

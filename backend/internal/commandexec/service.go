@@ -83,8 +83,9 @@ type CreateInput struct {
 	EdgeDeviceID uint
 	ActorUserID  uint
 	// ActorKind: "user" (默认, 人工操作) / "system" (自动化引擎/系统任务)。
-	// system 路径跳过 medium/low risk 的 confirmation (高风险 high/critical 仍强制)。
-	// 仅 Planner/内部系统调用方使用, 不接受 API 请求体直接指定。
+	// system 路径**不再**按风险等级豁免确认: O-2 裁决后唯一的跳过条件是该风险
+	// 动作已取得规则级显式授权 (见 RiskAcknowledged)。仅 Planner/内部系统调用方
+	// 使用, 不接受 API 请求体直接指定。
 	ActorKind         string
 	ActionID          string
 	Params            json.RawMessage
@@ -92,13 +93,26 @@ type CreateInput struct {
 	SourceIP          string
 	ConfirmationToken string
 	Reason            string
+	// RiskAcknowledged 表示调用方已就该**风险动作**取得规则级显式授权
+	// (automation_rules.risk_acknowledged_at, 用户裁决 O-2 的落地载体)。
+	//
+	// 安全边界 (三条必须同时成立才跳过确认门, 缺一不可):
+	//  1. ActorKind == ActorKindSystem —— 只对自动化/系统路径生效。API 请求体
+	//     永远无法设置该字段 (handler 不反序列化它), 因此人工路径不可能借此
+	//     绕过二次确认;
+	//  2. 目标是风险动作 (RiskLevel.RequiresConfirmation() == true) —— 普通动作
+	//     本就不需要确认, 该字段对它们没有任何作用;
+	//  3. 规则确实持有授权 (planner 只在 risk_acknowledged_at 非空时才置 true)。
+	// 这三条共同保证: 未被用户显式授权的风险动作, 在自动路径上仍然落
+	// confirmation_required, 绝不会被静默执行。
+	RiskAcknowledged bool
 }
 
 const (
 	// ActorKindUser 默认值, 人工操作 (走完整 confirmation 流程)。
 	ActorKindUser = "user"
 	// ActorKindSystem 系统内部调用 (automation planner/告警引擎)。
-	// 跳过 low/medium 风险 confirmation, 但 high/critical 仍须 confirmation。
+	// 风险动作仍须 confirmation, 除非调用方带 RiskAcknowledged (规则级授权)。
 	ActorKindSystem = "system"
 )
 
@@ -514,11 +528,17 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 				return ErrActionUnavailable
 			}
 		}
-		// 确认制门禁: high/critical 一律须 confirmation; medium 仅人工路径须 confirmation
-		// (system 路径放行 — 自动化引擎 IOC 场景, 已在 planner 层独立审计)。
-		// low 本就不需要 confirmation (confirmationRequired 返回 false)。
-		needsConfirmation := confirmationRequired(def.Risk)
-		if in.ActorKind == ActorKindSystem && (def.Risk == "low" || def.Risk == "medium") {
+		// 确认制门禁: 判定源收敛为**唯一**的 RiskLevel.RequiresConfirmation()
+		// (方案 §3.3.3 落点 1 / §6.4)。此处不得再内联任何 risk 字面量比较 ——
+		// 那正是 R3/A-9 防漂移门禁要抓的第二份判定。
+		//
+		// O-2 裁决后的语义: 风险动作默认需要人工确认; 只有系统路径且该规则已被
+		// 用户**显式授权** (risk_acknowledged_at 非空 → RiskAcknowledged=true) 时
+		// 才跳过确认门直接执行。未授权的风险动作在自动路径上会落到
+		// ErrConfirmationRequired, 由 planner 记为 confirmation_required 并在
+		// 前端可见 —— 而不是静默失败 (C5 消除)。
+		needsConfirmation := def.RiskLevel.RequiresConfirmation()
+		if in.RiskAcknowledged && in.ActorKind == ActorKindSystem && needsConfirmation {
 			needsConfirmation = false
 		}
 		if needsConfirmation {
@@ -551,7 +571,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		return audit.NewWriter(tx).Write(audit.Event{
 			ActorType: actorTypeForAudit(in.ActorKind), ActorUserID: &in.ActorUserID, EventName: "device_action.created", Result: "queued",
 			RequestID: commandID, SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(edge.ID),
-			Metadata: map[string]interface{}{"action_id": def.ID, "action_version": def.Version, "request_hash": hash},
+			Metadata: map[string]interface{}{"action_id": def.ID, "action_version": def.Version, "request_hash": hash, "risk_level": string(def.RiskLevel), "risk_acknowledged": in.RiskAcknowledged},
 		})
 	})
 	if err == nil {
