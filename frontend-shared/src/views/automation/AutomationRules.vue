@@ -194,8 +194,9 @@
         <el-form-item label="触发器类型" required>
           <!-- 下拉值域与后端 models.AutomationTriggerType **不同**：后端只有 sun_event
                一个类型（日出/日落由 trigger_sun_kind 区分），而设计稿 R4 与用户需求都要求
-               下拉里直接看到「日出」「日落」两项。故这里用 calc 代理值 (sunrise/sunset)，
-               提交时再映射回 trigger_type='sun_event' + trigger_sun_kind，见 toSunTrigger()。
+               下拉里直接看到「日出」「日落」两项。故这里绑 triggerSelection 这个
+               computed 代理（读时把 sun_event 展开为 kind，写时把 sunrise/sunset 折叠回
+               trigger_type='sun_event' + trigger_sun_kind），提交时由 buildPayload() 映射。
                为什么不塞一个 "sun_event" 项再另设二级下拉：那会让下拉文案与用户脑中的
                "日落前 30 分钟" 隔一层，而这句话本身就是需求原文（设计 D-2）。 -->
           <el-select v-model="triggerSelection" data-test="field-trigger-type" @change="onTriggerTypeChange">
