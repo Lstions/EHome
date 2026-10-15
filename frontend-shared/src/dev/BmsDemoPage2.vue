@@ -687,8 +687,36 @@ const catalog = computed<EffectiveAction[]>(() => opStore.catalogs.get(deviceId.
 const mosPhase = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
 const mosError = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
 
-const hasFetStatus = computed(() => num(latestData.value?.fet_status) !== null)
-const fetStatus = computed(() => num(latestData.value?.fet_status) ?? 0)
+/**
+ * 最近一次**真正携带** fet_status 的值（2026-10-15 实测缺陷修复）。
+ *
+ * 根因：latestData 是"**任意指令的最新一帧**"，不是"0x03 基本信息帧"。
+ *   设备按各指令自己的间隔轮流上报，实测 60 次采样的帧分布：
+ *     0x03 读取基本信息 45%（唯一含 fet_status）
+ *     0xAA 保护次数 32% / 0x05 硬件版本 8% / 0x0F 综合 8% / 0x04 单体 7%（均不含）
+ *   ⇒ 约 **47% 的时间**当前帧根本没有 fet_status。
+ *
+ * 改前把"本帧没这个字段"当成"MOS 关断"（effectiveFet 变 null ⇒ chargeOn=false），
+ * 于是开关每几秒自己翻转，并在设备实际充电时显示「充电 MOS 关断」——
+ * 这是**危险的信息错误**：用户会据此判断电池没在充电。
+ *
+ * 正确语义：该帧对 MOS **没有信息** ⇒ 保留上一次已知值，而不是解释为 false。
+ * 启用 5 条轮询后非 0x03 帧占比升高，把该缺陷从偶发放大成显性。
+ *
+ * （另有一个模拟器侧缺陷已同时修复：0x0F 帧曾硬编码 fet_status=0，
+ *   而 0x0F 是 0x03 的超集、同样会被解析 ⇒ 两条指令对同一字段给出矛盾取值。）
+ */
+const lastFet = ref<number | null>(null)
+watch(() => latestData.value?.fet_status, (v) => {
+  const n = num(v)
+  if (n !== null) lastFet.value = n
+}, { immediate: true })
+// 设备切换时清空，避免把上一台设备的 MOS 状态当成新设备的
+watch(deviceId, () => { lastFet.value = null })
+
+/** fetStatus：优先本帧，其次最近一次携带该字段的帧（保证展示的是**已知**状态而非默认值） */
+const fetStatus = computed(() => num(latestData.value?.fet_status) ?? lastFet.value ?? 0)
+const hasFetStatus = computed(() => num(latestData.value?.fet_status) !== null || lastFet.value !== null)
 const fetHex = computed(() => hexOf(fetStatus.value))
 
 /**
@@ -700,6 +728,7 @@ const verifiedFet = ref<number | null>(null)
 watch(() => latestData.value?.fet_status, (live) => {
   if (verifiedFet.value !== null && num(live) === verifiedFet.value) verifiedFet.value = null
 })
+/** 优先操作回执的权威值；否则用 fetStatus（已含 lastFet 兜底，不会因缺字段而塌陷） */
 const effectiveFet = computed(() => verifiedFet.value ?? (hasFetStatus.value ? fetStatus.value : null))
 const chargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 1) !== 0)
 const dischargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 2) !== 0)
