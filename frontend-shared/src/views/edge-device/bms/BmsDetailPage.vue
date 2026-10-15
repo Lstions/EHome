@@ -109,10 +109,16 @@
             <template #header>
               <div class="mos-header">
                 <span>MOS状态</span>
-                <span class="mos-hint">开关控制请使用下方「受控操作」</span>
+                <!-- 2026-10-15：MOS 改为可直接开关，不再需要引导去「受控操作」 -->
+                <span class="mos-hint">直接开关控制；高风险动作需一次确认</span>
               </div>
             </template>
-            <BmsMosStatus :data="latestData" />
+            <BmsMosStatus
+              :data="latestData"
+              :device-id="deviceId"
+              :offline="deviceOffline"
+              @changed="fetchLatestData"
+            />
           </el-card>
         </el-col>
       </el-row>
@@ -219,6 +225,16 @@ const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.v
  * 优先 device.node.id（后端 Node 关联），回退 node_id 序列号。
  */
 const deviceNodeId = computed(() => device.value?.node?.id ?? device.value?.node_id)
+
+/**
+ * 设备是否离线 —— MOS 开关据此禁用。
+ * 只把 active/online 视为可控制：其余（offline/warning/error/unknown…）一律禁用，
+ * fail-closed。给一个按得动但发不出去的开关，比禁用它更糟。
+ */
+const deviceOffline = computed(() => {
+  const s = device.value?.status
+  return s !== 'active' && s !== 'online'
+})
 
 // 实时数据条数
 const realtimeCount = computed(() => realtimeDataItems.value.length)
