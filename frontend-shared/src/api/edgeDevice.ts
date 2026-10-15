@@ -64,6 +64,13 @@ export interface EdgeDevice {
   created_at: string
   // 配置版本 (后端 EdgeDevice.ConfigVersion，配置清单版本标识)
   config_version?: string
+  /**
+   * 后端 MaxCommandsPerEdgeDevice：本设备**同时可轮询**的指令条数上限（2026-10-15）。
+   * 来自 GET /edge-devices/:id 的附加字段；PUT .../commands 超过该值会整单 400 拒绝，
+   * 前端据此在保存前给出可行动约束（"最多 3 条，当前已启用 5 条"）。
+   * 后端未返回时为 undefined → 不展示约束，行为与改动前一致。
+   */
+  max_polling_commands?: number
   // 数据生命周期 P0: 逻辑身份锚点 (后端 omitempty — 未建立时字段缺省为 undefined)
   logical_device_id?: number
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
@@ -184,6 +191,7 @@ interface RawEdgeDevice {
   status?: string
   last_data?: Record<string, number> | null
   last_data_at?: string | null
+  max_polling_commands?: number
   last_data_time?: string | null
   error_code?: number
   last_error_code?: number
@@ -258,6 +266,7 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   last_error_code: d.error_code ?? d.last_error_code ?? undefined,
   created_at: d.created_at || '',
   config_version: d.config_version || undefined,
+  max_polling_commands: d.max_polling_commands ?? undefined,
   logical_device_id: d.logical_device_id ?? undefined,
   device_config: d.device_config
 })

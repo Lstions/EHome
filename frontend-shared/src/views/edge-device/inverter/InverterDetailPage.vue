@@ -119,7 +119,11 @@
       />
 
       <!-- Command frequency -->
-      <CommandFrequencySection :device-id="deviceId" />
+      <CommandFrequencySection
+        :device-id="deviceId"
+        :node-id="deviceNodeId"
+        :max-polling-commands="device?.max_polling_commands"
+      />
 
       <!-- Operations -->
       <DeviceControlPanel :device-id="deviceId" />
@@ -163,6 +167,12 @@ const {
 const handleRefresh = () => composableHandleRefresh(() => historyChartRef.value?.fetchHistoryData())
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : '逆变器')
+/**
+ * 所属节点数值 id —— 透传给指令频率面板，用于保存后确认节点是否真的应用了新配置
+ * （2026-10-15 报障：改前提示永久停在「正在同步到节点」，因为根本没有确认信号）。
+ * 优先 device.node.id（后端 Node 关联），回退 node_id 序列号。
+ */
+const deviceNodeId = computed(() => device.value?.node?.id ?? device.value?.node_id)
 
 // Calculate total PV power from multiple channels
 const totalPvPower = computed(() => {

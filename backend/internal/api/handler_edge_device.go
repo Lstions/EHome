@@ -471,7 +471,20 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		Success(c, d)
+		// 2026-10-15：附带**轮询指令上限**，供前端在保存前给出可行动约束。
+		//
+		// 背景（用户报障"改频率→保存→刷新没变化"）：PUT /edge-devices/:id/commands
+		// 有容量门（ValidateManifestCommandCapacity），开启条数 > MaxCommandsPerEdgeDevice
+		// 时整单 400 拒绝、不落库；而前端此前只在 toast 里闪一下 → 用户刷新后看到旧值，
+		// 以为"保存没生效"。把上限随设备详情下发，前端即可即时提示
+		// "最多 N 条可同时轮询（已启用 M 条）"，把事后报错变成事前约束。
+		//
+		// 用**嵌入**而非包一层对象：models.EdgeDevice 无自定义 MarshalJSON，
+		// 嵌入会将其字段平铺，响应形状对既有调用方完全不变，只多一个字段。
+		Success(c, struct {
+			models.EdgeDevice
+			MaxPollingCommands int `json:"max_polling_commands"`
+		}{EdgeDevice: d, MaxPollingCommands: nodemgr.MaxCommandsPerEdgeDevice})
 	})
 
 	// Create edge device (v2.2 path for POST /devices)

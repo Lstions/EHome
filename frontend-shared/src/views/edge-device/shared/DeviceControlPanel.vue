@@ -45,9 +45,24 @@
       </div>
     </template>
     <el-collapse v-if="unavailable.length" class="unavailable"><el-collapse-item :title="`暂不可用操作（${unavailable.length}）`" name="unavailable"><p v-for="action in unavailable" :key="action.definition.id">{{ action.definition.name }}：{{ availabilityReason(action) }}</p></el-collapse-item></el-collapse>
-    <el-divider>操作历史</el-divider>
+    <el-divider>操作历史 <span v-if="history.length" class="history-count">最近 {{ visibleHistory.length }} / {{ history.length }} 条</span></el-divider>
+    <!-- 2026-10-15 布局修复：改前历史用**无上限**的 el-timeline 直铺，
+         每次受控操作都追加一条。实测运行一天后 32 条 = 4508px，把 .bottom-row
+         撑到 7318px；而左列「实时数据流」卡只有 688px ⇒ 左侧留下 6630px 空白，
+         页面看起来"左边空了一大截"（用户截图即此形态）。
+         修法：容器封顶 max-height + 内部滚动，并只渲染最近 N 条（历史默认收起）。
+         为什么是"容器滚动"而不是简单 slice：截断会**丢失**旧记录，而操作历史是
+         审计线索，用户需要能翻到；因此保留全部数据、只限制可视高度。 -->
     <el-empty v-if="history.length === 0" description="暂无操作记录" :image-size="64" />
-    <el-timeline v-else><el-timeline-item v-for="operation in history" :key="operation.command_id" :type="timelineType(operation.status)" :timestamp="format(operation.manual_resolution?.resolved_at || operation.updated_at)"><div class="timeline-line"><strong>{{ operation.action_id }}</strong><span class="status">{{ statusText(operation.status) }}</span><span v-if="operation.final_reason"> · {{ operation.final_reason }}</span><span v-if="resultSummary(operation)" class="result"> · {{ resultSummary(operation) }}</span><el-button v-if="operation.status === 'UNKNOWN' && !operation.manual_resolution" text type="warning" size="small" @click="beginResolution(operation)">人工处置</el-button></div><div v-if="operation.manual_resolution" class="resolution">人工结论：{{ resolutionLabel(operation.manual_resolution.outcome) }} · {{ operation.manual_resolution.reason }}</div></el-timeline-item></el-timeline>
+    <div v-else class="history-scroll" :class="{ 'is-expanded': expandedHistory }">
+    <el-timeline><el-timeline-item v-for="operation in visibleHistory" :key="operation.command_id" :type="timelineType(operation.status)" :timestamp="format(operation.manual_resolution?.resolved_at || operation.updated_at)"><div class="timeline-line"><strong>{{ operation.action_id }}</strong><span class="status">{{ statusText(operation.status) }}</span><span v-if="operation.final_reason"> · {{ operation.final_reason }}</span><span v-if="resultSummary(operation)" class="result"> · {{ resultSummary(operation) }}</span><el-button v-if="operation.status === 'UNKNOWN' && !operation.manual_resolution" text type="warning" size="small" @click="beginResolution(operation)">人工处置</el-button></div><div v-if="operation.manual_resolution" class="resolution">人工结论：{{ resolutionLabel(operation.manual_resolution.outcome) }} · {{ operation.manual_resolution.reason }}</div></el-timeline-item></el-timeline>
+    </div>
+    <!-- 折叠态只显示最近 HISTORY_LIMIT 条；其余通过"显示全部"展开（数据不丢）。 -->
+    <div v-if="history.length > HISTORY_LIMIT" class="history-more">
+      <el-button text type="primary" size="small" @click="expandedHistory = !expandedHistory">
+        {{ expandedHistory ? '收起' : `显示全部 ${history.length} 条` }}
+      </el-button>
+    </div>
   </el-card>
   <ActionForm v-model:visible="formVisible" :definition="selectedAction" @submit="submitSelected" />
   <ActionConfirmationDialog v-model:visible="confirmationVisible" :definition="selectedAction" @confirm="confirmSelected" />
@@ -80,6 +95,13 @@ import ActionConfirmationDialog from './ActionConfirmationDialog.vue'
 const props = defineProps<{ deviceId: number }>()
 const store = useDeviceOperationStore(); const ws = useWebSocketStore(); const submitting = ref(''); const selectedAction = ref<ActionDefinition | null>(null); const selectedParams = ref<Record<string, unknown>>({}); const formVisible = ref(false); const confirmationVisible = ref(false)
 const catalog = computed(() => store.catalogs.get(props.deviceId) ?? []); const history = computed(() => store.histories.get(props.deviceId) ?? []); const selectedKey = ref('')
+// 2026-10-15（布局修复）：历史条数上限。
+// 后端 List 默认返回 50 条，而每条 ~61px ⇒ 3050px；实测 32 条已 4508px。
+// 这里只渲染最近 HISTORY_LIMIT 条，其余仍在容器内滚动可见（数据不丢，仅限制首屏量）。
+// 展开"显示全部"需要用户显式动作 —— 历史是审计信息，默认不该主宰页面高度。
+const HISTORY_LIMIT = 8
+const expandedHistory = ref(false)
+const visibleHistory = computed(() => expandedHistory.value ? history.value : history.value.slice(0, HISTORY_LIMIT))
 const resolutionVisible = ref(false); const resolving = ref(false); const resolutionOperation = ref<DeviceOperation | null>(null); const resolutionOutcome = ref<ManualResolutionOutcome>('ACKNOWLEDGED_UNKNOWN'); const resolutionReason = ref('')
 const reauthenticationVisible = ref(false); const reauthenticationPassword = ref(''); const reauthenticating = ref(false)
 const available = computed(() => catalog.value.filter(item => !availabilityReason(item))); const unavailable = computed(() => catalog.value.filter(item => !!availabilityReason(item)))
@@ -185,6 +207,22 @@ function resultSummary(operation: DeviceOperation) { return operation.verified_r
 function resolutionLabel(outcome: ManualResolutionOutcome) { return outcome === 'CONFIRMED_SUCCEEDED' ? '确认成功' : outcome === 'CONFIRMED_FAILED' ? '确认失败' : '仍无法确认' }
 const offEvent = ws.subscribe('device_operation_update', message => { const operation = (message.payload ?? message.data) as DeviceOperation | undefined; if (operation?.edge_device_id === props.deviceId) store.apply(operation) })
 const offConnected = typeof ws.onConnected === 'function' ? ws.onConnected(load) : () => {}
-watch(() => props.deviceId, load); onMounted(load); onUnmounted(() => { offEvent(); offConnected() })
+// 切换设备时重置"显示全部"，避免上一个设备的展开态带到下一个。
+watch(() => props.deviceId, () => { expandedHistory.value = false; load() }); onMounted(load); onUnmounted(() => { offEvent(); offConnected() })
 </script>
-<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.stale-guidance{margin-bottom:12px}.stale-detail{margin:4px 0;font-size:12px;line-height:1.6}.guidance-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7}.guidance-list li{margin-bottom:4px}.guidance-action{color:var(--el-text-color-secondary)}.guidance-raw{display:block;color:var(--el-text-color-placeholder);font-size:11px;overflow-wrap:anywhere}.stale-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.stale-hint{font-size:12px;color:var(--el-text-color-secondary)}.ops-sub{margin:0 0 10px;font-size:12px;color:var(--el-text-color-secondary)}.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:8px;cursor:pointer;transition:border-color .15s,box-shadow .15s}.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--el-box-shadow-light)}.op-item:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:1px}.op-item.busy{opacity:.6;pointer-events:none}.op-icon{flex-shrink:0;margin-top:2px;color:var(--el-color-primary)}.op-text{min-width:0}.op-name{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--el-text-color-primary)}.op-desc{margin-top:4px;font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}@media (max-width:768px){.op-list{grid-template-columns:1fr}}</style>
+/* 2026-10-15 布局修复：历史容器封顶 + 内部滚动。
+   改前无上限直铺，实测 32 条 = 4508px，把 .bottom-row 撑到 7318px，
+   而左列实时数据卡仅 688px ⇒ 左侧 6630px 空白。
+   封顶 420px（约 6~7 条）让左右两列高度接近；超出部分在容器内滚动，
+   历史数据一条不丢（审计线索不能截断，见模板注释）。 */
+<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.stale-guidance{margin-bottom:12px}.stale-detail{margin:4px 0;font-size:12px;line-height:1.6}.guidance-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7}.guidance-list li{margin-bottom:4px}.guidance-action{color:var(--el-text-color-secondary)}.guidance-raw{display:block;color:var(--el-text-color-placeholder);font-size:11px;overflow-wrap:anywhere}.stale-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.stale-hint{font-size:12px;color:var(--el-text-color-secondary)}.ops-sub{margin:0 0 10px;font-size:12px;color:var(--el-text-color-secondary)}.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:8px;cursor:pointer;transition:border-color .15s,box-shadow .15s}.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--el-box-shadow-light)}.op-item:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:1px}.op-item.busy{opacity:.6;pointer-events:none}.op-icon{flex-shrink:0;margin-top:2px;color:var(--el-color-primary)}.op-text{min-width:0}.op-name{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--el-text-color-primary)}.op-desc{margin-top:4px;font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}
+/* 2026-10-15 布局修复：历史容器封顶 + 内部滚动。
+   改前无上限直铺，实测 32 条 = 4508px，把 .bottom-row 撑到 7318px，
+   而左列实时数据卡仅 688px ⇒ 左侧 6630px 空白。
+   封顶 420px（约 6~7 条）让左右两列高度接近；超出部分在容器内滚动，
+   历史数据一条不丢（审计线索不能截断，见模板注释）。 */
+.history-scroll{max-height:420px;overflow-y:auto;padding-right:4px}
+.history-scroll.is-expanded{max-height:70vh}
+.history-more{display:flex;justify-content:center;margin-top:4px}
+.history-count{margin-left:6px;font-size:12px;font-weight:400;color:var(--el-text-color-secondary)}
+@media (max-width:768px){.op-list{grid-template-columns:1fr}.history-scroll{max-height:320px}}</style>

@@ -129,7 +129,13 @@
         <BmsProtectionGrid :data="latestData" />
       </el-card>
 
-      <!-- 底部：实时数据流（左） + 指令频率/受控操作/操作历史（右） -->
+      <!-- 底部一行：实时数据流（左，md=14）+ 指令频率配置（右，md=10）。
+           2026-10-15 布局修复：改前右列还塞了「受控操作」，而它有 26 张操作卡
+           （窄列里要排 13 行，实测 opList=2033px）+ 操作历史（32 条=4508px）⇒
+           右列 7318px、左列卡片仅 688px，el-row 等高一拉 ⇒ 左侧 6630px 空白
+           （用户截图："左边空了一大截"）。
+           现在按**高度相近**配对：实时数据流(~690px) 与 指令频率配置(~580px) 并列，
+           受控操作整行下移（见下）。 -->
       <el-row :gutter="20" style="margin-top: 20px;" class="bottom-row">
         <el-col :xs="24" :md="14">
           <el-card shadow="hover">
@@ -150,11 +156,21 @@
         <el-col :xs="24" :md="10">
           <el-card shadow="hover" class="command-card">
             <template #header><span>指令频率配置</span></template>
-            <CommandFrequencySection :device-id="deviceId" embedded />
+            <CommandFrequencySection
+              :device-id="deviceId"
+              :node-id="deviceNodeId"
+              :max-polling-commands="device?.max_polling_commands"
+              embedded
+            />
           </el-card>
-          <DeviceControlPanel :device-id="deviceId" />
         </el-col>
       </el-row>
+
+      <!-- 受控操作 + 操作历史：单独占整行。
+           26 张操作卡在 md=10 的窄列里是 13 行（2033px）；整行后按 auto-fill
+           可并到 5 列，只需约 6 行 —— 既缩短页面，也让左列不再被拉高留白。
+           （DeviceControlPanel 自带 margin-top:20px，无需再给间距。） -->
+      <DeviceControlPanel :device-id="deviceId" />
     </template>
   </div>
 </template>
@@ -197,6 +213,12 @@ const handleRefresh = () => composableHandleRefresh(() => {
 })
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : 'BMS')
+/**
+ * 所属节点数值 id —— 透传给指令频率面板，用于保存后确认节点是否真的应用了新配置
+ * （2026-10-15 报障：改前提示永久停在「正在同步到节点」，因为根本没有确认信号）。
+ * 优先 device.node.id（后端 Node 关联），回退 node_id 序列号。
+ */
+const deviceNodeId = computed(() => device.value?.node?.id ?? device.value?.node_id)
 
 // 实时数据条数
 const realtimeCount = computed(() => realtimeDataItems.value.length)
