@@ -165,6 +165,13 @@ const routes: RouteRecordRaw[] = [
     name: 'BmsDemoPage',
     component: () => import('@/dev/BmsDemoPage.vue'),
     meta: { requiresAuth: false, hidden: true },
+  }, {
+    // BMS 详情页「重设计」评审 demo（2026-10-15）：MOS 直控开关 / 实时流不抢滚动 /
+    // 轮询 3 条上限 / 保护状态紧凑-展开。全部本地 mock，不改既有页面/组件。
+    path: '/dev/bms-demo2',
+    name: 'BmsDemoPage2',
+    component: () => import('@/dev/BmsDemoPage2.vue'),
+    meta: { requiresAuth: false, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {
