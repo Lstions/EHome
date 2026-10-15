@@ -38,6 +38,24 @@ func TestDecodeManifestCapacity(t *testing.T) {
 	if got != want {
 		t.Fatalf("decodeManifestCapacity(valid) = %+v, want %+v", got, want)
 	}
+	// field 4 是**可选**的（2026-10-15 新增）：老固件不发 ⇒ 解码为 0，
+	// 由调用方回退保守常量。若这里误设为必填，所有老固件的 manifest 都会被拒。
+	if got.MaxCommandsPerDevice != 0 {
+		t.Fatalf("absent field 4 must decode as 0 so callers can fall back, got %d", got.MaxCommandsPerDevice)
+	}
+	withCap := buildSubFrame(func(enc *frame.Encoder) {
+		enc.EncodeVarint(1, 16)
+		enc.EncodeVarint(2, 8)
+		enc.EncodeVarint(3, 8)
+		enc.EncodeVarint(4, 32)
+	})
+	gotCap, err := decodeManifestCapacity(withCap)
+	if err != nil {
+		t.Fatalf("decodeManifestCapacity(with field 4) error = %v", err)
+	}
+	if gotCap.MaxCommandsPerDevice != 32 {
+		t.Fatalf("field 4 must decode into MaxCommandsPerDevice, got %d", gotCap.MaxCommandsPerDevice)
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -59,6 +77,26 @@ func TestDecodeManifestCapacity(t *testing.T) {
 				t.Fatal("decodeManifestCapacity accepted invalid capacity")
 			}
 		})
+	}
+}
+
+// TestManifestCommandLimitComesFromNodeReport 守住用户的裁定：
+// 「支持多少应该由节点能力上报」。上限不是服务端常量，而是设备申报的事实。
+func TestManifestCommandLimitComesFromNodeReport(t *testing.T) {
+	// ① 节点申报 16 ⇒ 必须用申报值（而不是服务端保守常量）
+	reported := models.Node{HardwareInfo: `{"manifest_capacity":{"max_templates":16,"max_channels":8,"max_template_ids":8,"max_commands_per_device":16}}`}
+	if got := ManifestCommandLimitForNode(reported); got != 16 {
+		t.Fatalf("node-reported capability must win: got %d want 16", got)
+	}
+	// ② 老固件不申报该字段 ⇒ 回退保守常量。
+	//    ⚠ 这里**绝不能**返回 0：0 会让容量门拒绝任何非空的轮询配置（等于禁用全部轮询）。
+	legacy := models.Node{HardwareInfo: `{"manifest_capacity":{"max_templates":16,"max_channels":8,"max_template_ids":8}}`}
+	if got := ManifestCommandLimitForNode(legacy); got != MaxCommandsPerEdgeDevice {
+		t.Fatalf("legacy firmware must fall back to %d, got %d", MaxCommandsPerEdgeDevice, got)
+	}
+	// ③ 完全没有 capability（更老的固件）⇒ 同样回退，而不是 0
+	if got := ManifestCommandLimitForNode(models.Node{}); got != MaxCommandsPerEdgeDevice {
+		t.Fatalf("missing capability must fall back to %d, got %d", MaxCommandsPerEdgeDevice, got)
 	}
 }
 

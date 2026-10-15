@@ -163,7 +163,29 @@ func manifestLimitsFor(node models.Node) (manifestLimits, error) {
 	limits.maxTemplates = int(info.ManifestCapacity.MaxTemplates)
 	limits.maxChannels = int(info.ManifestCapacity.MaxChannels)
 	limits.maxTemplateIDs = int(info.ManifestCapacity.MaxTemplateIDs)
+	// 2026-10-15：单设备轮询上限**以设备申报为准**。老固件不发该字段（值为 0）时
+	// 保留构造时写入的保守常量 —— 绝不能变成 0，那会禁掉全部轮询。
+	if info.ManifestCapacity.MaxCommandsPerDevice > 0 {
+		limits.maxCommandsPerDevice = int(info.ManifestCapacity.MaxCommandsPerDevice)
+	}
 	return limits, nil
+}
+
+// ManifestCommandLimitForNode 返回该节点**申报**的单设备轮询指令上限。
+//
+// 为什么要有它：上限此前是服务端硬编码常量（MaxCommandsPerEdgeDevice=3），
+// 而它其实是固件的数组长度 —— 把"固件实现细节"当成了"协议能力"，用户想多开
+// 几条就被拒。用户裁定：**支持多少应该由节点能力上报**。本函数就是那个出口：
+// 读该节点 capability 里申报的值，拿不到（老固件 / 上报不全）才回退保守常量。
+//
+// 与 manifestLimitsFor 的区别：那个用于**下发前**校验（含 templates/channels），
+// 本函数供 API 层在**保存时**用，只需要这一个数。
+func ManifestCommandLimitForNode(node models.Node) int {
+	limits, err := manifestLimitsFor(node)
+	if err != nil || limits.maxCommandsPerDevice <= 0 {
+		return MaxCommandsPerEdgeDevice
+	}
+	return limits.maxCommandsPerDevice
 }
 
 var nextLegacyWriteRequestID = uint32(time.Now().UnixNano())

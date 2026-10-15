@@ -150,7 +150,7 @@ func TestValidateManifestCommandCapacity_RejectsOverCollectorLimit(t *testing.T)
 			atLimit[fmt.Sprintf("c%d", i)] = 0 // 显式禁用，避免走默认值回退
 		}
 	}
-	if err := ValidateManifestCommandCapacity(registry, "four-sched", atLimit, 0); err != nil {
+	if err := ValidateManifestCommandCapacity(registry, "four-sched", atLimit, 0, limit); err != nil {
 		t.Fatalf("%d enabled polling commands (== collector limit) must be accepted: %v", limit, err)
 	}
 
@@ -158,7 +158,7 @@ func TestValidateManifestCommandCapacity_RejectsOverCollectorLimit(t *testing.T)
 	for i := 0; i < limit+1; i++ {
 		over[fmt.Sprintf("c%d", i)] = 5000
 	}
-	err := ValidateManifestCommandCapacity(registry, "four-sched", over, 0)
+	err := ValidateManifestCommandCapacity(registry, "four-sched", over, 0, limit)
 	if err == nil {
 		t.Fatalf("%d enabled polling commands must exceed the collector limit of %d", limit+1, limit)
 	}
@@ -168,7 +168,7 @@ func TestValidateManifestCommandCapacity_RejectsOverCollectorLimit(t *testing.T)
 }
 
 func TestValidateManifestCommandCapacity_UnknownDriverErrors(t *testing.T) {
-	if err := ValidateManifestCommandCapacity(newFakeRegistry(), "nope", nil, 0); err == nil {
+	if err := ValidateManifestCommandCapacity(newFakeRegistry(), "nope", nil, 0, 0); err == nil {
 		t.Fatal("unknown driver type must error, not silently pass the gate")
 	}
 }

@@ -113,7 +113,13 @@ static bool encode_manifest_capacity(frame_encoder_t *enc)
     frame_encoder_init_sub(&nested, sub, sizeof(sub));
     if (frame_encode_varint(&nested, 1, MAX_TEMPLATES) != FRAME_OK ||
         frame_encode_varint(&nested, 2, MAX_CHANNELS) != FRAME_OK ||
-        frame_encode_varint(&nested, 3, MAX_TEMPLATE_IDS) != FRAME_OK) return false;
+        frame_encode_varint(&nested, 3, MAX_TEMPLATE_IDS) != FRAME_OK ||
+        /* field 4（2026-10-15 用户裁定）：单台边缘设备的轮询指令上限**由设备申报**，
+         * 后端不再硬编码 —— 硬编码正是 "MAX_COMMANDS_PER_DEVICE=3 变成协议上限"
+         * 的成因。申报值是校验上限 CONFIG_MAX_COMMANDS_PER_DEVICE（commands 已按需
+         * 动态分配，不再有预分配容量），后端据此在保存时就拒绝超限配置。
+         * 老固件不发这个字段 ⇒ 后端按保守默认处理（见 manifestLimitsFor）。 */
+        frame_encode_varint(&nested, 4, CONFIG_MAX_COMMANDS_PER_DEVICE) != FRAME_OK) return false;
     return frame_encode_bytes(enc, 10, sub, frame_encoder_size(&nested)) == FRAME_OK;
 }
 

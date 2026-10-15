@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"gorm.io/gorm"
+
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 )
 
@@ -121,18 +124,49 @@ func CountManifestCandidates(driverRegistry *drivers.Registry, devType string, i
 // make the ConfigManifest undeliverable to the collector.
 //
 // Why this exists: the encoder refuses to publish a manifest whose edge device
-// carries more than MaxCommandsPerEdgeDevice polling commands. Without this
-// gate the bad configuration is accepted (HTTP 200), the failure only surfaces
-// later as a rejected push, and the device silently keeps running the previous
-// configuration. Rejecting at write time turns a silent, repeating failure into
-// an immediate, actionable error.
-func ValidateManifestCommandCapacity(driverRegistry *drivers.Registry, devType string, intervals map[string]int, fallbackIntervalMs int) error {
+// carries more polling commands than the node can hold. Without this gate the bad
+// configuration is accepted (HTTP 200), the failure only surfaces later as a
+// rejected push, and the device silently keeps running the previous configuration.
+// Rejecting at write time turns a silent, repeating failure into an immediate,
+// actionable error.
+//
+// 上限来源（2026-10-15 用户裁定「支持多少应该由节点能力上报」）：由调用方经
+// NodeCommandLimitForDevice 取该节点申报的值传入；拿不到时传 0，
+// 本函数回退保守常量（绝不放行）。
+func ValidateManifestCommandCapacity(driverRegistry *drivers.Registry, devType string, intervals map[string]int, fallbackIntervalMs int, nodeLimit int) error {
+	// limit <= 0 表示调用方拿不到节点申报（节点未上报 / 查询失败）⇒ 用保守常量。
+	// 绝不放行：拿不到能力时放宽闸门会直接制造"保存成功、下发被拒"的静默失败。
+	limit := nodeLimit
+	if limit <= 0 {
+		limit = nodemgr.MaxCommandsPerEdgeDevice
+	}
 	count, err := CountManifestCandidates(driverRegistry, devType, intervals, fallbackIntervalMs)
 	if err != nil {
 		return err
 	}
-	if count > nodemgr.MaxCommandsPerEdgeDevice {
-		return fmt.Errorf("command_intervals enables %d polling commands, but the collector supports at most %d per edge device; set the remaining commands to 0 (disabled)", count, nodemgr.MaxCommandsPerEdgeDevice)
+	if count > limit {
+		return fmt.Errorf("command_intervals enables %d polling commands, but the node reports at most %d per edge device; set the remaining commands to 0 (disabled)", count, limit)
 	}
 	return nil
+}
+
+// NodeCommandLimitForDevice 取该设备所属节点**申报**的单设备轮询上限。
+//
+// 用户裁定（2026-10-15）：「支持多少应该由节点能力上报」——上限不是服务端常量，
+// 而是设备 capability 里的事实。这里顺着 edge_device → channel → node 取；
+// 任一环缺失/节点未上报都回退保守常量（由 ValidateManifestCommandCapacity 兜底），
+// 因为"不知道"绝不能解释成"可以多开"。
+func NodeCommandLimitForDevice(db *gorm.DB, dev *models.EdgeDevice) int {
+	if db == nil || dev == nil {
+		return nodemgr.MaxCommandsPerEdgeDevice
+	}
+	var ch models.Channel
+	if err := db.First(&ch, dev.ChannelID).Error; err != nil {
+		return nodemgr.MaxCommandsPerEdgeDevice
+	}
+	var node models.Node
+	if err := db.Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil {
+		return nodemgr.MaxCommandsPerEdgeDevice
+	}
+	return nodemgr.ManifestCommandLimitForNode(node)
 }

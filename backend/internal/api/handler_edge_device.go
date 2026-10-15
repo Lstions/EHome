@@ -716,7 +716,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				// Capacity gate: same authority as the update path, so a device
 				// can never be created with a configuration the collector will
 				// silently refuse to apply.
-				if vErr := ValidateManifestCommandCapacity(driverRegistry, dev.Type, dto.CommandIntervals, 0); vErr != nil {
+				if vErr := ValidateManifestCommandCapacity(driverRegistry, dev.Type, dto.CommandIntervals, 0, NodeCommandLimitForDevice(tx, &dev)); vErr != nil {
 					return vErr
 				}
 				dev.CommandIntervals = intervalsJSON

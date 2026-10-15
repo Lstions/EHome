@@ -105,6 +105,11 @@ type manifestCapacityReport struct {
 	MaxTemplates   uint32 `json:"max_templates"`
 	MaxChannels    uint32 `json:"max_channels"`
 	MaxTemplateIDs uint32 `json:"max_template_ids"`
+	// MaxCommandsPerDevice 单台边缘设备的轮询指令上限（固件 field 4，2026-10-15）。
+	// 新增：此前该上限在服务端是硬编码常量（MaxCommandsPerEdgeDevice=3），
+	// 于是"固件数组长度"被当成了协议能力。现在由设备申报，服务端只做背书校验。
+	// 老固件不发该字段 ⇒ 值为 0 ⇒ 调用方回退到保守常量（不是 0，否则会禁用全部轮询）。
+	MaxCommandsPerDevice uint32 `json:"max_commands_per_device"`
 }
 
 func decodeManifestCapacity(data []byte) (manifestCapacityReport, error) {
@@ -116,7 +121,7 @@ func decodeManifestCapacity(data []byte) (manifestCapacityReport, error) {
 	if err != nil {
 		return report, err
 	}
-	seen := [4]bool{}
+	seen := [5]bool{}
 	for {
 		field, err := dec.NextField()
 		if errors.Is(err, frame.ErrEndOfFrame) {
@@ -125,7 +130,7 @@ func decodeManifestCapacity(data []byte) (manifestCapacityReport, error) {
 		if err != nil {
 			return report, err
 		}
-		if field.FieldNum == 0 || field.FieldNum > 3 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+		if field.FieldNum == 0 || field.FieldNum > 4 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
 			return report, fmt.Errorf("invalid manifest_capacity field %d", field.FieldNum)
 		}
 		seen[field.FieldNum] = true
@@ -140,6 +145,8 @@ func decodeManifestCapacity(data []byte) (manifestCapacityReport, error) {
 			report.MaxChannels = uint32(value)
 		case 3:
 			report.MaxTemplateIDs = uint32(value)
+		case 4:
+			report.MaxCommandsPerDevice = uint32(value)
 		}
 	}
 	for _, required := range []uint8{1, 2, 3} {
