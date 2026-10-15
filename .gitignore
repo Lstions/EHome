@@ -1,6 +1,8 @@
 # Go
 # 本地构建缓存（沙箱内 /home/bcat/go/pkg/mod 不可写，用工作区私有 GOPATH 引导工具链）
 /.gocache/
+# 本机联调运行态（构建产物/证书/本地 sdkconfig 覆盖），一律不进 git
+/.run/
 backend/bin/
 /backend/server
 /backend/ehome-server

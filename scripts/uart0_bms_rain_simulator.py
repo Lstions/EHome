@@ -280,6 +280,12 @@ def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | N
         if cmd == 0xE1:
             # MOS 策略写: 更新 args.mos 使后续 0x03 readback 反映新状态
             # 帧: DD 5A E1 02 YY XX CRC 77 (YY=00 user/AA operator, XX bit0 禁充/bit1 禁放)
+            #
+            # ⚠ 极性（2026-10-15 本机联调实测）：E1 写入字节是**反向极性**
+            #   （1 = 软件关闭），而 0x03 的 fet_status 是**正向极性**
+            #   （bit0=充电MOS导通、bit1=放电MOS导通，1 = 导通）。
+            #   故 args.mos 保持 E1 极性存储，构造 0x03 时按 ~mos 上报。
+            #   依据 backend/internal/drivers/jiabaida_control.go:710。
             if frame:
                 try:
                     yy = frame[4]
@@ -405,9 +411,14 @@ def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | N
         return None
     # 读命令
     if cmd == 0x03:
+        # fet_status 极性转换：args.mos 存的是 E1 写字节（1=软件关闭），
+        # 而 0x03 的 fet_status 是 1=导通 ⇒ 取反低两位。
+        # 未写过 MOS（默认 0x00）时同样取反 ⇒ fet_status=0x03 双导通，
+        # 与真实 BMS 上电默认状态一致。
+        fet_status = (~args.mos) & 0x03
         data = bms_basic_info(
             args.bms_voltage, args.bms_current, 100.0, 100.0, 10,
-            args.bms_soc, args.mos, 16, 4, [25.0, 26.0, 27.0, 28.0],
+            args.bms_soc, fet_status, 16, 4, [25.0, 26.0, 27.0, 28.0],
         )
         return bms_response(0x03, data, target_len=60)
     if cmd == 0x04:
