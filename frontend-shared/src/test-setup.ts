@@ -356,17 +356,30 @@ const ElSwitch = defineComponent({
     inactiveText: String,
     activeValue: { default: true },
     inactiveValue: { default: false },
+    // ⚠ 必须支持 beforeChange（2026-10-15）。
+    // 真实 el-switch 的语义：before-change 返回 false / resolve(false) 时
+    // **不改变视觉状态、也不发 change**。旧 stub 没有这个 prop 且点击总是
+    // 直接 emit change ⇒ 组件把 @change 换成 :before-change 后测试会"点得动但断言不到"；
+    // 更早之前正是这个缺口掩盖了「取消后滑块不回滚」的真实缺陷。
+    beforeChange: Function,
   },
   emits: ['update:modelValue', 'change', 'input'],
   setup(props, { emit }) {
+    const apply = () => {
+      const val = props.modelValue === props.activeValue ? props.inactiveValue : props.activeValue
+      emit('update:modelValue', val)
+      emit('change', val)
+      emit('input', val)
+    }
     return () => h('button', {
       class: ['el-switch', { 'is-checked': props.modelValue === props.activeValue }],
       disabled: props.disabled,
-      onClick: () => {
-        const val = props.modelValue === props.activeValue ? props.inactiveValue : props.activeValue
-        emit('update:modelValue', val)
-        emit('change', val)
-        emit('input', val)
+      onClick: async () => {
+        if (props.beforeChange) {
+          const verdict = await (props.beforeChange as () => unknown)()
+          if (verdict === false) return   // 保持原位：视觉不变、不发 change
+        }
+        apply()
       },
     })
   },

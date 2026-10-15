@@ -15,6 +15,14 @@
         </el-icon>
         <span class="mos-label">充电 MOS</span>
         <span class="mos-state" :class="chargeOn ? 'is-on' : 'is-off'">{{ chargeOn ? '导通' : '关断' }}</span>
+        <!-- ⚠ 必须用 :before-change 而不是 :model-value + @change（2026-10-15 实测缺陷）。
+             el-switch 是**非受控视觉**组件：点击瞬间它自己就把滑块挪过去，
+             而 :model-value 由 fet_status（设备真值）驱动。取消确认时设备值没变，
+             Vue 也就不会重渲染这个开关 ⇒ **滑块停在错误位置**，与旁边的
+             「导通/关断」文字、fet_status 位自相矛盾（实测 3 次里复现 1 次，
+             刷新页面才恢复；刷新后回原值证明是纯视觉脱同步，不是数据错）。
+             :before-change 返回 Promise：resolve(true) 才允许它改动视觉，
+             resolve(false) 则**保持原位** —— 确认被取消时开关纹丝不动。 -->
         <el-switch
           class="mos-switch"
           :model-value="chargeOn"
@@ -23,7 +31,7 @@
           active-text="导通"
           inactive-text="关断"
           :aria-label="'充电 MOS 开关'"
-          @change="(v: string | number | boolean) => requestChange('charge', v === true)"
+          :before-change="() => beforeMosChange('charge')"
         />
       </div>
 
@@ -41,7 +49,7 @@
           active-text="导通"
           inactive-text="关断"
           :aria-label="'放电 MOS 开关'"
-          @change="(v: string | number | boolean) => requestChange('discharge', v === true)"
+          :before-change="() => beforeMosChange('discharge')"
         />
       </div>
 
@@ -125,23 +133,57 @@ const emit = defineEmits<{ (e: 'changed'): void }>()
 // 1 = 导通, 0 = 关断（与协议参数字段"软件关闭位"反相，见下）
 const hasFetStatus = computed(() => {
   if (!props.data) return false
-  return props.data.fet_status !== undefined || props.data.mos_charge !== undefined
+  // ⚠ 必须包含 lastFet：否则在 0xAA/0x05/0x04 等**不含 fet_status** 的帧到达时，
+  //   本判定会翻成 false ⇒ canControl 变 false ⇒ 开关被禁用、并在无需操作时抖动。
+  return (
+    props.data.fet_status !== undefined ||
+    lastFet.value !== null ||
+    props.data.mos_charge !== undefined
+  )
 })
 
-/** 有效 fet_status：优先用操作回执的权威值，其次用周期帧 */
-const effectiveFet = computed(() => verifiedFet.value ?? props.data?.fet_status)
+/**
+ * 最近一次**真正携带** fet_status 的值（2026-10-15 实测缺陷的核心修复）。
+ *
+ * 根因：latestData 是"任意指令的最新一帧"，不是"0x03 基本信息帧"。
+ *   设备按各指令自己的间隔轮流上报，实测 60 次采样的帧分布：
+ *     0x03 读取基本信息 45%（**唯一含 fet_status 的**）
+ *     0xAA 保护次数     32%（不含）
+ *     0x05 硬件版本      8%（不含）  0x0F 综合 8%（不含）  0x04 单体 7%（不含）
+ *   ⇒ 约 **47% 的时间**当前帧根本没有 fet_status。
+ *
+ * 改前把这种"本帧没这个字段"当成"MOS 关断"（回退到 mos_charge 等 legacy 字段，
+ * 而真机不发这些字段 ⇒ 恒 undefined ⇒ false）⇒ 开关每几秒自己翻转一次，
+ * 界面在设备实际充电时显示「充电 MOS 关断」。这是**危险的信息错误**，
+ * 不是显示瑕疵：用户会据此判断电池没在充电。
+ *
+ * 正确语义：一帧不含 fet_status = **该帧对 MOS 状态没有信息**，
+ * 应保留上一次已知值，而不是解释为 false。
+ * 启用 5 条轮询后非 0x03 帧占比升高，把该缺陷从偶发放大成显性。
+ */
+const lastFet = ref<number | null>(null)
+watch(
+  () => props.data?.fet_status,
+  (v) => { if (typeof v === 'number') lastFet.value = v },
+  { immediate: true },
+)
+/** 设备切换时清空，避免把上一台设备的 MOS 状态当成新设备的 */
+watch(() => props.deviceId, () => { lastFet.value = null })
+
+/** 有效 fet_status：操作回执的权威值 > 本帧 > 最近一次携带该字段的帧 */
+const effectiveFet = computed(() => verifiedFet.value ?? props.data?.fet_status ?? lastFet.value)
 
 const chargeOn = computed(() => {
   if (!props.data) return false
   const fet = effectiveFet.value
-  if (fet !== undefined) return (fet & 1) !== 0
+  if (fet !== undefined && fet !== null) return (fet & 1) !== 0
   return props.data.mos_charge === 1 || props.data.mos_charge_on === 1 || props.data.charge_mos === 1
 })
 
 const dischargeOn = computed(() => {
   if (!props.data) return false
   const fet = effectiveFet.value
-  if (fet !== undefined) return (fet & 2) !== 0
+  if (fet !== undefined && fet !== null) return (fet & 2) !== 0
   return props.data.mos_discharge === 1 || props.data.mos_discharge_on === 1 || props.data.discharge_mos === 1
 })
 
@@ -240,6 +282,10 @@ const { submitting, lastError, reauthVisible, reauthPassword, reauthBusy, dispat
 
 const confirmVisible = ref(false)
 const pendingKind = ref<'charge' | 'discharge' | null>(null)
+/** el-switch before-change 的挂起 resolve：由 doConfirm/cancelConfirm/doReauth 决定开关是否允许动 */
+let pendingResolve: ((ok: boolean) => void) | null = null
+/** 命中 recent_auth_required 时把 resolve 交接给重验证流程（验证通过才放行开关） */
+let reauthResolve: ((ok: boolean) => void) | null = null
 const pendingTargetOn = ref(false)
 const busyKey = ref('')
 const resultText = ref('')
@@ -258,26 +304,51 @@ const confirmText = computed(() => {
     : `将${k} MOS 置为**关断**（禁止${k}）。设备会回读 fet_status 校验是否生效。`
 })
 
-/** 切换开关：先弹极简确认（高风险动作后端强制单次令牌，无法跳过） */
-function requestChange(kind: 'charge' | 'discharge', targetOn: boolean) {
-  pendingKind.value = kind
-  pendingTargetOn.value = targetOn
-  resultText.value = ''
-  clearError()
-  confirmVisible.value = true
+/**
+ * 开关的 **before-change** 钩子（2026-10-15 修视觉脱同步缺陷）。
+ *
+ * el-switch 的 before-change 契约：返回 false 或 **resolve(false)** ⇒ 它**保持原位**、
+ * 不改变视觉状态；resolve(true) ⇒ 它才把滑块挪过去。
+ *
+ * 这正是我们要的语义：把"确认 + 下发 + 回读"整条链路做成这个 Promise，
+ * **批准了才允许滑块动**。改前用 :model-value + @change 时，点击瞬间滑块先动，
+ * 取消后设备值没变 ⇒ 不触发重渲染 ⇒ 滑块停在错误位置（实测复现，刷新才恢复）。
+ *
+ * 注意：这里 resolve 的是「本次操作已被受理」（不是「设备已确认成功」）。
+ * 后续成败由 lastMosOp 回执驱动 resultText，开关位置则由权威 fet_status 桥接。
+ */
+function beforeMosChange(kind: 'charge' | 'discharge'): Promise<boolean> {
+  const targetOn = !(kind === 'charge' ? chargeOn.value : dischargeOn.value)
+  return new Promise<boolean>((resolve) => {
+    pendingKind.value = kind
+    pendingTargetOn.value = targetOn
+    resultText.value = ''
+    clearError()
+    // 挂起本次 resolve，由 doConfirm / cancelConfirm 决定结果
+    pendingResolve = resolve
+    confirmVisible.value = true
+  })
 }
 
+/** 取消：开关必须保持原位（这是本修复的核心行为） */
 function cancelConfirm() {
   confirmVisible.value = false
   pendingKind.value = null
+  const r = pendingResolve
+  pendingResolve = null
+  r?.(false)
 }
 
 async function doConfirm() {
   const kind = pendingKind.value
   if (!kind) return
+  const resolveChange = pendingResolve
+  pendingResolve = null
   confirmVisible.value = false
   busyKey.value = kind
   resultText.value = ''
+  // 先在**不改变开关视觉**的前提下发起下发；只有受理成功才让滑块动。
+  // 这样即使下发失败/需要重验证，开关也不会先跳过去再弹回来（避免虚假反馈）。
   try {
     // 两个位一起提交（协议要求两个字段都必填）：未操作的那个保持当前实际状态。
     const targetCharge = kind === 'charge' ? pendingTargetOn.value : chargeOn.value
@@ -291,10 +362,18 @@ async function doConfirm() {
       resultOk.value = true
       resultText.value = `${label(kind)} MOS 指令已发送，正在回读校验…`
       emit('changed')
-    } else if (!reauthVisible.value) {
+      // 受理成功 ⇒ 允许滑块跟随目标位置（真实位置随后由权威 fet_status 收敛）
+      resolveChange?.(true)
+    } else if (reauthVisible.value) {
+      // 需要重验证：**先不让滑块动**，等重验证+重跑成功后再放行（见 doReauth）
+      reauthResolve = resolveChange
+    } else {
       resultOk.value = false
       resultText.value = lastError.value || 'MOS 指令未能提交'
+      resolveChange?.(false)
     }
+  } catch {
+    resolveChange?.(false)
   } finally {
     busyKey.value = ''
     pendingKind.value = null
@@ -309,16 +388,25 @@ async function doReauth() {
     resultOk.value = true
     resultText.value = 'MOS 指令已发送，正在回读校验…'
     emit('changed')
+    // 重验证+重跑成功，此时才放行开关滑块
+    reauthResolve?.(true)
+    reauthResolve = null
   } else if (!reauthVisible.value) {
     resultOk.value = false
     resultText.value = lastError.value || 'MOS 指令未能提交'
+    reauthResolve?.(false)
+    reauthResolve = null
   }
+  // 仍在 reauthVisible（用户输错密码）时保持挂起：开关不动，等下一次提交
 }
 
 function doCancelReauth() {
   cancelReauth()
   resultOk.value = false
   resultText.value = lastError.value || '已取消（未执行 MOS 操作）'
+  // 取消重验证 ⇒ 开关必须保持原位
+  reauthResolve?.(false)
+  reauthResolve = null
 }
 
 // 设备切换时清掉上一台设备的结果文案，避免串台（与 CommandList 同款守卫）
@@ -328,6 +416,9 @@ watch(() => props.deviceId, () => {
   pendingKind.value = null
   confirmVisible.value = false
   verifiedFet.value = null
+  // 设备切换时把挂起的 before-change 一律判否，避免开关停在一个"永远 loading"的 Promise 上
+  pendingResolve?.(false); pendingResolve = null
+  reauthResolve?.(false); reauthResolve = null
 })
 </script>
 

@@ -121,6 +121,80 @@ describe('BmsMosStatus 直接开关（极性 + 确认）', () => {
     expect(params.charge_software_closed, '未操作的充电 MOS 应保持导通 ⇒ false').toBe(false)
   })
 
+  /**
+   * 回归守卫（2026-10-15 实测缺陷）：**取消确认后开关必须保持原位**。
+   *
+   * 改前用 `:model-value + @change`：点一下 el-switch 立刻把滑块挪过去，
+   * 而 model-value 由设备 fet_status 驱动、取消时没变 ⇒ Vue 不重渲染 ⇒
+   * 滑块停在错误位置，与旁边「导通/关断」文字自相矛盾（实机 3 次里复现 1 次，
+   * 刷新页面才恢复）。改用 :before-change 后，取消会 resolve(false)，
+   * 开关按契约保持原位。
+   *
+   * 断言口径直接钉在**开关视觉**上（is-checked 不变 + 未发出任何写请求），
+   * 而不是只看"有没有弹窗"——那样正好会漏掉这个缺陷。
+   */
+  it('取消确认后开关保持原位，且不得发生任何写入', async () => {
+    const wrapper = mountSwitch({ fet_status: 0 }) // 两个都关断
+    const sw = wrapper.findAll('.el-switch')[0]
+    expect(sw.classes()).not.toContain('is-checked')
+
+    await sw.trigger('click')            // 请求置为导通 → 弹确认
+    await new Promise(r => setTimeout(r, 0))
+    const confirmBtn = wrapper.findAll('button').find(b => b.text() === '确认')
+    expect(confirmBtn, '未出现确认按钮').toBeTruthy()
+
+    // 走「取消」路径
+    const cancelBtn = wrapper.findAll('button').find(b => b.text() === '取消')
+    expect(cancelBtn, '未出现取消按钮').toBeTruthy()
+    await cancelBtn!.trigger('click')
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(store.create, '取消后不得发出任何写入').not.toHaveBeenCalled()
+    expect(store.confirm, '取消后不得申请确认令牌').not.toHaveBeenCalled()
+    expect(
+      wrapper.findAll('.el-switch')[0].classes(),
+      '取消后开关滑块未回滚 —— 视觉与 fet_status 脱同步（本次修复的缺陷）',
+    ).not.toContain('is-checked')
+  })
+
+  /**
+   * 回归守卫（2026-10-15 实测缺陷）：**不含 fet_status 的帧不得把 MOS 显示翻成关断**。
+   *
+   * 根因：latestData 是"任意指令的最新一帧"。启用 5 条轮询后实测帧分布为
+   *   0x03 读取基本信息 45%（唯一含 fet_status）/ 0xAA 保护次数 32% /
+   *   0x05 硬件版本 8% / 0x0F 综合 8% / 0x04 单体 7%
+   * ⇒ 约 47% 的时间当前帧没有 fet_status。改前此时回退到 legacy 字段
+   *   （真机不发）⇒ false ⇒ 界面在设备实际充电时显示「充电 MOS 关断」，
+   *   且开关每几秒自己翻转、并因 hasFetStatus=false 被禁用。
+   *
+   * 该帧对 MOS **没有信息** ⇒ 必须保留上一次已知值。
+   */
+  it('帧不含 fet_status 时保留上次已知 MOS 状态（不得翻成关断）', async () => {
+    const wrapper = mountSwitch({ fet_status: 3 }) // 两个都导通
+    expect(wrapper.findAll('.el-switch').map(s => s.classes().includes('is-checked')))
+      .toEqual([true, true])
+
+    // 模拟设备轮询到一条 0xAA（保护次数）帧 —— 不含 fet_status
+    await wrapper.setProps({ data: { protection_count: 5 } })
+    await new Promise(r => setTimeout(r, 0))
+
+    expect(
+      wrapper.findAll('.el-switch').map(s => s.classes().includes('is-checked')),
+      '不含 fet_status 的帧把 MOS 翻成了关断 —— 界面会谎报"未充电"',
+    ).toEqual([true, true])
+
+    // 且不应因此禁用开关（设备仍在线、fet 值仍然已知）
+    for (const sw of wrapper.findAll('.el-switch')) {
+      expect(sw.attributes('disabled')).toBeUndefined()
+    }
+
+    // 真正上报关断时才跟随
+    await wrapper.setProps({ data: { fet_status: 0 } })
+    await new Promise(r => setTimeout(r, 0))
+    expect(wrapper.findAll('.el-switch').map(s => s.classes().includes('is-checked')))
+      .toEqual([false, false])
+  })
+
   it('离线时开关禁用（不给"按得动但发不出去"的按钮）', () => {
     const wrapper = mountSwitch({ fet_status: 3 }, true)
     for (const sw of wrapper.findAll('.el-switch')) {

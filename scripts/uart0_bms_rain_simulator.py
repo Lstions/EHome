@@ -89,13 +89,30 @@ def bms_hardware_version(ver: str) -> bytes:
     return ver.encode("ascii")
 
 
-def bms_comprehensive() -> bytes:
-    """0x0F 综合信息 DATA (简化, 与 parse0x0F 布局一致)."""
+def bms_comprehensive(voltage: float, current: float, soc: float,
+                      fet_status: int, cell_count: int = 16,
+                      temps: list | None = None) -> bytes:
+    """0x0F 综合信息 DATA（与 parse0x0F 布局一致）。
+
+    ⚠ 本函数此前**硬编码**了一整套假数据（总压固定 48.0 / 电流 20A / SOC 80 /
+    单体 3250 / **FET 固定 0x00**），既无视 --bms-* 参数，也没有像 0x03 那样做
+    FET 极性换算。
+
+    后果（2026-10-15 实测）：0x0F 是 0x03 的**超集**，parse0x0F 同样会解出
+    fet_status。于是设备轮流上报时，0x03 帧报 fet_status=3（双导通）、
+    0x0F 帧报 fet_status=0（双关断）—— **同一字段两条指令互相矛盾**，
+    页面上的 MOS 开关每几秒自己翻转一次，并在设备实际充电时显示
+    「充电 MOS 关断」= 危险的信息错误（不是显示瑕疵）。
+
+    现在所有字段都取自真实入参，FET 由调用方按 0x03 相同的极性规则算好后传入，
+    保证两条指令对同一物理量给出**一致**的取值。
+    """
+    temps = temps or [25.0, 26.0, 27.0, 28.0]
     data = bytearray()
     data += bytes([0x00])                                   # [0] reserved
-    data += struct.pack(">H", int(48.0 * 100))              # [1:3] 总压
-    data += struct.pack(">h", 200)                          # [3:5] 电流 20A
-    data += bytes([80])                                     # [5] SOC
+    data += struct.pack(">H", int(voltage * 100))           # [1:3] 总压 (10mV)
+    data += struct.pack(">h", int(current * 100))           # [3:5] 电流 (10mA)
+    data += bytes([int(soc) & 0xFF])                        # [5] SOC
     data += struct.pack(">H", int(100.0 * 100))             # [6:8] 剩余容量
     data += struct.pack(">H", int(100.0 * 100))             # [8:10] 满容量
     data += struct.pack(">H", 0)                            # [10:12] 保护
@@ -104,11 +121,12 @@ def bms_comprehensive() -> bytes:
     data += struct.pack(">H", 0)                            # [16:18] 均衡低
     data += struct.pack(">H", 0)                            # [18:20] 均衡高
     data += struct.pack(">H", 10)                           # [20:22] 循环
-    data += bytes([0x00])                                   # [22] FET
-    data += bytes([1])                                      # [23] NTC 数
-    data += struct.pack(">H", int((25.0 + 273.15) * 10))    # [24:26] 温度
-    data += bytes([16])                                     # cell count M
-    for _ in range(16):                                     # M×2B 单体电压
+    data += bytes([fet_status & 0xFF])                      # [22] FET（必须与 0x03 同源同极性）
+    data += bytes([len(temps)])                             # [23] NTC 数
+    for t in temps:                                         # [24:24+2N] 温度 (0.1K)
+        data += struct.pack(">H", int((t + 273.15) * 10))
+    data += bytes([cell_count])                             # cell count M
+    for _ in range(cell_count):                             # M×2B 单体电压
         data += struct.pack(">H", 3250)
     # trailer: current_state(1) + charge_cap(2) + runtime(2) + seq(2) + hum(1)
     data += bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -429,7 +447,13 @@ def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | N
         # MOS 测试状态读回: [放电状态, 充电状态]
         return bms_response(0x0C, args.test_mos_status)
     if cmd == 0x0F:
-        return bms_response(0x0F, bms_comprehensive(), target_len=100)
+        # ⚠ 必须与 0x03 用**同一个** fet_status（含相同极性换算），否则两条指令
+        # 会对同一物理量给出矛盾取值，前端 MOS 显示随之来回翻转。
+        fet_status_0f = (~args.mos) & 0x03
+        return bms_response(0x0F, bms_comprehensive(
+            args.bms_voltage, args.bms_current, args.bms_soc,
+            fet_status_0f, 16, [25.0, 26.0, 27.0, 28.0],
+        ), target_len=100)
     if cmd == 0xA2:
         # 读 SN: 需要工厂模式
         if not args.factory_mode:
