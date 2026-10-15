@@ -542,7 +542,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 			needsConfirmation = false
 		}
 		if needsConfirmation {
-			if strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
+			// 2026-10-15 用户裁定：确认弹窗只保留确认/取消，理由不再是必填
+			// （可选审计备注）。确认的**实质**仍是 consumeConfirmation 对
+			// 一次性 token 的消费 —— 留空理由不会绕过确认门。
+			if utf8.RuneCountInString(in.Reason) > 512 {
 				return ErrConfirmationRequired
 			}
 			if err := s.consumeConfirmation(tx, in.ConfirmationToken, in.ActorUserID, edge.ID, def, hash); err != nil {

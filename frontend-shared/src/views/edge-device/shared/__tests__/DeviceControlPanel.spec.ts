@@ -6,7 +6,9 @@ describe('DeviceControlPanel high-risk recovery', () => {
   it('reauthenticates and retries the original confirmed intent', () => {
     expect(source).toContain("isApiErrorCode(error, 'recent_auth_required')")
     expect(source).toContain('authApi.reauthenticate(password)')
-    expect(source).toContain('await queueConfirmed(action, reason)')
+    // 2026-10-15 用户裁定：确认弹窗只保留确认/取消，理由不再在链路中传递。
+    expect(source).toContain('await queueConfirmed(action)')
+    expect(source).not.toContain('pendingConfirmationReason')
     expect(source).toContain('selectedKey.value')
     expect(source).toContain('该高风险操作要求最近 10 分钟内验证密码')
   })

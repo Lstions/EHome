@@ -120,8 +120,8 @@ func TestIssueConfirmationInputValidation(t *testing.T) {
 		{"zero actor", func(in *ConfirmationInput) { in.ActorUserID = 0 }, ErrConfirmationRequired},
 		{"empty action", func(in *ConfirmationInput) { in.ActionID = "" }, ErrConfirmationRequired},
 		{"whitespace action", func(in *ConfirmationInput) { in.ActionID = "  " }, ErrConfirmationRequired},
-		{"empty reason", func(in *ConfirmationInput) { in.Reason = "" }, ErrConfirmationRequired},
-		{"whitespace reason", func(in *ConfirmationInput) { in.Reason = "   " }, ErrConfirmationRequired},
+		// 2026-10-15 用户裁定：理由不再是必填（弹窗只有确认/取消），
+		// 仅保留长度上界防止超长文本进入审计元数据。
 		{"reason too long", func(in *ConfirmationInput) { in.Reason = strings.Repeat("x", 513) }, ErrConfirmationRequired},
 	}
 	for _, tt := range tests {

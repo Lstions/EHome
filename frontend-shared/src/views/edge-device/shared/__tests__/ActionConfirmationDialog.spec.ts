@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
 import ActionConfirmationDialog from '../ActionConfirmationDialog.vue'
 import type { ActionDefinition } from '@/api/deviceOperation'
 
@@ -20,58 +19,51 @@ function mountDialog(props: Record<string, unknown> = {}) {
 }
 
 describe('ActionConfirmationDialog', () => {
-  it('renders risk level and action name from definition', () => {
+  // 2026-10-15 用户裁定：弹窗只保留「确认 / 取消」，不再有必填的操作理由。
+  it('只渲染确认与取消两个按钮', () => {
     const wrapper = mountDialog()
-    expect(wrapper.text()).toContain('测试操作 将向设备发送参数变更')
-    // 2 级契约的中文标签 (不再是驱动 4 级方言原文)。
-    expect(wrapper.text()).toContain('风险等级：风险')
+    const labels = wrapper.findAll('button').map(button => button.text())
+    expect(labels).toEqual(['取消', '确认'])
   })
 
-  it('disables confirm button when reason is empty or whitespace only', async () => {
+  it('不渲染操作理由输入框（已移除该过度设计）', () => {
     const wrapper = mountDialog()
-    const confirmBtn = wrapper.findAll('button').find(button => button.text().includes('确认并排队'))!
-    expect(confirmBtn.attributes('disabled')).toBeDefined()
-
-    await wrapper.find('textarea').setValue('   ')
-    await nextTick()
-    expect(confirmBtn.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('操作理由')
   })
 
-  it('notifies parent with trimmed reason', async () => {
+  it('展示操作名，并在风险操作上给出风险提示', () => {
+    const wrapper = mountDialog()
+    expect(wrapper.text()).toContain('测试操作 将向设备发送指令')
+    expect(wrapper.text()).toContain('该操作为风险操作')
+  })
+
+  it('普通操作不显示风险提示，按钮用主色', () => {
+    const wrapper = mountDialog({ definition: makeDefinition({ risk_level: 'normal' }) })
+    expect(wrapper.text()).not.toContain('风险操作')
+    const confirmBtn = wrapper.findAll('button').find(button => button.text() === '确认')!
+    expect(confirmBtn.classes().join(' ')).toContain('el-button--primary')
+  })
+
+  it('确认按钮无需任何输入即可点击并通知父组件', async () => {
     const onConfirm = vi.fn()
     const wrapper = mountDialog({ onConfirm })
-    await wrapper.find('textarea').setValue('  测试理由  ')
-    await nextTick()
-    const confirmBtn = wrapper.findAll('button').find(button => button.text().includes('确认并排队'))!
+    const confirmBtn = wrapper.findAll('button').find(button => button.text() === '确认')!
     expect(confirmBtn.attributes('disabled')).toBeUndefined()
     await confirmBtn.trigger('click')
-    expect(onConfirm).toHaveBeenCalledWith('测试理由')
+    expect(onConfirm).toHaveBeenCalledTimes(1)
   })
 
-  it('notifies parent when cancel closes the dialog', async () => {
+  it('取消关闭弹窗', async () => {
     const onVisibleUpdate = vi.fn()
     const wrapper = mountDialog({ 'onUpdate:visible': onVisibleUpdate })
-    const cancelBtn = wrapper.findAll('button').find(button => button.text().includes('取消'))!
+    const cancelBtn = wrapper.findAll('button').find(button => button.text() === '取消')!
     await cancelBtn.trigger('click')
     expect(onVisibleUpdate).toHaveBeenCalledWith(false)
   })
 
-  it('resets reason when definition changes or dialog reopens', async () => {
-    const wrapper = mountDialog()
-    await wrapper.find('textarea').setValue('旧理由')
-    await wrapper.setProps({ definition: makeDefinition({ id: 'other_action', name: '其他操作' }) })
-    await nextTick()
-    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('')
-
-    await wrapper.setProps({ visible: false })
-    await wrapper.setProps({ visible: true })
-    await nextTick()
-    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('')
-  })
-
-  it('shows fallback text when definition is null', () => {
+  it('definition 为 null 时不崩且给出兜底文案', () => {
     const wrapper = mountDialog({ definition: null })
-    expect(wrapper.text()).toContain('该操作 将向设备发送参数变更')
-    expect(wrapper.text()).toContain('风险等级：unknown')
+    expect(wrapper.text()).toContain('该操作 将向设备发送指令')
   })
 })

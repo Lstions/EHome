@@ -143,7 +143,8 @@ export const useDeviceOperationStore = defineStore('deviceOperation', () => {
     apply(execution)
     return execution
   }
-  async function confirm(id: number, actionId: string, params: Record<string, unknown>, reason: string): Promise<ConfirmationGrant> {
+  // 2026-10-15 用户裁定：确认弹窗只有确认/取消，理由为可选审计备注（默认空）。
+  async function confirm(id: number, actionId: string, params: Record<string, unknown>, reason = ''): Promise<ConfirmationGrant> {
     const session = getSessionGeneration()
     const grant = await deviceOperationApi.confirm(id, actionId, params, reason)
     assertSessionGeneration(session)

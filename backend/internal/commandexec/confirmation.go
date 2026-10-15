@@ -52,7 +52,10 @@ type ConfirmationGrant struct {
 // current availability facts as Create, so confirmation cannot mint a grant
 // for an offline/stale node and use it later after the environment changed.
 func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (*ConfirmationGrant, error) {
-	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
+	// 2026-10-15 用户裁定：二次确认弹窗**只保留确认/取消**，不再强制填写
+	// 「操作理由」。理由从必填降级为**可选审计备注**：留空合法，只保留
+	// 长度上界防止超长文本进入审计元数据。
+	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || utf8.RuneCountInString(in.Reason) > 512 {
 		return nil, ErrConfirmationRequired
 	}
 	var grant ConfirmationGrant

@@ -39,9 +39,9 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     }
 
     if (Array.isArray(result) ? result.some(item => item.name === 'reset_ack') : result.name === 'write_ack') {
+      // 2026-10-15 用户裁定：确认弹窗只有确认/取消，不再填写操作理由。
       const confirmation = page.locator('.el-dialog:visible').last()
-      await confirmation.getByLabel('操作理由').fill(`SN-3001 实机验证：${buttonName} 后读回并恢复`)
-      await confirmation.getByRole('button', { name: '确认并排队', exact: true }).click()
+      await confirmation.getByRole('button', { name: '确认', exact: true }).click()
     }
 
     // A login within the recent-auth window proceeds directly. If the test is
