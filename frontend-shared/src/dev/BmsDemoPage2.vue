@@ -1,16 +1,16 @@
 <template>
   <!--
-    BmsDemoPage2.vue — BMS 设备详情页「重设计」评审 demo（2026-10-15）
+    BmsDemoPage2.vue — BMS 设备详情页「重设计」评审 demo（2026-10-15 重设计 / 2026-10-15 接真实后端）
 
-    · 全部数据为本地 mock，不调用任何后端 API。
-    · 仅开发环境路由可见（/dev/bms-demo2），带 DEV 水印。
-    · 不改动既有 BmsDemoPage.vue / 生产页面 / 共享组件。
+    · 数据全部来自真实后端：设备详情 / 实时流 / 受控操作目录 / 操作历史 / 轮询指令配置。
+    · 仅开发环境路由可见（/dev/bms-demo2?device=<id>），带 DEV 水印。
+    · 视觉与交互设计保持不变，本轮只替换数据层。
     · 本轮四条用户诉求的落点见各区段标题注释。
   -->
   <div class="bms-demo2">
-    <div class="dev-watermark">DEV DEMO · BMS 详情页重设计评审（全部为本地 mock 数据，非生产页面）</div>
+    <div class="dev-watermark">DEV · BMS 详情页重设计评审（已接入真实后端设备数据，非生产页面）</div>
 
-    <!-- 页头：设备身份 + 演示态切换 -->
+    <!-- 页头：设备身份（真实详情） -->
     <header class="page-head">
       <div class="crumb">
         <el-icon :size="14"><HomeFilled /></el-icon>
@@ -22,53 +22,53 @@
       <div class="head-main">
         <div class="dev-ident">
           <div class="dev-name-line">
-            <h1 class="dev-name">BMS-Pack-01</h1>
-            <el-tag type="success" size="small" effect="plain">在线</el-tag>
-            <el-tag type="info" size="small" effect="plain">jiabaida · 16S</el-tag>
+            <h1 class="dev-name">{{ deviceName }}</h1>
+            <el-tag :type="statusTag.type" size="small" effect="plain">{{ statusTag.text }}</el-tag>
+            <el-tag type="info" size="small" effect="plain">{{ deviceTypeLabel }} · {{ cellCountLabel }}</el-tag>
           </div>
           <div class="dev-sub">
-            节点 工厂A / 产线1 · 通道1 · 设备ID BMS3000A1B2C3 · 固件 {{ softwareVersion }}
-            · 轮询已启用 <b>{{ enabledCount }}/{{ MAX_POLL }}</b> 条
+            节点 {{ nodeLabel }} · 通道 {{ channelLabel }} · 设备 #{{ deviceId }} · 节点固件 {{ firmwareLabel }}
+            <template v-if="hasPollLimit"> · 轮询已启用 <b>{{ enabledCount }}/{{ pollLimitValue }}</b> 条</template>
+            <template v-else> · 轮询已启用 <b>{{ enabledCount }}</b> 条</template>
           </div>
         </div>
         <div class="head-actions">
-          <div class="mode-switch" role="group" aria-label="演示数据模式">
-            <span class="mode-label">演示数据</span>
-            <el-radio-group v-model="mode" size="small">
-              <el-radio-button value="normal">正常态</el-radio-button>
-              <el-radio-button value="abnormal">异常态</el-radio-button>
-            </el-radio-group>
-          </div>
-          <el-button size="small" :icon="Refresh" @click="resetDemo">重置演示</el-button>
+          <el-button size="small" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
         </div>
       </div>
     </header>
 
     <main class="page-body">
+      <!-- 设备详情加载失败：常驻页面，不随 toast 消失 -->
+      <el-alert v-if="detailError" type="error" :closable="false" show-icon class="inline-alert page-error">
+        <template #title>设备详情加载失败（下方数据可能不完整）</template>
+        <div class="alert-detail">{{ detailError }}</div>
+      </el-alert>
+
       <!-- 指标卡 -->
       <section class="row metrics">
-        <MetricStatCard label="SOC 剩余电量" :value="soc.toFixed(1)" unit="%" tone="success" :progress="Math.round(soc)" sub-text="健康区间 20% – 90%">
+        <MetricStatCard label="SOC 剩余电量" :value="fmt(soc, 1)" unit="%" tone="success" :progress="socProgress" sub-text="健康区间 20% – 90%">
           <template #icon><el-icon :size="22"><PieChart /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="剩余容量" :value="remainingCapacity.toFixed(2)" unit="Ah" tone="primary" :sub-text="'/ ' + nominalCapacity + ' Ah 标称'">
+        <MetricStatCard label="剩余容量" :value="fmt(remainingCapacity, 2)" unit="Ah" tone="primary" :sub-text="capacitySubText">
           <template #icon><el-icon :size="22"><Odometer /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="总电压" :value="totalVoltage.toFixed(2)" unit="V" tone="primary" :sub-text="'16 串 · 平均 ' + avgCell.toFixed(3) + 'V'">
+        <MetricStatCard label="总电压" :value="fmt(totalVoltage, 2)" unit="V" tone="primary" :sub-text="voltageSubText">
           <template #icon><el-icon :size="22"><DataLine /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="电流" :value="currentDisplay.toFixed(2)" unit="A" tone="primary" :sub-text="currentHint">
+        <MetricStatCard label="电流" :value="fmt(currentDisplay, 2)" unit="A" tone="primary" :sub-text="currentHint">
           <template #icon><el-icon :size="22"><Lightning /></el-icon></template>
         </MetricStatCard>
       </section>
 
       <!-- 诉求①：MOS 充电/放电直接开关 + 诉求④：保护状态 -->
       <section class="row mos-protect">
-        <!-- 诉求① 落点：MOS 直控卡（页首主位，不再埋进 26 项受控操作） -->
+        <!-- 诉求① 落点：MOS 直控卡（页首主位，不再埋进受控操作清单） -->
         <div class="card mos-card">
           <div class="card-head">
             <span class="card-title">MOS 直控</span>
             <span class="card-hint">像电灯开关一样直接操作</span>
-            <span class="head-right mono-badge">fet_status = 0x{{ fetHex }}</span>
+            <span class="head-right mono-badge">{{ hasFetStatus ? 'fet_status = 0x' + fetHex : 'fet_status = ' + DASH }}</span>
           </div>
           <p class="card-note">
             充电 / 放电回路通断的软件策略 <code>set_mos_policy</code>。开关即时下发，切换前弹
@@ -85,7 +85,7 @@
                   <span class="mos-name">{{ m.name }}</span>
                   <el-tag :type="m.on ? 'success' : 'info'" size="small" effect="plain">{{ m.on ? '导通' : '关断' }}</el-tag>
                   <el-tag v-if="m.phase" type="primary" size="small">{{ m.phase }}…</el-tag>
-                  <span v-if="m.hwOff" class="hw-off-note"><el-icon :size="12"><WarningFilled /></el-icon>被硬件保护关断</span>
+                  <span v-if="m.hwOff" class="hw-off-note"><el-icon :size="12"><WarningFilled /></el-icon>可能被硬件保护关断</span>
                 </div>
                 <div class="mos-desc">{{ m.desc }}</div>
               </div>
@@ -93,7 +93,7 @@
                 class="mos-switch"
                 :model-value="m.on"
                 :loading="!!m.phase"
-                :disabled="!!m.phase"
+                :disabled="!!m.phase || !canControlMos"
                 :aria-label="m.name + '开关'"
                 @change="(v: string | number | boolean) => requestMosChange(m.key, !!v)"
               />
@@ -104,35 +104,39 @@
             </el-alert>
           </div>
 
+          <p v-if="!canControlMos" class="card-footnote mos-manual-note">
+            当前不可控制：{{ hasFetStatus ? '设备离线（状态 ' + statusTag.text + '），指令无法下发' : '尚无 fet_status 数据' }}。
+          </p>
+
           <p class="card-footnote">
             着色规则：<b>导通</b>用成功色、<b>关断</b>用中性色 —— 关断是正常工况，不是故障；只有「保护已触发」才用告警色。
           </p>
         </div>
 
-        <!-- 诉求④ 落点：保护状态（正常态紧凑一行 / 异常态展开 12 项明细） -->
+        <!-- 诉求④ 落点：保护状态（正常态紧凑一行 / 有保护位时展开 12 项明细） -->
         <div class="card protect-card">
           <div class="card-head">
             <span class="card-title">保护状态</span>
             <el-tag v-if="activeProtections.length" type="danger" size="small">
               {{ activeProtections.length }} 项保护已触发
             </el-tag>
-            <el-tag v-else-if="mode === 'abnormal'" type="warning" size="small">无保护位命中</el-tag>
+            <el-tag v-else-if="!hasProtectionData" type="info" size="small" effect="plain">暂无数据</el-tag>
             <el-tag v-else type="success" size="small" effect="plain">
               <el-icon :size="12"><CircleCheckFilled /></el-icon> 全部正常
             </el-tag>
-            <span class="head-right mono-badge">protection_status = 0x{{ protHex }}</span>
+            <span class="head-right mono-badge">{{ hasProtectionData ? 'protection_status = 0x' + protHex : 'protection_status = ' + DASH }}</span>
           </div>
 
-          <!-- 正常态：紧凑一行 -->
+          <!-- 无保护命中：紧凑一行 -->
           <div v-if="!activeProtections.length" class="protect-compact" role="status">
-            <el-icon :size="18" color="var(--el-color-success)"><CircleCheckFilled /></el-icon>
-            <span class="protect-compact-text">12 项保护均未触发（bit0 – bit11 全 0）</span>
+            <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
+            <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据' }}</span>
             <button type="button" class="link-btn" @click="protectExpanded = !protectExpanded">
               {{ protectExpanded ? '收起明细' : '展开明细' }}
             </button>
           </div>
 
-          <!-- 异常态：结论 + 明细 -->
+          <!-- 有保护命中：结论 + 明细 -->
           <template v-else>
             <el-alert type="error" :closable="false" show-icon class="inline-alert">
               <template #title>{{ activeProtections.map(p => p.label).join('、') }} 已触发</template>
@@ -159,12 +163,13 @@
         <div class="card cell-card">
           <div class="card-head">
             <span class="card-title">电芯电压分布</span>
-            <span class="card-hint">16 串 · 单位 V</span>
-            <span class="head-right cell-summary">
+            <span class="card-hint">{{ cells.length }} 串 · 单位 V</span>
+            <span v-if="cells.length" class="head-right cell-summary">
               最高 <b class="txt-warning">#{{ maxCell.index }} {{ maxCell.voltage.toFixed(3) }}V</b>
               · 最低 <b class="txt-secondary">#{{ minCell.index }} {{ minCell.voltage.toFixed(3) }}V</b>
               · 压差 <b :class="diff > 0.1 ? 'txt-warning' : 'txt-secondary'">{{ diff.toFixed(3) }}V</b>
             </span>
+            <span v-else class="head-right cell-summary">暂无单体电压数据</span>
           </div>
           <div class="cell-chart-scroll">
             <div class="cell-chart">
@@ -190,7 +195,7 @@
         <div class="card temp-card">
           <div class="card-head">
             <span class="card-title">温度探头</span>
-            <span class="card-hint">4 路</span>
+            <span class="card-hint">{{ temps.length }} 路</span>
           </div>
           <div class="temp-list">
             <div v-for="t in temps" :key="t.index" class="temp-item">
@@ -200,12 +205,13 @@
                 {{ t.text }}
               </el-tag>
             </div>
+            <div v-if="!temps.length" class="stream-empty">暂无温度数据</div>
           </div>
           <p class="card-footnote">判定：&gt;45℃ 偏高（告警）· &gt;60℃ 过高（危险）。正常温区用成功色，不用危险色。</p>
         </div>
       </section>
 
-      <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询 3 条上限 -->
+      <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
       <section class="row stream-poll">
         <!-- 诉求② 落点：跟随模式 + 上滚即暂停 + 回到最新 -->
         <div class="card stream-card">
@@ -233,7 +239,7 @@
                 <span class="s-unit">{{ row.unit }}</span>
                 <span class="s-status" :class="'is-' + row.status">{{ row.statusText }}</span>
               </div>
-              <div v-if="!streamRows.length" class="stream-empty">暂无数据，点击「高频注入」开始滚动压测</div>
+              <div v-if="!streamRows.length" class="stream-empty">暂无实时数据；设备下一次上报后会自动出现在这里</div>
             </div>
             <transition name="fade">
               <button v-if="!following" type="button" class="back-latest" @click="scrollToLatest">
@@ -243,29 +249,44 @@
             </transition>
           </div>
 
+          <p v-if="snapshotError" class="card-footnote txt-danger">最新快照加载失败：{{ snapshotError }}</p>
           <p class="card-footnote">
-            验证方式：点「高频注入」让列表每秒新增 1 条 → 用鼠标/触控<b>向上滚</b>，列表应停在原处、
-            新数据只累积计数而不把视口拉回；点「回到最新」或滚回底部即恢复跟随。
+            数据来自设备 WebSocket 上报（新的在前）。验证方式：点「高频注入」让列表每秒新增 1 条（本地压测行，非设备数据）
+            → 用鼠标/触控<b>向上滚</b>，列表应停在原处、新数据只累积计数而不把视口拉回；点「回到最新」或滚回底部即恢复跟随。
           </p>
         </div>
 
-        <!-- 诉求③ 落点：轮询指令配置（3 条上限可见、超限点名要禁用哪几条） -->
+        <!-- 诉求③ 落点：轮询指令配置（上限由节点上报，超限点名要禁用哪几条） -->
         <div class="card poll-card">
           <div class="card-head">
             <span class="card-title">轮询指令配置</span>
-            <el-tag :type="pollBadgeType" size="small">已启用 {{ enabledCount }}/{{ MAX_POLL }}</el-tag>
+            <el-tag v-if="hasPollLimit" :type="pollBadgeType" size="small">已启用 {{ enabledCount }}/{{ pollLimitValue }}</el-tag>
+            <el-tag v-else type="success" size="small">已启用 {{ enabledCount }} 条</el-tag>
           </div>
           <p class="card-note">
-            每条指令可单独设间隔，<b>0 = 禁用</b>。固件静态上限为同时最多 <b>{{ MAX_POLL }} 条</b>；
-            超过会被后端整单拒绝（HTTP 400）且不落库 —— 所以这里在保存前就把约束摆出来。
+            每条指令可单独设间隔，<b>0 = 禁用</b>。
+            <template v-if="hasPollLimit">
+              固件静态上限为同时最多 <b>{{ pollLimitValue }} 条</b>；超过会被后端整单拒绝（HTTP 400）且不落库 —— 所以这里在保存前就把约束摆出来。
+            </template>
+            <template v-else>
+              本节点未上报轮询条数上限，保存前不显示容量提示（后端仍会在超限时整单拒绝）。
+            </template>
           </p>
 
-          <el-alert v-if="overLimit" type="warning" :closable="false" show-icon class="inline-alert">
-            <template #title>已启用 {{ enabledCount }} 条，超过上限 {{ MAX_POLL }} 条，保存会被拒绝</template>
-            <div class="alert-detail">请先禁用 {{ enabledCount - MAX_POLL }} 条：<b>{{ excessNames }}</b>。</div>
+          <el-alert v-if="pollLoadError" type="error" :closable="false" show-icon class="inline-alert">
+            <template #title>轮询指令加载失败</template>
+            <div class="alert-detail">
+              {{ pollLoadError }}
+              <el-button size="small" text type="primary" @click="loadPollCommands">重试</el-button>
+            </div>
           </el-alert>
-          <el-alert v-else-if="enabledCount === MAX_POLL" type="info" :closable="false" class="inline-alert">
-            <template #title>已占满 {{ MAX_POLL }}/{{ MAX_POLL }} 条轮询额度</template>
+
+          <el-alert v-if="overLimit" type="warning" :closable="false" show-icon class="inline-alert">
+            <template #title>已启用 {{ enabledCount }} 条，超过上限 {{ pollLimitValue }} 条，保存会被拒绝</template>
+            <div class="alert-detail">请先禁用 {{ enabledCount - pollLimitValue }} 条：<b>{{ excessNames }}</b>。</div>
+          </el-alert>
+          <el-alert v-else-if="hasPollLimit && enabledCount === pollLimitValue" type="info" :closable="false" class="inline-alert">
+            <template #title>已占满 {{ pollLimitValue }}/{{ pollLimitValue }} 条轮询额度</template>
             <div class="alert-detail">再启用任何一条都会超限；如需调整，请先禁用一条。</div>
           </el-alert>
 
@@ -275,7 +296,7 @@
                 <div class="poll-name-line">
                   <span class="poll-name">{{ c.name }}</span>
                   <el-tag v-if="isExcess(c)" type="warning" size="small" effect="dark">超限</el-tag>
-                  <el-tag v-else-if="!c.enabled" type="info" size="small" effect="plain">已禁用</el-tag>
+                  <el-tag v-else-if="!isPollEnabled(c)" type="info" size="small" effect="plain">已禁用</el-tag>
                 </div>
                 <div class="poll-desc">{{ c.desc }}</div>
               </div>
@@ -287,14 +308,14 @@
                   :step="1000"
                   size="small"
                   controls-position="right"
-                  :disabled="!c.enabled"
+                  :disabled="!isPollEnabled(c)"
                   class="poll-interval"
                   :aria-label="c.name + '轮询间隔（毫秒，0 = 禁用）'"
                   @change="() => onIntervalChange(c)"
                 />
                 <span class="poll-unit">ms</span>
                 <el-switch
-                  :model-value="c.enabled"
+                  :model-value="isPollEnabled(c)"
                   size="small"
                   :aria-label="c.name + '启用轮询'"
                   @change="(v: string | number | boolean) => togglePoll(c, !!v)"
@@ -302,7 +323,14 @@
                 <el-button v-if="isExcess(c)" size="small" @click="togglePoll(c, false)">禁用</el-button>
               </div>
             </div>
+            <div v-if="!pollCommands.length && !pollLoadError" class="stream-empty">暂无轮询指令</div>
           </div>
+
+          <!-- 保存被拒：常驻页面（toast 会消失） -->
+          <el-alert v-if="pollError" type="error" :closable="false" show-icon class="inline-alert">
+            <template #title>保存失败，改动未生效（下方仍是设备当前配置）</template>
+            <div class="alert-detail">{{ pollError }}</div>
+          </el-alert>
 
           <div class="poll-foot">
             <el-button type="primary" size="small" :disabled="overLimit || !pollDirty || pollBusy" @click="savePoll">保存</el-button>
@@ -311,7 +339,7 @@
         </div>
       </section>
 
-      <!-- 受控操作（分组，不平铺 26 项） + 操作历史 -->
+      <!-- 受控操作（目录来自后端，按用途分组） + 操作历史 -->
       <section class="row ops-history">
         <div class="card ops-card">
           <div class="card-head">
@@ -322,6 +350,15 @@
               状态文案：已发送 → 执行中 → 校验中 → 成功 / 失败 / 结果未知 / 已取消
             </span>
           </div>
+
+          <el-alert v-if="catalogError" type="error" :closable="false" show-icon class="inline-alert">
+            <template #title>受控操作目录加载失败</template>
+            <div class="alert-detail">
+              {{ catalogError }}
+              <el-button size="small" text type="primary" @click="loadOperations">重试</el-button>
+            </div>
+          </el-alert>
+          <div v-else-if="catalogLoading" class="stream-empty">正在加载受控操作目录…</div>
 
           <div class="op-groups">
             <div v-for="g in opGroups" :key="g.id" class="op-group">
@@ -339,10 +376,14 @@
                   <div class="op-info">
                     <div class="op-name-line">
                       <span class="op-name">{{ op.name }}</span>
-                      <el-tag :type="op.risk ? 'danger' : 'info'" size="small" effect="plain">{{ op.risk ? '风险' : '普通' }}</el-tag>
+                      <el-tag :type="op.risky ? 'danger' : 'info'" size="small" effect="plain">{{ op.risky ? '风险' : '普通' }}</el-tag>
+                      <el-tag v-if="!op.available" type="warning" size="small" effect="plain">暂不可用</el-tag>
+                      <el-tag v-if="op.needsParams" type="info" size="small" effect="plain">需参数</el-tag>
                       <el-tag v-if="op.movedTo" type="primary" size="small">已移至上方直控</el-tag>
                     </div>
                     <div v-if="op.note" class="op-desc">{{ op.note }}</div>
+                    <div v-if="!op.available && op.reason" class="op-desc op-desc-warn">不可用原因：{{ op.reason }}</div>
+                    <div v-else-if="op.needsParams" class="op-desc op-desc-warn">该操作需要参数，请到设备详情页的「受控操作」面板填写后执行。</div>
                   </div>
                   <div class="op-right">
                     <span v-if="opState(op.id).phase !== 'idle'" class="op-state">
@@ -352,13 +393,13 @@
                     <el-button
                       v-else
                       size="small"
-                      :type="op.risk ? 'warning' : 'primary'"
-                      :plain="op.risk"
+                      :type="op.risky ? 'warning' : 'primary'"
+                      :plain="op.risky"
                       :loading="opBusy(op.id)"
-                      :disabled="opBusy(op.id)"
+                      :disabled="opBusy(op.id) || !op.available || op.needsParams"
                       @click="runOp(op)"
                     >
-                      {{ op.risk ? '确认后执行' : '执行' }}
+                      {{ !op.available ? '暂不可用' : op.needsParams ? '需参数' : op.risky ? '确认后执行' : '执行' }}
                     </el-button>
                   </div>
                   <el-alert v-if="opState(op.id).reason" type="error" :closable="false" class="op-reason" :title="opState(op.id).reason" />
@@ -371,87 +412,252 @@
         <div class="card history-card">
           <div class="card-head">
             <span class="card-title">操作历史</span>
-            <span class="card-hint">审计线索 · 最近 {{ history.length }} 条</span>
+            <span class="card-hint">审计线索 · 最近 {{ historyRows.length }} 条</span>
           </div>
           <div class="history-list">
-            <div v-for="h in history" :key="h.id" class="history-item">
+            <div v-for="h in historyRows" :key="h.id" class="history-item">
               <div class="h-top">
                 <span class="h-type">{{ h.type }}</span>
                 <el-tag :type="resultTag(h.result)" size="small" effect="plain">{{ resultText(h.result) }}</el-tag>
               </div>
               <div class="h-content">{{ h.content }}</div>
-              <div class="h-meta">{{ h.time }} · admin</div>
+              <div class="h-meta">{{ h.time }}</div>
             </div>
+            <div v-if="!historyRows.length" class="history-empty">暂无操作记录</div>
           </div>
         </div>
       </section>
     </main>
+
+    <!-- 近期身份验证（后端 10 分钟窗口，缺失即 403 recent_auth_required） -->
+    <el-dialog v-model="reauthVisible" title="验证当前身份" width="420px" :close-on-click-modal="false" append-to-body>
+      <p class="dialog-note">该操作属于高风险动作，需要重新验证当前账户密码；验证通过后会自动继续执行。</p>
+      <el-input v-model="reauthPassword" type="password" show-password placeholder="请输入当前账户密码" aria-label="当前账户密码" />
+      <template #footer>
+        <el-button @click="cancelReauth">取消</el-button>
+        <el-button type="primary" :loading="reauthBusy" :disabled="!reauthPassword" @click="doReauth">验证并继续</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import type { Component } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   HomeFilled, PieChart, Odometer, DataLine, Lightning, Open, Lock,
   CircleCheckFilled, WarningFilled, Bottom, ArrowRight, InfoFilled,
   Timer, Operation, SetUp, Tools, Document, MagicStick, Refresh,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
-import { feedback } from '@/utils/feedback'
+import { feedback, extractErrorMessage } from '@/utils/feedback'
+import { edgeDeviceApi, type EdgeDevice, type CommandTemplateWithInterval } from '@/api/edgeDevice'
+import { useRealtimeData } from '@/composables/useRealtimeData'
+import { useWebSocketStore } from '@/stores/websocket'
+import { useDeviceOperationStore } from '@/stores/deviceOperation'
+import { useControlAction } from '@/composables/useControlAction'
+import type { DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
+import type { DataItem } from '@/types/realtime'
 
-// ════════════ 通用 ════════════
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+// ════════════ 通用小工具 ════════════
+const DASH = '—'
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+function fmt(v: number | null | undefined, digits: number): string {
+  return v === null || v === undefined || !Number.isFinite(v) ? DASH : v.toFixed(digits)
+}
 const pad2 = (n: number) => String(n).padStart(2, '0')
 function nowTime(): string {
   const t = new Date()
   return pad2(t.getHours()) + ':' + pad2(t.getMinutes()) + ':' + pad2(t.getSeconds())
 }
-function nowStamp(): string {
-  const t = new Date()
-  return t.getFullYear() + '-' + pad2(t.getMonth() + 1) + '-' + pad2(t.getDate()) + ' '
-    + pad2(t.getHours()) + ':' + pad2(t.getMinutes()) + ':' + pad2(t.getSeconds())
+function formatClock(iso: string): string {
+  const d = iso ? new Date(iso) : new Date()
+  if (Number.isNaN(d.getTime())) return nowTime()
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())
+}
+function formatStamp(iso?: string | null): string {
+  if (!iso) return DASH
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return DASH
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' '
+    + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())
+}
+function hexOf(n: number): string {
+  return Math.round(n).toString(16).toUpperCase().padStart(2, '0')
 }
 
-// ════════════ 演示态：正常 / 异常（本地 mock） ════════════
-const mode = ref<'normal' | 'abnormal'>('normal')
-const isAbnormal = computed(() => mode.value === 'abnormal')
-const softwareVersion = 'v2.14'
-const nominalCapacity = 106
-const CYCLE_COUNT = 10
+// ════════════ 路由 / 设备详情（edgeDeviceApi.getDetail） ════════════
+const route = useRoute()
+const deviceId = computed(() => Number(route.query.device ?? 1) || 1)
+const device = ref<EdgeDevice | null>(null)
+const detailError = ref('')
+const refreshing = ref(false)
 
-const NORMAL_CELLS = [3.323, 3.318, 3.331, 3.309, 3.336, 3.327, 3.314, 3.330, 3.341, 3.325, 3.312, 3.319, 3.338, 3.329, 3.321, 3.316]
-const ABNORMAL_CELLS = [3.323, 3.318, 3.331, 3.309, 3.681, 3.327, 3.314, 3.330, 3.341, 3.325, 3.312, 3.319, 3.338, 3.329, 3.321, 3.316]
-const NORMAL_TEMPS = [25.4, 26.1, 24.8, 27.3]
-const ABNORMAL_TEMPS = [30.2, 31.7, 47.5, 34.9]
+const deviceName = computed(() => device.value?.name || DASH)
+const deviceTypeLabel = computed(() => device.value?.device_type || DASH)
+const firmwareLabel = computed(() => device.value?.node?.firmware_version || DASH)
+const nodeLabel = computed(() => {
+  const n = device.value?.node
+  if (n?.name) return n.name
+  const id = device.value?.node_id
+  return id === undefined || id === null || id === '' ? DASH : String(id)
+})
+// ⚠ 通道名只能取 channel_hardware_id（总线名）；hardware_id 是设备从站地址，语义不同。
+const channelLabel = computed(() => device.value?.channel_hardware_id || DASH)
+const deviceOnline = computed(() => {
+  const s = device.value?.status
+  return s === 'active' || s === 'online'
+})
+type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
+const DEVICE_STATUS_MAP: Record<string, { type: TagType; text: string }> = {
+  active: { type: 'success', text: '在线' },
+  online: { type: 'success', text: '在线' },
+  offline: { type: 'info', text: '离线' },
+  warning: { type: 'warning', text: '告警' },
+  error: { type: 'danger', text: '故障' },
+  disabled: { type: 'info', text: '已停用' },
+  pending: { type: 'info', text: '待激活' },
+  initializing: { type: 'info', text: '初始化中' },
+  unknown: { type: 'info', text: '状态未知' },
+}
+const statusTag = computed(() => DEVICE_STATUS_MAP[device.value?.status ?? 'unknown'] ?? DEVICE_STATUS_MAP.unknown)
+
+async function loadDetail() {
+  try {
+    device.value = await edgeDeviceApi.getDetail(deviceId.value)
+    detailError.value = ''
+  } catch (e) {
+    detailError.value = extractErrorMessage(e, '设备详情加载失败')
+  }
+}
+
+// ════════════ 实时数据（useRealtimeData） ════════════
+const REALTIME_MAX_ITEMS = 200
+// 本页是独立 DEV 路由（不在 MainLayout 之下，而 WS 连接由 MainLayout 建立）。
+// 不在这里补一次 connect()，useRealtimeData 就永远收不到推送 —— 实时流会只剩快照兜底。
+const wsStore = useWebSocketStore()
+const {
+  dataItems, latestData, clear: clearRealtime,
+} = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
+
+/** 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。 */
+async function loadLatestSnapshot() {
+  snapshotError.value = ''
+  try {
+    const response = await edgeDeviceApi.getLatestData(deviceId.value)
+    if (!response) return
+    let parsed: Record<string, any> = response.data || {}
+    if (response.data_json) {
+      try {
+        const dj = JSON.parse(response.data_json)
+        if (dj.sensors && Array.isArray(dj.sensors)) {
+          parsed = {}
+          for (const s of dj.sensors) {
+            // StringValue 优先：字符串型读数的真值在 StringValue 里，Value 恒为 0。
+            const sv = s?.StringValue
+            parsed[s.Name] = (typeof sv === 'string' && sv.trim() !== '') ? sv : s.Value
+          }
+        }
+      } catch { /* 解析失败时退回 data 字段 */ }
+    }
+    latestData.value = { ...(latestData.value ?? {}), ...parsed }
+    const item: DataItem = {
+      id: 'latest-' + Date.now(),
+      timestamp: response.created_at || new Date().toISOString(),
+      data: parsed,
+      rawData: response.raw_data,
+      isRealtime: false,
+    }
+    dataItems.value = [item, ...dataItems.value].slice(0, REALTIME_MAX_ITEMS)
+  } catch (e) {
+    // 快照只是兜底：失败不弹 toast，但原因常驻页面（WS 仍会带来数据）。
+    snapshotError.value = extractErrorMessage(e, '最新快照加载失败')
+  }
+}
+const snapshotError = ref('')
+
+// ── 字段口径：单体电压 cell_voltage_N / 温度 temp_N（或 temperature_N） ──
+const cellCount = computed(() => {
+  const declared = num(latestData.value?.cell_count)
+  if (declared && declared > 0) return Math.min(32, Math.floor(declared))
+  let highest = 0
+  for (let i = 1; i <= 32; i++) {
+    if (num(latestData.value?.['cell_voltage_' + i] ?? latestData.value?.['cell_v_' + i]) !== null) highest = i
+  }
+  return highest
+})
+const cellCountLabel = computed(() => (cellCount.value > 0 ? cellCount.value + 'S' : DASH))
 
 interface CellVoltage { index: number; voltage: number }
-interface TempProbe { index: number; value: number; level: 'success' | 'warning' | 'danger'; text: string }
-
-const cellValues = computed(() => (isAbnormal.value ? ABNORMAL_CELLS : NORMAL_CELLS))
-const tempValues = computed(() => (isAbnormal.value ? ABNORMAL_TEMPS : NORMAL_TEMPS))
-const cells = computed<CellVoltage[]>(() => cellValues.value.map((v, i) => ({ index: i + 1, voltage: v })))
-const totalVoltage = computed(() => cellValues.value.reduce((a, b) => a + b, 0))
-const avgCell = computed(() => totalVoltage.value / cellValues.value.length)
-const maxCell = computed(() => cells.value.reduce((a, b) => (b.voltage > a.voltage ? b : a), cells.value[0]))
-const minCell = computed(() => cells.value.reduce((a, b) => (b.voltage < a.voltage ? b : a), cells.value[0]))
+const cells = computed<CellVoltage[]>(() => {
+  const out: CellVoltage[] = []
+  for (let i = 1; i <= cellCount.value; i++) {
+    const v = num(latestData.value?.['cell_voltage_' + i] ?? latestData.value?.['cell_v_' + i])
+    if (v !== null) out.push({ index: i, voltage: v })
+  }
+  return out
+})
+const cellSum = computed(() => cells.value.reduce((a, b) => a + b.voltage, 0))
+const totalVoltage = computed(() => {
+  const declared = num(latestData.value?.total_voltage ?? latestData.value?.voltage)
+  if (declared !== null) return declared
+  return cells.value.length ? cellSum.value : null
+})
+const avgCell = computed(() => (totalVoltage.value !== null && cells.value.length ? totalVoltage.value / cells.value.length : null))
+const maxCell = computed<CellVoltage>(() =>
+  cells.value.length ? cells.value.reduce((a, b) => (b.voltage > a.voltage ? b : a)) : { index: 0, voltage: 0 })
+const minCell = computed<CellVoltage>(() =>
+  cells.value.length ? cells.value.reduce((a, b) => (b.voltage < a.voltage ? b : a)) : { index: 0, voltage: 0 })
 const diff = computed(() => maxCell.value.voltage - minCell.value.voltage)
-const soc = computed(() => (isAbnormal.value ? 76.0 : 78.0))
-const remainingCapacity = computed(() => (soc.value / 100) * nominalCapacity)
+const soc = computed(() => num(latestData.value?.rsoc ?? latestData.value?.soc))
+const socProgress = computed(() => (soc.value === null ? undefined : Math.max(0, Math.min(100, Math.round(soc.value)))))
+const nominalCapacity = computed(() => num(latestData.value?.nominal_capacity))
+const remainingCapacity = computed(() => {
+  const declared = num(latestData.value?.remaining_capacity)
+  if (declared !== null) return declared
+  if (soc.value !== null && nominalCapacity.value !== null) return (soc.value / 100) * nominalCapacity.value
+  return null
+})
+const cycleCount = computed(() => num(latestData.value?.cycle_count))
+const currentDisplay = computed(() => num(latestData.value?.current))
+const currentHint = computed(() => {
+  const c = currentDisplay.value
+  if (c === null) return '暂无电流数据'
+  if (c < 0) return '放电中（电流为负）'
+  if (c > 0) return '充电中（电流为正）'
+  return '无电流'
+})
+const voltageSubText = computed(() => {
+  if (cells.value.length) return cells.value.length + ' 串 · 平均 ' + fmt(avgCell.value, 3) + 'V'
+  if (cellCount.value) return cellCount.value + ' 串 · 单体电压未上报'
+  return DASH
+})
+const capacitySubText = computed(() => '/ ' + fmt(nominalCapacity.value, 0) + ' Ah 标称')
 
+// ── 温度探头 ──
+interface TempProbe { index: number; value: number; level: 'success' | 'warning' | 'danger'; text: string }
 function tempLevel(v: number): 'success' | 'warning' | 'danger' {
   return v > 60 ? 'danger' : v > 45 ? 'warning' : 'success'
 }
 function tempText(v: number): string {
   return v > 60 ? '过高' : v > 45 ? '偏高' : '正常'
 }
-const temps = computed<TempProbe[]>(() =>
-  tempValues.value.map((v, i) => ({ index: i + 1, value: v, level: tempLevel(v), text: tempText(v) })),
-)
+const temps = computed<TempProbe[]>(() => {
+  const out: TempProbe[] = []
+  for (let i = 1; i <= 8; i++) {
+    const v = num(latestData.value?.['temp_' + i] ?? latestData.value?.['temperature_' + i])
+    if (v !== null) out.push({ index: i, value: v, level: tempLevel(v), text: tempText(v) })
+  }
+  return out
+})
 
 // ── 电芯柱状图（相对高度；只标最高/最低） ──
 const cellDomain = computed(() => {
-  const vs = cellValues.value
+  if (!cells.value.length) return { lo: 0, hi: 1 }
+  const vs = cells.value.map((c) => c.voltage)
   const lo = Math.min(...vs)
   const hi = Math.max(...vs)
   const pad = Math.max(0.04, (hi - lo) * 0.6)
@@ -473,48 +679,85 @@ function isExtreme(c: CellVoltage): boolean {
   return c.index === maxCell.value.index || c.index === minCell.value.index
 }
 
-// ════════════ 诉求①：MOS 直控 ════════════
-const mos = reactive<{ charge: boolean; discharge: boolean }>({ charge: true, discharge: true })
+// ════════════ 诉求①：MOS 直控（真机 fet_status + set_mos_policy） ════════════
+const opStore = useDeviceOperationStore()
+const historyOps = computed<DeviceOperation[]>(() => opStore.histories.get(deviceId.value) ?? [])
+const catalog = computed<EffectiveAction[]>(() => opStore.catalogs.get(deviceId.value) ?? [])
+
 const mosPhase = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
 const mosError = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
 
-const fetStatus = computed(() => (mos.charge ? 1 : 0) | (mos.discharge ? 2 : 0))
-const fetHex = computed(() => fetStatus.value.toString(16).toUpperCase().padStart(2, '0'))
-const fetText = computed(() => {
-  if (mos.charge && mos.discharge) return '充放导通'
-  if (mos.charge) return '仅充电导通'
-  if (mos.discharge) return '仅放电导通'
+const hasFetStatus = computed(() => num(latestData.value?.fet_status) !== null)
+const fetStatus = computed(() => num(latestData.value?.fet_status) ?? 0)
+const fetHex = computed(() => hexOf(fetStatus.value))
+
+/**
+ * 操作回执带来的**权威** fet_status（时序差桥接）。
+ * 周期快照最长落后约 8s，若只等快照，会出现「报成功了开关却没动」。成功回执里带着
+ * 写后回读的 fet_status，用它立即桥接；一旦周期帧也报出同一个值即撤掉桥接（自愈）。
+ */
+const verifiedFet = ref<number | null>(null)
+watch(() => latestData.value?.fet_status, (live) => {
+  if (verifiedFet.value !== null && num(live) === verifiedFet.value) verifiedFet.value = null
+})
+const effectiveFet = computed(() => verifiedFet.value ?? (hasFetStatus.value ? fetStatus.value : null))
+const chargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 1) !== 0)
+const dischargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 2) !== 0)
+function fetTextOf(fet: number): string {
+  const c = (fet & 1) !== 0
+  const d = (fet & 2) !== 0
+  if (c && d) return '充放导通'
+  if (c) return '仅充电导通'
+  if (d) return '仅放电导通'
   return '全部关断'
-})
-const currentDisplay = computed(() => (mos.discharge ? (isAbnormal.value ? -4.85 : -3.42) : 0))
-const currentHint = computed(() => {
-  if (!mos.discharge) return '已停止输出（放电 MOS 关断）'
-  return currentDisplay.value < 0 ? '放电中（电流为负）' : '充电中（电流为正）'
-})
+}
+const canControlMos = computed(() => hasFetStatus.value && deviceOnline.value)
 
 const mosRows = computed(() => [
   {
     key: 'charge' as const,
     name: '充电 MOS',
-    on: mos.charge,
+    on: chargeOn.value,
     phase: mosPhase.charge,
     error: mosError.charge,
-    hwOff: isAbnormal.value && !mos.charge,
-    desc: mos.charge ? '允许充电 · fet_status bit0 = 1' : '禁止充电 · fet_status bit0 = 0',
+    hwOff: hasFetStatus.value && !chargeOn.value && protectionActive(0),
+    desc: chargeOn.value ? '允许充电 · fet_status bit0 = 1' : '禁止充电 · fet_status bit0 = 0',
   },
   {
     key: 'discharge' as const,
     name: '放电 MOS',
-    on: mos.discharge,
+    on: dischargeOn.value,
     phase: mosPhase.discharge,
     error: mosError.discharge,
-    hwOff: false,
-    desc: mos.discharge ? '允许放电 · fet_status bit1 = 1' : '禁止放电 · fet_status bit1 = 0',
+    hwOff: hasFetStatus.value && !dischargeOn.value && (protectionActive(9) || protectionActive(10)),
+    desc: dischargeOn.value ? '允许放电 · fet_status bit1 = 1' : '禁止放电 · fet_status bit1 = 0',
   },
 ])
 
+/**
+ * ⚠ 极性换算（唯一一处，模板/参数里禁止手写取反）。
+ *
+ * 协议参数字段是 charge_software_closed / discharge_software_closed —— 语义为
+ * 「**软件关闭**位」；fet_status 的位语义是「**导通** = 1」，两者**反相**：
+ * 要让 MOS 导通，必须把 software_closed 置 **false**。
+ */
+function swClosed(conducting: boolean): boolean {
+  return !conducting
+}
+
+let mosKind: 'charge' | 'discharge' | null = null
+let activeCommandId = ''
+
+const ca = useControlAction(() => deviceId.value)
+const { lastError, reauthVisible, reauthPassword, reauthBusy, dispatch, retryAfterReauth, cancelReauth: cancelReauthAction, clearError } = ca
+
+type ReauthTarget = { type: 'mos'; which: 'charge' | 'discharge' } | { type: 'op'; id: string } | null
+let reauthTarget: ReauthTarget = null
+
 async function requestMosChange(which: 'charge' | 'discharge', target: boolean) {
-  if (mosPhase[which] !== '' || mos[which] === target) return
+  if (mosPhase[which] !== '' || !canControlMos.value) return
+  const currentOn = which === 'charge' ? chargeOn.value : dischargeOn.value
+  if (currentOn === target) return
   const name = which === 'charge' ? '充电 MOS' : '放电 MOS'
   const action = target ? '导通' : '关断'
   const effect = which === 'charge'
@@ -531,38 +774,27 @@ async function requestMosChange(which: 'charge' | 'discharge', target: boolean) 
 
 async function applyMos(which: 'charge' | 'discharge', target: boolean) {
   const name = which === 'charge' ? '充电 MOS' : '放电 MOS'
-  const action = target ? '导通' : '关断'
   mosPhase[which] = '下发中'
-  await sleep(650)
-  if (mosPhase[which] === '') return
-  mosPhase[which] = '回读校验中'
-  await sleep(650)
-  if (mosPhase[which] === '') return
-  const blocked = target ? mosBlockReason(which) : ''
-  if (blocked) {
-    mosPhase[which] = ''
-    mosError[which] = blocked
-    addHistory('MOS 直控', name + ' ' + action + ' 失败', 'failed', '回读 fet_status 与目标不一致')
-    feedback.error(name + action + '失败：' + blocked)
-    return
-  }
-  mos[which] = target
-  mosPhase[which] = ''
   mosError[which] = ''
-  addHistory('MOS 直控', name + ' ' + action + ' 成功', 'success', '回读 fet_status 一致')
-  feedback.success(name + '已' + action)
-}
-
-/** 硬件保护覆盖时软件无法导通（后端 FAILED 提示的那个判据）。 */
-function mosBlockReason(which: 'charge' | 'discharge'): string {
-  if (!isAbnormal.value) return ''
-  if (which === 'charge' && protectionActive(0)) {
-    return '单体过压保护（bit0）已触发，硬件保护已覆盖充电 MOS，软件无法导通。请先排除过压后再试。'
+  mosKind = which
+  clearError()
+  // 两个位一起提交（协议要求两个字段都必填）：未操作的那个保持当前实际状态。
+  const ok = await dispatch('set_mos_policy', {
+    charge_software_closed: swClosed(which === 'charge' ? target : chargeOn.value),
+    discharge_software_closed: swClosed(which === 'discharge' ? target : dischargeOn.value),
+    priority: 'user',
+  }, true)
+  if (ok) {
+    mosPhase[which] = '已发送'
+    reauthTarget = null
+    trackCommand('set_mos_policy')
+  } else if (reauthVisible.value) {
+    reauthTarget = { type: 'mos', which }
+  } else {
+    mosPhase[which] = ''
+    mosError[which] = lastError.value || 'MOS 指令未能提交'
+    feedback.error(name + '指令未能提交：' + (lastError.value || '未知原因'))
   }
-  if (which === 'discharge' && (protectionActive(9) || protectionActive(10))) {
-    return '放电过流 / 短路保护（bit9 / bit10）已触发，硬件保护已覆盖放电 MOS，软件无法导通。'
-  }
-  return ''
 }
 
 // ════════════ 诉求④：保护状态（12 位掩码） ════════════
@@ -580,8 +812,9 @@ const PROTECTION_BITS: Array<{ bit: number; label: string }> = [
   { bit: 10, label: '短路保护' },
   { bit: 11, label: '前端 IC 错误' },
 ]
-const protectionStatus = computed(() => (isAbnormal.value ? (1 << 0) | (1 << 6) : 0))
-const protHex = computed(() => protectionStatus.value.toString(16).toUpperCase().padStart(2, '0'))
+const hasProtectionData = computed(() => num(latestData.value?.protection_status) !== null)
+const protectionStatus = computed(() => num(latestData.value?.protection_status) ?? 0)
+const protHex = computed(() => hexOf(protectionStatus.value))
 const protectExpanded = ref(false)
 interface ProtectionBit { bit: number; label: string; active: boolean }
 const protectionBits = computed<ProtectionBit[]>(() =>
@@ -594,7 +827,7 @@ function protectionActive(bit: number): boolean {
 
 // ════════════ 诉求②：实时数据流（跟随模式，不抢滚动） ════════════
 interface StreamRow {
-  id: number
+  id: string
   time: string
   item: string
   value: string
@@ -609,8 +842,8 @@ const following = ref(true)
 const pendingCount = ref(0)
 const injecting = ref(false)
 let streamSeq = 0
-let feedTimer: ReturnType<typeof setInterval> | null = null
 let injectTimer: ReturnType<typeof setInterval> | null = null
+const seenItemIds = new Set<string>()
 
 function appendRows(rows: StreamRow[]) {
   streamRows.value.push(...rows)
@@ -646,46 +879,95 @@ function scrollToLatest() {
 }
 
 function clearStream() {
+  // 需求：清空走 composable 的 clear()。
+  clearRealtime()
+  seenItemIds.clear()
   streamRows.value = []
   pendingCount.value = 0
   following.value = true
+  // clear() 会同时清空 latestData（指标卡会短暂空白），这里立即用最新快照补回。
+  void loadLatestSnapshot()
 }
 
-function pushFrame() {
-  const t = nowTime()
-  const phase = streamSeq
+const LEVEL_TO_STATUS: Record<'success' | 'warning' | 'danger', StreamRow['status']> = {
+  success: 'normal', warning: 'warning', danger: 'danger',
+}
+
+/** 把一条真实上报（DataItem）摊平成数据流行；只展示有真实值且对现场有意义的字段。 */
+function rowsForItem(item: DataItem): StreamRow[] {
+  const d = item.data ?? {}
+  const t = formatClock(item.timestamp)
   const rows: StreamRow[] = []
-  const push = (item: string, value: string, unit: string, status: StreamRow['status'], statusText: string) => {
+  const push = (label: string, value: string, unit: string, status: StreamRow['status'], statusText: string) => {
     streamSeq++
-    rows.push({ id: streamSeq, time: t, item, value, unit, status, statusText })
+    rows.push({ id: 's' + streamSeq, time: t, item: label, value, unit, status, statusText })
   }
-  push('总电压', (totalVoltage.value + Math.sin(phase / 5) * 0.03).toFixed(2), 'V', 'normal', '正常')
-  push('电流', (currentDisplay.value + Math.sin(phase / 3) * 0.12).toFixed(2), 'A', 'normal', currentDisplay.value < 0 ? '放电' : '充电')
-  push('SOC', soc.value.toFixed(1), '%', 'normal', '正常')
-  push('MOS 状态', '0x' + fetHex.value, '', 'normal', fetText.value)
-  const hi = maxCell.value.voltage
-  push('单体最高 #' + maxCell.value.index, hi.toFixed(3), 'V', hi > 3.6 ? 'danger' : 'normal', hi > 3.6 ? '越限' : '正常')
-  appendRows(rows)
+  const tv = num(d.total_voltage)
+  if (tv !== null) push('总电压', tv.toFixed(2), 'V', 'normal', '正常')
+  const cur = num(d.current)
+  if (cur !== null) push('电流', cur.toFixed(2), 'A', 'normal', cur < 0 ? '放电' : cur > 0 ? '充电' : '待机')
+  const s = num(d.rsoc ?? d.soc)
+  if (s !== null) push('SOC', s.toFixed(1), '%', 'normal', '正常')
+  const fet = num(d.fet_status)
+  if (fet !== null) push('MOS 状态', '0x' + hexOf(fet), '', 'normal', fetTextOf(fet))
+  const ps = num(d.protection_status)
+  if (ps !== null && ps > 0) {
+    push('保护状态', '0x' + hexOf(ps), '', 'danger', protectionSummary(ps))
+  }
+  const itemCells: number[] = []
+  for (let i = 1; i <= 32; i++) {
+    const v = num(d['cell_voltage_' + i] ?? d['cell_v_' + i])
+    if (v !== null) itemCells.push(v)
+  }
+  if (itemCells.length) {
+    const mx = Math.max(...itemCells)
+    const mn = Math.min(...itemCells)
+    push('单体最高 #' + (itemCells.indexOf(mx) + 1), mx.toFixed(3), 'V', mx > 3.6 ? 'danger' : 'normal', mx > 3.6 ? '越限' : '正常')
+    push('单体最低 #' + (itemCells.indexOf(mn) + 1), mn.toFixed(3), 'V', mn < 2.5 ? 'danger' : 'normal', mn < 2.5 ? '越限' : '正常')
+  }
+  for (let i = 1; i <= 4; i++) {
+    const v = num(d['temp_' + i] ?? d['temperature_' + i])
+    if (v !== null) push('温度 探头' + i, v.toFixed(1), '℃', LEVEL_TO_STATUS[tempLevel(v)], tempText(v))
+  }
+  return rows
 }
 
-/** 「高频注入」：每秒往列表推 1 条，用于人工验证滚动不被抢。 */
+function protectionSummary(mask: number): string {
+  let n = 0
+  for (let b = 0; b < 12; b++) if ((mask & (1 << b)) !== 0) n++
+  return n + ' 项触发'
+}
+
+function syncStreamFromItems(items: DataItem[]) {
+  if (!items.length) return
+  const unseen = items.filter((it) => !seenItemIds.has(it.id))
+  if (!unseen.length) return
+  for (const it of unseen) seenItemIds.add(it.id)
+  // dataItems 新的在前；按时间正序追加，保证「最新的在底部」。
+  const rows: StreamRow[] = []
+  for (const it of [...unseen].reverse()) rows.push(...rowsForItem(it))
+  if (rows.length) appendRows(rows)
+}
+watch(dataItems, (items) => syncStreamFromItems(items))
+
+/** 「高频注入」：本地压测行，每秒推 1 条，用于人工验证滚动不被抢（不代表设备数据）。 */
 function injectOne() {
   const t = nowTime()
-  streamSeq++
   const slot = streamSeq % 4
   let row: Omit<StreamRow, 'id' | 'time'>
-  if (slot === 0) {
+  if (slot === 0 && cells.value.length) {
     const c = cells.value[Math.floor(Math.random() * cells.value.length)]
     row = { item: '单体电压 #' + c.index, value: c.voltage.toFixed(3), unit: 'V', status: c.voltage > 3.6 ? 'danger' : 'normal', statusText: c.voltage > 3.6 ? '越限' : '正常' }
-  } else if (slot === 1) {
+  } else if (slot === 1 && temps.value.length) {
     const tp = temps.value[Math.floor(Math.random() * temps.value.length)]
-    row = { item: '温度 探头' + tp.index, value: tp.value.toFixed(1), unit: '℃', status: tp.level === 'success' ? 'normal' : tp.level, statusText: tp.text }
-  } else if (slot === 2) {
+    row = { item: '温度 探头' + tp.index, value: tp.value.toFixed(1), unit: '℃', status: LEVEL_TO_STATUS[tp.level], statusText: tp.text }
+  } else if (slot === 2 && remainingCapacity.value !== null) {
     row = { item: '剩余容量', value: remainingCapacity.value.toFixed(2), unit: 'Ah', status: 'normal', statusText: '正常' }
   } else {
-    row = { item: '循环次数', value: String(CYCLE_COUNT), unit: '次', status: 'normal', statusText: '正常' }
+    row = { item: '循环次数', value: cycleCount.value !== null ? String(cycleCount.value) : DASH, unit: '次', status: 'normal', statusText: '正常' }
   }
-  appendRows([{ id: streamSeq, time: t, ...row }])
+  streamSeq++
+  appendRows([{ id: 'i' + streamSeq, time: t, ...row }])
 }
 
 function toggleInject() {
@@ -704,149 +986,195 @@ function stopInject() {
   injecting.value = false
 }
 
-// ════════════ 诉求③：轮询指令配置（3 条上限） ════════════
-interface PollCommand { id: string; name: string; desc: string; interval: number; enabled: boolean; lastInterval: number }
-const MAX_POLL = 3
-const POLL_INITIAL: Array<Omit<PollCommand, 'lastInterval'>> = [
-  { id: 'read_basic_info', name: '读取基本信息', desc: '总压 / 电流 / 容量 / SOC / 温度 / FET', interval: 5000, enabled: true },
-  { id: 'read_cell_voltage', name: '读取单体电压', desc: '各串电芯电压', interval: 5000, enabled: true },
-  { id: 'read_comprehensive', name: '读取综合信息', desc: '综合信息帧', interval: 1000, enabled: true },
-  { id: 'read_hardware_version', name: '读取硬件版本', desc: '硬件 / 固件版本确认', interval: 60000, enabled: false },
-  { id: 'read_protection_count', name: '读取保护历史次数', desc: '12 种保护触发次数统计', interval: 10000, enabled: false },
-]
-const pollCommands = reactive<PollCommand[]>(POLL_INITIAL.map((p) => ({ ...p, lastInterval: p.interval })))
-const enabledCount = computed(() => pollCommands.filter((c) => c.enabled).length)
-const overLimit = computed(() => enabledCount.value > MAX_POLL)
-const excessIds = computed(() => new Set(pollCommands.filter((c) => c.enabled).slice(MAX_POLL).map((c) => c.id)))
-const excessNames = computed(() => pollCommands.filter((c) => excessIds.value.has(c.id)).map((c) => '「' + c.name + '」').join('、'))
+// ════════════ 诉求③：轮询指令配置（上限由节点上报） ════════════
+interface PollCommand { id: string; name: string; desc: string; interval: number; defaultInterval: number }
+const pollCommands = ref<PollCommand[]>([])
+const pollBaseline = ref('[]')
+const pollSaveState = ref<'idle' | 'saving' | 'synced'>('idle')
+const pollError = ref('')
+const pollLoadError = ref('')
+const pollBusy = computed(() => pollSaveState.value === 'saving')
+
+const isPollEnabled = (c: PollCommand) => c.interval > 0
+const enabledCount = computed(() => pollCommands.value.filter(isPollEnabled).length)
+/** 上限来自设备详情（后端随 GET /edge-devices/:id 下发），缺失时不显示任何上限提示。 */
+const pollLimit = computed(() => num(device.value?.max_polling_commands))
+const pollLimitValue = computed(() => pollLimit.value ?? 0)
+const hasPollLimit = computed(() => pollLimit.value !== null && pollLimit.value > 0)
+const overLimit = computed(() => hasPollLimit.value && enabledCount.value > (pollLimit.value as number))
+const excessIds = computed(() => {
+  if (!overLimit.value) return new Set<string>()
+  return new Set(pollCommands.value.filter(isPollEnabled).slice(pollLimit.value as number).map((c) => c.id))
+})
+const excessNames = computed(() =>
+  pollCommands.value.filter((c) => excessIds.value.has(c.id)).map((c) => '「' + c.name + '」').join('、'))
 function isExcess(c: PollCommand): boolean {
-  return c.enabled && excessIds.value.has(c.id)
+  return isPollEnabled(c) && excessIds.value.has(c.id)
 }
-const pollBadgeType = computed(() => (overLimit.value ? 'danger' : enabledCount.value === MAX_POLL ? 'warning' : 'success'))
+const pollBadgeType = computed<TagType>(() => {
+  if (!hasPollLimit.value) return 'success'
+  if (overLimit.value) return 'danger'
+  return enabledCount.value === pollLimit.value ? 'warning' : 'success'
+})
 
 function snapshotPoll(): string {
-  return JSON.stringify(pollCommands.map((c) => ({ id: c.id, enabled: c.enabled, interval: c.interval })))
+  return JSON.stringify(pollCommands.value.map((c) => [c.id, c.interval]))
 }
-const pollBaseline = ref(snapshotPoll())
 const pollDirty = computed(() => snapshotPoll() !== pollBaseline.value)
-const pollSaveState = ref<'idle' | 'saving' | 'syncing' | 'synced'>('idle')
-const pollBusy = computed(() => pollSaveState.value === 'saving' || pollSaveState.value === 'syncing')
 const pollHint = computed(() => {
-  if (overLimit.value) return '超限 ' + enabledCount.value + '/' + MAX_POLL + ' 条，修正后才能保存'
+  if (overLimit.value) return '超限 ' + enabledCount.value + '/' + pollLimit.value + ' 条，修正后才能保存'
   switch (pollSaveState.value) {
     case 'saving': return '保存中…'
-    case 'syncing': return '已保存，正在同步到节点…'
-    case 'synced': return '已同步到节点'
+    case 'synced': return '已保存'
     default: return pollDirty.value ? '有未保存改动' : '当前配置与设备一致'
   }
 })
 
+async function loadPollCommands() {
+  pollLoadError.value = ''
+  pollError.value = ''
+  try {
+    const cmds = await edgeDeviceApi.getCommandIntervals(deviceId.value)
+    pollCommands.value = cmds.filter((c: CommandTemplateWithInterval) => c.schedulable).map((c: CommandTemplateWithInterval) => ({
+      id: c.id,
+      name: c.name,
+      desc: c.description || '',
+      interval: c.current_interval_ms,
+      defaultInterval: c.interval_ms > 0 ? c.interval_ms : 5000,
+    }))
+    pollBaseline.value = snapshotPoll()
+    pollSaveState.value = 'idle'
+  } catch (e) {
+    pollCommands.value = []
+    pollLoadError.value = extractErrorMessage(e, '轮询指令加载失败')
+  }
+}
+
 function togglePoll(c: PollCommand, on: boolean) {
-  c.enabled = on
-  if (on && c.interval <= 0) c.interval = c.lastInterval || 5000
-  if (!on && c.interval > 0) c.lastInterval = c.interval
+  c.interval = on ? (c.defaultInterval || 5000) : 0
   markPollEdited()
 }
 function onIntervalChange(c: PollCommand) {
-  if (c.interval <= 0) {
-    c.interval = 0
-    c.enabled = false
-  } else {
-    c.enabled = true
-    c.lastInterval = c.interval
-  }
+  c.interval = !Number.isFinite(c.interval) || c.interval <= 0 ? 0 : Math.min(Math.floor(c.interval), 60000)
   markPollEdited()
 }
 function markPollEdited() {
+  pollError.value = ''
   if (pollSaveState.value === 'synced') pollSaveState.value = 'idle'
 }
 async function savePoll() {
-  if (overLimit.value) return
+  if (overLimit.value || !pollDirty.value || pollBusy.value) return
   pollSaveState.value = 'saving'
-  await sleep(400)
-  pollSaveState.value = 'syncing'
-  await sleep(1100)
-  pollSaveState.value = 'synced'
-  pollBaseline.value = snapshotPoll()
-  addHistory('配置更新', '轮询指令启用 ' + enabledCount.value + '/' + MAX_POLL + ' 条', 'success', '节点已确认应用')
-  feedback.success('轮询配置已保存并同步到节点')
+  pollError.value = ''
+  try {
+    const intervals: Record<string, number> = {}
+    for (const c of pollCommands.value) intervals[c.id] = c.interval
+    await edgeDeviceApi.updateCommandIntervals(deviceId.value, intervals)
+    pollBaseline.value = snapshotPoll()
+    pollSaveState.value = 'synced'
+    feedback.success('轮询配置已保存')
+  } catch (e) {
+    pollSaveState.value = 'idle'
+    // 拒绝原因必须**常驻页面**：toast 会消失，而"改完保存、刷新后没变化"正是因为它没被留住。
+    pollError.value = extractErrorMessage(e, '轮询配置保存失败')
+    feedback.handleError(e, '轮询配置保存失败')
+  }
 }
 
-// ════════════ 受控操作（26 项，分组） ════════════
-interface OpDef { id: string; name: string; risk: boolean; note?: string; movedTo?: boolean }
+// ════════════ 受控操作（目录来自后端 catalogs） ════════════
+interface OpDef {
+  id: string
+  name: string
+  note: string
+  risky: boolean
+  requiresConfirmation: boolean
+  available: boolean
+  reason: string
+  needsParams: boolean
+  movedTo: boolean
+}
 interface OpGroup { id: string; name: string; hint: string; icon: Component; ops: OpDef[] }
 type OpPhase = 'idle' | 'sent' | 'running' | 'verifying' | 'success' | 'failed' | 'unknown' | 'cancelled'
 interface OpState { phase: OpPhase; text: string; reason: string }
 
-const opGroups: OpGroup[] = [
+/** 分组只是展示层归属（目录本身不含分组），成员按 action id 归属；未列出的归入「其他操作」。 */
+const OP_GROUP_DEFS: Array<{ id: string; name: string; hint: string; icon: Component; ids: string[] }> = [
   {
     id: 'read', name: '读取信息', hint: '一次性读取，不改设备配置', icon: Document,
-    ops: [
-      { id: 'read_basic_info', name: '读取基本信息', risk: false, note: '总压 / 电流 / 容量 / SOC / 温度 / FET' },
-      { id: 'read_cell_voltage', name: '读取单体电压', risk: false, note: '各串电芯电压' },
-      { id: 'read_hardware_version', name: '读取硬件版本', risk: false },
-      { id: 'read_comprehensive', name: '读取综合信息', risk: false },
-      { id: 'read_protection_count', name: '读取保护历史次数', risk: false, note: '12 种保护触发次数统计' },
-      { id: 'read_custom_attributes', name: '读取自定义属性', risk: false, note: 'F0 读 3 个 uint16' },
-      { id: 'read_test_mos_status', name: '读取 MOS 测试状态', risk: false, note: '0C 读' },
-    ],
+    ids: ['read_basic_info', 'read_cell_voltage', 'read_hardware_version', 'read_comprehensive', 'read_protection_count', 'read_custom_attributes', 'read_test_mos_status'],
   },
   {
     id: 'diag', name: '诊断与测试', hint: '不写入参数，用于现场排障', icon: Tools,
-    ops: [
-      { id: 'find_car', name: '寻车（蜂鸣器）', risk: false, note: 'F1 开 / 关，最长 30s 自动关闭' },
-      { id: 'test_charge_mos', name: '测试充电 MOS', risk: false },
-      { id: 'test_discharge_mos', name: '测试放电 MOS', risk: false },
-    ],
+    ids: ['find_car', 'test_charge_mos', 'test_discharge_mos'],
   },
   {
     id: 'runtime', name: '运行控制', hint: '直接影响设备当前运行状态', icon: Operation,
-    ops: [
-      { id: 'set_mos_policy', name: '设置充放电 MOS 软件策略', risk: true, movedTo: true, note: '已改为页首「MOS 直控」直接开关（去掉表单与多余必填，只保留最小风险确认）。' },
-      { id: 'force_balance', name: '强制均衡', risk: true, note: 'F5 + 回读 0x03 均衡态' },
-      { id: 'clear_alarm', name: '清除告警状态', risk: true, note: 'E6 固定数据' },
-      { id: 'auto_test_edv', name: '自动测试 EDV', risk: true, note: '0D 设置静止时间，需 SOC > 95%' },
-      { id: 'bms_restart', name: '重启 BMS', risk: true, note: '需观察离线窗口，不能以 ACK 判成功' },
-    ],
+    ids: ['set_mos_policy', 'force_balance', 'clear_alarm', 'auto_test_edv', 'bms_restart'],
   },
   {
     id: 'param', name: '参数与标定', hint: '读取 / 写入厂内参数，需进厂模式', icon: SetUp,
-    ops: [
-      { id: 'read_protection_parameters', name: '读取 BMS 保护参数', risk: true, note: '需进厂模式' },
-      { id: 'read_system_parameters', name: '读取 BMS 系统参数', risk: true, note: '需进厂模式' },
-      { id: 'write_protection_parameters', name: '写入 BMS 保护参数', risk: true },
-      { id: 'write_system_parameters', name: '写入 BMS 系统参数', risk: true },
-      { id: 'write_custom_attributes', name: '写入自定义属性', risk: true },
-      { id: 'write_internal_resistance', name: '写入电芯内阻', risk: true },
-      { id: 'write_sn', name: '写入 SN 码', risk: true },
-    ],
+    ids: ['read_protection_parameters', 'read_system_parameters', 'write_protection_parameters', 'write_system_parameters', 'write_custom_attributes', 'write_internal_resistance', 'write_sn'],
   },
   {
     id: 'timer', name: '时间与上报设置', hint: '改变设备行为参数', icon: Timer,
-    ops: [
-      { id: 'set_static_correction_time', name: '设置静态修正时间', risk: true },
-      { id: 'set_report_interval', name: '设置上报时间间隔', risk: true },
-      { id: 'set_charge_time_window', name: '设置充电时间窗', risk: true },
-      { id: 'set_discharge_time_limit', name: '设置放电时限', risk: true },
-    ],
+    ids: ['set_static_correction_time', 'set_report_interval', 'set_charge_time_window', 'set_discharge_time_limit'],
   },
 ]
-const totalOps = computed(() => opGroups.reduce((n, g) => n + g.ops.length, 0))
+
+function toOp(action: EffectiveAction): OpDef {
+  const def = action.definition
+  const properties = Object.keys(def.input_schema?.properties ?? {})
+  return {
+    id: def.id,
+    name: def.name,
+    note: def.description || '',
+    risky: def.risk_level === 'elevated',
+    requiresConfirmation: def.requires_confirmation === true,
+    available: action.available,
+    reason: action.reason || '',
+    needsParams: properties.length > 0,
+    movedTo: def.id === 'set_mos_policy',
+  }
+}
+
+const opGroups = computed<OpGroup[]>(() => {
+  if (!catalog.value.length) return []
+  const byId = new Map(catalog.value.map((a) => [a.definition.id, a]))
+  const claimed = new Set<string>()
+  const groups: OpGroup[] = []
+  for (const g of OP_GROUP_DEFS) {
+    const ops = g.ids
+      .map((id) => byId.get(id))
+      .filter((a): a is EffectiveAction => !!a)
+      .map(toOp)
+    if (!ops.length) continue
+    for (const o of ops) claimed.add(o.id)
+    groups.push({ id: g.id, name: g.name, hint: g.hint, icon: g.icon, ops })
+  }
+  const rest = catalog.value.filter((a) => !claimed.has(a.definition.id)).map(toOp)
+  if (rest.length) groups.push({ id: 'other', name: '其他操作', hint: '目录中未归类的操作', icon: Operation, ops: rest })
+  return groups
+})
+const totalOps = computed(() => catalog.value.length)
 const openGroups = reactive<Record<string, boolean>>({ runtime: true })
 function toggleGroup(id: string) {
   openGroups[id] = !openGroups[id]
 }
 function riskCount(g: OpGroup): number {
-  return g.ops.filter((o) => o.risk).length
+  return g.ops.filter((o) => o.risky).length
+}
+function catalogName(actionId: string): string {
+  const hit = catalog.value.find((a) => a.definition.id === actionId)
+  return hit?.definition.name || actionId
 }
 
 const opStates = reactive<Record<string, OpState>>({})
 // 预初始化：render 期间不写响应式状态（避免渲染中改 dep 触发递归更新）。
-opGroups.forEach((g) => {
-  g.ops.forEach((o) => {
-    opStates[o.id] = { phase: 'idle', text: '', reason: '' }
-  })
-})
+watch(catalog, (list) => {
+  for (const a of list) {
+    if (!opStates[a.definition.id]) opStates[a.definition.id] = { phase: 'idle', text: '', reason: '' }
+  }
+}, { immediate: true })
 function opState(id: string): OpState {
   const existing = opStates[id]
   if (existing) return existing
@@ -868,51 +1196,167 @@ function stateDot(phase: OpPhase): string {
     case 'success': return 'dot-green'
     case 'failed': return 'dot-red'
     case 'unknown': return 'dot-orange'
+    case 'cancelled': return 'dot-orange'
     default: return 'dot-blue'
   }
 }
 
-/** 演示用：某些操作会失败 / 结果未知，用于评审状态文案与常驻原因。 */
-const OP_FAIL: Record<string, string> = {
-  write_protection_parameters: '设备未进入厂模式，写入被拒绝。请先执行「读取 BMS 保护参数」并确认已进厂模式。',
+/** 执行状态 → 中文（不暴露 QUEUED/VERIFYING 等内部枚举）。 */
+const OPERATION_UI: Record<OperationStatus, { phase: OpPhase; text: string }> = {
+  QUEUED: { phase: 'sent', text: '已发送' },
+  DISPATCHED: { phase: 'running', text: '已下发' },
+  DEVICE_ACCEPTED: { phase: 'running', text: '设备已收到' },
+  VERIFYING: { phase: 'verifying', text: '校验中' },
+  SUCCEEDED: { phase: 'success', text: '成功' },
+  FAILED: { phase: 'failed', text: '失败' },
+  UNKNOWN: { phase: 'unknown', text: '结果未知' },
+  CANCELLED: { phase: 'cancelled', text: '已取消' },
 }
 
+const notified = new Set<string>()
+function notifyOnce(op: DeviceOperation, fn: () => void) {
+  const key = op.command_id + ':' + op.status
+  if (notified.has(key)) return
+  notified.add(key)
+  fn()
+}
+
+const TERMINAL: OperationStatus[] = ['SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED']
+
+/** 把一条真实操作回执映射到页面状态（失败原因常驻，成功用权威回读桥接）。 */
+function applyOperationToUi(op: DeviceOperation) {
+  const ui = OPERATION_UI[op.status]
+  const terminal = TERMINAL.includes(op.status)
+
+  if (op.action_id === 'set_mos_policy') {
+    const kind = mosKind
+    if (kind) mosPhase[kind] = terminal ? '' : ui.text
+    notifyOnce(op, () => {
+      const label = kind === 'charge' ? '充电 MOS' : '放电 MOS'
+      if (op.status === 'SUCCEEDED') {
+        if (kind) mosError[kind] = ''
+        // 用回执里的权威 fet_status 立即桥接，抹掉"成功但开关没动"的窗口。
+        const verified = (op.verified_result ?? []).find((v) => v.name === 'fet_status')
+        if (typeof verified?.value === 'number') verifiedFet.value = verified.value
+        feedback.success(label + '操作成功（已回读校验）')
+      } else if (op.status === 'FAILED') {
+        const reason = readableFinalReason(op.final_reason) || '设备未接受或回读不一致'
+        if (kind) mosError[kind] = reason
+        feedback.error(label + '操作失败：' + reason)
+      } else if (op.status === 'UNKNOWN') {
+        if (kind) mosError[kind] = '操作结果未知；请先核对当前 MOS 状态，勿重复提交。'
+        feedback.warning(label + '操作结果未知，请核对当前状态')
+      } else if (op.status === 'CANCELLED') {
+        if (kind) mosError[kind] = '操作已取消'
+        feedback.warning(label + '操作已取消')
+      }
+    })
+    return
+  }
+
+  const st = opState(op.action_id)
+  if (op.status === 'SUCCEEDED') {
+    setPhase(op.action_id, 'success', '成功')
+    st.reason = ''
+  } else if (op.status === 'FAILED') {
+    setPhase(op.action_id, 'failed', '失败')
+    st.reason = readableFinalReason(op.final_reason) || '设备未接受或回读校验不一致'
+  } else if (op.status === 'UNKNOWN') {
+    setPhase(op.action_id, 'unknown', '结果未知')
+    st.reason = '观察类操作无法以 ACK 判定成功；请等待设备重新上线后在设备详情页确认。'
+  } else if (op.status === 'CANCELLED') {
+    setPhase(op.action_id, 'cancelled', '已取消')
+    st.reason = '操作已取消'
+  } else {
+    setPhase(op.action_id, ui.phase, ui.text)
+  }
+  notifyOnce(op, () => {
+    const name = catalogName(op.action_id)
+    if (op.status === 'SUCCEEDED') feedback.success('「' + name + '」执行成功')
+    else if (op.status === 'FAILED') feedback.error('「' + name + '」失败：' + (readableFinalReason(op.final_reason) || '回读校验不一致'))
+    else if (op.status === 'UNKNOWN') feedback.warning('「' + name + '」结果未知：请等待设备重新上线')
+  })
+}
+
+/** 记录本次页面发起的命令，只跟踪它自己的回执（不把历史遗留操作当成本次结果）。 */
+function trackCommand(actionId: string) {
+  const op = historyOps.value.find((o) => o.action_id === actionId)
+  if (!op) return
+  activeCommandId = op.command_id
+  applyOperationToUi(op)
+}
+watch(historyOps, (list) => {
+  if (!activeCommandId) return
+  const op = list.find((o) => o.command_id === activeCommandId)
+  if (op) applyOperationToUi(op)
+})
+
 async function runOp(op: OpDef) {
-  if (op.movedTo) return
-  if (op.risk) {
+  if (op.movedTo || op.needsParams || !op.available) return
+  const st = opState(op.id)
+  st.reason = ''
+  clearError()
+  if (op.risky || op.requiresConfirmation) {
+    // 后端对高风险动作强制单次确认令牌（useControlAction 内部走 confirm），这里再补一次极简确认。
     const ok = await feedback.confirmDanger(
       '确认执行「' + op.name + '」？该操作会影响设备运行参数，执行后自动回读校验。',
       { title: '受控操作 · ' + op.name, confirmText: '确认执行', cancelText: '取消' },
     )
     if (!ok) return
   }
-  const st = opState(op.id)
-  st.reason = ''
   setPhase(op.id, 'sent', '已发送')
-  await sleep(450)
-  setPhase(op.id, 'running', '执行中')
-  await sleep(550)
-  setPhase(op.id, 'verifying', '校验中')
-  await sleep(650)
-
-  if (op.id === 'bms_restart') {
-    setPhase(op.id, 'unknown', '结果未知')
-    st.reason = '重启期间设备离线，无法以 ACK 判定成功；请等待设备重新上线后在设备列表确认。'
-    addHistory('受控操作', op.name, 'unknown', '已下发重启指令，等待设备重新上线')
-    feedback.warning('「' + op.name + '」结果未知：等待设备重新上线')
-    return
-  }
-  const failReason = OP_FAIL[op.id]
-  if (failReason) {
+  const ok = await dispatch(op.id, {}, op.requiresConfirmation)
+  if (ok) {
+    reauthTarget = null
+    trackCommand(op.id)
+  } else if (reauthVisible.value) {
+    reauthTarget = { type: 'op', id: op.id }
+  } else {
     setPhase(op.id, 'failed', '失败')
-    st.reason = failReason
-    addHistory('受控操作', op.name, 'failed', failReason)
-    feedback.error('「' + op.name + '」失败：' + failReason)
+    st.reason = lastError.value || '操作未能提交'
+    feedback.error('「' + op.name + '」未能提交：' + (lastError.value || '未知原因'))
+  }
+}
+
+/** 重验证通过后自动继续执行（令牌单次且绑定 params，由 useControlAction 重新 confirm）。 */
+async function doReauth() {
+  const target = reauthTarget
+  const ok = await retryAfterReauth()
+  if (ok) {
+    if (target?.type === 'mos') {
+      mosPhase[target.which] = '已发送'
+      trackCommand('set_mos_policy')
+    } else if (target?.type === 'op') {
+      setPhase(target.id, 'sent', '已发送')
+      trackCommand(target.id)
+    }
+    reauthTarget = null
     return
   }
-  setPhase(op.id, 'success', '成功')
-  addHistory('受控操作', op.name, 'success', '执行成功，回读校验一致')
-  feedback.success('「' + op.name + '」执行成功')
+  if (!reauthVisible.value) {
+    if (target?.type === 'mos') {
+      mosPhase[target.which] = ''
+      mosError[target.which] = lastError.value || 'MOS 指令未能提交'
+    } else if (target?.type === 'op') {
+      const st = opState(target.id)
+      setPhase(target.id, 'failed', '失败')
+      st.reason = lastError.value || '操作未能提交'
+    }
+    reauthTarget = null
+  }
+}
+
+function cancelReauth() {
+  cancelReauthAction()
+  if (reauthTarget?.type === 'mos') {
+    mosPhase[reauthTarget.which] = ''
+    mosError[reauthTarget.which] = lastError.value || '已取消（未执行 MOS 操作）'
+  } else if (reauthTarget?.type === 'op') {
+    const st = opState(reauthTarget.id)
+    setPhase(reauthTarget.id, 'cancelled', '已取消')
+    st.reason = '已取消（未执行该操作）'
+  }
+  reauthTarget = null
 }
 
 function scrollToMos() {
@@ -920,70 +1364,116 @@ function scrollToMos() {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-// ════════════ 操作历史（审计线索） ════════════
-interface HistoryRow { id: number; time: string; type: string; content: string; result: 'success' | 'failed' | 'unknown' }
-const HISTORY_INITIAL: HistoryRow[] = [
-  { id: 1, time: '2026-10-15 15:12:07', type: 'MOS 直控', content: '放电 MOS 导通 成功 — 回读 fet_status 一致', result: 'success' },
-  { id: 2, time: '2026-10-15 14:58:44', type: '配置更新', content: '轮询指令启用 3/' + MAX_POLL + ' 条 — 节点已确认应用', result: 'success' },
-  { id: 3, time: '2026-10-15 14:31:20', type: '受控操作', content: '读取 BMS 保护参数 — 设备未进入厂模式，读取被拒绝', result: 'failed' },
-  { id: 4, time: '2026-10-15 13:47:02', type: '受控操作', content: '重启 BMS — 已下发，等待设备重新上线', result: 'unknown' },
-]
-const history = ref<HistoryRow[]>(HISTORY_INITIAL.map((h) => ({ ...h })))
-let historySeq = HISTORY_INITIAL.length
-function addHistory(type: string, content: string, result: HistoryRow['result'], detail?: string) {
-  historySeq++
-  history.value.unshift({ id: historySeq, time: nowStamp(), type, content: detail ? content + ' — ' + detail : content, result })
-  if (history.value.length > 30) history.value.splice(30)
+// ════════════ 操作历史（审计线索，来自 store.histories） ════════════
+type HistoryResult = 'success' | 'failed' | 'unknown' | 'cancelled'
+interface HistoryRow { id: string; time: string; type: string; content: string; result: HistoryResult }
+/** 后端 reason 里会出现 final_succeeded / final_failed 这类内部令牌，转成中文或交给回读摘要。 */
+function readableFinalReason(reason?: string): string {
+  if (!reason) return ''
+  if (reason === 'final_failed') return '设备未接受或回读校验不一致'
+  if (reason === 'final_succeeded') return ''
+  return reason
 }
-function resultTag(r: HistoryRow['result']): 'success' | 'danger' | 'warning' {
-  return r === 'success' ? 'success' : r === 'failed' ? 'danger' : 'warning'
+function verifiedSummary(op: DeviceOperation): string {
+  return (op.verified_result ?? [])
+    .filter((v) => !v.name.endsWith('_ack'))
+    .slice(0, 3)
+    .map((v) => v.name + '=' + (v.string_value || v.value) + (v.unit || ''))
+    .join(', ')
 }
-function resultText(r: HistoryRow['result']): string {
-  return r === 'success' ? '成功' : r === 'failed' ? '失败' : '结果未知'
-}
-
-// ════════════ 演示态切换 / 重置 ════════════
-watch(mode, (m) => {
-  // 异常态：单体过压会把充电 MOS 硬件关断，这里同步 mock 出该表现。
-  mos.charge = m !== 'abnormal'
-  mos.discharge = true
-  mosPhase.charge = ''
-  mosPhase.discharge = ''
-  mosError.charge = ''
-  mosError.discharge = ''
-  protectExpanded.value = false
+const historyRows = computed<HistoryRow[]>(() => {
+  // store.apply 在 REST 合并时会 unshift，数组顺序不保证「新的在前」；显式按时间倒序，
+  // 保证「最近 N 条」真的是最近的（否则 slice(0,30) 会留下最老的 30 条）。
+  const ordered = [...historyOps.value].sort((a, b) => {
+    const ta = Date.parse(a.updated_at || a.completed_at || a.created_at || '')
+    const tb = Date.parse(b.updated_at || b.completed_at || b.created_at || '')
+    return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta)
+  })
+  return ordered.slice(0, 30).map((op) => {
+    const detail = op.manual_resolution?.reason || readableFinalReason(op.final_reason) || verifiedSummary(op)
+    return {
+      id: op.command_id,
+      time: formatStamp(op.manual_resolution?.resolved_at || op.completed_at || op.updated_at || op.created_at),
+      type: op.action_id === 'set_mos_policy' ? 'MOS 直控' : '受控操作',
+      content: catalogName(op.action_id) + (detail ? ' — ' + detail : ''),
+      result: op.status === 'SUCCEEDED' ? 'success' : op.status === 'FAILED' ? 'failed' : op.status === 'CANCELLED' ? 'cancelled' : 'unknown',
+    }
+  })
 })
+function resultTag(r: HistoryResult): TagType {
+  return r === 'success' ? 'success' : r === 'failed' ? 'danger' : r === 'cancelled' ? 'info' : 'warning'
+}
+function resultText(r: HistoryResult): string {
+  return r === 'success' ? '成功' : r === 'failed' ? '失败' : r === 'cancelled' ? '已取消' : '结果未知'
+}
 
-function resetDemo() {
-  mode.value = 'normal'
-  mos.charge = true
-  mos.discharge = true
-  mosPhase.charge = ''
-  mosPhase.discharge = ''
-  mosError.charge = ''
-  mosError.discharge = ''
+// ════════════ 受控操作目录加载 ════════════
+const catalogReady = ref(false)
+const catalogError = ref('')
+const catalogLoading = computed(() => !catalogReady.value)
+async function loadOperations() {
+  catalogReady.value = false
+  catalogError.value = ''
+  try {
+    await opStore.refresh(deviceId.value)
+  } catch (e) {
+    catalogError.value = extractErrorMessage(e, '受控操作目录加载失败')
+  } finally {
+    catalogReady.value = true
+  }
+}
+
+// ════════════ 刷新 / 生命周期 ════════════
+function resetDeviceScopedState() {
+  stopInject()
   streamRows.value = []
+  seenItemIds.clear()
   pendingCount.value = 0
   following.value = true
-  stopInject()
+  snapshotError.value = ''
+  mosPhase.charge = ''
+  mosPhase.discharge = ''
+  mosError.charge = ''
+  mosError.discharge = ''
+  mosKind = null
+  activeCommandId = ''
+  verifiedFet.value = null
+  protectExpanded.value = false
+  reauthTarget = null
   Object.keys(opStates).forEach((k) => {
     opStates[k] = { phase: 'idle', text: '', reason: '' }
   })
-  pollCommands.forEach((c, i) => {
-    c.enabled = POLL_INITIAL[i].enabled
-    c.interval = POLL_INITIAL[i].interval
-    c.lastInterval = POLL_INITIAL[i].interval
-  })
-  pollSaveState.value = 'idle'
-  pollBaseline.value = snapshotPoll()
-  history.value = HISTORY_INITIAL.map((h) => ({ ...h }))
-  historySeq = HISTORY_INITIAL.length
-  feedback.info('已重置为初始 mock 数据')
 }
 
+async function refreshAll() {
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    await loadDetail()
+    await Promise.all([loadPollCommands(), loadLatestSnapshot(), loadOperations()])
+    feedback.success('已刷新设备数据')
+  } catch (e) {
+    feedback.handleError(e, '设备数据刷新失败')
+  } finally {
+    refreshing.value = false
+  }
+}
+
+watch(deviceId, () => {
+  resetDeviceScopedState()
+  void loadDetail()
+  void loadPollCommands()
+  void loadLatestSnapshot()
+  void loadOperations()
+})
+
 onMounted(() => {
-  pushFrame()
-  feedTimer = setInterval(pushFrame, 2500)
+  // connect() 幂等：已连接/连接中会直接返回，不会打断 MainLayout 建立的连接。
+  wsStore.connect()
+  void loadDetail()
+  void loadPollCommands()
+  void loadLatestSnapshot()
+  void loadOperations()
   void nextTick(() => {
     const el = streamEl.value
     if (el) el.scrollTop = el.scrollHeight
@@ -991,7 +1481,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (feedTimer) clearInterval(feedTimer)
   stopInject()
 })
 </script>
@@ -1039,8 +1528,6 @@ onUnmounted(() => {
 .dev-sub { margin-top: 6px; font-size: 12px; color: var(--el-text-color-secondary); }
 .dev-sub b { color: var(--el-text-color-primary); }
 .head-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.mode-switch { display: flex; align-items: center; gap: 8px; }
-.mode-label { font-size: 12px; color: var(--el-text-color-secondary); }
 
 .page-body { max-width: 1480px; margin: 0 auto; padding: 16px 24px; }
 .row { display: grid; gap: 16px; margin-bottom: 16px; }
@@ -1072,6 +1559,7 @@ onUnmounted(() => {
 .mono-badge { font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 11px; color: var(--el-text-color-secondary); background: var(--el-fill-color-light); border-radius: 4px; padding: 2px 8px; }
 .alert-detail { margin-top: 4px; font-size: 12px; line-height: 1.6; }
 .inline-alert { margin: 8px 0; }
+.page-error { margin-bottom: 16px; }
 .txt-warning { color: var(--el-color-warning); }
 .txt-danger { color: var(--el-color-danger); }
 .txt-secondary { color: var(--el-text-color-regular); }
@@ -1091,6 +1579,7 @@ onUnmounted(() => {
 .mos-name { font-size: 14px; font-weight: 600; }
 .mos-desc { margin-top: 3px; font-size: 12px; color: var(--el-text-color-secondary); }
 .mos-switch { flex-shrink: 0; }
+.mos-manual-note { margin-top: 8px; }
 .hw-off-note { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--el-color-warning); }
 
 /* ══════════ 保护状态 ══════════ */
@@ -1213,6 +1702,7 @@ onUnmounted(() => {
 .op-name-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .op-name { font-size: 13px; font-weight: 500; }
 .op-desc { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 3px; line-height: 1.6; }
+.op-desc-warn { color: var(--el-color-warning); }
 .op-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .op-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--el-text-color-regular); }
 .op-reason { flex-basis: 100%; margin: 4px 0 0; }
@@ -1229,6 +1719,10 @@ onUnmounted(() => {
 .h-type { font-size: 12px; font-weight: 600; }
 .h-content { font-size: 12px; color: var(--el-text-color-regular); margin-top: 4px; line-height: 1.6; word-break: break-word; }
 .h-meta { font-size: 11px; color: var(--el-text-color-secondary); margin-top: 4px; }
+.history-empty { padding: 24px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
+
+/* ══════════ 身份重验证 ══════════ */
+.dialog-note { margin: 0 0 12px; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
 
 /* ══════════ 响应式 ══════════ */
 @media (max-width: 1200px) {

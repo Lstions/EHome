@@ -481,10 +481,18 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		//
 		// 用**嵌入**而非包一层对象：models.EdgeDevice 无自定义 MarshalJSON，
 		// 嵌入会将其字段平铺，响应形状对既有调用方完全不变，只多一个字段。
+		// ⚠ 必须与**容量门用同一个来源**（节点申报值）。此前这里写的是常量，
+		// 而闸门已改为读申报值 ⇒ 设备申报 32 时，闸门放行 5 条、这里却仍显示 3，
+		// 前端会渲染出"已启用 5/3"这种自相矛盾的状态。
+		// d 已 Preload("Node")，直接用它的 HardwareInfo，不再多查一次库。
+		nodeLimit := nodemgr.MaxCommandsPerEdgeDevice
+		if d.Node.NodeID != "" {
+			nodeLimit = nodemgr.ManifestCommandLimitForNode(d.Node)
+		}
 		Success(c, struct {
 			models.EdgeDevice
 			MaxPollingCommands int `json:"max_polling_commands"`
-		}{EdgeDevice: d, MaxPollingCommands: nodemgr.MaxCommandsPerEdgeDevice})
+		}{EdgeDevice: d, MaxPollingCommands: nodeLimit})
 	})
 
 	// Create edge device (v2.2 path for POST /devices)

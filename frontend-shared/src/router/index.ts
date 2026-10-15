@@ -171,7 +171,10 @@ const routes: RouteRecordRaw[] = [
     path: '/dev/bms-demo2',
     name: 'BmsDemoPage2',
     component: () => import('@/dev/BmsDemoPage2.vue'),
-    meta: { requiresAuth: false, hidden: true },
+    // 2026-10-15：本页已接真实后端（设备详情/实时流/受控操作/轮询配置），
+    // 因此必须走鉴权 —— 未登录时由守卫带 redirect 跳登录页，回来仍落在此页。
+    // 设备 id 走 query（?device=1），路径不变 ⇒ 无需改路由覆盖白名单。
+    meta: { requiresAuth: true, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {
