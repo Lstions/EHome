@@ -440,7 +440,7 @@
                               :aria-label="`${resource.id} 绑定的 DMA 资源`"
                               :model-value="dmaSelectionFor(resource)"
                               :disabled="nodeOffline || !canToggleResourceDma(resource)"
-                              placeholder="选择 DMA 资源"
+                              placeholder="未绑定"
                               :title="dmaBoundValueLabel(resourceDmaBinding(resource))"
                               @click.stop
                               @change="(value: any) => changeResourceDma(resource, String(value))"
@@ -572,25 +572,31 @@
                   <span>DMA 绑定</span>
                   <b v-if="selectedResource.enabled !== false && busSupportsDma && resourceDmaCandidates(selectedResource).length > 0" class="bus-detail-edit">
                     <el-select
-                      class="dma-select"
+                      class="dma-select dma-select-detail"
                       size="small"
                       :data-dma-detail-select="selectedResource.id"
                       :aria-label="`${selectedResource.id} 绑定的 DMA 资源`"
                       :model-value="dmaSelectionFor(selectedResource)"
                       :disabled="nodeOffline || !canToggleResourceDma(selectedResource)"
-                      placeholder="选择 DMA 资源"
+                      placeholder="未绑定"
                       @change="(value: any) => changeResourceDma(selectedResource!, String(value))"
                     >
                       <el-option label="不使用 DMA" value="" />
+                      <!-- 与资源表同一套文案分档（2026-10-15）：已绑定本资源的那条用紧凑
+                           文案作**显示值**（详情行只需回答"绑了哪条"），其余候选保留下拉里的
+                           全量文案（带兼容总线）便于比较。两处语言一致才不会出现
+                           "表格写 GDMA_CH0、详情写 GDMA_CH0（#0 · UART · I2C）"的分叉。 -->
                       <el-option
                         v-for="dma in resourceDmaCandidates(selectedResource)"
                         :key="dma.dma_id"
-                        :label="dmaOptionLabel(dma)"
+                        :label="isDmaBoundToResource(dma, selectedResource) ? dmaBoundValueLabel(dma) : dmaOptionLabel(dma)"
                         :value="String(dma.dma_id)"
                       />
                     </el-select>
                   </b>
-                  <b v-else :class="{ 'dma-bound': resourceDmaBinding(selectedResource)?.bound_to }">{{ resourceDmaBinding(selectedResource)?.bound_to || '未绑定' }}</b>
+                  <!-- 无候选/不可编辑时的只读值：走与 DMA 卡同一套 dmaBoundToText，
+                       不把内部键 "uart/uart0" 原样露出（同一资源在别处写作 "uart0（UART）"）。 -->
+                  <b v-else :class="{ 'dma-bound': resourceDmaBinding(selectedResource)?.bound_to }">{{ dmaBoundToText(resourceDmaBinding(selectedResource)?.bound_to) }}</b>
                 </div>
               </div>
               <el-empty v-else description="请选择资源" :image-size="72" />
@@ -3029,7 +3035,69 @@ html.dark .node-overview-page {
 .dma-none { color: var(--no-text-muted); font-size: 12px; line-height: 18px; white-space: nowrap; }
 /* 选择器宽度必须跟着列走：原先写死 200px，而「DMA 绑定」列在 812px 表宽下只有 ~81px，
    控件直接溢出并盖住右侧「操作」列（2026-10-02 实测该单元格 scrollWidth=206 > clientWidth=81）。 */
+/* ── DMA 绑定：可写配置的「值 + 轻量编辑入口」（2026-10-15 UI-2）────────────
+   问题：DMA 绑定用**裸 el-select** 直接塞进两处 —— 资源表单元格与「资源详情」描述
+   列表行。裸选择器自带常驻 1px 描边（EP 用 box-shadow inset 实现，实测亮色
+   rgb(220,223,230)、暗色 rgb(74,74,76)），于是：
+     · 描述列表其余行都是右对齐纯文本，唯独这一行横着一条 1090px 的带框下拉
+       （实测 width=1090 / height=24），把整列节奏打断；
+     · 表格单元格里它又显得比同行的 tag/开关"重一档"，不像同一套语言。
+   目标：两种位置都读成「值 + 轻量编辑入口」——默认无框、hover/focus 才显形，
+   且**不占满行**（行宽≠控件宽）。保留三态文字表达（规范 §4.2.2）：
+     · 已绑定 → 通道名；未绑定 → "未绑定"；不可用/无候选 → 既有 .dma-na / .dma-none 文案。
+
+   为什么必须用 :deep()：el-select 的内部结构在子组件里，scoped 样式选择不到
+   .el-select__wrapper；这些类名来自本项目安装的 Element Plus 版本（已在亮/暗两套
+   主题下用 getComputedStyle 实测确认），非跨版本稳定契约。 */
 .dma-select { width: 100%; min-width: 0; }
+
+/* 轻量入口：无常驻边框、无背景、无最小高度，与同行的 tag/开关同一视觉重量。
+   —— .dma-select 与 .dma-select-detail 共用这一套，保证两处是同一语言。 */
+.dma-select :deep(.el-select__wrapper),
+.dma-select-detail :deep(.el-select__wrapper) {
+  min-height: 0;
+  padding: 0 2px;
+  background: transparent;
+  box-shadow: none;
+}
+/* 指向提示：让"这是可编辑值"在静止态也成立，但不靠描边 —— 用极轻的 hover 底色。 */
+.dma-select :deep(.el-select__wrapper:hover:not(.is-disabled)),
+.dma-select-detail :deep(.el-select__wrapper:hover:not(.is-disabled)) {
+  background: var(--no-bg-hover);
+  box-shadow: none;
+}
+/* 键盘焦点必须有可见指示（a11y）：仅聚焦时给出与其它输入一致的一圈。
+   focus 态描边用全站输入控件的既有 token，不新造色值。 */
+.dma-select :deep(.el-select__wrapper.is-focused),
+.dma-select-detail :deep(.el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+/* ⚠ 刻意**不**设 font-size：App.vue 的全局移动端防缩放规则
+   （@media max-width:768px 下 .el-select__wrapper{font-size:16px}，防 iOS Safari
+   聚焦缩放）特异性只有 (0,1,0)，而本文件的 :deep() 选择器是 (0,2,0) —— 一旦在这里
+   写 font-size，媒体查询不会提供额外特异性，全局规则会被静默压掉，移动端聚焦就会
+   缩放。字号交给 EP 默认（桌面 14px / 移动 16px）继承即可，与"轻量"目标无关。 */
+.dma-select :deep(.el-select__placeholder),
+.dma-select-detail :deep(.el-select__placeholder) {
+  color: var(--no-text);
+}
+/* 未绑定/不可用：与同行只读值同色，不再像一条"待填写的空输入框"。 */
+.dma-select :deep(.el-select__placeholder.is-transparent),
+.dma-select-detail :deep(.el-select__placeholder.is-transparent) {
+  color: var(--no-text-muted);
+}
+/* 箭头降到辅助信息层级：它只是"可展开"的提示，不是本行的主角。 */
+.dma-select :deep(.el-select__caret),
+.dma-select-detail :deep(.el-select__caret) {
+  color: var(--no-text-muted);
+  font-size: 13px;
+}
+/* 禁用态（节点离线 / 不可重绑）：与其它禁用控件同款降权，不额外加框。 */
+.dma-select :deep(.el-select__wrapper.is-disabled),
+.dma-select-detail :deep(.el-select__wrapper.is-disabled) {
+  background: transparent;
+  box-shadow: none;
+}
 .bus-tool-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(228px, 1fr); gap: 16px; }
 /* 只剩一组工具时让它占满整行，避免右侧留一片空白 */
 .bus-tool-layout.single-group { grid-template-columns: minmax(0, 1fr); }
@@ -3074,11 +3142,22 @@ html.dark .node-overview-page {
 .bus-detail-list .dma-bound { color: var(--no-success-text); }
 /* 详情行内的就地操作（查看通道 / DMA 选择器）靠右对齐，与只读值同一列 */
 .bus-detail-list .bus-detail-action { margin-left: 8px; font-size: 12px; }
-/* flex:1 + min-width:0 才能让选择器真正吃满剩余宽度；
-   只写 width:100% 时父级 <b> 是 inline-flex 收缩包裹，100% 无处可依，会退到 min-width，
-   于是长文案（如 "GDMA_CH0（#0 · UART · I2C）"）被截断成 "GDMA_CH0（#0 · UART · I…"。 */
-.bus-detail-list .bus-detail-edit { flex: 1; min-width: 0; display: inline-flex; justify-content: flex-end; }
-.bus-detail-list .bus-detail-edit .dma-select { width: 100%; min-width: 0; }
+/* 2026-10-15 UI-2：**不再让选择器吃满整行**。
+   改前这里写的是 flex:1 + width:100%，于是 DMA 行横着一条 1090px 的带框下拉
+   （实测 detailWrapperBox.w=1090），与上下"右对齐纯文本"的行完全不是一个节奏 ——
+   这就是用户说的"破坏整列节奏"。
+   现在：值本身保持右对齐，编辑入口是**贴着值**的窄控件（上限 150px，够显示
+   "GDMA_CH0（#1）"这类最长紧凑文案），像这一行的轻量编辑按钮，
+   而不是一条横贯整行的输入框。 */
+/* ⚠ 必须给**确定宽度**，不能写 width:auto：EP 的 .el-select__placeholder 是
+   position:absolute（浮动标签式），它不参与 wrapper 的固有宽度计算 ⇒ 在 flex 行内
+   写 auto 时控件会塌缩到只剩箭头（实测 root 21px，placeholder 被 overflow:hidden
+   裁掉，"未绑定"完全不可见）。150px 足够显示最长的紧凑值（如 "GDMA_CH0（#1）"），
+   更长的值按 EP 默认省略号处理。 */
+.bus-detail-list .bus-detail-edit { flex: 0 0 auto; max-width: 150px; display: inline-flex; justify-content: flex-end; }
+.bus-detail-list .bus-detail-edit .dma-select { width: 150px; max-width: 150px; min-width: 0; }
+/* 窄屏下编辑入口占满可用宽度：规则并入既有 768 块（见文件尾部 @media），
+   本仓门禁要求"不得新增重复的 768px 媒体查询块"（NodeOverview.spec.ts）。 */
 /* 通道行内联波特率编辑 */
 .baud-inline-input { width: 120px; }
 .baud-inline-error { color: var(--no-danger); font-size: 12px; }
@@ -3240,6 +3319,11 @@ html.dark .node-overview-page {
   .info-grid { flex-direction: column; gap: 0; }
 }
 @media (max-width: 768px) {
+  /* ── UI-2（2026-10-15）：DMA 详情行的轻量编辑入口在窄屏占满可用宽度。
+     桌面端它贴着右对齐的值、上限 150px（见 .bus-detail-list .bus-detail-edit）；
+     窄屏详情行改纵向堆叠后，横向空间足够，占满反而更好点按（§4.4.5 触控目标）。 */
+  .bus-detail-list .bus-detail-edit { max-width: none; width: 100%; }
+  .bus-detail-list .bus-detail-edit .dma-select { width: 100%; max-width: none; }
   /* ── 面包屑：移动端从「整条隐藏」改为「压缩为两段」 ──
      改前 .no-breadcrumb{display:none} 与 MainLayout 顶栏面包屑同时消失，
      移动端只剩标题，层级位置感丢失（审计 F10 / §4.1.2 MUST）。

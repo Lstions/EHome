@@ -978,6 +978,32 @@ onUnmounted(() => {
 }
 
 /* 桌面端菜单 — 限定在 .sidebar 内 */
+/* 侧栏滚动条（2026-10-15 UI-1）。
+   缺陷：全局 ::-webkit-scrollbar 用 --bg-color(#fff) 作 track、--scrollbar-thumb(#c1c1c1)
+   作滑块 —— 都是**亮色**，而侧栏在所有主题下都是深色品牌底（--sidebar-bg-gradient）。
+   矮视口（实测视口高 620px、菜单内容 892px）滚动时，一条浅灰滚动条压在深色渐变上。
+   修法：**只在侧栏作用域内**覆盖滚动条，消费侧栏专属 token；全局规则不动
+   （其余滚动区背面是浅色，维持原值）。轨道透明 —— 侧栏是渐变底，铺一条实色轨道
+   会在渐变上割出一条色带。
+   ⚠ 选择器必须带 .sidebar / 抽屉前缀，**不能**写全局 —— 否则会改掉全站滚动条。 */
+/* ⚠ 目标必须是**真正滚动的那一层**：.sidebar 自身是 overflow:hidden，
+   滚动条长在 .sidebar .sidebar-menu 上（见下方 flex:1 + overflow-y:auto）。
+   实测把选择器写成 .sidebar::-webkit-scrollbar 时探针读到仍是全局的
+   rgb(193,193,193)/8px —— 样式根本没落到滚动容器上。 */
+.sidebar .sidebar-menu::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.sidebar .sidebar-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar .sidebar-menu::-webkit-scrollbar-thumb {
+  background: var(--sidebar-scrollbar-thumb, rgba(255, 255, 255, 0.18));
+  border-radius: 3px;
+}
+.sidebar .sidebar-menu::-webkit-scrollbar-thumb:hover {
+  background: var(--sidebar-scrollbar-thumb-hover, rgba(255, 255, 255, 0.3));
+}
 .sidebar .sidebar-menu {
   flex: 1;
   /* D7：菜单必须能**滚动**，否则内容（14 项默认全展开，实测 892px）超出可用高度时
@@ -988,6 +1014,12 @@ onUnmounted(() => {
      改前是 `overflow-y: visible`（不可滚）。 */
   min-height: 0;
   overflow-y: auto;
+  /* UI-1：Firefox 回退（::-webkit-* 在上方单独给出，无效时才用标准属性）。
+     ⚠ 这两条必须留在**本块内**，不能另起一个 `.sidebar .sidebar-menu {}` 块 ——
+     MainLayout.spec.ts 的 D7 契约用 ruleOf() 取本选择器的**首个**匹配块来断言
+     overflow-y/min-height，另起块会让它取到新块而变红（本次已实测踩到）。 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--sidebar-scrollbar-thumb, rgba(255, 255, 255, 0.18)) transparent;
   border-right: none;
   background: transparent;
   padding: 8px;

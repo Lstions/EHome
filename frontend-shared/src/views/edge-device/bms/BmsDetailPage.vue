@@ -275,22 +275,25 @@ onMounted(() => {
   margin-left: auto;
 }
 
+/* UI-4（2026-10-15）：改前每格 120px 起、纵向居中三行（标签/数值/tag），
+   4 个探针各占一格时卡内上下留白明显（用户截图复现）。
+   现在：数值与状态**同一阅读路径**（一行内：标签 · 数值 · 状态），
+   格子按内容收缩、密度提高；窄屏两列保证数值不被挤压（规范 §4.2.5 关键数值不得截断）。 */
 .temp-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;
 }
 .temp-item {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 12px 8px;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--el-fill-color-lighter);
-  border-radius: 8px;
+  border-radius: 6px;
 }
-.temp-label { font-size: 12px; color: var(--el-text-color-regular); }
-.temp-value { font-size: 18px; font-weight: 600; }
+.temp-label { font-size: 12px; color: var(--el-text-color-regular); white-space: nowrap; }
+.temp-value { font-size: 16px; font-weight: 600; margin-left: auto; }
 .temp-value.is-success { color: var(--el-color-success); }
 .temp-value.is-warning { color: var(--el-color-warning); }
 .temp-value.is-danger { color: var(--el-color-danger); }
@@ -313,5 +316,11 @@ onMounted(() => {
 @media (max-width: 992px) {
   /* 右列（指令频率/受控操作）在平板以下堆叠到实时数据流下方，补间距 */
   .bottom-row .command-card { margin-top: 20px; }
+}
+@media (max-width: 768px) {
+  /* 窄屏两列：探针数值不被压缩（规范 §4.2.5）。 */
+  .temp-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .temp-item { padding: 8px 10px; gap: 6px; }
+  .temp-value { font-size: 15px; }
 }
 </style>

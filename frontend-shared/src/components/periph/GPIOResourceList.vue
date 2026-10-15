@@ -31,7 +31,10 @@
         <p v-if="visibleRows.length === 0" class="filter-empty" role="status">
           {{ filter === 'configured' ? '该节点当前没有已配置的 GPIO 引脚。' : '所有引脚都已配置。' }}
         </p>
-        <ul v-else class="resource-list">
+        <div v-if="visibleRows.length" class="resource-head" aria-hidden="true">
+          <span>引脚</span><span>运行状态</span><span>操作</span>
+        </div>
+        <ul class="resource-list">
           <li
             v-for="row in visibleRows"
             :key="row.resource.id"
@@ -225,10 +228,33 @@ defineExpose({ applyRuntimeLevel })
    其中第二列专为「ESP32 已上报」那句**每行相同**的占位文案预留 170px+。
    删除该文案并合并列后，用 `1fr` 让信息列吃满剩余空间，
    避免"一个按钮 + 一大片空白"（实测改前未配置行的空列宽达 497px）。 */
-.resource-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto; align-items: center; gap: 12px; min-height: 56px; padding: 10px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; }
+/* UI-3（2026-10-15）：改前第三列前的信息列写 `1fr` ⇒ 该列吃满整行剩余宽度，
+   而内容（"GPIO 1 [可用]"）只有 ~120px，于是每行出现跨屏空白
+   （实测用户截图："GPIO 1 可用 …………………………………… [配置 GPIO]"）。
+   现改为 `auto` 让信息列**按内容收缩**，空白收敛到操作区左侧的弹性间隔：
+   信息聚拢在左、操作贴右，中间留白由 `justify-content: space-between` 的语义承担，
+   而不是被一列无内容的 1fr 撑开。 */
+/* UI-3（2026-10-15）紧凑行（规范 §4.3.3：含开关/状态/多操作的资源管理用纵向行列表）。
+   改前 `minmax(0,1fr) …` 让第一列吃满整行，而内容（"GPIO 1 可用"）只有 ~120px，
+   于是每行出现跨屏空白（用户截图："GPIO 1 可用 ……………… [配置 GPIO]"）。
+   第一次改为三列并把剩余宽度给"运行状态"后，**未配置行**该列无内容，
+   仍留 855px 空洞（实测 gapBetweenInfoAndActions=879）—— 问题只是换了位置。
+   现在：列全部按内容收缩，操作区用 `margin-left:auto` 贴右，
+   行高压到 44px（内容一行放得下时不再占 56px）。空行不再有"被撑开的中间列"。 */
+.resource-row { display: flex; align-items: center; column-gap: 12px; row-gap: 8px; flex-wrap: wrap; min-height: 44px; padding: 6px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; transition: background-color 0.15s; }
+.resource-row:hover { background: var(--el-fill-color-lighter); }
+/* 操作区贴右：flex 行里用 auto 外边距把空白**收在操作区左侧**，
+   而不是让它变成一列无内容的弹性轨道。 */
+.resource-row .actions { margin-left: auto; }
+/* 列头：桌面端让紧凑行读成一张表（窄屏隐藏）。列宽与行内三段对齐。 */
+.resource-head { display: flex; column-gap: 12px; padding: 6px 16px; border-bottom: 1px solid var(--el-border-color-lighter); font-size: 12px; color: var(--el-text-color-secondary); }
+.resource-head > span:first-child { min-width: 120px; }
+.resource-head > span:nth-child(2) { flex: 0 0 auto; }
+.resource-head > span:last-child { margin-left: auto; }
 .resource-row[data-state="configured"]::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--el-color-primary); }
 .info, .runtime, .actions { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
-.info { gap: 6px 8px; }
+/* 引脚标识列定宽下限：各行左缘对齐（与列头 "引脚" 对齐）。 */
+.info { gap: 6px 8px; min-width: 120px; }
 .pin-id { font-weight: 600; white-space: nowrap; }
 .summary { color: var(--el-text-color-regular); font-size: 13px; white-space: nowrap; }
 .sep { color: var(--el-text-color-placeholder); }
@@ -243,6 +269,8 @@ defineExpose({ applyRuntimeLevel })
 .stale-configs { display: flex; flex-direction: column; gap: 4px; padding: 8px 16px; border: 1px solid var(--el-color-warning-light-5); }
 @media (max-width: 768px) {
   /* 移动端：信息列占满一行，操作区独立成行（改前两列并排会把按钮挤到很窄）。 */
+  /* 窄屏：列头无意义（单列堆叠），隐藏；行改为单列。 */
+  .resource-head { display: none; }
   .resource-row { grid-template-columns: 1fr; }
   .runtime, .actions, .feedback { grid-column: 1 / -1; }
   /* D6 修订 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px。

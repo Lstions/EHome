@@ -4,7 +4,10 @@
     <el-skeleton v-if="loading" :rows="4" animated />
     <template v-else>
       <el-empty v-if="resources.length === 0" description="等待节点硬件资源上报" />
-      <ul v-else class="resource-list">
+      <div v-if="rows.length" class="resource-head" aria-hidden="true">
+        <span>资源</span><span>配置</span><span>运行状态</span><span>操作</span>
+      </div>
+      <ul class="resource-list">
         <li
           v-for="row in rows"
           :key="row.resource.id"
@@ -241,7 +244,13 @@ defineExpose({ applyRuntimeState })
 <style scoped>
 .pwm-resource-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .resource-list { list-style: none; margin: 0; padding: 0; }
-.resource-row { display: grid; grid-template-columns: minmax(170px, auto) minmax(0, 1.2fr) minmax(260px, 1.6fr) auto; align-items: center; gap: 12px; min-height: 60px; padding: 10px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; }
+/* UI-3（2026-10-15）：与 GPIO 侧对齐为同一套列语言（标识 | 配置 | 运行 | 操作），
+   并把列头一起提供 —— 两个列表风格统一是本次反馈的明确要求。
+   列宽：标识按内容（min 160px 保证各行左缘对齐）、配置与运行分剩余空间、操作贴右。 */
+.resource-row { display: grid; grid-template-columns: minmax(160px, auto) minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: 12px; min-height: 60px; padding: 10px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; transition: background-color 0.15s; }
+.resource-row:hover { background: var(--el-fill-color-lighter); }
+.resource-head { display: grid; grid-template-columns: minmax(160px, auto) minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--el-border-color-lighter); font-size: 12px; color: var(--el-text-color-secondary); }
+.resource-head > span:last-child { text-align: right; }
 .resource-row[data-state="configured"]::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--el-color-success); }
 .identity, .configuration, .runtime, .actions { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .runtime :deep(.el-slider) { min-width: 100px; flex: 1; }
@@ -251,6 +260,7 @@ defineExpose({ applyRuntimeState })
 .feedback { grid-column: 1 / -1; color: var(--el-color-danger); }
 .stale-configs { display: flex; flex-direction: column; gap: 4px; padding: 8px 16px; border: 1px solid var(--el-color-warning-light-5); }
 @media (max-width: 768px) {
+  .resource-head { display: none; }
   .resource-row { grid-template-columns: 1fr auto; }
   .configuration, .runtime, .feedback { grid-column: 1 / -1; }
   /* D6 修订 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px（与 GPIO 侧同款，保持两列表一致）。

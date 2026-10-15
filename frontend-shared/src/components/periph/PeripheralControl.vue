@@ -11,8 +11,15 @@
       <el-button text type="primary" size="small" @click="loadAll">重试</el-button>
     </el-alert>
 
-    <section>
-      <h4>GPIO 硬件资源</h4>
+    <!-- UI-3（2026-10-15）：改前这里只有裸 <section><h4>，没有容器 —— 页面其它区段
+         （基本信息 / 实时指标 / 总线配置）都是 .card 卡片语言，唯独外设控制是"裸标题 +
+         一长条列表"，与整页层级不一致（用户反馈"设计水平太差"）。
+         现改为与同页一致的卡片 + card-head，标题层级与「总线配置」tab 对齐。 -->
+    <section class="card periph-card">
+      <div class="card-head">
+        <span class="card-title">GPIO 硬件资源</span>
+        <span class="card-hint">设备上报的可用引脚</span>
+      </div>
       <GPIOResourceList
         ref="gpioResourceList"
         :resources="hardwareGpio"
@@ -28,8 +35,11 @@
       />
     </section>
 
-    <section>
-      <h4>PWM 硬件资源</h4>
+    <section class="card periph-card">
+      <div class="card-head">
+        <span class="card-title">PWM 硬件资源</span>
+        <span class="card-hint">可调占空比输出</span>
+      </div>
       <PWMResourceList
 		ref="pwmResourceList"
         :resources="hardwarePwm"
@@ -339,6 +349,11 @@ defineExpose({
 .peripheral-control { display: flex; flex-direction: column; gap: 16px; }
 .periph-header { display: flex; align-items: center; justify-content: space-between; }
 .periph-title { font-weight: 600; font-size: 15px; }
-section { display: flex; flex-direction: column; gap: 8px; }
-h4 { margin: 0; color: var(--el-text-color-primary); }
+/* UI-3：卡片语言与同页「总线配置」一致 —— 复用 .card 外观，本组件只补内距与头部。
+   圆角沿用 .card 的既有值（≤8px，规范 §4.2.3），不新造。 */
+.periph-card { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+.card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
+/* 说明文字降级为辅助信息（规范 §4.2.4：标签/数值/辅助说明各有稳定角色）。 */
+.card-hint { font-size: 12px; color: var(--el-text-color-secondary); }
 </style>

@@ -87,6 +87,17 @@
      侧栏在所有主题下都是深色品牌底（同 --sidebar-bg-gradient），
      故亮/暗两套**同值是有意的**（与 --sidebar-text-hover 同类）。 */
   --sidebar-group-title: rgba(255, 255, 255, 0.55);
+  /* 侧栏滚动条（2026-10-15 UI-1）。
+     缺陷：全局 ::-webkit-scrollbar 用 --bg-color(#fff) 作 track、--scrollbar-thumb(#c1c1c1)
+     作滑块 —— 都是**亮色**；而侧栏在所有主题下都是深色品牌底（--sidebar-bg-gradient）。
+     矮视口（实测视口高 620px、菜单内容 892px）滚动时，一条浅灰滚动条压在深色渐变上，
+     与整个侧栏的深色语言冲突（用户截图复现）。
+     修法：给侧栏**单独一套**滚动条 token，并在 MainLayout 的侧栏作用域内覆盖
+     ::-webkit-scrollbar-*；全局滚动条不受影响（其余区域背面是浅色，维持原值）。
+     α 取值：滑块 0.18 静止 / 0.30 悬停 —— 在深色底上可见但不喧宾夺主；
+     侧栏底色在亮/暗两主题不同（#1a1f2e vs #141414），故两套取值不同（F16 同口径）。 */
+  --sidebar-scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --sidebar-scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
 
   /* 登录页品牌背景渐变（审计报告 #17：此前两处硬编码在 Login.vue:275/400）。
      设计上登录页与"登录成功过渡层"在**所有主题**下都保持深色品牌底（无可用性影响），
@@ -337,6 +348,10 @@ html.dark {
   --sidebar-border: rgba(255, 255, 255, 0.04);
   /* 分组标题：与亮色**同值**（侧栏恒为深色品牌底，见亮色块处说明；α 0.55 → 5.62:1）。 */
   --sidebar-group-title: rgba(255, 255, 255, 0.55);
+  /* 侧栏滚动条（UI-1）：暗色侧栏底色更深（#141414 vs #1a1f2e），
+     同样的白色叠加更刺眼，故暗色取更低一档（与 --sidebar-hover-bg 同一理由）。 */
+  --sidebar-scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --sidebar-scrollbar-thumb-hover: rgba(255, 255, 255, 0.26);
 
   /* 暗色下语义基色被提亮 ⇒ 前景必须转深（见亮色块处说明，实测 6.86–9.38:1）。 */
   --text-on-fill: #1a1a1a;
