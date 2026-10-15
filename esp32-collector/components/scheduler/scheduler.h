@@ -82,7 +82,16 @@ typedef struct {
 typedef struct {
     uint32_t edge_device_id;
     uint32_t hardware_id;
-    sched_command_t commands[MAX_COMMANDS_PER_DEVICE];
+    /* 动态分配，长度恰为 command_count（0 时为 NULL）。
+     *
+     * 2026-10-15：与 config_mgr 的 config_edge_device_t.commands 同步改为按需分配。
+     * 改前这里是 sched_command_t commands[3]，而 scheduler_refresh 从 config 拷贝时写的是
+     *   `if (cmd_count > MAX_COMMANDS_PER_DEVICE) cmd_count = MAX_COMMANDS_PER_DEVICE;`
+     * —— 也就是**静默截断**：配置侧一旦允许超过 3 条，调度器会默默只跑前 3 条，
+     * 用户看到"配置生效了但只有 3 条在轮询"，且没有任何日志。改成动态后截断消失。
+     *
+     * 所有权在 scheduler（scheduler_refresh 释放旧的、分配新的）。 */
+    sched_command_t *commands;
     uint8_t  command_count;
 } sched_edge_device_t;
 

@@ -198,8 +198,12 @@ static void test_nested_repeated_arrays_reject_overflow(void)
     assert_rejected_without_active_change(frame, length);
 
     uint8_t edge[128];
+    /* 超限必须被拒。改前用的是 MAX_COMMANDS_PER_DEVICE：那时它是**预分配数组长度**；
+     * 2026-10-15 起该数组改为按需分配，原宏被 CONFIG_MAX_COMMANDS_PER_DEVICE 取代，
+     * 语义变为「校验上限」（拒绝异常 manifest，不是容量上限）。本用例的意图不变：
+     * 超过校验上限的 manifest 必须整份被拒，且不影响当前生效配置。 */
     size_t edge_len = build_nested_repeated_empty(edge, sizeof(edge), 3,
-                                                  MAX_COMMANDS_PER_DEVICE + 1);
+                                                  CONFIG_MAX_COMMANDS_PER_DEVICE + 1);
     frame_encoder_init(&channel, nested, sizeof(nested), 0);
     CHECK(frame_encode_bytes(&channel, 9, edge + 1, edge_len) == FRAME_OK);
     length = build_manifest_with_nested(frame, sizeof(frame), 4, nested + 1,

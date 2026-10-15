@@ -203,6 +203,11 @@ static uart_port_t route_uart_port(const config_channel_t *ch)
 
 /* ── public API ──────────────────────────────────────────────────── */
 
+/* 前向声明（2026-10-15）：scheduler_init() 早于这两个助手的定义处就要用它们
+ * （init/prepare 的清零路径必须先释放动态指令数组）。定义在 scheduler_add_channel 之前。 */
+static void sched_free_channel_commands(sched_channel_t *c);
+static void sched_free_all_commands(void);
+
 void scheduler_init(void)
 {
 #if COLLECTOR_MEM_PSRAM_ENABLED
@@ -215,6 +220,7 @@ void scheduler_init(void)
     }
 #endif
     if (sched_channels_ready()) {
+        sched_free_all_commands();   /* 先释放动态指令数组，再清零（顺序不可颠倒） */
         memset(s_channels, 0, SCHED_CHANNELS_BYTES);
     }
     s_running     = false;
@@ -241,11 +247,13 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
     }
     s_queues = *queues;
 
+    sched_free_all_commands();   /* 重新 prepare 时先释放上一轮的动态数组 */
     memset(s_channels, 0, SCHED_CHANNELS_BYTES);
     for (int i = 0; i < manifest->channel_count && i < MAX_CHANNELS; i++) {
         if (!manifest->channels[i].enabled) continue;
         sched_err_t err = scheduler_add_channel(&manifest->channels[i]);
         if (err != SCHED_OK) {
+            sched_free_all_commands();  /* 回滚：已加入的通道可能已分配了指令数组 */
             memset(s_channels, 0, SCHED_CHANNELS_BYTES);
             return err;
         }
@@ -268,6 +276,7 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         s_prepared = false;
+        sched_free_all_commands();
         memset(s_channels, 0, SCHED_CHANNELS_BYTES);
         return SCHED_ERR_NOT_INIT;
     }
@@ -364,6 +373,81 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
     return SCHED_OK;
 }
 
+/* 把 config 侧的指令表复制进 scheduler 的**动态**槽位（2026-10-15）。
+ *
+ * 改前这里是固定数组 + `if (cmd_count > MAX_COMMANDS_PER_DEVICE) cmd_count = MAX_COMMANDS_PER_DEVICE;`
+ * 的**静默截断**：配置侧一旦允许超过 3 条，调度器只会跑前 3 条，且没有任何日志 ——
+ * 用户看到的是"配置生效了但只有 3 条在轮询"。
+ *
+ * @param preserve_runtime true 时保留已存在槽位的 last_run_ms（就地更新路径要求
+ *        不丢独立计时）；false 时全部归零（新增通道）。
+ * @return false 表示堆不足 —— 调用方必须整体失败，绝不降级成"少几条"。
+ *
+ * ⚠ realloc 的新增槽位未初始化，必须显式清零/初始化 last_run_ms，否则独立计时
+ *   会从随机 TickType_t 起步（可能长时间不触发或立刻触发）。
+ */
+static bool sched_assign_commands(sched_edge_device_t *dst,
+                                  const config_edge_device_t *src,
+                                  bool preserve_runtime)
+{
+    uint8_t n = src->command_count;
+    uint8_t old_n = dst->command_count;
+
+    if (n == 0) {
+        free(dst->commands);
+        dst->commands = NULL;
+        dst->command_count = 0;
+        return true;
+    }
+
+    sched_command_t *grown = realloc(dst->commands, (size_t)n * sizeof(sched_command_t));
+    if (grown == NULL) return false;
+    dst->commands = grown;
+    dst->command_count = n;
+
+    for (uint8_t ci = 0; ci < n; ci++) {
+        dst->commands[ci].template_id = src->commands[ci].template_id;
+        dst->commands[ci].interval_ms = src->commands[ci].interval_ms;
+        dst->commands[ci].enabled     = src->commands[ci].enabled;
+        if (!preserve_runtime || ci >= old_n) {
+            /* 新建槽位：清零运行态（含 error/backpressure 计数） */
+            memset(&dst->commands[ci].last_run_ms, 0,
+                   sizeof(sched_command_t) - offsetof(sched_command_t, last_run_ms));
+        }
+    }
+    return true;
+}
+
+/* 释放某通道下所有 edge device 的动态指令数组（换通道/移除通道时必须调用）。 */
+static void sched_free_channel_commands(sched_channel_t *c)
+{
+    if (c == NULL) return;
+    for (int ed = 0; ed < c->edge_device_count && ed < MAX_EDGE_DEVICES_PER_CH; ed++) {
+        free(c->edge_devices[ed].commands);
+        c->edge_devices[ed].commands = NULL;
+        c->edge_devices[ed].command_count = 0;
+    }
+    /* ⚠ s_channels[].config 是 config_channel_t 的**浅拷贝**（memcpy）：
+     *   它的 edge_devices[].commands 指向 config_mgr 拥有的堆块。
+     *   这里只置空，绝不 free —— 否则与 config_mgr 双重释放。 */
+    for (int ed = 0; ed < MAX_EDGE_DEVICES_PER_CH; ed++) {
+        c->config.edge_devices[ed].commands = NULL;
+        c->config.edge_devices[ed].command_count = 0;
+    }
+    c->edge_device_count = 0;
+}
+
+/* 释放整张通道表持有的动态指令数组。
+ * ⚠ 必须在每一次 `memset(s_channels, 0, SCHED_CHANNELS_BYTES)` **之前**调用：
+ *   memset 会把指针抹成 NULL，堆块永久泄漏（init / prepare / 两条失败回滚都要用）。 */
+static void sched_free_all_commands(void)
+{
+    if (!sched_channels_ready()) return;
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        sched_free_channel_commands(&s_channels[i]);
+    }
+}
+
 sched_err_t scheduler_add_channel(const config_channel_t *ch)
 {
     if (!ch || !sched_channels_ready()) return SCHED_ERR_INVALID;
@@ -400,19 +484,8 @@ sched_err_t scheduler_add_channel(const config_channel_t *ch)
             sched_edge_device_t *dst = &s_channels[slot].edge_devices[ed];
             dst->edge_device_id = src->edge_device_id;
             dst->hardware_id    = src->hardware_id;
-            dst->command_count  = 0;
-
-            uint8_t cmd_count = src->command_count;
-            if (cmd_count > MAX_COMMANDS_PER_DEVICE)
-                cmd_count = MAX_COMMANDS_PER_DEVICE;
-            dst->command_count = cmd_count;
-
-            for (int ci = 0; ci < cmd_count; ci++) {
-                dst->commands[ci].template_id  = src->commands[ci].template_id;
-                dst->commands[ci].interval_ms  = src->commands[ci].interval_ms;
-                dst->commands[ci].enabled      = src->commands[ci].enabled;
-                dst->commands[ci].last_run_ms  = 0;
-            }
+            /* 新增通道：指令表按需分配、运行态全零。分配失败即整体失败（不降级）。 */
+            if (!sched_assign_commands(dst, src, false)) return SCHED_ERR_NOT_INIT;
         }
     }
 
@@ -425,6 +498,8 @@ sched_err_t scheduler_remove_channel(uint32_t id)
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s_channels[i].active && s_channels[i].config.id == id) {
             s_channels[i].active = false;
+            /* 释放该通道的动态指令数组，避免通道反复增删时泄漏 */
+            sched_free_channel_commands(&s_channels[i]);
             return SCHED_OK;
         }
     }
@@ -453,7 +528,9 @@ sched_err_t scheduler_update_channel(const config_channel_t *ch)
             s_channels[i].skip_count = saved_skip;
 
             /* Re-init edge_device state from new config */
-            s_channels[i].edge_device_count = 0;
+            /* 先把上一轮的动态数组按**旧 count** 释放，再重建（否则 count 被覆盖后
+             * 遍历不到旧块 ⇒ 泄漏）。 */
+            sched_free_channel_commands(&s_channels[i]);
             if (ch->edge_device_count > 0) {
                 uint8_t count = ch->edge_device_count;
                 if (count > MAX_EDGE_DEVICES_PER_CH) count = MAX_EDGE_DEVICES_PER_CH;
@@ -463,16 +540,8 @@ sched_err_t scheduler_update_channel(const config_channel_t *ch)
                     sched_edge_device_t *dst = &s_channels[i].edge_devices[ed];
                     dst->edge_device_id = src->edge_device_id;
                     dst->hardware_id    = src->hardware_id;
-                    dst->command_count  = 0;
-                    uint8_t cmd_count = src->command_count;
-                    if (cmd_count > MAX_COMMANDS_PER_DEVICE) cmd_count = MAX_COMMANDS_PER_DEVICE;
-                    dst->command_count = cmd_count;
-                    for (int ci = 0; ci < cmd_count; ci++) {
-                        dst->commands[ci].template_id  = src->commands[ci].template_id;
-                        dst->commands[ci].interval_ms  = src->commands[ci].interval_ms;
-                        dst->commands[ci].enabled      = src->commands[ci].enabled;
-                        /* preserve last_run_ms for independent timing */
-                    }
+                    /* 就地更新：保留已存在槽位的 last_run_ms（独立计时不重置） */
+                    if (!sched_assign_commands(dst, src, true)) return SCHED_ERR_NOT_INIT;
                 }
             }
             return SCHED_OK;

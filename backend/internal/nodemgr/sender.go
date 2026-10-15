@@ -29,9 +29,32 @@ const (
 	maxManifestChannels      = 8
 	maxLegacyTemplateIDs     = 8
 	maxEdgeDevicesPerChannel = 5
-	// MaxCommandsPerEdgeDevice mirrors config_mgr's MAX_COMMANDS_PER_DEVICE.
-	// Exported so the API layer can refuse to SAVE a configuration that the
-	// collector could never receive, instead of letting it fail at push time.
+	// MaxCommandsPerEdgeDevice 是「单台边缘设备可同时轮询的指令条数」的服务端闸门。
+	// 导出给 API 层，使不可下发的配置在**保存时**就被拒，而不是推到设备才失败。
+	//
+	// 2026-10-15 变更：3 → 8。**根因不是"把数字调大"**，而是固件侧不再预分配：
+	//   改前 config_edge_device_t.commands 是静态数组 commands[MAX_COMMANDS_PER_DEVICE=3]，
+	//   每台设备无论用不用都占 3 槽，3 因此成了能力上限并被镜像到这里。
+	//   用户裁定「不要提前分配，应该动态分配」⇒ 固件改为按 manifest 实际条数 realloc
+	//   （config_mgr.c: parse_command），旧宏被校验上限 CONFIG_MAX_COMMANDS_PER_DEVICE=32 取代
+	//   （仅用于拒绝异常 manifest，不是容量上限）。scheduler 侧同步改为动态分配，
+	//   并移除了原先的静默截断（超出部分会被默默丢掉、无日志）。
+	//
+	// ⚠⚠ 当前值必须与**设备上实际运行的固件**一致，否则会制造静默失败：
+	//   闸门放宽 → 用户存得下 → 设备拒绝下发 → "保存成功但没生效"（本次要消灭的形态）。
+	//
+	// 因此这里仍是 3：动态分配固件**已改好并编译通过**（build/ehome_collector.bin），
+	//   但**尚未烧录**（S3 原生 USB 未接线，ttyACM0 被 BMS 总线模拟器占用）。
+	//   与新固件一起发布时，把本常量改为 8 即可 —— 只改这一个值，
+	//   校验路径已参数化（manifestLimits.maxCommandsPerDevice），测试按常量推导，
+	//   不需要再动任何断言。
+	//
+	// 为什么目标值是 8 而不是 16/32：单设备轮询条数受**每通道 template_ids 预算**
+	//   （固件 MAX_TEMPLATE_IDS = 8）约束 —— 8 是"单设备轮询数"不可能撑爆该预算的
+	//   最大值。再往上必须同时抬 MAX_TEMPLATE_IDS(8) 与节点级 MAX_TEMPLATES(16)，
+	//   否则同样会回到"保存成功、下发被拒"。
+	//   后续可改为由设备申报（固件已申报 max_templates/max_template_ids，
+	//   尚未申报单设备指令数），届时这里改读申报值。
 	MaxCommandsPerEdgeDevice = 3
 
 	// MaxManifestWireBytes is the largest ConfigManifest **payload** an ESP32
@@ -114,10 +137,14 @@ type manifestLimits struct {
 	maxTemplates   int
 	maxChannels    int
 	maxTemplateIDs int
+	// maxCommandsPerDevice 单设备轮询指令上限。作为**字段**而非直接读全局常量，
+	// 是为了让回归测试能把边界钉在任意值上（例如 3），从而在常量本身变化时
+	// 仍然持续验证"超限必须被拒"这条机制，而不是随常量一起漂移失效。
+	maxCommandsPerDevice int
 }
 
 func manifestLimitsFor(node models.Node) (manifestLimits, error) {
-	limits := manifestLimits{maxTemplates: maxManifestTemplates, maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs}
+	limits := manifestLimits{maxTemplates: maxManifestTemplates, maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs, maxCommandsPerDevice: MaxCommandsPerEdgeDevice}
 	if strings.TrimSpace(node.HardwareInfo) == "" {
 		return limits, nil
 	}

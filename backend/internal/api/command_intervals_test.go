@@ -1,9 +1,12 @@
 package api
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/nodemgr"
 )
 
 // fakeMultiDriver 供 C1-C4 测试使用：两个 schedulable + 一个 one-shot 模板。
@@ -125,19 +128,42 @@ func TestCountManifestCandidates_CountsOnlyEnabledSchedulable(t *testing.T) {
 	}
 }
 
+// TestValidateManifestCommandCapacity_RejectsOverCollectorLimit 守住容量门的边界：
+// 「恰好等于上限」放行、「超出一条」拒绝，且拒绝文案必须点名真实上限。
+//
+// 2026-10-15：生产常量由 3 提到 8（固件改为动态分配，见 nodemgr/sender.go）。
+// 本用例改为**从常量推导**条数，而不是硬编码 4 —— 硬编码会在常量变大后
+// 落在限内，断言随之变成假绿。推导后无论常量怎么变都继续验证机制本身。
 func TestValidateManifestCommandCapacity_RejectsOverCollectorLimit(t *testing.T) {
 	registry := drivers.NewRegistry()
 	registry.Register(&fourSchedulableDriver{})
-	if err := ValidateManifestCommandCapacity(registry, "four-sched", map[string]int{
-		"c1": 5000, "c2": 5000, "c3": 5000, "c4": 5000,
-	}, 0); err == nil {
-		t.Fatal("4 enabled polling commands must exceed the collector limit of 3")
+	limit := nodemgr.MaxCommandsPerEdgeDevice
+
+	// ⚠ 映射必须覆盖**驱动声明的每一条**：CountManifestCandidates 对"不在映射里的
+	// 指令"会回退到模板默认 interval_ms（本假驱动是 5000 ⇒ 默认即启用）。
+	// 只写 limit 条会让第 limit+1 条落到回退分支而被计入，边界断言随即失真。
+	atLimit := map[string]int{}
+	for i := 0; i < limit+1; i++ {
+		if i < limit {
+			atLimit[fmt.Sprintf("c%d", i)] = 5000
+		} else {
+			atLimit[fmt.Sprintf("c%d", i)] = 0 // 显式禁用，避免走默认值回退
+		}
 	}
-	// Exactly at the limit is allowed.
-	if err := ValidateManifestCommandCapacity(registry, "four-sched", map[string]int{
-		"c1": 5000, "c2": 5000, "c3": 5000, "c4": 0,
-	}, 0); err != nil {
-		t.Fatalf("3 enabled polling commands must be accepted: %v", err)
+	if err := ValidateManifestCommandCapacity(registry, "four-sched", atLimit, 0); err != nil {
+		t.Fatalf("%d enabled polling commands (== collector limit) must be accepted: %v", limit, err)
+	}
+
+	over := map[string]int{}
+	for i := 0; i < limit+1; i++ {
+		over[fmt.Sprintf("c%d", i)] = 5000
+	}
+	err := ValidateManifestCommandCapacity(registry, "four-sched", over, 0)
+	if err == nil {
+		t.Fatalf("%d enabled polling commands must exceed the collector limit of %d", limit+1, limit)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("at most %d", limit)) {
+		t.Fatalf("rejection must name the real limit %d, got: %v", limit, err)
 	}
 }
 
@@ -147,16 +173,22 @@ func TestValidateManifestCommandCapacity_UnknownDriverErrors(t *testing.T) {
 	}
 }
 
-// fourSchedulableDriver declares 4 schedulable commands — one more than the
-// collector supports — so the capacity gate can be exercised at the boundary.
+// fourSchedulableDriver 声明 **collector 上限 + 1** 条可调度指令，使容量门**永远**
+// 能在边界上被真实触发。
+//
+// 2026-10-15：改前硬编码 4 条（当时上限 3）。上限提到 8 后 4 条落在限内，
+// 用例会"通过但没测到门"。现在按常量推导：无论上限多少，都恰好比它多一条。
 type fourSchedulableDriver struct{ fakeMultiDriver }
 
 func (*fourSchedulableDriver) DeviceType() string { return "four-sched" }
 func (*fourSchedulableDriver) GetCommandTemplates() []drivers.CommandTemplate {
-	return []drivers.CommandTemplate{
-		{ID: "c1", Type: "read", WriteData: "B1", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
-		{ID: "c2", Type: "read", WriteData: "B2", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
-		{ID: "c3", Type: "read", WriteData: "B3", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
-		{ID: "c4", Type: "read", WriteData: "B4", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
+	templates := make([]drivers.CommandTemplate, 0, nodemgr.MaxCommandsPerEdgeDevice+1)
+	for i := 0; i < nodemgr.MaxCommandsPerEdgeDevice+1; i++ {
+		templates = append(templates, drivers.CommandTemplate{
+			ID: fmt.Sprintf("c%d", i), Type: "read",
+			WriteData: fmt.Sprintf("B%02d", i), ReadLength: 1,
+			IntervalMs: 5000, Schedulable: true,
+		})
 	}
+	return templates
 }

@@ -40,13 +40,34 @@ func (templateOverflowDriver) GetCommandTemplates() []drivers.CommandTemplate {
 type fourCommandDriver struct{ templateOverflowDriver }
 
 func (fourCommandDriver) DeviceType() string { return "four-commands" }
+
+// GetCommandTemplates 声明 **collector 上限 + 1** 条可调度指令，让"命令数超限"
+// 这条下发前门禁**永远**能被真实触发。
+//
+// 2026-10-15：改前硬编码 4 条（当时上限 3）。上限提到 8 后 4 条落在限内，
+// 用例会"通过但根本没测到门"。现在按常量推导：无论上限多少都恰好比它多一条。
 func (fourCommandDriver) GetCommandTemplates() []drivers.CommandTemplate {
-	return []drivers.CommandTemplate{
-		{ID: "one", Type: "read", WriteData: "01", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
-		{ID: "two", Type: "read", WriteData: "02", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
-		{ID: "three", Type: "read", WriteData: "03", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
-		{ID: "four", Type: "read", WriteData: "04", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
+	n := MaxCommandsPerEdgeDevice + 1
+	templates := make([]drivers.CommandTemplate, 0, n)
+	for i := 0; i < n; i++ {
+		templates = append(templates, drivers.CommandTemplate{
+			ID: fmt.Sprintf("cmd%d", i), Type: "read",
+			WriteData: fmt.Sprintf("%02X", i+1), ReadLength: 1,
+			IntervalMs: 1000, Schedulable: true,
+		})
 	}
+	return templates
+}
+
+// fourCommandDriverTemplateWriteData 返回 fourCommandDriver 声明的模板 WriteData 列表，
+// 供用例在 DB 里建出**同样条数**的 ConfigTemplate（少建一条就会变成另一种失败原因）。
+func fourCommandDriverTemplateWriteData() []string {
+	n := MaxCommandsPerEdgeDevice + 1
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, fmt.Sprintf("%02X", i+1))
+	}
+	return out
 }
 
 // mockDownlinkPublisher 记录下行消息, 用于验证 SendPeriphCmd 编码正确性。
@@ -765,7 +786,7 @@ func TestConfigManifestRejectsTooManyV2CommandsBeforePublish(t *testing.T) {
 	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "four-commands", Enabled: true, Name: "four"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	for _, writeData := range []string{"01", "02", "03", "04"} {
+	for _, writeData := range fourCommandDriverTemplateWriteData() {
 		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: writeData, ReadLength: 1}).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -995,8 +1016,9 @@ func TestConfigManifestRejectionOverwritesStaleInSyncState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Now make the CURRENT config undeliverable: 4 schedulable commands against
-	// the collector's limit of 3 (exactly the production failure shape).
+	// Now make the CURRENT config undeliverable: collector limit + 1 schedulable
+	// commands (exactly the production failure shape). 条数按常量推导，
+	// 不写死 —— 否则上限变化后这里会变成"可下发"，用例静默失去意义。
 	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
 		t.Fatal(err)
 	}

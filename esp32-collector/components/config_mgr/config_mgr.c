@@ -105,6 +105,27 @@ void config_mgr_init(void)
 static config_manifest_t *active_manifest(void) { return &s_manifests[s_active_idx]; }
 static config_manifest_t *inactive_manifest(void) { return &s_manifests[1 - s_active_idx]; }
 
+/* 释放 manifest 持有的所有动态指令数组（2026-10-15：commands 由静态数组改为按需分配）。
+ *
+ * ⚠ 必须在每一次 `memset(manifest, 0, sizeof(*manifest))` **之前**调用，否则
+ *   memset 会把指针抹成 NULL，堆块永久泄漏 —— 而这条路径在**每次配置下发**都会走，
+ *   泄漏会随下发次数线性累积，最终把内部堆吃穿。
+ *
+ * 只遍历 `channel_count`/`edge_device_count`（边界来自解析时的上限校验），
+ * 不依赖数组已清零；重复调用安全（free 后立即置 NULL 并归零计数）。 */
+static void free_manifest_commands(config_manifest_t *m)
+{
+    if (m == NULL) return;
+    for (int c = 0; c < m->channel_count && c < MAX_CHANNELS; c++) {
+        config_channel_t *ch = &m->channels[c];
+        for (int e = 0; e < ch->edge_device_count && e < MAX_EDGE_DEVICES_PER_CH; e++) {
+            free(ch->edge_devices[e].commands);
+            ch->edge_devices[e].commands = NULL;
+            ch->edge_devices[e].command_count = 0;
+        }
+    }
+}
+
 bool config_mgr_stage_manifest(const uint8_t *data, size_t len)
 {
     if (data == NULL || len < 1 || !manifests_ready()) {
@@ -117,16 +138,21 @@ bool config_mgr_stage_manifest(const uint8_t *data, size_t len)
 
     /* Parse into inactive buffer (readers still see old config) */
     config_manifest_t *target = inactive_manifest();
+    /* 先释放上一轮解析在这块缓冲里留下的动态指令数组，再清零（顺序不可颠倒：清零后再
+     * free 就等于丢指针）。 */
+    free_manifest_commands(target);
     memset(target, 0, sizeof(*target));
 
     if (!parse_manifest(target, data, len)) {
         ESP_LOGE(TAG, "Failed to parse manifest");
-        memset(target, 0, sizeof(*target));  /* clean up failed parse */
+        free_manifest_commands(target);      /* 失败的解析可能已分配了部分指令数组 */
+        memset(target, 0, sizeof(*target));
         return false;
     }
 
     if (!validate_peripheral_pin_ownership(target)) {
         ESP_LOGE(TAG, "Manifest peripheral pin conflict");
+        free_manifest_commands(target);
         memset(target, 0, sizeof(*target));
         return false;
     }
@@ -163,8 +189,10 @@ bool config_mgr_commit_staged_manifest(void)
 
 void config_mgr_discard_staged_manifest(void)
 {
-    if (s_staged_idx >= 0 && manifests_ready())
+    if (s_staged_idx >= 0 && manifests_ready()) {
+        free_manifest_commands(&s_manifests[s_staged_idx]);
         memset(&s_manifests[s_staged_idx], 0, sizeof(config_manifest_t));
+    }
     s_staged_idx = -1;
 }
 
@@ -378,9 +406,30 @@ static bool parse_field_channel(config_manifest_t *target, const frame_field_t *
 
 static bool parse_command(config_edge_device_t *cur_ed, const uint8_t *data, size_t len)
 {
-    if (cur_ed->command_count >= MAX_COMMANDS_PER_DEVICE) return false;
+    /* 校验闸（非预分配）：拒绝异常 manifest，防堆被吃穿。见头文件说明。 */
+    if (cur_ed->command_count >= CONFIG_MAX_COMMANDS_PER_DEVICE) return false;
 
+    /* 按需生长：只分配**实际条数**，不再预占固定槽位（2026-10-15 用户裁定）。
+     *
+     * 为什么用 realloc 逐条生长而不是先数后配：这是流式解码（field 到达即处理），
+     * 预先计数需要二次扫描整份 manifest。条数受上面的闸限制（≤32），
+     * 且只在**配置下发时**发生（不是每帧采样），拷贝代价可忽略。
+     *
+     * ⚠ 两个必须做对的地方：
+     *   ① realloc 失败要 **fail-closed**：整份 manifest 被拒（调用方会释放已分配部分），
+     *      绝不能只丢这一条 —— 那会静默产生"少了几条轮询"的错误配置。
+     *   ② 新槽必须清零：realloc 只保证旧内容，未初始化字节会让 protobuf 默认值
+     *      （enabled=false / interval=0）变成随机值。 */
+    config_command_t *grown = realloc(cur_ed->commands,
+                                      ((size_t)cur_ed->command_count + 1) * sizeof(config_command_t));
+    if (grown == NULL) {
+        ESP_LOGE(TAG, "realloc failed for edge_device=%lu commands (count=%d)",
+                 (unsigned long)cur_ed->edge_device_id, (int)cur_ed->command_count);
+        return false;
+    }
+    cur_ed->commands = grown;
     config_command_t *cur_cmd = &cur_ed->commands[cur_ed->command_count];
+    memset(cur_cmd, 0, sizeof(*cur_cmd));
     frame_decoder_t cdec2;
     if (frame_decoder_init_sub(&cdec2, data, len) != FRAME_OK) return false;
     frame_field_t cf2;

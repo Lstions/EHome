@@ -152,9 +152,16 @@ func TestInverterIntervalMapMatchesDriverCommandIDs(t *testing.T) {
 	}
 }
 
-// TestInverterEdgeDeviceCapacityAllowsThreePolls 守住编码器上限（MaxCommandsPerEdgeDevice=3）
-// 与"用户可选多条"之间的边界：默认只开 1 条，用户最多能开 3 条。
+// TestInverterEdgeDeviceCapacityAllowsThreePolls 守住编码器侧「单设备轮询条数上限」
+// 这条机制：恰好在限内必须放行，超出一条必须被拒。
+//
+// 2026-10-15：生产常量 MaxCommandsPerEdgeDevice 由 3 提到 8（固件改为动态分配，
+// 见 sender.go 注释）。本测试**刻意把边界钉在 3**，通过 manifestLimits.maxCommandsPerDevice
+// 传入 —— 这样即使常量继续变化，本用例仍然持续验证机制本身，
+// 不会因为"常量变大 ⇒ 断言自动满足"而静默失效（那正是最危险的假绿）。
 func TestInverterEdgeDeviceCapacityAllowsThreePolls(t *testing.T) {
+	// 本用例使用的边界值（与生产常量解耦）
+	const testLimit = 3
 	registry, _, _ := newInverterEdgeFixture()
 	drv, _ := registry.Get("techfine_inverter")
 	all := getCommandTemplatesFromDriver(drv)
@@ -179,8 +186,8 @@ func TestInverterEdgeDeviceCapacityAllowsThreePolls(t *testing.T) {
 	if n != 3 {
 		t.Fatalf("3 enabled polls should yield exactly 3 candidates, got %d", n)
 	}
-	if n > MaxCommandsPerEdgeDevice {
-		t.Fatalf("candidate count %d exceeds collector limit %d", n, MaxCommandsPerEdgeDevice)
+	if n > testLimit {
+		t.Fatalf("candidate count %d exceeds collector limit %d", n, testLimit)
 	}
 
 	// 第 4 条启用时，候选数会到 4 —— 但 CommandIsManifestCandidate 只是**谓词**，
@@ -199,9 +206,9 @@ func TestInverterEdgeDeviceCapacityAllowsThreePolls(t *testing.T) {
 	if n4 != 4 {
 		t.Fatalf("predicate should count all 4 enabled polls (capacity is enforced elsewhere), got %d", n4)
 	}
-	if n4 <= MaxCommandsPerEdgeDevice {
+	if n4 <= testLimit {
 		t.Fatalf("fixture is not exercising the over-limit case: %d candidates vs limit %d",
-			n4, MaxCommandsPerEdgeDevice)
+			n4, testLimit)
 	}
 	// 真正的编码前门禁必须拒绝它。用真实的门禁函数（快照版）验证 ——
 	// 它正是 sendConfigManifest 在下发前调用的那一个。
@@ -222,9 +229,10 @@ func TestInverterEdgeDeviceCapacityAllowsThreePolls(t *testing.T) {
 	// 4 条启用 -> 必须被拒
 	err := validateManifestScheduleCapacityFromSnapshot(snap, reg2,
 		[]models.Channel{ch2}, true, manifestLimits{maxTemplates: maxManifestTemplates,
-			maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs})
+			maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs,
+			maxCommandsPerDevice: testLimit})
 	if err == nil {
-		t.Fatal("encoder-side capacity gate accepted 4 polling commands; the collector limit is 3")
+		t.Fatalf("encoder-side capacity gate accepted 4 polling commands; the limit under test is %d", testLimit)
 	}
 	// 3 条启用 -> 必须放行（否则用户根本无法把 3 条都开起来）
 	three := map[string]int{}
@@ -242,8 +250,9 @@ func TestInverterEdgeDeviceCapacityAllowsThreePolls(t *testing.T) {
 	}
 	if err := validateManifestScheduleCapacityFromSnapshot(snap3, reg2,
 		[]models.Channel{ch2}, true, manifestLimits{maxTemplates: maxManifestTemplates,
-			maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs}); err != nil {
-		t.Fatalf("3 polling commands must be accepted (collector limit is 3): %v", err)
+			maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs,
+			maxCommandsPerDevice: testLimit}); err != nil {
+		t.Fatalf("3 polling commands must be accepted (limit under test is %d): %v", testLimit, err)
 	}
 }
 

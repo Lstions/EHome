@@ -38,7 +38,23 @@ extern "C" {
 #define MAX_TEMPLATE_IDS  8
 #define MAX_DMA_CONFIGS   8
 #define MAX_EDGE_DEVICES_PER_CH 5
-#define MAX_COMMANDS_PER_DEVICE 3
+
+/* 单设备轮询指令数的**校验上限**（不是预分配！）。
+ *
+ * 2026-10-15 用户裁定：「不要提前分配，应该动态分配」。
+ * 改前 config_edge_device_t.commands 是静态数组 commands[3]，于是
+ *   ① 每台设备无论用不用都占 3 个槽（12B×3×5设备×5通道 = 900B/份 manifest，
+ *      双缓冲 ×2 = 1.8KB 常驻，且它跟着 config_manifest_t 一起被整体 memcpy）；
+ *   ② 3 被镜像到后端，成了**保存时的硬容量门**：启用超过 3 条整单 400。
+ * 现在 commands 是**按 manifest 实际条数精确分配的指针**（见 parse_command 的
+ * realloc 生长），不再预占。
+ *
+ * 本宏只用于**拒绝异常/恶意 manifest**，防止解析出几千条把内部堆吃穿：
+ * manifest 线上最大 4096B、单条指令子消息约 8B ⇒ 理论上限数百条，
+ * 而 config_command_t 是 12B ⇒ 必须有一道闸。它不是容量上限、不是预分配。
+ * 取 32：远超任何真实 BMS/逆变器的轮询指令数，同时把单设备最坏堆占用
+ * 限在 32×12B = 384B。 */
+#define CONFIG_MAX_COMMANDS_PER_DEVICE 32
 
 
 /* === Template === */
@@ -61,7 +77,14 @@ typedef struct {
 typedef struct {
     uint32_t edge_device_id;
     uint32_t hardware_id;
-    config_command_t commands[MAX_COMMANDS_PER_DEVICE];
+    /* 动态分配，长度恰为 command_count（0 时为 NULL）。
+     *
+     * ⚠ 所有权在 config_mgr。任何把 config_manifest_t 整体 memcpy 的路径都会变成
+     *   浅拷贝（两份 manifest 指向同一块）⇒ 必须改深拷贝，或先 free 再 memset。
+     *   当前唯一的整体拷贝是 config_mgr_snapshot_active()，它在生产路径**无人调用**
+     *   （头注释已说明配置事务不再用它）。stage / discard / parse-fail 三条
+     *   memset 路径均已先 free_manifest_commands()。 */
+    config_command_t *commands;
     uint8_t  command_count;
 } config_edge_device_t;
 
