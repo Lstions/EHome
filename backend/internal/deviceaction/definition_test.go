@@ -214,12 +214,14 @@ func TestSetActionRequiresTrustedVerifier(t *testing.T) {
 func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definitions := registry.List("jiabaida_bms")
-	// T1 (2026-09-23): the catalogue is pinned at exactly 26 actions, all enabled.
+	// T1 (2026-09-23): the catalogue is pinned at exactly 28 actions, all enabled.
+	// 2026-10-16: 26 -> 28，新增 read_internal_resistance / read_sn，
+	// 供参数表单的「读取」回填 write_internal_resistance / write_sn。
 	// A loose lower bound would let an action disappear unnoticed; an exact count
 	// plus the per-action asserts below make both "vanished" and "silently
 	// re-gated" fail here instead of in production.
-	if len(definitions) != 26 {
-		t.Fatalf("got %d Jiabaida actions, want exactly 26: %+v", len(definitions), definitions)
+	if len(definitions) != 28 {
+		t.Fatalf("got %d Jiabaida actions, want exactly 28", len(definitions))
 	}
 	// Every jiabaida action must be reachable: no AvailabilityCode may survive,
 	// and Enabled must be true.  (deviceaction recomputes Enabled for set/reset

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ControlActions moves the documented, side-effect-free V19 queries onto the
@@ -165,6 +166,14 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 				{Name: "enabled", Type: "boolean", Required: true},
 				{Name: "days", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 			}},
+		ControlAction{ID: "read_sn", Version: 1, Name: "读取 SN 码",
+			Description: "嘉佰达 0xA2；受控工厂模式工作流（进厂→读→出厂）",
+			Semantics:   "read", Risk: "medium", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3},
+		ControlAction{ID: "read_internal_resistance", Version: 1, Name: "读取电芯内阻",
+			Description: "F6 读 30 串内阻(0.1mΩ 有符号)",
+			Semantics:   "read", Risk: "low", Enabled: true, Verification: "ack", ExecutionShape: "single",
+			TXData: jiabaidaReadFrame(0xF6), ReadSize: 67, RXTimeoutMS: 2000},
 		ControlAction{ID: "write_sn", Version: 1, Name: "写入 SN 码",
 			Description: "进工厂→写 SN(ASCII,≤31 字符)→退出工厂",
 			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
@@ -643,6 +652,15 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
+	case "read_sn":
+		return CompiledControlPlan{
+			RequiresFinally: true,
+			Steps: []CompiledControlPlanStep{
+				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "read_sn", Kind: "readback", TXData: jiabaidaReadFrame(0xA2), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
+				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForRead(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			},
+		}, nil
 	case "write_sn":
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(params, &fields); err != nil {
@@ -776,7 +794,7 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 	expected, ok := map[string]byte{
 		"read_basic_info": 0x03, "read_cell_voltage": 0x04, "read_hardware_version": 0x05,
 		"read_comprehensive": 0x0F, "read_protection_count": 0xAA,
-		"read_test_mos_status": 0x0C, "read_custom_attributes": 0xF0,
+		"read_test_mos_status": 0x0C, "read_custom_attributes": 0xF0, "read_internal_resistance": 0xF6,
 	}[actionID]
 	if !ok {
 		return nil, fmt.Errorf("unknown jiabaida control action %q", actionID)
@@ -958,6 +976,42 @@ func (d *JiabaidaBMSDriver) verifyExtendedBatchActions(actionID string, params j
 			return nil, true, fmt.Errorf("jiabaida %s readback: %w", actionID, err)
 		}
 		return append([]SensorData{{Name: "write_ack", Value: 1, Unit: "ack"}}, readback...), true, nil
+	case "read_internal_resistance":
+		// 读回的名字必须与 write_internal_resistance 的表单字段一致（resistance_N），
+		// 否则前端「读取」回填对不上（parse0xF6 原始名是 cell_resistance_N）。
+		sensors, err := d.ParseData(raw)
+		if err != nil {
+			return nil, true, err
+		}
+		for i := range sensors {
+			sensors[i].Name = strings.Replace(sensors[i].Name, "cell_resistance_", "resistance_", 1)
+		}
+		return sensors, true, nil
+	case "read_sn":
+		steps, err := decodeBatchPlanEnvelope(raw)
+		if err != nil {
+			return nil, true, err
+		}
+		if len(steps) != 3 {
+			return nil, true, fmt.Errorf("jiabaida read_sn requires three verified responses, got %d", len(steps))
+		}
+		if err := jiabaidaExpectZeroAck(steps[0], 0x00); err != nil {
+			return nil, true, fmt.Errorf("jiabaida read_sn enter factory: %w", err)
+		}
+		if _, err := jiabaidaResponseData(steps[1], 0xA2); err != nil {
+			return nil, true, fmt.Errorf("jiabaida read_sn readback: %w", err)
+		}
+		sensors, err := d.ParseData(steps[1])
+		if err != nil {
+			return nil, true, fmt.Errorf("jiabaida read_sn readback: %w", err)
+		}
+		// 字段名对齐 write_sn 的 "sn"（parse0xA2 原始名是 serial_number）。
+		for i := range sensors {
+			if sensors[i].Name == "serial_number" {
+				sensors[i].Name = "sn"
+			}
+		}
+		return sensors, true, nil
 	case "write_custom_attributes":
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(params, &fields); err != nil {

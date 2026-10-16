@@ -648,7 +648,16 @@ func TestJiabaidaControlActionCatalog(t *testing.T) {
 			}
 			continue
 		}
-		if action.ID == "read_test_mos_status" || action.ID == "read_custom_attributes" {
+		if action.ID == "read_sn" {
+			// read_sn 是 bounded_sequence（进工厂→读→退出工厂），没有单帧 TXData；
+			// Risk 与既有工厂模式读（read_protection_parameters）一致为 medium ⇒ elevated + 需确认令牌。
+			// 因此只校验它仍是只读、低风险、禁用位为空。
+			if !action.Enabled || action.AvailabilityCode != "" || action.Semantics != "read" || action.Risk != "medium" || action.ExecutionShape != "bounded_sequence" {
+				t.Fatalf("read_sn must stay an enabled low-risk read sequence: %+v", action)
+			}
+			continue
+		}
+		if action.ID == "read_test_mos_status" || action.ID == "read_custom_attributes" || action.ID == "read_internal_resistance" {
 			// Manual reads are enabled (2026-09-23): they ride the same verified
 			// single-step telemetry path and perform no write.
 			if !action.Enabled || action.AvailabilityCode != "" || action.Semantics != "read" || action.Risk != "low" || len(action.TXData) == 0 || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
@@ -705,8 +714,9 @@ func TestJiabaidaFormerlyGuardedActionsAreEnabledAtDriverLayer(t *testing.T) {
 	for _, action := range d.ControlActions() {
 		byID[action.ID] = action
 	}
-	if len(byID) != 26 {
-		t.Fatalf("want 26 jiabaida control actions, got %d", len(byID))
+	// 28 = 26 + read_internal_resistance / read_sn（2026-10-16 为参数表单的「读取」新增）
+	if len(byID) != 28 {
+		t.Fatalf("want 28 jiabaida control actions, got %d", len(byID))
 	}
 	for _, id := range formerlyGuarded {
 		action, ok := byID[id]

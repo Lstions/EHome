@@ -1432,9 +1432,13 @@ async function readOpFormValues() {
   opFormPrefill.value = null
   clearError()
   try {
-    // true ⇒ 先取后端确认令牌（read_*_parameters 是 elevated，后端强制单次令牌）。
-    // 读取不改设备，这里不额外弹本地确认框。
-    const ok = await dispatch(readId, {}, true)
+    // 是否取确认令牌必须**按该读动作自己的 requires_confirmation**，不能写死 true：
+    //   read_protection_parameters / read_sn 是 elevated ⇒ 需要令牌；
+    //   read_internal_resistance 是单步 low-risk 读 ⇒ **不需要**令牌，此时若仍去
+    //   申请，后端直接 409 "confirmation is not required for this action"，读取静默失败。
+    // 读取不改设备，两种情况下都不额外弹本地确认框。
+    const readAction = catalog.value.find((a) => a.definition.id === readId)
+    const ok = await dispatch(readId, {}, readAction?.definition.requires_confirmation === true)
     if (!ok) {
       feedback.error('读取现有值失败：' + (lastError.value || '未知原因'))
       return
