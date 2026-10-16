@@ -448,6 +448,10 @@
     <ActionForm
       v-model:visible="opFormVisible"
       :definition="opFormTarget?.definition ?? null"
+      :can-read="opFormCanRead"
+      :reading="opFormReading"
+      :prefill="opFormPrefill"
+      @read="readOpFormValues"
       @submit="submitOpForm"
     />
   </div>
@@ -473,6 +477,7 @@ import { useWebSocketStore } from '@/stores/websocket'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
 import { useControlAction } from '@/composables/useControlAction'
 import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
+import { deviceOperationApi } from '@/api/deviceOperation'
 import type { DataItem } from '@/types/realtime'
 
 // ════════════ 通用小工具 ════════════
@@ -1357,6 +1362,8 @@ function onOpClick(op: OpDef) {
   if (op.movedTo || !op.available) return
   if (op.needsParams) {
     opFormTarget.value = op
+    // 每次打开都清掉上一次的读取结果，避免把 A 动作的值带进 B 动作的表单
+    opFormPrefill.value = null
     opFormVisible.value = true
     return
   }
@@ -1368,6 +1375,82 @@ function submitOpForm(params: Record<string, unknown>) {
   opFormVisible.value = false
   if (!op) return
   void runOp(op, params)
+}
+
+/* ══════════ 读取现有值 → 回填表单（2026-10-16 用户要求） ══════════
+   用户原话："参数应该先读取现有值，弹窗内取消最左边增加'读取'"。
+
+   为什么必须有：写入类动作的参数表动辄 15/30/33 项（保护参数 / 系统参数 / 内阻表），
+   空白手填既慢又极易填错；而这些值设备本来就有，读一次就能拿到。
+   这里把「写入动作」配对到「读动作」——后端命名是一一对应的
+   （write_protection_parameters ↔ read_protection_parameters 等），
+   按 write_→read_ 推导并**要求该读动作在当前目录里存在且可用**，
+   不存在就不显示「读取」按钮（避免给出一个点了没反应的按钮）。
+
+   结果取回：读动作以 verified_result 返回 [{name, value}]，
+   字段名与写入 schema 完全对应（实测 read_protection_parameters 回 23 项，
+   cell_ov_protect / cell_uv_delay / chg_ot_protect 等与写表单同名）。 */
+
+const opFormReading = ref(false)
+const opFormPrefill = ref<Record<string, unknown> | null>(null)
+
+/** 写入动作对应的读动作 id；没有可用读动作时返回空串 ⇒ 不显示「读取」按钮 */
+function readActionFor(writeId: string): string {
+  if (!writeId.startsWith('write_')) return ''
+  const candidate = 'read_' + writeId.slice('write_'.length)
+  const hit = catalog.value.find((a) => a.definition.id === candidate && a.available)
+  return hit ? candidate : ''
+}
+
+const opFormCanRead = computed(() => !!opFormTarget.value && !!readActionFor(opFormTarget.value.id))
+
+/** 轮询该读操作的终态并取回 verified_result（有界等待，失败返回 null） */
+async function waitReadResult(readId: string): Promise<Record<string, unknown> | null> {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 1000))
+    const list = await deviceOperationApi.list(deviceId.value)
+    const op = list.find((o) => o.action_id === readId)
+    if (!op) continue
+    if (['QUEUED', 'DISPATCHED', 'DEVICE_ACCEPTED', 'VERIFYING'].includes(op.status)) continue
+    if (op.status !== 'SUCCEEDED') return null
+    const out: Record<string, unknown> = {}
+    for (const v of op.verified_result ?? []) {
+      if (v.string_value !== undefined && v.string_value !== '') out[v.name] = v.string_value
+      else out[v.name] = v.value
+    }
+    return Object.keys(out).length ? out : null
+  }
+  return null
+}
+
+async function readOpFormValues() {
+  const op = opFormTarget.value
+  if (!op || opFormReading.value) return
+  const readId = readActionFor(op.id)
+  if (!readId) return
+  opFormReading.value = true
+  opFormPrefill.value = null
+  clearError()
+  try {
+    // true ⇒ 先取后端确认令牌（read_*_parameters 是 elevated，后端强制单次令牌）。
+    // 读取不改设备，这里不额外弹本地确认框。
+    const ok = await dispatch(readId, {}, true)
+    if (!ok) {
+      feedback.error('读取现有值失败：' + (lastError.value || '未知原因'))
+      return
+    }
+    const values = await waitReadResult(readId)
+    if (!values) {
+      feedback.error('已下发读取，但未取回可用值（设备未响应或读取被拒）')
+      return
+    }
+    opFormPrefill.value = values
+    feedback.success('已读取设备现有值，共 ' + Object.keys(values).length + ' 项，可直接修改后提交')
+  } catch (e) {
+    feedback.error('读取现有值失败：' + String(e))
+  } finally {
+    opFormReading.value = false
+  }
 }
 
 async function runOp(op: OpDef, params: Record<string, unknown> = {}) {

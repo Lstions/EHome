@@ -140,4 +140,24 @@ describe('ActionForm', () => {
     expect(wrapper.findAll('.el-form-item')).toHaveLength(0)
     expect(wrapper.text()).not.toContain('此动作的参数类型尚未获得客户端支持')
   })
+
+  it('prefill 回填读取到的现有值，提交时带上', async () => {
+    const onSubmit = vi.fn()
+    const w = mountForm({ onSubmit })
+    await w.setProps({ prefill: { mode: 'manual', threshold: 42 } })
+    await nextTick()
+    await submitButton(w).trigger('click')
+    expect(onSubmit).toHaveBeenCalledWith({ mode: 'manual', threshold: 42 })
+  })
+
+  it('再次 prefill 只覆盖快照中出现的字段，不清空其它已填值', async () => {
+    const onSubmit = vi.fn()
+    const w = mountForm({ onSubmit })
+    await w.setProps({ prefill: { mode: 'manual', threshold: 42 } })
+    await nextTick()
+    await w.setProps({ prefill: { mode: 'auto' } })
+    await nextTick()
+    await submitButton(w).trigger('click')
+    expect(onSubmit).toHaveBeenCalledWith({ mode: 'auto', threshold: 42 })
+  })
 })
