@@ -174,25 +174,22 @@
             </span>
             <span v-else class="head-right cell-summary">暂无单体电压数据</span>
           </div>
-          <div class="cell-chart-scroll">
-            <div class="cell-chart">
-              <div v-for="c in cells" :key="c.index" class="cell-col" :class="cellClass(c)">
-                <span class="cell-value" :class="{ show: isExtreme(c) }">{{ c.voltage.toFixed(3) }}</span>
-                <div class="cell-bar-track">
-                  <div class="cell-bar" :style="{ height: cellBarHeight(c.voltage) }"></div>
-                </div>
-                <span class="cell-idx">{{ c.index }}</span>
-              </div>
-            </div>
+          <div class="cell-chart-host">
+            <BmsCellVoltageChart
+              v-if="cellVoltages.length"
+              :voltages="cellVoltages"
+              :cell-count="cellVoltages.length"
+              height="300px"
+            />
+            <div v-else class="cell-chart-empty">暂无单体电压数据</div>
           </div>
           <div class="cell-legend">
             <span class="lg"><i class="swatch swatch-normal"></i>正常</span>
-            <span class="lg"><i class="swatch swatch-high"></i>组内相对最高</span>
-            <span class="lg"><i class="swatch swatch-low"></i>组内相对最低</span>
-            <span class="lg"><i class="swatch swatch-danger"></i>越限</span>
-            <span class="cell-thresholds">单体过压 3.650V · 单体欠压 2.500V</span>
+            <span class="lg"><i class="swatch swatch-high"></i>偏高 &gt; 3.600V</span>
+            <span class="lg"><i class="swatch swatch-danger"></i>偏低 &lt; 3.000V</span>
+            <span class="cell-thresholds">参考线 3.000V / 3.600V（沿用旧页 BmsCellVoltageChart）</span>
           </div>
-          <p class="card-footnote">橙色 / 青色只表示组内相对高低，<b>不等于故障</b>；红色才是越限。</p>
+          <p class="card-footnote">复用旧 BMS 页柱状图口径：Y 轴自适应、上下限虚线标注、容器变窄时只保留越限与最高/最低标签，精确值可悬停查看。</p>
         </div>
 
         <div class="card temp-card">
@@ -213,6 +210,11 @@
           <p class="card-footnote">判定：&gt;45℃ 偏高（告警）· &gt;60℃ 过高（危险）。正常温区用成功色，不用危险色。</p>
         </div>
       </section>
+
+      <!-- 图表：业务逻辑参考旧 BMS 页面（BmsCellVoltageHistoryChart / HistoryChartSection）重建，
+           复用 LineChart / TimeRangeSelector / useHistoryData / useTimeRange / computeAdaptiveYAxisRange。
+           容器高度固定，避免内容变化撑变页面高度而破坏 overflow-anchor:none 防跳动。 -->
+      <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
 
       <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
       <section class="row stream-poll">
@@ -470,6 +472,9 @@ import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
+import BmsChartsPanel from './BmsChartsPanel.vue'
+// 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
+import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
 import { feedback, extractErrorMessage } from '@/utils/feedback'
 import { edgeDeviceApi, type EdgeDevice, type CommandTemplateWithInterval } from '@/api/edgeDevice'
 import { useRealtimeData } from '@/composables/useRealtimeData'
@@ -632,6 +637,8 @@ const maxCell = computed<CellVoltage>(() =>
 const minCell = computed<CellVoltage>(() =>
   cells.value.length ? cells.value.reduce((a, b) => (b.voltage < a.voltage ? b : a)) : { index: 0, voltage: 0 })
 const diff = computed(() => maxCell.value.voltage - minCell.value.voltage)
+/** 供旧页 BmsCellVoltageChart 使用的纯数值序列 */
+const cellVoltages = computed(() => cells.value.map((c) => c.voltage))
 const soc = computed(() => num(latestData.value?.rsoc ?? latestData.value?.soc))
 const socProgress = computed(() => (soc.value === null ? undefined : Math.max(0, Math.min(100, Math.round(soc.value)))))
 const nominalCapacity = computed(() => num(latestData.value?.nominal_capacity))
@@ -674,30 +681,8 @@ const temps = computed<TempProbe[]>(() => {
   return out
 })
 
-// ── 电芯柱状图（相对高度；只标最高/最低） ──
-const cellDomain = computed(() => {
-  if (!cells.value.length) return { lo: 0, hi: 1 }
-  const vs = cells.value.map((c) => c.voltage)
-  const lo = Math.min(...vs)
-  const hi = Math.max(...vs)
-  const pad = Math.max(0.04, (hi - lo) * 0.6)
-  return { lo: lo - pad, hi: hi + pad }
-})
-function cellBarHeight(v: number): string {
-  const { lo, hi } = cellDomain.value
-  const pct = ((v - lo) / (hi - lo)) * 100
-  const clamped = Math.max(8, Math.min(100, pct))
-  return clamped + '%'
-}
-function cellClass(c: CellVoltage): string {
-  if (c.voltage > 3.6 || c.voltage < 2.5) return 'is-danger'
-  if (c.index === maxCell.value.index) return 'is-high'
-  if (c.index === minCell.value.index) return 'is-low'
-  return ''
-}
-function isExtreme(c: CellVoltage): boolean {
-  return c.index === maxCell.value.index || c.index === minCell.value.index
-}
+// 电芯电压分布改由旧页 BmsCellVoltageChart 渲染（自适应 Y 轴 + 上下限标注 + 标签降级），
+// 页面不再自带一套手绘柱状图。
 
 // ════════════ 诉求①：MOS 直控（真机 fet_status + set_mos_policy） ════════════
 const opStore = useDeviceOperationStore()
@@ -1823,28 +1808,17 @@ onUnmounted(() => {
 .protect-name { font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .protect-bit { font-size: 11px; color: var(--el-text-color-secondary); font-family: 'SF Mono', Consolas, Monaco, monospace; }
 
-/* ══════════ 电芯电压分布 ══════════ */
+/* ══════════ 电芯电压分布（图表复用旧页 BmsCellVoltageChart） ══════════ */
 .cell-summary { font-size: 12px; color: var(--el-text-color-secondary); }
-.cell-chart-scroll { overflow-x: auto; }
-.cell-chart { display: flex; align-items: flex-end; gap: 6px; height: 190px; min-width: 520px; padding-top: 20px; }
-.cell-col { flex: 1; height: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; justify-content: flex-end; min-width: 0; }
-.cell-value { font-size: 10px; line-height: 14px; height: 14px; color: var(--el-text-color-secondary); opacity: 0; white-space: nowrap; }
-.cell-value.show { opacity: 1; }
-.cell-bar-track { position: relative; width: 100%; max-width: 26px; flex: 1; min-height: 40px; background: var(--el-fill-color-light); border-radius: 4px 4px 0 0; }
-.cell-bar { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 4px 4px 0 0; background: var(--el-color-primary); transition: height 0.3s ease; }
-.cell-idx { font-size: 10px; color: var(--el-text-color-secondary); }
-.cell-col.is-high .cell-bar { background: var(--el-color-warning); }
-.cell-col.is-low .cell-bar { background: var(--el-color-primary-light-3); }
-.cell-col.is-danger .cell-bar { background: var(--el-color-danger); }
-.cell-col.is-high .cell-value { color: var(--el-color-warning); }
-.cell-col.is-low .cell-value { color: var(--el-color-primary); }
-.cell-col.is-danger .cell-value { color: var(--el-color-danger); }
+/* 固定高度：图表异步渲染不得改变卡片高度（本页依赖 overflow-anchor:none 防跳动） */
+.cell-chart-host { height: 300px; }
+.cell-chart-empty { height: 300px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 12px; }
 .cell-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--el-text-color-secondary); }
 .lg { display: inline-flex; align-items: center; gap: 5px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-.swatch-normal { background: var(--el-color-primary); }
+/* 与 BmsCellVoltageChart 口径一致：正常=成功色，>3.6V=告警色，<3.0V=危险色 */
+.swatch-normal { background: var(--el-color-success); }
 .swatch-high { background: var(--el-color-warning); }
-.swatch-low { background: var(--el-color-primary-light-3); }
 .swatch-danger { background: var(--el-color-danger); }
 .cell-thresholds { margin-left: auto; }
 
