@@ -38,7 +38,7 @@ export const BANNED_TERMS: Record<string, string> = {
 export const REGISTERED_EXCEPTIONS: { term: string; count: number; reason: string }[] = [
   {
     term: '设备类型',
-    count: 13,
+    count: 14,
     reason: '需产品措辞裁定；改动会触及 2 条逐字断言文案的测试，见 docs/分析/后续工作计划与方案-2026-09-15.md',
   },
 ]

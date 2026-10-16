@@ -71,6 +71,7 @@ export const REGISTERED_ROUTE_EXCLUSIONS: Record<string, string> = {
   '/dev/mock-bms': 'DEV-only 页面（import.meta.env.DEV 门控），生产构建里不存在',
   '/dev/bms-demo': 'DEV-only 设计稿预览页（同上），不进受审分母',
   '/dev/bms-demo2': 'DEV-only BMS 重设计评审 demo（2026-10-15，同上），不进受审分母',
+  'dev/edge-device-cards': 'DEV-only 边缘设备卡片重设计评审 demo（2026-10-16，MainLayout 下的相对子路由，与 /dev/bms-demo2 同属 DEV 门控），不进受审分母',
   '/:pathMatch(.*)*': '404 兜底路由，非真实页面',
   'node/:id': '参数化详情路由：需要实体 ID，契约 §4 约定由列表页进入审计，不进冻结清单',
   'node/:id/overview': '参数化详情路由（同上）',

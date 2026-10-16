@@ -142,6 +142,15 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/profile/Profile.vue'),
         meta: { title: '个人设置', icon: 'Setting', hiddenInMenu: true },
       },
+      // 边缘设备「卡片列表重设计」评审 demo（2026-10-16）。
+      // 挂在 MainLayout 之下 ⇒ 评审时与生产列表页同一外壳（侧栏/顶栏），
+      // 但路由与页面都不进生产（DEV 门禁 + hidden）。
+      ...(import.meta.env.DEV ? [{
+        path: 'dev/edge-device-cards',
+        name: 'EdgeDeviceCardsDemo',
+        component: () => import('@/dev/EdgeDeviceCardsDemo.vue'),
+        meta: { title: '边缘设备卡片重设计', requiresAuth: true, hidden: true },
+      }] : []),
     ],
   },
   // 403 无权限
