@@ -161,8 +161,9 @@
         </div>
       </section>
 
-      <!-- 电芯电压分布 + 温度探头 -->
-      <section class="row cell-temp">
+      <!-- 电芯电压分布：图表卡是固定高度的"异类"，独占一行 ——
+           与内容驱动卡片同行时，矮卡下方必然留出页面底色（padding 无法吸收固定高度差）。 -->
+      <section class="row cell-chart-row">
         <div class="card cell-card">
           <div class="card-head">
             <span class="card-title">电芯电压分布</span>
@@ -191,7 +192,10 @@
           </div>
           <p class="card-footnote">复用旧 BMS 页柱状图口径：Y 轴自适应、上下限虚线标注、容器变窄时只保留越限与最高/最低标签，精确值可悬停查看。</p>
         </div>
+      </section>
 
+      <!-- 温度探头：内容驱动卡，与 MOS/保护等卡同属流式（auto-fill 列数） -->
+      <section class="row temp-row">
         <div class="card temp-card">
           <div class="card-head">
             <span class="card-title">温度探头</span>
@@ -1742,8 +1746,8 @@ onUnmounted(() => {
 /* 各组按设计意图给大/小卡不同的基准宽度；窄屏自动堆叠 */
 .mos-protect > .mos-card      { flex-basis: 380px; min-width: 320px; }
 .mos-protect > .protect-card  { flex-basis: 520px; min-width: 340px; }
-.cell-temp > .cell-card       { flex-basis: 520px; min-width: 360px; }
-.cell-temp > .temp-card       { flex-basis: 380px; min-width: 320px; }
+.cell-chart-row > .cell-card  { flex: 1 1 100%; }   /* 图表卡独占一行 */
+.temp-row > .temp-card         { flex: 1 1 100%; }   /* 与 .op-groups 同宽，内部 auto-fill 决定列数 */
 .stream-poll > .stream-card   { flex-basis: 520px; min-width: 380px; }
 .stream-poll > .poll-card     { flex-basis: 380px; min-width: 340px; }
 .ops-history > .ops-card      { flex-basis: 600px; min-width: 400px; }
@@ -1810,7 +1814,8 @@ onUnmounted(() => {
 
 /* ══════════ 电芯电压分布（图表复用旧页 BmsCellVoltageChart） ══════════ */
 .cell-summary { font-size: 12px; color: var(--el-text-color-secondary); }
-/* 固定高度：图表异步渲染不得改变卡片高度（本页依赖 overflow-anchor:none 防跳动） */
+/* 固定高度：图表异步渲染不得改变卡片高度（本页依赖 overflow-anchor:none 防跳动）。
+   图表卡独占一行（.cell-chart-row），不再有"同排矮卡"要迁就，故恢复到 300px 的可读高度。 */
 .cell-chart-host { height: 300px; }
 .cell-chart-empty { height: 300px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 12px; }
 .cell-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--el-text-color-secondary); }
@@ -1823,7 +1828,7 @@ onUnmounted(() => {
 .cell-thresholds { margin-left: auto; }
 
 /* ══════════ 温度 ══════════ */
-/* 流式：温度卡按宽度自适应列数（写死 2 列在窄屏会挤成两行文字） */
+/* 流式：温度卡按宽度自适应列数（写死 2 列在窄屏会挤成两行文字）。 */
 .temp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .temp-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--el-fill-color-lighter); border-radius: var(--radius-sm); min-width: 0; }
 .temp-label { font-size: 12px; color: var(--el-text-color-regular); white-space: nowrap; }
@@ -1938,7 +1943,6 @@ onUnmounted(() => {
    让"大小卡并排"更早变成堆叠。 */
 @media (max-width: 1200px) {
   .mos-protect > .protect-card,
-  .cell-temp > .cell-card,
   .stream-poll > .stream-card,
   .ops-history > .ops-card { flex-basis: 420px; }
 }
@@ -1948,7 +1952,6 @@ onUnmounted(() => {
   .head-actions { margin-left: 0; }
   .card { padding: 14px 12px; }
   .protect-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .temp-list { grid-template-columns: minmax(0, 1fr); }
   .head-right, .stream-actions { margin-left: 0; }
   .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
