@@ -386,7 +386,8 @@
                     </div>
                     <div v-if="op.note" class="op-desc">{{ op.note }}</div>
                     <div v-if="!op.available && op.reason" class="op-desc op-desc-warn">不可用原因：{{ op.reason }}</div>
-                    <div v-else-if="op.needsParams" class="op-desc op-desc-warn">该操作需要参数，请到设备详情页的「受控操作」面板填写后执行。</div>
+                    <!-- 不再把人支到生产页：本页现在就能填（2026-10-16 用户要求） -->
+                    <div v-else-if="op.needsParams" class="op-desc">该操作需要参数，点「填写参数」按后端 Schema 逐项填写后提交。</div>
                   </div>
                   <div class="op-right">
                     <span v-if="opState(op.id).phase !== 'idle'" class="op-state">
@@ -399,10 +400,10 @@
                       :type="op.risky ? 'warning' : 'primary'"
                       :plain="op.risky"
                       :loading="opBusy(op.id)"
-                      :disabled="opBusy(op.id) || !op.available || op.needsParams"
-                      @click="runOp(op)"
+                      :disabled="opBusy(op.id) || !op.available"
+                      @click="onOpClick(op)"
                     >
-                      {{ !op.available ? '暂不可用' : op.needsParams ? '需参数' : op.risky ? '确认后执行' : '执行' }}
+                      {{ !op.available ? '暂不可用' : op.needsParams ? '填写参数' : op.risky ? '确认后执行' : '执行' }}
                     </el-button>
                   </div>
                   <el-alert v-if="opState(op.id).reason" type="error" :closable="false" class="op-reason" :title="opState(op.id).reason" />
@@ -441,6 +442,14 @@
         <el-button type="primary" :loading="reauthBusy" :disabled="!reauthPassword" @click="doReauth">验证并继续</el-button>
       </template>
     </el-dialog>
+
+    <!-- 参数化操作表单：字段由后端 definition.input_schema 生成，与生产页同一组件。
+         参数与标定组（30/33 参数的内阻与保护参数表）靠它的双列布局 + 数字感知排序排版。 -->
+    <ActionForm
+      v-model:visible="opFormVisible"
+      :definition="opFormTarget?.definition ?? null"
+      @submit="submitOpForm"
+    />
   </div>
 </template>
 
@@ -454,13 +463,16 @@ import {
   Timer, Operation, SetUp, Tools, Document, MagicStick, Refresh,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
+// 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
+// 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
+import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
 import { feedback, extractErrorMessage } from '@/utils/feedback'
 import { edgeDeviceApi, type EdgeDevice, type CommandTemplateWithInterval } from '@/api/edgeDevice'
 import { useRealtimeData } from '@/composables/useRealtimeData'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
 import { useControlAction } from '@/composables/useControlAction'
-import type { DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
+import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
 import type { DataItem } from '@/types/realtime'
 
 // ════════════ 通用小工具 ════════════
@@ -1124,6 +1136,8 @@ interface OpDef {
   reason: string
   needsParams: boolean
   movedTo: boolean
+  /** 后端动作定义，参数化表单据此生成字段（input_schema） */
+  definition: ActionDefinition
 }
 interface OpGroup { id: string; name: string; hint: string; icon: Component; ops: OpDef[] }
 type OpPhase = 'idle' | 'sent' | 'running' | 'verifying' | 'success' | 'failed' | 'unknown' | 'cancelled'
@@ -1166,6 +1180,7 @@ function toOp(action: EffectiveAction): OpDef {
     reason: action.reason || '',
     needsParams: properties.length > 0,
     movedTo: def.id === 'set_mos_policy',
+    definition: def,
   }
 }
 
@@ -1323,8 +1338,43 @@ watch(historyOps, (list) => {
   if (op) applyOperationToUi(op)
 })
 
-async function runOp(op: OpDef) {
-  if (op.movedTo || op.needsParams || !op.available) return
+/**
+ * 参数化操作表单（2026-10-16 用户要求："参数与标定功能应该参数化显示，可修改保存"）。
+ *
+ * 改前带参数的操作（参数与标定全组、诊断/运行/时间组共 12 项）按钮一律置灰，
+ * 只给一句"请到设备详情页填写"—— 在评审页等于不可用。
+ * 现在复用生产页同一份 ActionForm：字段直接由后端 definition.input_schema 生成
+ * （boolean→开关、enum→下拉、integer→带上下限的数字框、string→文本框），
+ * 必填与范围也在同一处校验，不再有第二套表单导致的规则漂移。
+ *
+ * 提交流程：填参数 →（若为高风险动作）极简确认 → dispatch(带参数)。
+ * 风险动作后端强制单次令牌，仍由 useControlAction 内部处理重验证。
+ */
+const opFormVisible = ref(false)
+const opFormTarget = ref<OpDef | null>(null)
+
+function onOpClick(op: OpDef) {
+  if (op.movedTo || !op.available) return
+  if (op.needsParams) {
+    opFormTarget.value = op
+    opFormVisible.value = true
+    return
+  }
+  void runOp(op)
+}
+
+function submitOpForm(params: Record<string, unknown>) {
+  const op = opFormTarget.value
+  opFormVisible.value = false
+  if (!op) return
+  void runOp(op, params)
+}
+
+async function runOp(op: OpDef, params: Record<string, unknown> = {}) {
+  // ⚠ 不再因 needsParams 直接 return —— 参数由 ActionForm 收集后传入（2026-10-16 用户要求
+  // "参数与标定功能应该参数化显示，可修改保存"）。原实现把带参数的操作一律挡在门外，
+  // 且 dispatch 传的是空对象 {}，即使绕过去也必然被后端 schema 拒绝。
+  if (op.movedTo || !op.available) return
   const st = opState(op.id)
   st.reason = ''
   clearError()
@@ -1337,7 +1387,7 @@ async function runOp(op: OpDef) {
     if (!ok) return
   }
   setPhase(op.id, 'sent', '已发送')
-  const ok = await dispatch(op.id, {}, op.requiresConfirmation)
+  const ok = await dispatch(op.id, params, op.requiresConfirmation)
   if (ok) {
     reauthTarget = null
     trackCommand(op.id)
