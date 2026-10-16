@@ -1516,8 +1516,26 @@ onUnmounted(() => {
 
 <style scoped>
 /* ══════════ 页面骨架 ══════════ */
+/**
+ * ⚠ 本页是**独立 DEV 路由**（不在 MainLayout 之下），因此必须自己提供滚动容器。
+ *
+ * 根因（2026-10-16 用户报障"页面内容显示不全，不能向下滚动"）：
+ *   src/App.vue 的全局样式是**应用外壳**模式 ——
+ *     html, body { width:100%; height:100%; overflow:hidden; }
+ *     #app       { width:100%; height:100%; }
+ *   即整页锁死为视口高度、**由 MainLayout 内部提供滚动区**。
+ *   走 MainLayout 的页面因此都正常；而本页直接渲染进 #app、没有 MainLayout，
+ *   就没有任何元素承担滚动 ⇒ 内容高 2113px 却滚不动（实测滚轮后 scrollY 恒为 0）。
+ *
+ * 修法：本页自己当滚动容器。**不能改全局 CSS** —— 那会破坏外壳模式，
+ *   影响所有依赖 MainLayout 内部滚动的页面。
+ *
+ * 用 height:100% + overflow-y:auto（而不是 min-height:100vh）：
+ *   前者让本页恰好占满 #app 并**在自己内部**滚动，滚动条位置/行为与生产页一致。
+ */
 .bms-demo2 {
-  min-height: 100vh;
+  height: 100%;
+  overflow-y: auto;
   background: var(--el-bg-color-page);
   color: var(--el-text-color-primary);
   font-size: 13px;
