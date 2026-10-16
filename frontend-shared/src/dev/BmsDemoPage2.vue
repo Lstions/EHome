@@ -127,13 +127,14 @@
             <span class="head-right mono-badge">{{ hasProtectionData ? 'protection_status = 0x' + protHex : 'protection_status = ' + DASH }}</span>
           </div>
 
-          <!-- 无保护命中：紧凑一行 -->
+          <!-- 无保护命中：紧凑一行。
+               ⚠ 2026-10-16 用户要求：**删除收起/展开，明细默认展开**。
+               原来正常态只给一行摘要 + 「展开明细」按钮，要用户多点一次才能看到
+               12 位明细；而这页的主要用途就是核对保护位，默认藏起来反而妨碍阅读。
+               现在 12 项明细恒定可见（见下方 .protect-grid），少一层交互。 -->
           <div v-if="!activeProtections.length" class="protect-compact" role="status">
             <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
             <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据' }}</span>
-            <button type="button" class="link-btn" @click="protectExpanded = !protectExpanded">
-              {{ protectExpanded ? '收起明细' : '展开明细' }}
-            </button>
           </div>
 
           <!-- 有保护命中：结论 + 明细 -->
@@ -146,7 +147,9 @@
             </el-alert>
           </template>
 
-          <div v-if="activeProtections.length || protectExpanded" class="protect-grid">
+          <!-- 12 位明细：**恒定展开**（用户要求删除收起/展开）。
+               不再依赖 protectExpanded 状态，因此也不会有"默认收起"的信息缺口。 -->
+          <div class="protect-grid">
             <div v-for="p in protectionBits" :key="p.bit" class="protect-item" :class="{ active: p.active }">
               <span class="protect-name">{{ p.label }}</span>
               <el-tag :type="p.active ? 'danger' : 'success'" size="small" :effect="p.active ? 'dark' : 'plain'">
@@ -844,7 +847,7 @@ const PROTECTION_BITS: Array<{ bit: number; label: string }> = [
 const hasProtectionData = computed(() => num(latestData.value?.protection_status) !== null)
 const protectionStatus = computed(() => num(latestData.value?.protection_status) ?? 0)
 const protHex = computed(() => hexOf(protectionStatus.value))
-const protectExpanded = ref(false)
+// （2026-10-16 已删除 protectExpanded：用户要求保护明细默认展开、不留收起/展开交互）
 interface ProtectionBit { bit: number; label: string; active: boolean }
 const protectionBits = computed<ProtectionBit[]>(() =>
   PROTECTION_BITS.map((p) => ({ ...p, active: protectionActive(p.bit) })),
@@ -1467,7 +1470,6 @@ function resetDeviceScopedState() {
   mosKind = null
   activeCommandId = ''
   verifiedFet.value = null
-  protectExpanded.value = false
   reauthTarget = null
   Object.keys(opStates).forEach((k) => {
     opStates[k] = { phase: 'idle', text: '', reason: '' }
@@ -1536,6 +1538,13 @@ onUnmounted(() => {
 .bms-demo2 {
   height: 100%;
   overflow-y: auto;
+  /* ⚠ 禁用滚动锚定（2026-10-16 用户报障："实时数据流刷新数据时页面跳到该位置"）。
+     滚动锚定由浏览器布局引擎执行，**不经过 JS 的 scrollTop setter、也不发 scroll/focus
+     事件** —— 实测插桩：数据刷新期间外层 0 次程序化滚动、0 次 focus，scrollTop 纹丝不动，
+     正因如此这个缺陷一直抓不到。
+     当锚点节点落在持续刷新的列表里、而行又被新增/裁剪（MAX_STREAM_ROWS 修剪）时，
+     锚点消失 ⇒ 浏览器重选锚点并**调整外层滚动位置** ⇒ 整页跳到列表处。 */
+  overflow-anchor: none;
   background: var(--el-bg-color-page);
   color: var(--el-text-color-primary);
   font-size: 13px;
@@ -1576,14 +1585,47 @@ onUnmounted(() => {
 .dev-sub b { color: var(--el-text-color-primary); }
 .head-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
-.page-body { max-width: 1480px; margin: 0 auto; padding: 16px 24px; }
-.row { display: grid; gap: 16px; margin-bottom: 16px; }
-/* align-items:start —— 避免旧页面「等高拉伸出大片空白」的同类结构 */
-.metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.mos-protect { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: start; }
-.cell-temp { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); align-items: start; }
-.stream-poll { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); align-items: start; }
-.ops-history { grid-template-columns: minmax(0, 8fr) minmax(0, 4fr); align-items: start; }
+/* 流式：不再用 1480px 上限把内容钉在中间，宽度自适应可用空间 */
+.page-body { max-width: 100%; margin: 0 auto; padding: 16px 24px; }
+
+/* ══════════ 流式布局（2026-10-16 用户要求） ══════════
+   改前每行是**固定列数 grid**：列数与比例都写死
+     .metrics    repeat(4, 1fr)
+     .mos-protect 5fr / 7fr   …等
+   问题：① 窄屏不重排，只把卡片越挤越窄，内容被压扁、出现横向溢出；
+        ② 某张卡内容变多也只能在本列里挤，不能借用相邻空间；
+        ③ 比例是"平均分配"，不反映卡片实际需要多宽。
+
+   改成 flex + flex-wrap 的**流式**：
+     · 每张卡用 flex-basis 声明"希望多宽"（按设计意图，大卡 520/600、小卡 320/380）；
+     · min-width 是硬底线，保证不会被压到不可读；
+     · 一行放不下就**自动换行**，窄屏自然堆叠成单列。
+   这是流式与硬栅格的关键差别：宽度由内容需要决定，而不是由列数决定。
+
+   ⚠ 仍保留 align-items: flex-start：矮卡片绝不被同行的高卡片拉高
+     （历史踩过的坑 —— el-row/el-col 默认 stretch 会制造大片空白）。 */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+  align-items: flex-start;
+}
+.row > .card,
+.row > .metric-card { flex-grow: 1; flex-shrink: 1; }
+
+/* 四个指标卡：等权重，220px 起算自动折行 */
+.metrics > .metric-card { flex: 1 1 160px; min-width: 150px; }
+
+/* 各组按设计意图给大/小卡不同的基准宽度；窄屏自动堆叠 */
+.mos-protect > .mos-card      { flex-basis: 380px; min-width: 320px; }
+.mos-protect > .protect-card  { flex-basis: 520px; min-width: 340px; }
+.cell-temp > .cell-card       { flex-basis: 520px; min-width: 360px; }
+.cell-temp > .temp-card       { flex-basis: 380px; min-width: 320px; }
+.stream-poll > .stream-card   { flex-basis: 520px; min-width: 380px; }
+.stream-poll > .poll-card     { flex-basis: 380px; min-width: 340px; }
+.ops-history > .ops-card      { flex-basis: 600px; min-width: 400px; }
+.ops-history > .history-card  { flex-basis: 320px; min-width: 300px; }
 
 /* ══════════ 卡片语言（沿用 .card / card-head） ══════════ */
 .card {
@@ -1632,7 +1674,9 @@ onUnmounted(() => {
 /* ══════════ 保护状态 ══════════ */
 .protect-compact { display: flex; align-items: center; gap: 8px; padding: 6px 0; flex-wrap: wrap; }
 .protect-compact-text { font-size: 13px; font-weight: 500; }
-.protect-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+/* 流式：12 项明细按可用宽度自动决定列数（窄屏 2 列 / 宽屏 4 列以上），
+   而不是写死 3 列 —— 写死会让窄屏每格过窄、宽屏留白过多。 */
+.protect-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
 .protect-item {
   display: flex; align-items: center; gap: 6px; padding: 8px 10px;
   background: var(--el-fill-color-lighter); border: 1px solid transparent;
@@ -1668,7 +1712,8 @@ onUnmounted(() => {
 .cell-thresholds { margin-left: auto; }
 
 /* ══════════ 温度 ══════════ */
-.temp-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+/* 流式：温度卡按宽度自适应列数（写死 2 列在窄屏会挤成两行文字） */
+.temp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .temp-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--el-fill-color-lighter); border-radius: var(--radius-sm); min-width: 0; }
 .temp-label { font-size: 12px; color: var(--el-text-color-regular); white-space: nowrap; }
 .temp-value { font-size: 16px; font-weight: 600; margin-left: auto; white-space: nowrap; }
@@ -1681,6 +1726,10 @@ onUnmounted(() => {
 .stream-box { position: relative; }
 .stream-scroll {
   height: 320px; overflow: auto;
+  /* 列表行 churn 不得影响任何祖先滚动位置（见 .bms-demo2 的同类说明）。
+     锚点若落在本列表内，行被 MAX_STREAM_ROWS 裁剪时锚点会消失，
+     浏览器随即重选锚点并调整**外层**滚动位置 ⇒ 整页跳到列表处。 */
+  overflow-anchor: none;
   border: 1px solid var(--el-border-color-lighter); border-radius: var(--radius-sm);
   background: var(--el-fill-color-lighter);
 }
@@ -1772,9 +1821,15 @@ onUnmounted(() => {
 .dialog-note { margin: 0 0 12px; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
 
 /* ══════════ 响应式 ══════════ */
+/* 流式布局下 .row 已是 flex —— 换行由 flex-basis / min-width 自动决定，
+   下面这些 grid-template-columns 覆盖在 flex 容器上已**完全失效**
+   （留着会让后人以为窄屏重排还靠它，属于误导性死代码），故改为收窄大卡基准宽度，
+   让"大小卡并排"更早变成堆叠。 */
 @media (max-width: 1200px) {
-  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mos-protect, .cell-temp, .stream-poll, .ops-history { grid-template-columns: minmax(0, 1fr); }
+  .mos-protect > .protect-card,
+  .cell-temp > .cell-card,
+  .stream-poll > .stream-card,
+  .ops-history > .ops-card { flex-basis: 420px; }
 }
 @media (max-width: 768px) {
   .page-head { padding: 12px 12px 14px; }
