@@ -53,7 +53,7 @@
         :class="{ 'is-offline': c.offline }"
       >
         <div class="edc-top">
-          <span class="edc-icon" :class="c.typeTone">
+          <span class="device-type-icon edc-icon" :class="c.typeTone">
             <el-icon :size="20"><component :is="c.icon" /></el-icon>
           </span>
           <div class="edc-ident">
@@ -136,11 +136,10 @@ import { useRouter } from 'vue-router'
 import type { Component } from 'vue'
 import {
   View, Edit, Delete, Connection, DataLine, Refresh, Search, Warning, Location,
-  Cloudy, PartlyCloudy, WindPower, Compass, Drizzling, Sunny, Cpu, Switch, Box,
 } from '@element-plus/icons-vue'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import type { EdgeDevice, EdgeDeviceListParams } from '@/api/edgeDevice'
-import { deviceTypeOptions, getDeviceTypeLabel } from '@/utils/deviceType'
+import { deviceTypeOptions, getDeviceTypeLabel, getDeviceTypeIcon, getDeviceTypeTone } from '@/utils/deviceType'
 import { getDriverTree, findDriverLeaf } from '@/api/driver'
 import type { DriverTreeNode } from '@/api/driver'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
@@ -181,13 +180,9 @@ function statusTone(s: string): string {
     default: return 'is-muted'
   }
 }
-function typeTone(t: string): string {
-  if (t.indexOf('bms') >= 0 || t === 'battery') return 'tone-success'
-  if (t === 'inverter') return 'tone-primary'
-  if (t.indexOf('light') >= 0 || t.indexOf('rain') >= 0) return 'tone-warning'
-  if (t.indexOf('wind') >= 0) return 'tone-info'
-  return 'tone-primary'
-}
+// 色调改为走全局能力（src/utils/deviceType.ts），本页不再自维护一套映射 ——
+// 之前这里与全局各有一份，是「图标全站统一」要消灭的重复源。
+const typeTone = (t: string): string => 'tone-' + getDeviceTypeTone(t)
 
 // ── 位置信息（通道名取 channel_hardware_id，不用设备地址冒充 —— 见 EdgeDevice 注释） ──
 function nodeLabel(d: EdgeDevice): string {
@@ -219,22 +214,10 @@ function addressValue(d: EdgeDevice): string {
   return ''
 }
 
-// ── 类型图标：按"含义"挑，避免风速=闪电、逆变器=图表、温湿度=仪表盘这类错配 ──
-const DEVICE_ICONS: Record<string, Component> = {
-  temp_humidity: Cloudy,
-  sht40: Cloudy,
-  bmp280: PartlyCloudy,
-  wind_speed: WindPower,
-  wind_direction: Compass,
-  rain: Drizzling,
-  light: Sunny,
-  battery: Cpu,
-  jiabaida_bms: Cpu,
-  inverter: Switch,
-}
-function deviceIcon(type: string): Component {
-  return DEVICE_ICONS[type] || Box
-}
+// ── 类型图标：直接走全局单源（src/utils/deviceType.ts）──
+// 本页原有的本地 DEVICE_ICONS 已上移到全局，避免"同一类型两套图标"漂移。
+// 图标按含义挑，不再是风速=闪电、逆变器=图表、温湿度=仪表盘那类错配。
+const deviceIcon = (type: string): Component => getDeviceTypeIcon(type)
 
 // ── 相对时间 ──
 function relTime(iso: string | null): string {
@@ -465,15 +448,11 @@ onUnmounted(() => { if (debounceTimer) clearTimeout(debounceTimer) })
 .edc-card.is-offline { opacity: 0.82; }
 
 .edc-top { display: flex; align-items: flex-start; gap: 12px; }
-.edc-icon {
-  width: 42px; height: 42px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: var(--radius-sm);
-}
-.tone-primary { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
-.tone-success { color: var(--el-color-success); background: var(--el-color-success-light-9); }
-.tone-warning { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
-.tone-info { color: var(--el-color-info); background: var(--el-color-info-light-9); }
+/* 尺寸/居中/圆角由 theme.css 的 .device-type-icon 给（全站统一），
+   本页只覆盖 size：卡片头用 42px，与默认一致故仅作显式声明。 */
+.edc-icon { --device-icon-size: 42px; }
+/* .tone-* 前景/底色搬到 theme.css 的 .device-type-icon（全站统一，且暗色下 primary
+   必须换成 --icon-primary，见该处注释）——此处不再自维护一套颜色。 */
 
 .edc-ident { flex: 1; min-width: 0; }
 .edc-name-row { display: flex; align-items: center; gap: 8px; }

@@ -178,6 +178,19 @@
      两端深色系（primary 家族）的渐变请用 --brand-gradient + 白字，别用本 token。 */
   --text-on-fill: #ffffff;
 
+  /* ── 图标语义前景（浅底 + 基色文字范式）─────────────────────────────
+     设备类型图标等"浅底方块 + 图标"元素用它上色：底色是 --el-color-*-light-9，
+     前景是本组 token。
+     为什么不直接复用 --el-color-* 基色：亮色下基色当文字落在 light-9 上达标，
+     但**暗色下 primary 只有 2.70**（见下方暗色块说明）—— 基色要同时承担
+     "白字落其上 ≥4.5" 与 "作文字落浅底 ≥4.5" 两个相反要求，暗色下不可兼得。
+     故拆成独立 token，亮暗各自取值，实测对比度见行尾注释。 */
+  --icon-primary: #1f5ad8; /* on primary-light-9 5.18 */
+  --icon-success: #147a3a; /* on success-light-9 4.73 */
+  --icon-warning: #9a5b06; /* on warning-light-9 4.74 */
+  --icon-danger: #b91c1c;  /* on danger-light-9  5.45 */
+  --icon-info: #5e6673;    /* on info-light-9    5.08 */
+
   /* 品牌渐变（logo 图标 / 用户头像 / 统计卡"总计"图标等）。
      改前 6 处硬编码 `linear-gradient(135deg, var(--el-color-primary), var(--el-color-success))`：
      亮色下白字最差 5.42 ✓，但**暗色下 success 被提亮成 #85ce61 ⇒ 白字最差仅 1.91**，
@@ -355,6 +368,19 @@ html.dark {
 
   /* 暗色下语义基色被提亮 ⇒ 前景必须转深（见亮色块处说明，实测 6.86–9.38:1）。 */
   --text-on-fill: #1a1a1a;
+
+  /* ── 图标语义前景（暗色）─────────────────────────────────────────
+     实测算得：除 primary 外，其余基色作文字落在各自的 light-9 深底上均已达标
+     （success 8.29 / warning 8.47 / danger 6.88 / info 6.36），故沿用基色。
+     唯独 primary 不行 —— 基色 #1f5ad8 是为"白字落其上 ≥4.5"选的（够深），
+     同一颜色作文字落在 #18222b 上只有 2.70。这与上方 --el-tag-primary-text
+     是同一个结论，故暗色 primary 前景**复用同一个更亮的蓝**，避免第二套约定。 */
+  --icon-primary: #79bbff; /* on primary-light-9 7.96（同 --el-tag-primary-text） */
+  --icon-success: #85ce61; /* 8.29 */
+  --icon-warning: #ebb563; /* 8.47 */
+  --icon-danger: #f78989;  /* 6.88 */
+  --icon-info: #9ca3af;    /* 6.36 */
+
   /* 暗色品牌渐变改走 primary 同族：原 primary→success 在暗色下白字只剩 1.91（见亮色块说明）。 */
   --brand-gradient: linear-gradient(135deg, #1f5ad8 0%, #2f6ae8 100%);
 
@@ -454,6 +480,12 @@ html.dark,
 /* ============================================
    Element Plus 暗色主题覆盖
    ============================================ */
+/* 三个选择器都要列（与上方 [data-theme=dark]/.dark-theme/html.dark 同口径）：
+   stores/theme.ts 同时设 data-theme + body.dark-theme + html.dark，
+   但预览/测试里可能只设其中一个。只挂 html.dark 时，
+   单靠 data-theme="dark" 进入的用户会落回 EP 默认档（实测踩到）。 */
+[data-theme="dark"],
+.dark-theme,
 html.dark {
   /* 基础色覆盖 */
   --el-bg-color: var(--bg-color);
@@ -493,7 +525,7 @@ html.dark {
   --el-color-primary-light-5: #2a598a;
   --el-color-primary-light-7: #213d5b;
   --el-color-primary-light-8: #1d3043;
-  --el-color-primary-light-9: #18222b; /* el-tag/el-alert 的**底** */
+  --el-color-primary-light-9: #18222b !important; /* el-tag/el-alert 的**底**；!important 见文件末尾亮色 light-9 重申处的说明 */
   /* 暗色下「实心填充色」与「浅底徽标的文字色」必须分开取：
      基色 #1f5ad8 是为「白字落在其上 ≥4.5」选的（深色），但同一颜色作文字落在
      深色底 light-9(#18222b) 上只有 2.7（EP 用同一个变量同时承担这两个角色，
@@ -504,27 +536,27 @@ html.dark {
   --el-color-success-light-5: #3e6b27;
   --el-color-success-light-7: #2d481f;
   --el-color-success-light-8: #25371c;
-  --el-color-success-light-9: #1c2518;
+  --el-color-success-light-9: #1c2518 !important;
   --el-color-warning-light-3: #a77730;
   --el-color-warning-light-5: #7d5b28;
   --el-color-warning-light-7: #533f20;
   --el-color-warning-light-8: #3e301c;
-  --el-color-warning-light-9: #292218;
+  --el-color-warning-light-9: #292218 !important;
   --el-color-danger-light-3: #b25252;
   --el-color-danger-light-5: #854040;
   --el-color-danger-light-7: #582e2e;
   --el-color-danger-light-8: #412626;
-  --el-color-danger-light-9: #2a1d1d;
+  --el-color-danger-light-9: #2a1d1d !important;
   --el-color-error-light-3: #b25252;
   --el-color-error-light-5: #854040;
   --el-color-error-light-7: #582e2e;
   --el-color-error-light-8: #412626;
-  --el-color-error-light-9: #2a1d1d;
+  --el-color-error-light-9: #2a1d1d !important;
   --el-color-info-light-3: #6b6d71;
   --el-color-info-light-5: #525457;
   --el-color-info-light-7: #393a3c;
   --el-color-info-light-8: #2d2d2f;
-  --el-color-info-light-9: #202121;
+  --el-color-info-light-9: #202121 !important;
 }
 
 /* el-tag(el-alert) 的 primary 变体在暗色下必须用「更亮的蓝」作文字。
@@ -1261,4 +1293,77 @@ a.device-link {
 
 .flash {
   animation: flash 1s infinite;
+}
+
+/* ============================================
+   设备类型图标块（全站统一，2026-10-17）
+   ============================================
+   浅底方块 + 语义图标。底色用 --el-color-*-light-9，前景用 --icon-*。
+
+   为什么不写成 color: var(--el-color-primary)：亮色下可行，但暗色下
+   primary 基色（#1f5ad8，为"白字落其上 ≥4.5"而选的深蓝）作文字落在
+   深底 light-9(#18222b) 上只有 2.70，未达 4.5。故前景必须走独立 token，
+   由 theme.css 的亮/暗两块各自取值（详见该处注释与实测值）。
+
+   尺寸用 CSS 变量给，方便不同场景（列表卡片 42px / 表格 28px）覆盖，
+   而不必各写一套 .tone-* 规则。 */
+.device-type-icon {
+  --device-icon-size: 42px;
+  width: var(--device-icon-size);
+  height: var(--device-icon-size);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm, 8px);
+}
+
+.device-type-icon.tone-primary { color: var(--icon-primary); background: var(--el-color-primary-light-9); }
+.device-type-icon.tone-success { color: var(--icon-success); background: var(--el-color-success-light-9); }
+.device-type-icon.tone-warning { color: var(--icon-warning); background: var(--el-color-warning-light-9); }
+.device-type-icon.tone-danger  { color: var(--icon-danger);  background: var(--el-color-danger-light-9); }
+.device-type-icon.tone-info    { color: var(--icon-info);    background: var(--el-color-info-light-9); }
+
+
+/* ============================================
+   亮色 浅底令牌（-light-9 家族）—— 高特异性重申
+   ============================================
+   问题（2026-10-17 实测发现）：本文件 :root 块里那套「基色文字落在浅底上 ≥4.5」
+   的调优值（primary #e9effb / success #e8f2eb / warning #f5efe6 / danger #f8e8e8 /
+   info #eff0f1）**全部没有生效**。CDP 读 document.styleSheets 的声明顺序：
+
+     html.dark -> #1c2518    （EP 暗色档）
+     :root     -> #e8f2eb    （本项目）
+     html.dark -> #1c2518    （EP 暗色档，重复注入）
+     :root     -> #f0f9eb    （EP 默认档，**最后出现，覆盖了本项目**）
+
+   element-plus 的默认 :root 与 theme.css 同为 (0,1,0)，后注入者胜 ——
+   故亮色下 5 个 light-9 全部退回 EP 默认（实测 computed：
+   primary #ecf5ff / success #f0f9eb / warning #fdf6ec / danger #fef0f0 / info #f4f4f5），
+   项目按 4.5 调过的值形同虚设。
+
+   暗色侧没这个问题：那边用 html.dark (0,1,1)，本来就高于 EP 的 :root。
+
+   修法：与文件里既有的 `--el-fill-color` 等 9 个变量**同一套做法** ——
+   显式选择器 + !important（见本文件 ~465 行那段「为什么不用 :root:root」的讨论）。
+   不堆特异性、不用 :root:root：那会同时压过项目自己的暗色块，
+   把暗色 light-9 顶回亮色值 —— 本文件已经写明这是"更隐蔽的覆盖关系"，
+   我第一版正是踩了这个坑（实测暗色 success 变回 #e8f2eb）。
+
+   只在亮色态声明，故选择器排除三个暗色入口；
+   !important 用于压过 EP 后注入的同特异性 :root。
+   暗色侧由下方 [data-theme=dark]/.dark-theme/html.dark 块自带 !important 的暗色值接管，
+   两边互不干扰。 */
+/* ⚠ .dark-theme 挂在 body 上（stores/theme.ts: document.body.className = 'dark-theme'），
+   不是 html —— 所以不能用 :root:not(.dark-theme)（:root 是 html，永远不含该类）。
+   用 :root:not(...):not(:has(body.dark-theme))：只要 body 带该 class 就不命中本块。
+   :has() 在目标浏览器（Chrome 105+）可用；若需兼容更老环境，
+   可改为在 html 上也加类，但那要动 stores/theme.ts。 */
+:root:not(.dark):not([data-theme="dark"]):not(:has(body.dark-theme)) {
+  --el-color-primary-light-9: #e9effb !important; /* 基色文字于其上 5.18（EP 默认 #ecf5ff = 2.53） */
+  --el-color-success-light-9: #e8f2eb !important; /* 4.73（EP 默认 #f0f9eb = 2.08） */
+  --el-color-warning-light-9: #f5efe6 !important; /* 4.74（EP 默认 #fdf6ec = 2.04） */
+  --el-color-danger-light-9: #f8e8e8 !important;  /* 5.45（EP 默认 #fef0f0 = 2.61） */
+  --el-color-error-light-9: #f8e8e8 !important;
+  --el-color-info-light-9: #eff0f1 !important;    /* 5.08 */
 }

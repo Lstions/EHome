@@ -215,7 +215,7 @@
         shadow="hover"
       >
         <div class="card-header">
-          <div class="device-icon" :class="getDeviceClass(device.device_type)">
+          <div class="device-type-icon device-icon" :class="getDeviceTone(device.device_type)">
             <el-icon :size="20"><component :is="getDeviceIcon(device.device_type)" /></el-icon>
           </div>
           <div class="device-info">
@@ -676,7 +676,7 @@ import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
 import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog.vue'
 import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
-import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
+import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon, getDeviceTypeTone } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { DEVICE_ADDRESS_DEFAULT, isValidDeviceAddress, parseDeviceAddress } from '@/utils/deviceAddress'
 import { getHardwareDisplay, getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
@@ -1330,18 +1330,8 @@ const getDeviceIcon = (type: string) => {
   return getDeviceTypeIcon(type)
 }
 
-const getDeviceClass = (type: string) => {
-  const classMap: Record<string, string> = {
-    temp_humidity: 'temp',
-    wind_speed: 'wind',
-    wind_direction: 'wind',
-    rain: 'rain',
-    light: 'light',
-    battery: 'battery',
-    inverter: 'solar'
-  }
-  return classMap[type] || 'default'
-}
+// 语义色调走全局单源（src/utils/deviceType.ts），本页不再维护第二份 classMap。
+const getDeviceTone = (type: string) => 'tone-' + getDeviceTypeTone(type)
 
 const getDeviceTypeLabel = (type: string) => {
   return getGlobalDeviceTypeLabel(type)
@@ -2103,23 +2093,11 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.device-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  flex-shrink: 0;
-}
-
-.device-icon.wind { color: var(--el-text-color-regular); background: var(--el-fill-color-light); }
-.device-icon.rain { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
-.device-icon.light { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
-.device-icon.battery { color: var(--el-color-success); background: var(--el-color-success-light-9); }
-.device-icon.solar { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+/* 尺寸/居中/语义色全部交给 theme.css 的 .device-type-icon + .tone-*
+   （2026-10-17 全站统一）：本页原来另有一套 .device-icon.wind/rain/light/battery/solar
+   与 utils 里的 classMap，是同一件事的第二份实现 —— 改图标或改色时两边会漂移。
+   本页只覆盖尺寸：列表卡用 40px。 */
+.device-icon { --device-icon-size: 40px; }
 
 .device-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 
