@@ -70,8 +70,11 @@ export const REGISTERED_ROUTE_EXCLUSIONS: Record<string, string> = {
   '/403': '无权限错误页：无数据面，不进受审分母',
   '/dev/mock-bms': 'DEV-only 页面（import.meta.env.DEV 门控），生产构建里不存在',
   '/dev/bms-demo': 'DEV-only 设计稿预览页（同上），不进受审分母',
-  '/dev/bms-demo2': 'DEV-only BMS 重设计评审 demo（2026-10-15，同上），不进受审分母',
-  'dev/edge-device-cards': 'DEV-only 边缘设备卡片重设计评审 demo（2026-10-16，MainLayout 下的相对子路由，与 /dev/bms-demo2 同属 DEV 门控），不进受审分母',
+  // 2026-10-17 删除两条 DEV 例外，对应两个 demo 已转正为生产页面：
+  //   · '/dev/bms-demo2'          -> views/edge-device/bms/BmsDetailPage.vue
+  //                                   （经 EdgeDeviceDetailRouter 按 device_type 分派）
+  //   · 'dev/edge-device-cards'   -> views/edge-device/EdgeDeviceList.vue 的卡片视图
+  // 两者的 DEV 路由与页面均已移除，不再是例外。
   '/:pathMatch(.*)*': '404 兜底路由，非真实页面',
   'node/:id': '参数化详情路由：需要实体 ID，契约 §4 约定由列表页进入审计，不进冻结清单',
   'node/:id/overview': '参数化详情路由（同上）',

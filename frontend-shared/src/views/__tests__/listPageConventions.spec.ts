@@ -435,9 +435,9 @@ const EXEMPT_PAGE_HEADER: Record<string, string> = {
     '补页头属业务改动（改变页面视觉），P1-C 只加门禁不改业务页面，故登记缺口待排期。登记日期 ' + SCAN_DATE + '。',
   'src/views/edge-device/EdgeDeviceList.vue':
     '同 NodeList.vue：存量缺页头，页面以统计卡开场，无 <h1>/<h2> 页标题。登记缺口待排期。登记日期 ' + SCAN_DATE + '。',
-  'src/dev/EdgeDeviceCardsDemo.vue':
-    'DEV-only 评审 demo（import.meta.env.DEV 门控，生产构建里不存在）：模板用页内 DEV 评审横幅（"DEV · 边缘设备卡片重设计评审"）' +
-    '作为自有页头，没有 <PageHeader>。它不是生产列表页、不进 I-6 统一页头的适用范围，故登记豁免。登记日期 ' + SCAN_DATE + '。',
+  // 原 'src/dev/EdgeDeviceCardsDemo.vue' 豁免已于 2026-10-17 移除：
+  // 该 demo 的卡片设计已转正进生产 EdgeDeviceList.vue，DEV 页面被删除，
+  // 不再出现在分母里。门禁的「豁免表不得腐烂」用例正是为此报警的。
 }
 
 /** 豁免理由必须写明"原因 + 日期"：防止一条豁免被复制成永久免死金牌。 */

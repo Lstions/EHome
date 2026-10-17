@@ -96,32 +96,36 @@ describe('BmsCellVoltageChart container-aware label degradation (P0-1)', () => {
   })
 })
 
-describe('BmsDetailPage card headers no-wrap title (P1-2)', () => {
-  it('marks both 电芯电压/保护状态 titles nowrap + flex-shrink 0', () => {
-    // 选择器可能分组书写（.cell-voltage-title, .protection-title { ... }），用 [^{]* 容忍
-    expect(bmsDetailSource).toMatch(/\.cell-voltage-title[^{]*\{[^}]*white-space:\s*nowrap[^}]*flex-shrink:\s*0[^}]*\}/)
-    expect(bmsDetailSource).toMatch(/\.protection-title[^{]*\{[^}]*white-space:\s*nowrap[^}]*flex-shrink:\s*0[^}]*\}/)
+describe('BmsDetailPage 卡片标题换行行为（重设计版）', () => {
+  it('卡片头统一 flex-wrap，长摘要换行而不是挤掉标题', () => {
+    // 重设计后用统一 .card-head 取代旧版每卡一套 .cell-voltage-header/.protection-header：
+    // 一条共享规则而非两份重复声明，语义等价（标题与右侧摘要可换行）。
+    expect(bmsDetailSource).toMatch(/\.card-head \{[^}]*display:\s*flex[^}]*flex-wrap:\s*wrap/)
   })
 
-  it('lets the summary tag wrap to a second line instead of squeezing the title', () => {
-    expect(bmsDetailSource).toMatch(/\.cell-voltage-header[^{]*\{[^}]*flex-wrap:\s*wrap[^}]*\}/)
-    expect(bmsDetailSource).toMatch(/\.protection-header[^{]*\{[^}]*flex-wrap:\s*wrap[^}]*\}/)
+  it('.head-right 自身也可换行（摘要较长时不撑破卡片）', () => {
+    expect(bmsDetailSource).toMatch(/\.head-right \{[^}]*flex-wrap:\s*wrap/)
   })
 
-  it('keeps the full 16节/最低/最高/压差 summary content', () => {
-    expect(bmsDetailSource).toContain('节 · 最低')
-    expect(bmsDetailSource).toContain('· 最高')
-    expect(bmsDetailSource).toContain('· 压差')
+  it('保留完整的串数/最高/最低/压差摘要内容', () => {
+    expect(bmsDetailSource).toContain('串 · 单位 V')
+    expect(bmsDetailSource).toContain('最高')
+    expect(bmsDetailSource).toContain('最低')
+    expect(bmsDetailSource).toContain('压差')
   })
 })
 
-describe('BmsDetailPage temperature/MOS breakpoints (P1-3)', () => {
-  it('adds :xs="24" :sm="12" so 温度探头/MOS 状态 stack to one column below 768px', () => {
-    expect(bmsDetailSource.match(/<el-col :xs="24" :sm="12">/g)?.length).toBe(2)
+describe('BmsDetailPage 窄屏断点（重设计版）', () => {
+  it('用流式 flex-basis + media query 堆叠，而非 el-col 栅格断点', () => {
+    // 旧版靠 el-col :xs/:sm/:md 控制堆叠；重设计改流式后由 flex-basis/min-width
+    // 自动换行，窄屏断点收窄大卡基准宽度让堆叠更早发生。
+    expect(bmsDetailSource).not.toMatch(/<el-col[^>]*:md="1[04]"/)
+    expect(bmsDetailSource).toMatch(/@media \(max-width: 1200px\)/)
+    expect(bmsDetailSource).toMatch(/@media \(max-width: 768px\)/)
   })
 
-  it('keeps the 4 metric cards on their own mobile 2-col breakpoint untouched', () => {
-    expect(bmsDetailSource.match(/<el-col :xs="12" :sm="12" :md="6">/g)?.length).toBe(4)
+  it('保留粗指针 44px 触摸目标（移动端可达性）', () => {
+    expect(bmsDetailSource).toMatch(/@media \(pointer: coarse\)[\s\S]*?min-height:\s*44px/)
   })
 })
 

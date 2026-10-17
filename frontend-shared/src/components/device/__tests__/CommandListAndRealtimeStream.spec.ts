@@ -76,7 +76,30 @@ describe('RealtimeDataList 行高与空态契约', () => {
 })
 
 describe('BmsDetailPage 接线契约', () => {
-  it('折叠面板内 CommandFrequencySection 使用 embedded 消除双层嵌套', () => {
-    expect(bmsDetailSource).toMatch(/<CommandFrequencySection[^>]*embedded/)
+  /**
+   * 2026-10-17 重写：本页由评审 demo 转正，轮询指令区改为**自建的「轮询指令配置」卡片**，
+   * 不再复用共享 CommandFrequencySection，原因（用户诉求③）是：
+   *   · 上限必须**按节点上报**展示，并在保存前就把"超限会整单被拒"摆出来；
+   *   · 超限时要点名禁用哪几条 —— 共享组件没有这层语义。
+   * 旧断言（要求 <CommandFrequencySection embedded>）对应的是被替换掉的旧结构，
+   * 继续保留会把旧实现当成契约，故按新契约重写。
+   * 共享组件本身未变，InverterDetailPage / GenericDeviceDetail 仍在用（见各自测试）。
+   */
+  it('轮询指令区为自建卡片，并展示节点上报的上限', () => {
+    expect(bmsDetailSource).not.toContain('<CommandFrequencySection')
+    expect(bmsDetailSource).toContain('轮询指令配置')
+    // 上限值来自节点上报（hasPollLimit / pollLimitValue），模板按是否上报分两态渲染
+    expect(bmsDetailSource).toMatch(/hasPollLimit/)
+    expect(bmsDetailSource).toMatch(/pollLimitValue/)
+  })
+
+  it('超限时必须点名要禁用哪几条，并提供可操作提示', () => {
+    expect(bmsDetailSource).toMatch(/excessNames/)
+    expect(bmsDetailSource).toMatch(/超过上限/)
+  })
+
+  it('未上报上限时不得假装有上限（显示已启用条数而非 x/y）', () => {
+    expect(bmsDetailSource).toMatch(/hasPollLimit/)
+    expect(bmsDetailSource).toContain('未上报轮询条数上限')
   })
 })

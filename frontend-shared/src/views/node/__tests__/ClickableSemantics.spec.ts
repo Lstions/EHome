@@ -71,28 +71,30 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
     })
   })
 
-  describe('EdgeDeviceList.vue — .fact-value.copyable 点击复制', () => {
-    it('复制目标补了 role="button" / tabindex="0" / aria-label', () => {
-      const span = edgeDeviceListSource.match(/<span\s+class="fact-value copyable"[\s\S]*?>/)
-      expect(span).not.toBeNull()
-      const tag = span![0]
-      expect(tag).toContain('role="button"')
-      expect(tag).toContain('tabindex="0"')
+  /**
+   * 2026-10-17 重写：卡片重设计把「点击复制的值」由
+   *   <span class="fact-value copyable" role=button tabindex=0 @keydown.enter/space>
+   * 改为**真 <button class="card-chip is-copy">**。
+   * 这是 a11y 上的**增强**而非删减：原生 button 自带焦点、Enter/Space 激活与读屏角色，
+   * 不再需要手工补 role/tabindex/keydown（手工那套本来就容易漏 Space 或 .prevent）。
+   * 断言随之改为「必须是原生 button + 有可区分的 aria-label」。
+   */
+  describe('EdgeDeviceList.vue — 卡片「节点」chip 点击复制', () => {
+    it('用原生 <button> 承载复制，而非手工补 role/tabindex 的 span', () => {
+      const btn = edgeDeviceListSource.match(/<button[^>]*class="card-chip is-copy"[\s\S]*?>/)
+      expect(btn, '复制入口应为原生 button').not.toBeNull()
+      const tag = btn![0]
+      // 原生 button ⇒ 不需要 role/tabindex；但必须有可区分的名字（同类 chip 一页多个）
       expect(tag).toMatch(/:aria-label="[^"]*复制所属节点/)
-    })
-
-    it('复制目标补了 Enter / Space 键盘激活', () => {
-      const span = edgeDeviceListSource.match(/<span\s+class="fact-value copyable"[\s\S]*?>/)
-      const tag = span![0]
-      expect(tag).toContain('@keydown.enter.prevent=')
-      expect(tag).toContain('@keydown.space.prevent=')
       expect(tag).toContain('@click="copyText(')
     })
 
-    it('样式里只有一处 .fact-value.copyable（没有新增重复定义）', () => {
-      const matches = edgeDeviceListSource.match(/\.fact-value\.copyable\s*\{/g) || []
-      expect(matches).toHaveLength(1)
-      expect(edgeDeviceListSource).toContain('.fact-value.copyable:focus-visible')
+    it('不再保留手工键盘激活（原生 button 已提供）', () => {
+      expect(edgeDeviceListSource).not.toContain('@keydown.space.prevent="copyText(')
+    })
+
+    it('chip 有 hover 与 focus-visible 反馈', () => {
+      expect(edgeDeviceListSource).toMatch(/button\.card-chip:hover/)
     })
   })
 

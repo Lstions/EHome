@@ -35,6 +35,10 @@ const ALLOWED_WHITE_ON_FILL: Record<string, string> = {
     '基类前景；.total 走 --brand-gradient，语义色变体已改用 --text-on-fill。',
   'src/views/edge-device/inverter/InverterEnergyCard.vue':
     '仅 monthly（primary 家族，两端深色）保留白字；其余变体用 --text-on-fill。',
+  'src/views/edge-device/bms/BmsDetailPage.vue':
+    '仅 .back-latest（回到最新）：底为 --el-color-primary，亮暗同值 #1f5ad8 且**两端都是深色填充**，'
+    + '白字实测 5.98:1。不用 --text-on-fill —— 该 token 暗色取 #1a1a1a（为提亮后的 success/warning/danger'
+    + ' 浅底而设），落在深蓝上只有 2.91，theme.css 亦明写其不适用于 primary 家族。',
 }
 
 function vueFiles(): string[] {

@@ -231,46 +231,50 @@
           </div>
         </div>
 
-        <div class="card-facts">
-          <div class="fact-item">
-            <el-icon :size="16"><Connection /></el-icon>
-            <div class="fact-content">
-              <span class="fact-label">所属节点</span>
-              <span
-                class="fact-value copyable"
-                role="button"
-                tabindex="0"
-                :aria-label="`复制所属节点 ${device.node?.name || ('#' + device.node_id)}`"
-                :title="`点击复制：${device.node?.name || ('#' + device.node_id)}`"
-                @click="copyText(device.node?.name || ('#' + device.node_id))"
-                @keydown.enter.prevent="copyText(device.node?.name || ('#' + device.node_id))"
-                @keydown.space.prevent="copyText(device.node?.name || ('#' + device.node_id))"
-              >{{ device.node?.name || ('#' + device.node_id) }}</span>
-            </div>
-          </div>
-          <div class="fact-item">
-            <el-icon :size="16"><DataLine /></el-icon>
-            <div class="fact-content">
-              <span class="fact-label">总线通道</span>
-              <code class="fact-value">{{ getDeviceBusLabel(device) }}</code>
-            </div>
-          </div>
+        <!-- 位置信息做成 chips（2026-10-17 卡片重设计转正）：节点可点击复制；
+             从机地址只在**真的有地址参数**时显示 —— UART 点对点没有地址，
+             不得拿 hardware_id 冒充（见 addressValue 注释）。 -->
+        <div class="card-chips">
+          <button
+            type="button"
+            class="card-chip is-copy"
+            :title="`点击复制节点：${device.node?.name || ('#' + device.node_id)}`"
+            :aria-label="`复制所属节点 ${device.node?.name || ('#' + device.node_id)}`"
+            @click="copyText(device.node?.name || ('#' + device.node_id))"
+          >
+            <el-icon :size="14"><Connection /></el-icon>
+            <span class="chip-label">节点</span>
+            <b class="chip-value mono">{{ device.node?.name || ('#' + device.node_id) }}</b>
+          </button>
+          <span class="card-chip">
+            <el-icon :size="14"><DataLine /></el-icon>
+            <span class="chip-label">通道</span>
+            <b class="chip-value">{{ getDeviceBusLabel(device) }}</b>
+          </span>
+          <span v-if="addressValue(device)" class="card-chip">
+            <el-icon :size="14"><Location /></el-icon>
+            <span class="chip-label">从机地址</span>
+            <b class="chip-value mono">{{ addressValue(device) }}</b>
+          </span>
         </div>
 
-        <div class="card-reading" :class="{ 'no-data': !device.last_data }">
-          <template v-if="device.last_data">
-            <span class="reading-label">最新读数</span>
-            <strong class="reading-value" :title="formatDeviceData(device.last_data)">{{ formatDeviceData(device.last_data) }}</strong>
-            <span class="reading-time">{{ formatRelativeTime(device.last_data_time) }}</span>
-          </template>
-          <template v-else>
-            <el-icon :size="16"><Warning /></el-icon>
-            <span>等待首条采集数据</span>
-          </template>
+        <!-- 最新读数中文语义化：原先直打后端字段名（cell_count: 16.00 | cell_overvolt...），
+             既读不懂也违反「中文优先、不出现内部键名」。现按设备类型挑 3 个关键指标。
+             数值格式与标签取自 utils/deviceReadings.ts 单一事实源。 -->
+        <div v-if="readingsOf(device).length" class="card-readings">
+          <div v-for="r in readingsOf(device)" :key="r.key" class="card-reading">
+            <span class="r-label" :title="r.label">{{ r.label }}</span>
+            <span class="r-value">{{ r.value }}<span v-if="r.unit" class="r-unit">{{ r.unit }}</span></span>
+          </div>
         </div>
+        <div v-else class="card-readings is-empty">
+          <el-icon :size="15"><Warning /></el-icon>
+          <span>等待首条采集数据</span>
+        </div>
+        <p v-if="device.last_data" class="card-updated">更新于 {{ formatRelativeTime(device.last_data_time) }}</p>
 
         <div class="card-actions">
-          <el-button size="small" type="primary" text :icon="View" @click="goToDetail(device.id)">详情</el-button>
+          <el-button size="small" type="primary" :icon="View" @click="goToDetail(device.id)">详情</el-button>
           <el-button size="small" text :icon="Edit" @click="handleEdit(device)">编辑</el-button>
           <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${device.name}`" @click="handleDelete(device)">删除</el-button>
         </div>
@@ -653,7 +657,7 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
   Plus, View, Edit, Delete, InfoFilled, Check, Warning, Connection, DataLine,
-  List, Download, Document
+  List, Download, Document, Location
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
@@ -666,6 +670,7 @@ import { nodeApi } from '@/api/node'
 import client from '@/api/client'
 import { logger } from '@/utils/logger'
 import { findDriverLeaf, getDriverTree, type DriverTreeNode } from '@/api/driver'
+import { pickDeviceReadings } from '@/utils/deviceReadings'
 import type { Channel } from '@/api/channel'
 import type { Parser } from '@/api/parser'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -1337,6 +1342,31 @@ const getDeviceTypeLabel = (type: string) => {
   return getGlobalDeviceTypeLabel(type)
 }
 
+/** 卡片最新读数（中文语义化，按设备类型挑 3 个关键指标）。 */
+const readingsOf = (device: any) => pickDeviceReadings(device, 3)
+
+/**
+ * 卡片「从机地址」栏的取值。
+ *
+ * ⚠ 不能见到 hardware_id 就显示：UART 是点对点总线，**没有地址参数**，
+ * 该字段在 UART 上只是遗留默认值（1），拿它当地址展示会误导
+ * （2026-10-16 评审 demo 实测发现）。
+ *
+ * 判定用**后端真源**而非字符串形态：/device-configs/tree 的
+ * requires_target_address 表示该型号是否真的消费物理地址（Modbus 类为 true）。
+ * I2C 器件的 hardware_id 是器件地址（0x44 / 0x76），仍然展示。
+ * 其余（UART 点对点 / SPI）一律不展示。
+ */
+const addressValue = (device: any): string => {
+  const hw = device?.hardware_id ? String(device.hardware_id) : ''
+  if (!hw) return ''
+  const cap = findDriverLeaf(driverTree.value, device.device_type)?.requires_target_address
+  if (cap === true) return hw
+  const bus = String(device?.channel?.bus_type || device?.hardware_type || '').toLowerCase()
+  if (bus === 'i2c') return hw
+  return ''
+}
+
 /**
  * 「总线」列 / 「总线通道」栏 / CSV「总线」列的唯一取值口径。
  *
@@ -1920,6 +1950,10 @@ watch(showCreateDialog, (val) => {
 })
 
 onMounted(() => {
+  // 驱动树用于卡片「从机地址」的能力判定（requires_target_address）——
+  // 必须在挂载期就拉，不能等用户打开创建向导才拉，否则首屏卡片的地址栏判不出来。
+  // fetchDriverTreeOnce 自带幂等守卫，与向导共用同一份快照。
+  void fetchDriverTreeOnce()
   fetchDevices().then(() => {
     // 首次加载后再武装筛选 watch, 避免挂载期初值触发一次多余请求。
     filterReady = true
@@ -2128,103 +2162,43 @@ onUnmounted(() => {
 .status-indicator.online .dot { animation: pulse 2s infinite; }
 .status-indicator.active .dot { animation: pulse 2s infinite; }
 
-.card-facts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  padding: 0 16px 16px;
-}
-
-.fact-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  min-width: 0;
-  color: var(--el-text-color-secondary);
-}
-
-.fact-item > .el-icon {
-  margin-top: 2px;
-  color: var(--el-text-color-secondary);
-  flex-shrink: 0;
-}
-
-.fact-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.fact-label,
-.reading-label {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-
-.fact-value {
-  color: var(--el-text-color-primary);
-  font-size: 13px;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-code.fact-value {
-  color: var(--el-color-primary);
-  font-family: var(--el-font-family);
-}
-
-.fact-value.copyable {
-  cursor: pointer;
-}
-
-.fact-value.copyable:hover {
-  color: var(--el-color-primary);
-}
-
-.fact-value.copyable:focus-visible {
-  outline: 2px solid var(--el-color-primary);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.card-reading {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr) max-content;
-  align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  padding: 12px 16px;
+/* ── 卡片内容（2026-10-17 由评审 demo 转正）────────────────────────────
+   原文案：latest data 直打后端字段名（cell_count: 16.00 | cell_overvolt...），
+   既读不懂也违反「中文优先、不出现内部键名」。现为位置 chips + 中文读数块。 */
+.card-chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
+.card-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 6px 10px; border-radius: var(--radius-sm);
   background: var(--el-fill-color-lighter);
-  border-top: 1px solid var(--el-border-color-lighter);
+  font-size: 12px; color: var(--el-text-color-secondary);
 }
+button.card-chip { border: none; font-family: inherit; cursor: pointer; }
+button.card-chip:hover { background: var(--el-fill-color-light); color: var(--el-color-primary); }
+.chip-label { white-space: nowrap; }
+.chip-value { color: var(--el-text-color-primary); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+.chip-value.mono { font-family: 'SF Mono', Consolas, Monaco, monospace; font-weight: 500; }
 
-.card-reading.no-data {
-  display: flex;
-  justify-content: center;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
+/* 3 个关键读数块：灰底、大数值、tabular-nums 对齐 */
+.card-readings { display: flex; gap: 8px; padding: 0 16px 12px; }
+.card-reading {
+  flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  background: var(--el-fill-color-lighter);
 }
-
-.reading-value {
-  min-width: 0;
-  color: var(--el-text-color-primary);
-  font-size: 14px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.r-label { font-size: 12px; color: var(--el-text-color-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-value { font-size: 16px; font-weight: 600; color: var(--el-text-color-primary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.r-unit { margin-left: 2px; font-size: 12px; font-weight: 400; color: var(--el-text-color-secondary); }
+.card-readings.is-empty {
+  align-items: center; justify-content: center; gap: 6px;
+  padding: 14px; margin: 0 16px 12px; border-radius: var(--radius-sm);
+  background: var(--el-fill-color-lighter); color: var(--el-text-color-secondary); font-size: 13px;
 }
+.card-updated { margin: 0; padding: 0 16px 12px; font-size: 12px; color: var(--el-text-color-secondary); }
 
-.reading-time {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
+/* 操作区固定贴底：卡片在网格里等高，底边按钮对齐 */
 .card-actions {
+  margin-top: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;

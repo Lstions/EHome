@@ -286,9 +286,14 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain("currentPage.value = 1")
   })
 
-  it('uses compact facts and reading regions in card view', () => {
-    expect(source).toContain('class="card-facts"')
+  it('uses compact chips and reading regions in card view', () => {
+    // 2026-10-17 卡片重设计：facts 区改为位置 chips（节点/通道/从机地址），
+    // 读数由「一行拼接字符串」改为 3 个中文语义读数块。
+    expect(source).toContain('class="card-chips"')
+    expect(source).toContain('class="card-readings"')
     expect(source).toContain('class="card-reading"')
+    // 读数必须走中文语义化单一事实源，不得回退成直打后端字段名
+    expect(source).toContain('pickDeviceReadings')
   })
 
   it('invalidates caches and forces refresh after writes and deletion batches', () => {

@@ -142,15 +142,6 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/profile/Profile.vue'),
         meta: { title: '个人设置', icon: 'Setting', hiddenInMenu: true },
       },
-      // 边缘设备「卡片列表重设计」评审 demo（2026-10-16）。
-      // 挂在 MainLayout 之下 ⇒ 评审时与生产列表页同一外壳（侧栏/顶栏），
-      // 但路由与页面都不进生产（DEV 门禁 + hidden）。
-      ...(import.meta.env.DEV ? [{
-        path: 'dev/edge-device-cards',
-        name: 'EdgeDeviceCardsDemo',
-        component: () => import('@/dev/EdgeDeviceCardsDemo.vue'),
-        meta: { title: '边缘设备卡片重设计', requiresAuth: true, hidden: true },
-      }] : []),
     ],
   },
   // 403 无权限
@@ -174,16 +165,6 @@ const routes: RouteRecordRaw[] = [
     name: 'BmsDemoPage',
     component: () => import('@/dev/BmsDemoPage.vue'),
     meta: { requiresAuth: false, hidden: true },
-  }, {
-    // BMS 详情页「重设计」评审 demo（2026-10-15）：MOS 直控开关 / 实时流不抢滚动 /
-    // 轮询 3 条上限 / 保护状态紧凑-展开。全部本地 mock，不改既有页面/组件。
-    path: '/dev/bms-demo2',
-    name: 'BmsDemoPage2',
-    component: () => import('@/dev/BmsDemoPage2.vue'),
-    // 2026-10-15：本页已接真实后端（设备详情/实时流/受控操作/轮询配置），
-    // 因此必须走鉴权 —— 未登录时由守卫带 redirect 跳登录页，回来仍落在此页。
-    // 设备 id 走 query（?device=1），路径不变 ⇒ 无需改路由覆盖白名单。
-    meta: { requiresAuth: true, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {

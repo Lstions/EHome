@@ -144,11 +144,17 @@ async function mountWith(device: Record<string, unknown>, mode: 'card' | 'table'
   return wrapper
 }
 
-/** 按标签定位卡片里的「总线通道」值，避免误读页面上其它文本。 */
+/**
+ * 按标签定位卡片里的「通道」值，避免误读页面上其它文本。
+ *
+ * 2026-10-17 卡片重设计：原本的 .fact-item/.fact-label/<code> 结构改为
+ * .card-chip/.chip-label/.chip-value（位置信息做成 chips），选择器同步更新。
+ * 注意标签文案也由「总线通道」简化为「通道」（与卡片内其它 chip 同宽）。
+ */
 function cardBusText(wrapper: ReturnType<typeof mount>): string {
-  const item = wrapper.findAll('.device-card .fact-item').find(i => i.find('.fact-label').text() === '总线通道')
-  expect(item, '未找到「总线通道」项 —— 选择器失效，断言将形同虚设').toBeTruthy()
-  return item!.find('code').text()
+  const item = wrapper.findAll('.device-card .card-chip').find(i => i.find('.chip-label').text() === '通道')
+  expect(item, '未找到「通道」项 —— 选择器失效，断言将形同虚设').toBeTruthy()
+  return item!.find('.chip-value').text()
 }
 
 /** 按列标签定位表格「总线」单元格。 */
