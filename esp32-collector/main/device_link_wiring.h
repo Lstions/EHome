@@ -117,6 +117,15 @@ const char *devlink_place_name(devlink_place_t v);
 /** 单份证书判定。cap 是容量上限。 */
 devlink_cert_t devlink_cert_check(size_t blob_bytes, size_t cap);
 
+/**
+ * 内嵌证书数据是否可直接交给 esp-tls（纯函数，宿主可测）。
+ *
+ * 判据：len >= 2 且 data[len-1] == 0（esp-tls 要求含 NUL 终止符）。
+ * 见 device_link_wiring.c 里这个函数上方的长注释 —— 它防的是
+ * "长度算成 (end-start)+1 而数据里没有 NUL" 这个会让设备永久失联的写法。
+ */
+devlink_cert_t devlink_embedded_pem_check(const uint8_t *data, size_t len);
+
 /* ── PEM 终止符（2026-10-07，真机抓到 MBEDTLS_ERR_X509_INVALID_FORMAT 后补）──
  *
  * esp-tls 的契约（components/esp-tls/esp_tls.h:111-112, 137-140）：

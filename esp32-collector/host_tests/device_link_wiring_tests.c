@@ -536,6 +536,46 @@ static void test_buf_place_is_only_about_psram(void)
           "两个取值都要有非空名字（日志里要能看出放哪了）");
 }
 
+
+/* 内嵌证书长度的判定（2026-10-18）。
+ *
+ * 防的缺陷：第一版把内嵌证书长度算成 (end - start) + 1，理由是"esp-tls 要求
+ * 含 NUL 终止符"。但 .S 里当时没有 NUL 字节，于是 +1 读到 .rodata 里紧邻下一个
+ * 对象的首字节。后果不是崩溃 —— 是 mbedtls 解析一个末尾多一个垃圾字节的 PEM，
+ * 行为不可预期，最坏情况是设备永久失联（连不上、MQTT 已删、无法远程恢复）。
+ *
+ * 正确约定：.S 自己带 NUL，长度就是 (end - start)，判据由数据保证而不是靠
+ * 调用方"记得加 1"。
+ *
+ * 反向验证：把 devlink_embedded_pem_check 改成无条件 return DEVLINK_CERT_OK，
+ * 本用例第 2 条立即变红。 */
+static void test_embedded_pem_needs_trailing_nul(void)
+{
+    /* 1) 正常：数据 + NUL */
+    static const uint8_t good[] = { (uint8_t)'A', (uint8_t)'B', 0 };
+    CHECK(devlink_embedded_pem_check(good, sizeof(good)) == DEVLINK_CERT_OK,
+          "内嵌 PEM：末字节为 NUL 应判定可用");
+
+    /* 2) 关键回归：没有 NUL 必须拒绝。
+     * 若这里放行，(end-start)+1 那类写法就会把越界字节当终止符发出去。 */
+    static const uint8_t no_nul[] = { (uint8_t)'A', (uint8_t)'B', (uint8_t)'C' };
+    CHECK(devlink_embedded_pem_check(no_nul, sizeof(no_nul)) != DEVLINK_CERT_OK,
+          "内嵌 PEM：**缺 NUL 终止符必须拒绝**（否则读越界字节当终止符）");
+
+    /* 3) 空 / 只有一个字节：都不可能是合法 PEM（至少要 1 数据 + 1 NUL） */
+    CHECK(devlink_embedded_pem_check(NULL, 10) != DEVLINK_CERT_OK,
+          "内嵌 PEM：NULL 应拒绝");
+    CHECK(devlink_embedded_pem_check(good, 0) != DEVLINK_CERT_OK,
+          "内嵌 PEM：长度 0 应拒绝");
+    CHECK(devlink_embedded_pem_check(good, 1) != DEVLINK_CERT_OK,
+          "内嵌 PEM：长度 1 应拒绝（至少要有数据字节 + NUL）");
+
+    /* 4) 边界：正好 2 字节（1 数据 + 1 NUL）应放行 —— 最短合法形态 */
+    static const uint8_t minimal[] = { (uint8_t)'A', 0 };
+    CHECK(devlink_embedded_pem_check(minimal, sizeof(minimal)) == DEVLINK_CERT_OK,
+          "内嵌 PEM：最短合法形态（1 数据 + NUL）应放行");
+}
+
 int main(void)
 {
     test_delim_bytes_matches_wire_constants();
@@ -554,6 +594,7 @@ int main(void)
     test_frame_round_trips_through_the_wire_decoder();
     test_pem_terminator_contract();
     test_buf_place_is_only_about_psram();   /* task-34 */
+    test_embedded_pem_needs_trailing_nul();  /* 2026-10-18: NUL 终止符 */
 
     if (s_failures) { printf("device_link_wiring_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_link_wiring_tests: all checks passed\n");

@@ -91,3 +91,54 @@ endif()
 # change cannot be delivered over OTA — it needs a physical reflash, which is not
 # possible for a remotely deployed node.
 idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=esp_panic_handler" APPEND)
+# ── 可选：把设备证书编译进 app 分区（EHOME_EMBED_DEVICE_CERTS）────────────
+#
+# 用途：给"还跑着 MQTT 固件、NVS 里没有服务端当前 PKI"的现场设备做
+# 一次性 OTA 迁移。OTA 只写 app 分区、碰不到 NVS，所以证书必须随固件走。
+# 详见 device_link_wiring.c 里 devlink_load_embedded_certs 的长注释。
+#
+# 为什么用 target_add_binary_data 而不是 C 数组字面量：
+#   证书是 PEM 文本，手工转义成 C 字符串既易错又不可读；这个 CMake 函数
+#   把文件直接放进 .rodata，符号名 = _binary_<文件名去点>_start/_end。
+#
+# 用法（只对需要的那台设备构建一次，**不要**提交生成物）：
+#   cmake -DEHOME_EMBED_CERT_DIR=/path/to/pki/DD84 ... build
+#   目录里需有 ca.pem / cert.pem / key.pem 三个文件。
+#
+# 缺省（未指定 EHOME_EMBED_CERT_DIR）= 不内嵌，行为与既有构建逐字节一致。
+if(DEFINED EHOME_EMBED_CERT_DIR)
+    if(NOT EXISTS "${EHOME_EMBED_CERT_DIR}/ca.pem" OR
+       NOT EXISTS "${EHOME_EMBED_CERT_DIR}/cert.pem" OR
+       NOT EXISTS "${EHOME_EMBED_CERT_DIR}/key.pem")
+        message(FATAL_ERROR
+            "EHOME_EMBED_CERT_DIR=${EHOME_EMBED_CERT_DIR} 缺少 ca.pem/cert.pem/key.pem")
+    endif()
+    # ⚠ 必须把 .S 放进组件的 SRCS，**不能** 用 target_add_binary_data
+    # 指向 COMPONENT_LIB，也不能建 OBJECT 库。
+    #
+    # 实测踩到两个坑（都试过）：
+    #   ① target_add_binary_data(COMPONENT_LIB ...) —— .S 编出的目标文件
+    #      只是静态库 main.a 的一个成员，而静态库成员只有在被显式引用时才
+    #      被链接器拉入 ⇒ nm 能看到符号，最终链接却 undefined reference。
+    #   ② add_library(... OBJECT) + target_link_libraries —— IDF 的 ldgen
+    #      会对每个 target 求 $<TARGET_FILE:...>，而 OBJECT 库没有该属性
+    #      ⇒ "Target is not an executable or library" 配置期失败。
+    #
+    # 唯一可靠路径：把生成好的 .S 作为普通源文件交给 idf_component_register。
+    # 所以这里要求调用方预先生成三个 .S（见 tools/gen_embed_certs.sh），
+    # 本文件只负责把它们编进组件。缺文件时**明确失败**而不是静默跳过 ——
+    # 静默跳过会让"固件里没有证书"在设备失联时才被发现。
+    set(_embed_asm "")
+    foreach(_pair "ca_pem" "cert_pem" "key_pem")
+        set(_f "${EHOME_EMBED_CERT_DIR}/gen/${_pair}.S")
+        if(NOT EXISTS "${_f}")
+            message(FATAL_ERROR
+                "缺少内嵌证书汇编文件：${_f}\n"
+                "先运行：tools/gen_embed_certs.sh ${EHOME_EMBED_CERT_DIR}")
+        endif()
+        list(APPEND _embed_asm "${_f}")
+    endforeach()
+    target_sources(${COMPONENT_LIB} PRIVATE ${_embed_asm})
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EHOME_EMBED_DEVICE_CERTS=1)
+    message(STATUS "EHOME: 内嵌设备证书 <- ${EHOME_EMBED_CERT_DIR}")
+endif()

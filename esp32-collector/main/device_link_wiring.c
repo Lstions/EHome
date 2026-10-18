@@ -256,6 +256,34 @@ bool devlink_pem_terminate(uint8_t *buf, size_t cap, size_t raw_len, size_t *out
     *out_len = raw_len + 1u;
     return true;
 }
+/* ── 内嵌证书长度的判定（纯函数，宿主可测）── */
+
+/**
+ * 内嵌证书数据是否可直接交给 esp-tls。
+ *
+ * esp-tls 的契约：cacert_bytes / clientcert_bytes / clientkey_bytes **含**
+ * NUL 终止符。内嵌数据来自 .S 文件，长度按 (end - start) 算 —— 所以终止符
+ * 必须在数据里，不能靠调用方 +1。
+ *
+ * 这函数存在的原因（2026-10-18）：第一版把长度算成 (end-start)+1，而 .S 里
+ * **没有** NUL，于是 +1 读到 .rodata 里紧邻下一个对象的字节。后果不是崩溃，
+ * 而是 mbedtls 解析一个"末尾多一字节垃圾"的 PEM —— 行为不可预期，最坏情况
+ * 是设备永久失联（连不上、且 MQTT 已删、无法远程恢复）。
+ *
+ * ⇒ 判据做成纯函数，宿主测试可以逐条咬住；否则它只活在 IDF 胶水里，
+ *   而固件里那段代码在单测环境根本编不进去。
+ *
+ * @param data 指向内嵌数据的首字节（可为 NULL）
+ * @param len  (end - start) 的长度
+ * @return DEVLINK_CERT_OK 表示长度合法且末字节为 NUL
+ */
+devlink_cert_t devlink_embedded_pem_check(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len < 2) return DEVLINK_CERT_EMPTY;
+    if (data[len - 1] != 0) return DEVLINK_CERT_TOO_BIG;  /* 用现有枚举表达"不可用" */
+    return DEVLINK_CERT_OK;
+}
+
 /* ── 3.0 下行帧的分发判定 ── */
 
 static const char *const s_rx_verdict_names[] = {
@@ -628,6 +656,10 @@ static uint8_t *s_ca;   static size_t s_ca_len;
 static uint8_t *s_cert; static size_t s_cert_len;
 static uint8_t *s_key;  static size_t s_key_len;
 
+/* 前向声明：devlink_load_certs 的"NVS 失败"分支要回收已 malloc 的部分，
+ * 而定义在它下方（顺序历史原因）。 */
+static void devlink_free_certs(void);
+
 static esp_err_t nvs_read_blob_alloc(nvs_handle_t h, const char *key,
                                      uint8_t **out, size_t *out_len)
 {
@@ -668,23 +700,128 @@ static esp_err_t nvs_read_blob_alloc(nvs_handle_t h, const char *key,
     return ESP_OK;
 }
 
-/** 读全部证书材料。任一缺失即如实返回该错误码。 */
+/* ── 内嵌证书兜底（EHOME_EMBED_DEVICE_CERTS）──
+ *
+ * ## 为什么需要（2026-10-18 实测得出）
+ *
+ * 3.0 链路对证书有硬依赖：没有 ca/cert/key 就连不上，而 OTA **只写 app
+ * 分区**（ota_0/ota_1），证书却在 NVS（0x9000）—— 两者物理独立。于是存在
+ * 一个无法自愈的死角：
+ *
+ *   一台还在跑 MQTT 固件的现场设备，通过 OTA 升到 3.0 之后，
+ *   NVS 里没有服务端当前 PKI 的材料 ⇒ TLS_FAIL_CONFIG ⇒ FATAL。
+ *   而 3.0 固件已删掉 MQTT ⇒ 既连不上、也回滚不了 ⇒ 只能现场插 USB。
+ *
+ * 这不是"理论上可能"：DD84 正是这个形态（2.8.0 + MQTT，从未下发过服务端
+ * 证书）。而 OTA 是唯一能远程触达它的手段。
+ *
+ * ## 办法：把该设备的证书**编译进 app 分区**
+ *
+ * 一次性固件，只为这一台设备构建，内嵌它自己的 ca/cert/key。这样：
+ *   · OTA 把 app 分区整体换掉 ⇒ 证书跟着固件一起到达（不需要碰 NVS）；
+ *   · 设备重启后先读 NVS（保持既有语义），读不到才用内嵌副本；
+ *   · 后续若通过 NVS 铺了正式证书，NVS **优先**，内嵌副本自动让位。
+ *
+ * ## 优先级为什么是"NVS 优先"
+ *
+ * NVS 是运行期可更新的（证书轮换会写它），app 分区只有 OTA 才变。若内嵌
+ * 优先，则一次 OTA 会把设备永久钉死在这张证书上，轮换能力失效。
+ *
+ * ## 为什么内嵌路径不设 s_ca/s_cert/s_key
+ *
+ * 内嵌数据在 .rodata，生命周期是整个进程，**不能被 free**。s_* 表示"由本
+ * 模块 malloc、需要释放"，混用会让 devlink_free_certs 去 free .rodata 指针。 */
+#if defined(EHOME_EMBED_DEVICE_CERTS)
+/* 符号由 tools/gen_embed_certs.sh 生成的 .S 提供（见 main/CMakeLists.txt
+ * 里 EHOME_EMBED_CERT_DIR 段）。.S 已带 NUL 终止符，故长度不需要 +1。 */
+extern const uint8_t devlink_embedded_ca_start[]   asm("_binary_ca_pem_start");
+extern const uint8_t devlink_embedded_ca_end[]     asm("_binary_ca_pem_end");
+extern const uint8_t devlink_embedded_cert_start[] asm("_binary_cert_pem_start");
+extern const uint8_t devlink_embedded_cert_end[]   asm("_binary_cert_pem_end");
+extern const uint8_t devlink_embedded_key_start[]  asm("_binary_key_pem_start");
+extern const uint8_t devlink_embedded_key_end[]    asm("_binary_key_pem_end");
+#endif
+
+/** 尝试用内嵌证书填充 out。
+ *
+ * @return ESP_OK 表示已填充；ESP_ERR_NOT_FOUND 表示本次构建未内嵌证书。 */
+static esp_err_t devlink_load_embedded_certs(tls_esp_certs_t *out)
+{
+#if defined(EHOME_EMBED_DEVICE_CERTS)
+    /* 长度 = (end - start)，**不加 1**。
+     *
+     * ⚠ 这里踩过一个会让设备永久失联的坑，记下来防止复发：
+     * 第一版写成 "+1"，理由是"esp-tls 要求含 NUL 终止符"。但 .S 里当时
+     * **没有** NUL 字节（按原始 PEM 长度生成），于是 +1 取到的是 .rodata
+     * 里紧邻下一个对象的首字节 —— 越界读、内容随机。
+     *
+     * 正确做法：**让 .S 自己带 NUL**（tools/gen_embed_certs.sh 负责，末字节
+     * 为 0x00），此时 (end - start) 天然就是"含 NUL 的长度"，与 NVS 路径
+     * devlink_pem_terminate 的产物逐字节同构，无需再 +1。
+     *
+     * 判据必须来自数据本身，不能靠调用方"记得加 1" —— "两个地方各管一半"
+     * 正是最容易漂移的约定。 */
+    const size_t ca_len   = (size_t)(devlink_embedded_ca_end   - devlink_embedded_ca_start);
+    const size_t cert_len = (size_t)(devlink_embedded_cert_end - devlink_embedded_cert_start);
+    const size_t key_len  = (size_t)(devlink_embedded_key_end  - devlink_embedded_key_start);
+
+    if (devlink_embedded_pem_check(devlink_embedded_ca_start, ca_len)     != DEVLINK_CERT_OK ||
+        devlink_embedded_pem_check(devlink_embedded_cert_start, cert_len) != DEVLINK_CERT_OK ||
+        devlink_embedded_pem_check(devlink_embedded_key_start, key_len)   != DEVLINK_CERT_OK) {
+        ESP_LOGE(TAG, "内嵌证书缺失或末尾无 NUL（ca=%u cert=%u key=%u B）—— "
+                      "构建配置错误：.S 必须由 tools/gen_embed_certs.sh 生成",
+                 (unsigned)ca_len, (unsigned)cert_len, (unsigned)key_len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    out->ca_pem   = (uint8_t *)devlink_embedded_ca_start;   out->ca_len   = ca_len;
+    out->cert_pem = (uint8_t *)devlink_embedded_cert_start; out->cert_len = cert_len;
+    out->key_pem  = (uint8_t *)devlink_embedded_key_start;  out->key_len  = key_len;
+
+    ESP_LOGW(TAG, "NVS 无可用证书 ⇒ 使用**内嵌**证书（本次固件专用；"
+                  "ca=%u cert=%u key=%u B）。后续若在 NVS 铺了正式证书，NVS 优先。",
+             (unsigned)ca_len, (unsigned)cert_len, (unsigned)key_len);
+    return ESP_OK;
+#else
+    (void)out;
+    return ESP_ERR_NOT_FOUND;
+#endif
+}
+
+/** 读全部证书材料。任一缺失即如实返回该错误码。
+ *
+ * 顺序：先 NVS（运行期可更新），失败再考虑内嵌副本（固件自带）。
+ * 两者都没有则**如实失败** —— 不猜、不降级到"不校验"，因为跳过证书校验
+ * 等于让 mTLS 变成明文。 */
 static esp_err_t devlink_load_certs(tls_esp_certs_t *out)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(CONFIG_EHOME_DEVICE_LINK_NVS_NS, NVS_READONLY, &h);
-    if (err != ESP_OK) return err;
-
-    err = nvs_read_blob_alloc(h, "ca",   &s_ca,   &s_ca_len);
-    if (err == ESP_OK) err = nvs_read_blob_alloc(h, "cert", &s_cert, &s_cert_len);
-    if (err == ESP_OK) err = nvs_read_blob_alloc(h, "key",  &s_key,  &s_key_len);
-    nvs_close(h);
-
     if (err == ESP_OK) {
-        out->ca_pem   = s_ca;   out->ca_len   = s_ca_len;
-        out->cert_pem = s_cert; out->cert_len = s_cert_len;
-        out->key_pem  = s_key;  out->key_len  = s_key_len;
+        err = nvs_read_blob_alloc(h, "ca",   &s_ca,   &s_ca_len);
+        if (err == ESP_OK) err = nvs_read_blob_alloc(h, "cert", &s_cert, &s_cert_len);
+        if (err == ESP_OK) err = nvs_read_blob_alloc(h, "key",  &s_key,  &s_key_len);
+        nvs_close(h);
+
+        if (err == ESP_OK) {
+            out->ca_pem   = s_ca;   out->ca_len   = s_ca_len;
+            out->cert_pem = s_cert; out->cert_len = s_cert_len;
+            out->key_pem  = s_key;  out->key_len  = s_key_len;
+            return ESP_OK;
+        }
     }
+
+    /* NVS 不可用（命名空间不存在 / key 缺失 / 超上限）—— 记下真实原因再试内嵌。
+     * 两条日志的差别是排障时最先要看的：NOT_FOUND=没铺证书，INVALID_SIZE=证书过大。 */
+    ESP_LOGW(TAG, "NVS 证书不可用（err=0x%x），尝试内嵌副本", err);
+
+    /* 已经 malloc 出来的部分要回收，否则走内嵌路径会泄漏。 */
+    devlink_free_certs();
+
+    esp_err_t eerr = devlink_load_embedded_certs(out);
+    if (eerr == ESP_OK) return ESP_OK;
+
+    /* 两条路都不通：如实返回 NVS 的错误码。 */
     return err;
 }
 
