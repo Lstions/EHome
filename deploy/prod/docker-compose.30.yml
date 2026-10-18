@@ -1,0 +1,85 @@
+# ────────────────────────────────────────────────────────────────────────────
+# EHomeSystem 生产部署（/srv/ehomesystem）—— **3.0 纯 TCP 版**
+#
+# 与上一代（MQTT）的差异：
+#   · 删掉 emqx 服务：3.0 后端**没有 MQTT 代码**（commit 91fd7856 已彻底移除），
+#     留着它只会误导运维以为还有 MQTT 通道。
+#   · 新增 8443 + mTLS：设备通过长连接 TLS 接入，证书挂在 ./certs。
+#   · 镜像改为本机构建的 3.0 版本（GHCR 上的 main 仍是 10-05 的旧世代）。
+#
+# 回滚方式：见 docker-compose.yml.mqtt-bak（保留的原文件），
+#   把 .env 的 EHOME_IMAGE_TAG 指回旧 sha 并恢复原 compose 即可。
+#
+# 端口占用：宿主 8080 已被无关项目 sub2api 占用 ⇒ Web 用 18090。
+# ────────────────────────────────────────────────────────────────────────────
+
+name: ehomesystem
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ehome-prod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?err — POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err — POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ehome}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-ehome}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    networks: [ehome-internal]
+
+  ehome:
+    image: ${EHOME_IMAGE:-ghcr.io/lstions/ehome:${EHOME_IMAGE_TAG:-latest}}
+    container_name: ehome-prod-web
+    restart: unless-stopped
+    ports:
+      - "${EHOME_HTTP_PORT:-18090}:8080"
+      # 设备 mTLS 入口。3.0 固件硬编码连这个端口（编译期常量）。
+      - "${EHOME_DEVICE_PORT:-8443}:8443"
+    environment:
+      GIN_MODE: release
+      EHOME_ENV: production
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      EHOME_DB_SSLMODE: disable
+      # ── 3.0 设备传输（替代 MQTT）──
+      EHOME_DEVICE_ENABLED: "true"
+      EHOME_DEVICE_ADDR: ":8443"
+      EHOME_DEVICE_CERT_FILE: /certs/server.crt
+      EHOME_DEVICE_KEY_FILE: /certs/server.key
+      EHOME_DEVICE_CLIENT_CA_FILE: /certs/ca.pem
+      # 设备可达地址（OTA 固件下载 URL 拼接），必须是 ESP32 能访问的 IP
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required}
+      EHOME_JWT_SECRET: ${EHOME_JWT_SECRET:?err — EHOME_JWT_SECRET is required}
+      EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-90}
+      EHOME_STATIC_DIR: /app/static/dist
+      EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
+      EHOME_RAW_DIAGNOSTICS_ENABLED: ${EHOME_RAW_DIAGNOSTICS_ENABLED:-false}
+    healthcheck:
+      # /api/v1/health 会被 SPA catch-all 兜住返回 200+HTML（假健康）。
+      # 真实端点是 /health，返回 JSON。
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - ./data/firmwares:/app/firmwares
+      - ./certs:/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [ehome-internal]
+
+networks:
+  ehome-internal:
+    driver: bridge
