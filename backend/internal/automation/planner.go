@@ -320,13 +320,14 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 
 	executed := 0
 	lastCommandID := ""
+	notified := 0
 	for i := range actions {
 		act := actions[i]
 		if act.ActionType == models.AutomationActionNotification {
 			// 通知动作无设备侧副作用, 失败无"半完成"风险; 但 notifyAction 本身
-			// fail-open (写失败只告警), 因此这里不把通知计入可失败动作 —— 与
-			// 改造前"通知动作恒落 notification 结果"的语义一致。
+			// fail-open (写失败只告警), 因此这里不把通知计入可失败动作。
 			p.notifyActionFor(rule, act, at, value)
+			notified++
 			continue
 		}
 
@@ -360,7 +361,29 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		lastCommandID = exec.CommandID
 	}
 
-	// 全部动作成功 → executed (+ 冷却锚点, 取触发时刻 at)。
+	// ── 结果码分流: 纯通知 ≠ 执行 ──
+	//
+	// 为什么必须分流 (2026-10-18 真机闭环实测发现): 动作循环把整个 switch 换成
+	// 循环后, 纯通知规则会掉进下面的 recordExecuted, 落 result='executed' 且
+	// command_id 为空。这不只是显示问题, 它同时改变了四件事:
+	//   ① 日熔断只 count(executed) ⇒ 纯通知规则开始占 MaxDailyExec 配额 (旧行为不限);
+	//   ② recordExecuted 同事务写 last_triggered_at ⇒ 通知规则开始写冷却锚点 (旧行为不写);
+	//   ③ datalifecycle 把 notification 归遥测档(30 天)、executed 归执行档(400 天)
+	//      ⇒ 保留期语义被顺手改掉;
+	//   ④ evaluator.backfillCooldownAnchors 按 result='executed' 回填 ⇒ 通知规则被带上锚点。
+	// 而接口设计文档明文写着「纯通知动作成功记 notification (非 executed)」。
+	//
+	// 分流判据是**本次是否真的下发过设备动作**, 不是"规则类型是什么":
+	//   · 只有通知动作 (executed==0 且 notified>0) ⇒ notification, 不写锚点;
+	//   · 至少一个设备动作成功 ⇒ executed + 锚点 (保持既有语义);
+	//   · 一个动作都没有 ⇒ 上面已按 failed_dispatch 返回, 到不了这里。
+	if executed == 0 && notified > 0 {
+		p.record(rule, at, value, models.AutomationResultNotification, "",
+			fmt.Sprintf("notified via %d action(s)", notified))
+		return
+	}
+
+	// 至少一个设备动作成功 → executed (+ 冷却锚点, 取触发时刻 at)。
 	p.recordExecuted(rule, at, value, lastCommandID)
 }
 

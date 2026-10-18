@@ -188,6 +188,14 @@ func AutoMigrate() error {
 	if _, err = MigrateAutomationRuleActions(DB); err != nil {
 		return err
 	}
+	// node_id 世代对齐 (2026-10-18, 真机闭环实测): commit 54dae005 把 node_id 从
+	// USB-JTAG MAC 改为 base MAC, 解决了两块 C6 撞 id 的问题, 但**没有迁移存量行**。
+	// 结果是同一块板在库里有两行: 新 id 在线但无通道(收空 manifest), 旧 id 离线却
+	// 占着配置 ⇒ 设备接入后一条数据都没有, 而 UI 显示在线。幂等: 迁移后旧行已软删,
+	// 重跑匹配不到任何东西。
+	if _, err = MigrateNodeIDFromJTAGMAC(DB); err != nil {
+		return err
+	}
 	return err
 }
 

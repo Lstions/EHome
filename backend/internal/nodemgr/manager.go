@@ -457,6 +457,8 @@ func (m *Manager) HandleFrame(deviceID string, msgType uint8, payload []byte) {
 		m.handleLogStream(deviceID, payload)
 	case frame.MsgDiagReport:
 		m.handleDiagReport(deviceID, payload)
+	case frame.MsgMemRpt:
+		m.handleMemReport(deviceID, payload)
 
 	// Unimplemented message types — log warning, no panic
 	case frame.MsgConfigMfst:

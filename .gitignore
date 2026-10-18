@@ -93,6 +93,9 @@ backend/cover.out
 # 约定：可复用的工具放 tools/ 并入库（如 uiux-audit.mjs）；一次性的草稿放这些目录。
 frontend-shared/.tmp-probe/
 .tmp-probe/
+# Docker CLI 需要一个可写的配置目录（宿主 ~/.docker 只读时用 DOCKER_CONFIG 指到这里）。
+# 只在本地构建时产生，内容是本机凭据/构建缓存，绝不能入库。
+.docker-config/
 **/__dbg_*
 **/_tmp-*
 **/__scratch_*

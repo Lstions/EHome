@@ -290,9 +290,32 @@ void sync_manager_periodic_task(void *pvParameters)
         /* Refresh active config state */
         update_has_active_config();
 
-        /* Priority 1: No config — aggressive 30s retry */
+        /* Priority 1: No config — aggressive 30s retry
+         *
+         * ⚠ 2026-10-18 真机修复（C6 实测）：上面的 update_has_active_config() 与
+         * 下面**延时之后**的 request_sync 之间存在一个过期的判定 —— 本分支先按
+         * "无配置"选择路径，然后睡 30 s；在这 30 s 里 ConfigManifest 很可能已经
+         * 到了（实测 t=2560 应用配置，本分支 t=31779 才醒）。醒来后仍执行旧分支
+         * 的 request_sync(NO_CONFIG) ⇒ 置 SYNCING，而**同一行日志**里
+         * has_config=1，自相矛盾。
+         *
+         * 后果不是"多发一次同步"这么轻：状态机被永久钉在 SYNCING（后端实测 60/89
+         * 条 StatusReport 是 syncing，从未回到 idle），而 sync_state 是后端判定
+         * "配置同步是否健康"的唯一输入。
+         *
+         * 修法：延时**之后**重新求值一次，而不是沿用延时前的结论。这不是"多查一
+         * 次"的防御性冗余 —— 判据必须在**使用它的时刻**成立，而不是在**选择分支
+         * 的时刻**成立。 */
         if (!s_state.has_active_config) {
             vTaskDelay(pdMS_TO_TICKS(30 * 1000));
+            /* 重新求值：这 30 s 内配置可能已经到达。 */
+            update_has_active_config();
+            if (s_state.has_active_config) {
+                /* 配置已到 ⇒ 本分支的前提消失，回到循环顶部走正常路径。
+                 * 不在这里发任何请求：配置刚到，sync_manager_on_config_applied
+                 * 已经把状态置为 IDLE。 */
+                continue;
+            }
             uint32_t now = get_time_sec();
             if (now - s_state.last_sync_time_sec > 25) {  /* >25s since last attempt */
                 ESP_LOGI(TAG, "No active config, requesting sync (30s interval)");
