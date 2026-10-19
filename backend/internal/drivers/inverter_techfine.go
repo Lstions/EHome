@@ -492,17 +492,20 @@ func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteDa
 	}
 	cmdStr := strings.ToUpper(strings.TrimSpace(string(decoded)))
 
+	// 统一字段切分：所有 ASCII 应答同构 "(f1 f2 ...\r"
+	s := string(raw)
+	if !strings.HasPrefix(s, "(") {
+		return nil, fmt.Errorf("techfine: response must start with '(', got: %q", s)
+	}
+	s = strings.TrimPrefix(s, "(")
+	s = strings.TrimRight(s, "\r\n\x00 ")
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("techfine %s: empty response", cmdStr)
+	}
+
+	// HPV / HPVB 共用同一形状，必须靠命令区分 pv1_ 还是 pv2_。
 	if cmdStr == "HPV" || cmdStr == "HPVB" {
-		s := string(raw)
-		if !strings.HasPrefix(s, "(") {
-			return nil, fmt.Errorf("techfine: response must start with '(', got: %q", s)
-		}
-		s = strings.TrimPrefix(s, "(")
-		s = strings.TrimRight(s, "\r\n\x00 ")
-		fields := strings.Fields(s)
-		if len(fields) < 3 {
-			return nil, fmt.Errorf("techfine %s: need >=3 fields, got %d", cmdStr, len(fields))
-		}
 		prefix := "pv1"
 		if cmdStr == "HPVB" {
 			prefix = "pv2"
@@ -510,9 +513,53 @@ func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteDa
 		return d.parsePV(fields, prefix)
 	}
 
-	// Other response formats are structurally distinguishable. If the response
-	// has the ambiguous PV shape, ParseData still fails closed.
+	// 其余命令按命令字面量**精确分派**，不再猜形状。
+	if fn, ok := techfineParserFor(cmdStr); ok {
+		return fn(fields)
+	}
+
+	// 未知命令（未来新增 / 命令字节被改）：回落形状猜测。
+	// 这是兼容兜底，不是常态路径 —— 已知命令一律精确分派。
 	return d.ParseData(raw)
+}
+
+// techfineParserFor 把命令字面量映射到**精确**的解析函数。
+//
+// 为什么必须有这张表（2026-10-19 实测缺陷，污染 2087 条数据）：
+//   ParseDataWithCommand 原先只对 HPV/HPVB 用了命令上下文，其余 9 条命令一律
+//   `return d.ParseData(raw)` —— **拿到上下文却只用在一个地方**，剩下全靠猜形状。
+//   后果是实测的：HBMS1 的 16 位标志串被 parseHBAT 当成电池电压，
+//   每 30 秒往库里写一条 1e12 伏特。
+//
+//   当时我错误地判断成"设备没上报 command_template_id"。实际设备**报了**
+//   （field 9 有值：后端能查到 config_template 并取到 write_data —— 否则
+//   consumers_heavy.go:316 会在 ID==0 分支直接 return，一个传感器都进不了库，
+//   而实测每分钟稳定入库 254 条）。真正缺的是这张表。
+//
+// 语义：有命令就**必须**用命令指定的解析器，不猜。猜只留给未知命令。
+func techfineParserFor(cmdStr string) (func([]string) ([]SensorData, error), bool) {
+	d := &TechfineInverterDriver{}
+	switch cmdStr {
+	case "HSTS":
+		return d.parseHSTS, true
+	case "HGRID":
+		return d.parseHGRID, true
+	case "HOP":
+		return d.parseHOP, true
+	case "HBAT":
+		return d.parseHBAT, true
+	case "HTEMP":
+		return d.parseHTEMP, true
+	case "HGEN":
+		return d.parseHGEN, true
+	case "HBMS1":
+		return d.parseHBMS1, true
+	case "HEEP1":
+		return d.parseHEEP1, true
+	case "HIMSG1":
+		return d.parseHIMSG1, true
+	}
+	return nil, false
 }
 
 // ============================================================================
@@ -694,6 +741,19 @@ func (d *TechfineInverterDriver) parseHOP(fields []string) ([]SensorData, error)
 func (d *TechfineInverterDriver) parseHBAT(fields []string) ([]SensorData, error) {
 	if len(fields) < 7 {
 		return nil, fmt.Errorf("techfine HBAT: need >=7 fields, got %d", len(fields))
+	}
+
+	// 形状绑定：HBAT 的 fields[0] 是**单体数**（整数，如 "04"）；
+	// 而 HGRID 的 fields[0] 是电压（带小数点，如 "52.1"）。两者字段数都是 7，
+	// 单看数量区分不了 —— 这是精确分派之后仍然必须有的第二道闸门。
+	//
+	// 为什么在精确分派之后还要它：解析器也可能被**非控制路径**直接调用
+	// （轮询 CMD_SAMPLE），而 VerifyControlAction 的族校验只覆盖控制动作。
+	// 一旦上游把错配帧喂进来，"强行按 HBAT 位置取值"就会产出
+	// battery_voltage=8.0 这种看起来合理的假数据 —— 比报错危险得多。
+	if strings.Contains(fields[0], ".") {
+		return nil, fmt.Errorf("techfine HBAT: first field %q is not an integer cell count — "+
+			"该帧不是电池应答（很可能是 HGRID），拒绝按 HBAT 位置解读", fields[0])
 	}
 
 	voltage, err := strconv.ParseFloat(fields[1], 64)
