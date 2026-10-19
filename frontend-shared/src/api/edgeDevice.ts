@@ -9,6 +9,20 @@ export type DeviceStatus = 'active' | 'online' | 'offline' | 'warning' | 'error'
  * 边缘设备**关联通道**（后端 GET /edge-devices 每个 item 携带的 channel 对象）。
  * 只声明展示所需的字段；其余字段（bus_config/address/...）按需追加。
  */
+/**
+ * 单个传感器的「最新值」。
+ *
+ * 与 EdgeDevice 的 latest_data 不同：后者是**一条**原始记录里的若干物理量
+ * （对多命令设备只覆盖最后一条命令），本类型是**跨命令**聚合后的全集。
+ */
+export interface LatestSensorValue {
+  sensor_name: string
+  value: number
+  unit: string
+  /** 该传感器最近一次采样的时刻（各传感器独立，可能相差数秒） */
+  timestamp: string
+}
+
 export interface EdgeDeviceChannel {
   id?: number
   /**
@@ -369,6 +383,23 @@ export const edgeDeviceApi = {
   async getLatestData(id: number): Promise<any> {
     const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/edge-devices/${id}/latest-data`)
     return response.data
+  },
+
+  /**
+   * 该设备**每个传感器**各自的最新值（跨命令聚合）。
+   *
+   * 与 getLatestData 的区别（2026-10-18 实测缺陷）：
+   *   getLatestData 返回 device_data 的**一条**原始记录 —— 对 Modbus 设备够用
+   *   （一条命令读出全部物理量），但对 ASCII 一问一答设备（Techfine 逆变器）
+   *   只能拿到**最后执行的那条命令**的产物（实测 3/36 个字段），其余字段
+   *   在库里但界面永远看不到，表现为"页面大部分是空的"。
+   *
+   * 本方法返回全部传感器的最新值，是详情页展示实时读数应使用的接口。
+   */
+  async getLatestValues(id: number): Promise<LatestSensorValue[]> {
+    const response = await client.get<unknown, ApiEnvelope<LatestSensorValue[]>>(`/api/v1/edge-devices/${id}/latest-values`)
+    const data = response?.data
+    return Array.isArray(data) ? data : []
   },
 
   async getHistoryData(id: number, params: {

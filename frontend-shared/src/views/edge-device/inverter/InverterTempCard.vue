@@ -39,7 +39,18 @@
       </div>
     </div>
 
-    <el-empty v-if="!hasTempData && !hasFanData" description="无温度/风扇数据" :image-size="60" />
+    <!--
+      无数据时给出**原因**，而不是一句"无数据"。
+      2026-10-18 实测：泰琪丰 HTEMP 的真机应答只有 6 个字段
+      （"(000.0 00.0 00000 0 380.0 0…"），而驱动的 parseHTEMP 要求 >= 11 个，
+      于是整条命令被判定为"帧形状不完整"并拒绝 —— 温度**在设备侧就没采到**，
+      不是本页面的问题。写"无数据"会让运维去查前端/链路，方向错了。
+    -->
+    <el-empty
+      v-if="!hasTempData && !hasFanData"
+      description="设备未返回温度数据（HTEMP 应答格式与本驱动的解析器不一致，属固件/驱动侧待修项）"
+      :image-size="60"
+    />
   </div>
 </template>
 

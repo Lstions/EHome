@@ -101,12 +101,45 @@ export function useDeviceData(
   }
 
   // ── API: fetch latest data snapshot ──────────────────────────
+  //
+  // 两个端点并用，各自不可替代（2026-10-18 实测缺陷后改）：
+  //
+  //   /latest-values  ⇒ **每个传感器**的最新值（跨命令聚合）。这是详情页
+  //                     展示实时读数必须用的：ASCII 一问一答设备（逆变器）
+  //                     一个轮询周期发 9 条命令、每条各带 2~14 个物理量，
+  //                     而 /latest-data 只返回**最后一条命令**的记录 ⇒
+  //                     实测 36 个字段里只显示 3 个，其余在库里但界面看不到。
+  //
+  //   /latest-data    ⇒ 最新**一条原始记录**（含 raw_data），用于实时数据流
+  //                     逐条展示"刚收到了什么帧"。它是有意义的，不能删。
+  //
+  // 合并顺序：先取全量快照，再用单条记录覆盖同名字段（后者更新）。
+  // latest-values 失败**不阻断**页面 —— 退化为原来的单条行为，而不是白屏。
   let latestDataSequence = 0
   const fetchLatestData = async (throwOnError = false) => {
     const id = deviceId.value
     if (id === null) return
     const sequence = ++latestDataSequence
     try {
+      // ① 全量传感器快照（跨命令）
+      let aggregated: Record<string, unknown> | null = null
+      try {
+        const values = await edgeDeviceApi.getLatestValues(id)
+        if (sequence !== latestDataSequence || deviceId.value !== id) return
+        if (values.length > 0) {
+          aggregated = {}
+          for (const item of values) {
+            aggregated[item.sensor_name] = item.value
+          }
+        }
+      } catch (error) {
+        logger.error('获取全量传感器快照失败，退化为单条记录', { error: String(error) })
+      }
+
+      if (aggregated) {
+        latestData.value = { ...(latestData.value || {}), ...aggregated }
+      }
+
       const response = await edgeDeviceApi.getLatestData(id)
       if (sequence !== latestDataSequence || deviceId.value !== id) return
       if (response) {
@@ -126,7 +159,13 @@ export function useDeviceData(
             }
           } catch { /* ignore parse error */ }
         }
-        latestData.value = parsedData
+        // ⚠ **合并**，不是覆盖。
+        //
+        // 这里曾经写的是 `latestData.value = parsedData` —— 单条记录只含
+        // 最后一条命令的物理量（逆变器实测 3/36 个），直接赋值会把上面刚取到的
+        // 全量快照整个抹掉，于是页面又变回"只有 3 个字段"。
+        // 语义：单条记录里的同名字段**更新**（它更新），其余保留。
+        latestData.value = { ...(latestData.value || {}), ...parsedData }
         // Prepend to realtime data stream as a historical item
         realtimeDataItems.value = [{
           id: `latest-${Date.now()}`,

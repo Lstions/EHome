@@ -125,13 +125,25 @@ describe('InverterDetailPage', () => {
     expect(wrapper.findAllComponents(MetricStatCard)).toHaveLength(0)
   })
 
+  /**
+   * ⚠ 本用例用的键必须是**后端真实字段名**。
+   *
+   * 2026-10-19 修正：原用例用的是 battery_current / load_power / current —— 
+   * 这三个字段在泰琪丰驱动里**都不存在**（真实字段是
+   * battery_charge_current / battery_discharge_current / output_active_power）。
+   * 于是用例一直绿着，而真实页面永远拿不到值：**测试与生产在两个世界里**，
+   * 这正是"页面空着但没人发现"的原因之一。
+   *
+   * 现在用例与 InverterDetailPage 的传参口径一致。
+   */
   it('renders device sections with metric values derived from latestData', () => {
-    hoisted.state.device.value = { id: 42, name: '测试逆变器', device_type: 'inverter', status: 'online' }
+    hoisted.state.device.value = { id: 42, name: '测试逆变器', device_type: 'techfine_inverter', status: 'online' }
     hoisted.state.latestData.value = {
       pv1_power: 1000, pv2_power: 500,
-      battery_voltage: 51.2, battery_current: 10,
+      battery_voltage: 51.2, battery_discharge_current: 10,
+      battery_capacity: 69,
       grid_voltage: 220, grid_frequency: 50,
-      load_power: 500,
+      output_active_power: 500,
     }
     const wrapper = mount(InverterDetailPage, { global: globalOptions })
 
@@ -150,7 +162,7 @@ describe('InverterDetailPage', () => {
     expect(cards[3].props('value')).toBe('500W')
 
     expect(wrapper.findComponent(InverterPowerFlow).props()).toMatchObject({
-      pvPower: 1500, loadPower: 500, batteryVoltage: 51.2, batteryCurrent: 10,
+      pvPower: 1500, loadPower: 500, batteryVoltage: 51.2, batteryDischargeCurrent: 10,
     })
     expect(wrapper.findComponent(InverterMpptCard).props('data')).toEqual(hoisted.state.latestData.value)
     expect(wrapper.findComponent(InverterStatusGrid).props('latestData')).toEqual(hoisted.state.latestData.value)
@@ -186,21 +198,43 @@ describe('InverterDetailPage', () => {
     expect(mount(InverterDetailPage, { global: globalOptions }).findAllComponents(MetricStatCard)[0].props('value')).toBe('600W')
   })
 
-  it('maps battery current sign to charge/discharge/idle and legacy fallbacks', () => {
-    hoisted.state.device.value = { id: 1, name: 'x', device_type: 'inverter', status: 'online' }
-    const cases: Array<{ data: Record<string, any>; direction: string }> = [
-      { data: { battery_current: -4 }, direction: 'charge' },
-      { data: { battery_current: 0 }, direction: 'idle' },
-      { data: { battery_current: 4 }, direction: 'discharge' },
-      { data: { current: -2 }, direction: 'charge' },
-      { data: { current: 2 }, direction: 'discharge' },
-      { data: {}, direction: 'idle' },
+  /**
+   * 电池方向判定：**充电与放电是两个独立寄存器**，不是同一个量的正负号。
+   *
+   * 泰琪丰 HBAT 应答里 battery_charge_current 与 battery_discharge_current
+   * 各占一个字段，浮充/待机时都可能为 0。旧用例假设存在 battery_current
+   * （带符号的单值）—— 那个字段后端从来不返回，于是断言测的是一个不存在
+   * 的契约；真实页面恒显示 idle（灰色）。本用例改用真实字段。
+   */
+  it('maps charge/discharge to direction from the two independent current fields', () => {
+    hoisted.state.device.value = { id: 1, name: 'x', device_type: 'techfine_inverter', status: 'online' }
+    const cases: Array<{ data: Record<string, any>; direction: string; note: string }> = [
+      { data: { battery_charge_current: 4 }, direction: 'charge', note: '充电电流 > 0' },
+      { data: { battery_discharge_current: 6 }, direction: 'discharge', note: '放电电流 > 0' },
+      { data: { battery_charge_current: 0, battery_discharge_current: 0 }, direction: 'idle', note: '两者皆 0（浮充/待机）' },
+      { data: {}, direction: 'idle', note: '字段缺失' },
     ]
     for (const c of cases) {
       hoisted.state.latestData.value = c.data
       const wrapper = mount(InverterDetailPage, { global: globalOptions })
-      expect(wrapper.findAllComponents(MetricStatCard)[1].props('direction'), JSON.stringify(c.data)).toBe(c.direction)
+      expect(
+        wrapper.findAllComponents(MetricStatCard)[1].props('direction'),
+        c.note + ' -> ' + JSON.stringify(c.data),
+      ).toBe(c.direction)
     }
+  })
+
+  /**
+   * UI 层的物理闸门：越界读数显示 "—"，不把垃圾值当真实读数展示。
+   *
+   * 2026-10-19 实测：后端曾把 HBMS1 的 16 位二进制串当电池电压，写库 2087 条
+   * 1e12 伏特。解析器根因已修，但前端仍是最后一道防线。
+   */
+  it('shows — instead of an implausible battery voltage', () => {
+    hoisted.state.device.value = { id: 1, name: 'x', device_type: 'techfine_inverter', status: 'online' }
+    hoisted.state.latestData.value = { battery_voltage: 1000000000000 }
+    const wrapper = mount(InverterDetailPage, { global: globalOptions })
+    expect(wrapper.findAllComponents(MetricStatCard)[1].props('value')).toBe('—')
   })
 
   it('renders — placeholders and zero power when latestData is null', () => {

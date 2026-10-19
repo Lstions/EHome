@@ -11,7 +11,7 @@ describe('InverterStatusGrid', () => {
     const wrapper = mountGrid({ work_mode: 2, fault_code: 0 })
     const tags = wrapper.findAll('.status-item .el-tag')
     expect(tags).toHaveLength(2)
-    expect(tags[0].text()).toBe('市电')
+    expect(tags[0].text()).toBe('市电 Line')
     expect(tags[0].attributes('data-type')).toBe('success')
     expect(tags[1].text()).toBe('无故障')
     expect(tags[1].attributes('data-type')).toBe('success')
@@ -38,13 +38,16 @@ describe('InverterStatusGrid', () => {
 
   it('decodes every documented work mode with its tag type', () => {
     const cases: Array<{ mode: number; label: string; type: string }> = [
-      { mode: 0, label: '初始上电', type: 'success' },
-      { mode: 1, label: '待机', type: 'success' },
-      { mode: 2, label: '市电', type: 'success' },
-      { mode: 3, label: '电池', type: 'warning' },
-      { mode: 4, label: '故障', type: 'danger' },
-      { mode: 5, label: '关机', type: 'info' },
-      { mode: 6, label: '测试', type: 'success' },
+      // 标签同时带协议字母：数值↔字母映射来自驱动 workModeMap
+      // （P=0 S=1 L=2 B=3 F=4 D=5 X=6）。显示字母才能在"界面说的模式"
+      // 与"设备回的字符"之间一眼对上，避免映射漂移时静默说错话。
+      { mode: 0, label: '开机 Power-on', type: 'success' },
+      { mode: 1, label: '待机 Standby', type: 'success' },
+      { mode: 2, label: '市电 Line', type: 'success' },
+      { mode: 3, label: '电池 Battery', type: 'warning' },
+      { mode: 4, label: '故障 Fault', type: 'danger' },
+      { mode: 5, label: '关机 Shutdown', type: 'info' },
+      { mode: 6, label: '测试 Test', type: 'success' },
     ]
     for (const c of cases) {
       const wrapper = mountGrid({ work_mode: c.mode })

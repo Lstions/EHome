@@ -26,12 +26,18 @@
           </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
+          <!--
+            电池卡：显示电压 + 电量，方向由充/放电流两个独立字段判定。
+            ⚠ 不能用 latestData.battery_current —— 后端没有这个字段，
+            真实字段是 battery_charge_current / battery_discharge_current。
+          -->
           <MetricStatCard
             label="电池"
-            :value="formatNum(latestData?.battery_voltage ?? latestData?.voltage, 1)"
+            :value="batteryVoltageText"
             unit="V"
             tone="success"
-            :direction="(latestData?.battery_current ?? latestData?.current ?? 0) < 0 ? 'charge' : (latestData?.battery_current ?? latestData?.current ?? 0) > 0 ? 'discharge' : 'idle'"
+            :direction="batteryDirection"
+            :sub-text="`${formatNum(latestData?.battery_capacity, 0)}% · ${batteryCurrentText}`"
           >
             <template #icon><el-icon :size="20"><Lightning /></el-icon></template>
           </MetricStatCard>
@@ -42,13 +48,19 @@
             :value="formatNum(latestData?.grid_voltage, 0)"
             unit="V"
             tone="primary"
-            :sub-text="`${formatNum(latestData?.grid_frequency ?? latestData?.frequency, 1)}Hz`"
+            :sub-text="`${formatNum(latestData?.grid_frequency, 1)}Hz`"
           >
             <template #icon><el-icon :size="20"><Connection /></el-icon></template>
           </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <MetricStatCard label="负载" :value="formatPower(latestData?.load_power ?? latestData?.power ?? 0)" tone="info">
+          <!-- 负载卡：用 output_active_power（有功，W）。若同时有视在功率则作为副文本。 -->
+          <MetricStatCard
+            label="负载"
+            :value="formatPower(num(latestData?.output_active_power))"
+            tone="info"
+            :sub-text="loadSubText"
+          >
             <template #icon><el-icon :size="20"><HomeFilled /></el-icon></template>
           </MetricStatCard>
         </el-col>
@@ -59,9 +71,14 @@
         <template #header><span>功率流向</span></template>
         <InverterPowerFlow
           :pv-power="totalPvPower"
-          :load-power="latestData?.load_power ?? latestData?.power ?? 0"
-          :battery-voltage="latestData?.battery_voltage ?? latestData?.voltage ?? 0"
-          :battery-current="latestData?.battery_current ?? latestData?.current ?? 0"
+          :load-power="num(latestData?.output_active_power)"
+          :battery-voltage="num(latestData?.battery_voltage)"
+          :battery-charge-current="num(latestData?.battery_charge_current)"
+          :battery-discharge-current="num(latestData?.battery_discharge_current)"
+          :battery-capacity="num(latestData?.battery_capacity)"
+          :grid-voltage="num(latestData?.grid_voltage)"
+          :work-mode="numOrNull(latestData?.work_mode)"
+          :apparent-power="num(latestData?.output_apparent_power)"
         />
       </el-card>
 
@@ -210,6 +227,80 @@ function formatNum(v: number | undefined | null, digits: number = 1): string {
   if (v === undefined || v === null || isNaN(v)) return '—'
   return v.toFixed(digits)
 }
+
+/**
+ * 把可能是字符串的传感器值收敛成 number，缺失时给 0。
+ *
+ * 为什么需要：latestData 的值有两个来源 —— /latest-values 给 number，
+ * 而单条记录解析时 StringValue 优先（见 useDeviceData），字符串型读数
+ * （如 BMS hardware_version="V19"）会以 string 形式落进来。直接参与
+ * 算术会得到 "1231" 这种字符串拼接结果。
+ */
+function num(v: unknown): number {
+  if (v === undefined || v === null || v === '') return 0
+  const n = Number(v)
+  return isNaN(n) ? 0 : n
+}
+
+/** 同 num，但"缺失"保持为 null —— 用于需要区分"0"与"没有"的展示（如工作模式）。 */
+function numOrNull(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(v)
+  return isNaN(n) ? null : n
+}
+
+/**
+ * 带物理闸门的取值：超出 [min, max] 视为**无效**，返回 null。
+ *
+ * 为什么前端也要挡一道（后端已经修了解析器根因）：
+ *   2026-10-19 实测，后端把 HBMS1 的 16 位二进制串当成电池电压，往库里
+ *   写了 2087 条 1e12 伏特。根因修好后**历史数据仍在库**，而前端读的是
+ *   "每个传感器的最新值" —— 只要最新一条是脏的，页面就显示 1000000000000.0V。
+ *
+ *   UI 是最后一道防线：显示"—"远好于显示一个荒谬的数字，后者会让人去查
+ *   电池，而真相是上游认错了帧。
+ */
+function numSane(v: unknown, min: number, max: number): number | null {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(v)
+  if (isNaN(n) || n < min || n > max) return null
+  return n
+}
+
+/**
+ * 电池方向。**充电与放电是两个独立寄存器**，不是同一量的正负号：
+ * 泰琪丰协议里 battery_charge_current 与 battery_discharge_current 各自
+ * 独立，浮充/待机时两者都可为 0。早期代码读不存在的 battery_current，
+ * 恒走 idle 分支，于是语义色永远不亮。
+ */
+const batteryDirection = computed<'charge' | 'discharge' | 'idle'>(() => {
+  if (num(latestData.value?.battery_charge_current) > 0) return 'charge'
+  if (num(latestData.value?.battery_discharge_current) > 0) return 'discharge'
+  return 'idle'
+})
+
+/** 电池电压展示值，经物理闸门（0~1000V）；越界显示 "—" 而非原始数字。 */
+const batteryVoltageText = computed(() => {
+  const v = numSane(latestData.value?.battery_voltage, 0, 1000)
+  return v === null ? '—' : v.toFixed(1)
+})
+
+const batteryCurrentText = computed(() => {
+  const c = num(latestData.value?.battery_charge_current)
+  const d = num(latestData.value?.battery_discharge_current)
+  if (c > 0) return `充 ${c.toFixed(1)}A`
+  if (d > 0) return `放 ${d.toFixed(1)}A`
+  return '静止'
+})
+
+const loadSubText = computed(() => {
+  const apparent = num(latestData.value?.output_apparent_power)
+  const pct = num(latestData.value?.output_load_percent)
+  const parts: string[] = []
+  if (apparent > 0) parts.push(`${apparent.toFixed(0)}VA`)
+  if (pct > 0) parts.push(`${pct.toFixed(0)}%`)
+  return parts.join(' · ')
+})
 
 const goBack = () => router.back()
 

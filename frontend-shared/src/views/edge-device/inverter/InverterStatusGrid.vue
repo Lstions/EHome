@@ -37,16 +37,25 @@ const props = defineProps<{
   latestData: Record<string, any> | null
 }>()
 
-// Work mode decoding: numeric encoding from backend
-// 0=初始上电, 1=待机, 2=市电, 3=电池, 4=故障, 5=关机, 6=测试
+/**
+ * 工作模式解码。
+ *
+ * ⚠ 数值与字母的对应关系来自**驱动**而不是协议文档，两边必须一致：
+ *   backend/internal/drivers/inverter_techfine.go:516
+ *   workModeMap = {'P':0,'S':1,'L':2,'B':3,'F':4,'D':5,'X':6}
+ *   协议原文（同文件 :510）：P=Power-on S=Standby L=Line B=Battery F=Fault D=Shutdown X=Test
+ *
+ * 一旦驱动改动该映射而这里没跟，界面会把"电池模式"显示成"故障"——
+ * 这类错位不会报错，只会静默地说错话，故把字母一并写进标签便于核对。
+ */
 const WORK_MODE_MAP: Record<number, string> = {
-  0: '初始上电',
-  1: '待机',
-  2: '市电',
-  3: '电池',
-  4: '故障',
-  5: '关机',
-  6: '测试',
+  0: '开机 Power-on',
+  1: '待机 Standby',
+  2: '市电 Line',
+  3: '电池 Battery',
+  4: '故障 Fault',
+  5: '关机 Shutdown',
+  6: '测试 Test',
 }
 
 const workModeLabel = computed(() => {

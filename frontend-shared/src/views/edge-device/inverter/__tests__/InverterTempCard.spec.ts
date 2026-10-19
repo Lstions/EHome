@@ -129,7 +129,7 @@ describe('InverterTempCard', () => {
   it('shows el-empty placeholder for null or field-less data', () => {
     const fromNull = mountCard(null)
     expect(fromNull.find('.el-empty').exists()).toBe(true)
-    expect(fromNull.text()).toContain('无温度/风扇数据')
+    expect(fromNull.text()).toContain('设备未返回温度数据')
     expect(fromNull.findAll('.temp-item')).toHaveLength(0)
     expect(fromNull.find('.fan-section').exists()).toBe(false)
 

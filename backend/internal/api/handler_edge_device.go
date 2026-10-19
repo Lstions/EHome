@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/deviceaction"
@@ -1281,6 +1282,88 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		cond, args := dataScopeCond(qs)
 		db.Where(cond, args...).Order("created_at DESC").First(&data)
 		Success(c, data)
+	})
+
+	// GET /api/v1/edge-devices/:id/latest-values
+	//
+	// 返回该设备**每个传感器**各自的最新值（一帧里可能有 N 个物理量，
+	// 也可能来自**多条命令**）。
+	//
+	// 为什么需要它（2026-10-18 实测缺陷）：
+	//   /latest-data 返回的是 device_data 的**一条**原始记录。对 Modbus 类设备
+	//   （JBD BMS）没问题 —— 一条命令读一段寄存器，解析出全部 29 个物理量。
+	//   但对 **ASCII 一问一答**类设备（Techfine 逆变器）就致命：它每个轮询周期
+	//   要发 9 条独立命令（HSTS/HGRID/HOP/HBAT/HPV/HPVB/HGEN/HTEMP/HBMS1），
+	//   每条产生**一条** device_data，各带 2~14 个物理量。
+	//   前端取"最新那一条" ⇒ 只能看到**最后执行的那条命令**的产物（实测 3 个
+	//   字段 pv1_*），另外 33 个字段在库里但界面永远看不到 —— 表现为
+	//   "逆变器页面大部分是空的"，而数据其实一直在采。
+	//
+	// 实现与 /overview 同口径（复用 latestValueCache）：缓存优先，miss 的设备
+	// 回落 DISTINCT ON (sensor_name) SQL。**必须用 LatestValues 而不是
+	// LatestValue** —— 后者只返回最后写入的那一条，会重现同一缺陷。
+	e.GET("/:id/latest-values", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
+		if err != nil {
+			Error(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if qs.InstanceDeleted {
+			Error(c, http.StatusNotFound, "edge device not found")
+			return
+		}
+
+		type latestValue struct {
+			SensorName string    `json:"sensor_name"`
+			Value      float64   `json:"value"`
+			Unit       string    `json:"unit"`
+			StringValue string   `json:"string_value,omitempty"`
+			Timestamp  time.Time `json:"timestamp"`
+		}
+		out := make([]latestValue, 0, 32)
+
+		// 缓存优先。缓存键是 edge_device_id —— 即本端点的 :id。
+		// （UnifiedData.DeviceID 在 v2.2 起就是 edge_device_id，见 models.go:256）
+		for _, rec := range LatestValues(uint(id)) {
+			out = append(out, latestValue{
+				SensorName: rec.SensorName,
+				Value:      rec.Value,
+				Unit:       rec.Unit,
+				Timestamp:  rec.Timestamp,
+			})
+		}
+
+		if len(out) == 0 {
+			// 缓存 miss：按**传感器**各取最新一条。
+			//
+			// ⚠ 这里**不能**照抄 /overview 的回落 SQL：那条用的是
+			//   DISTINCT ON (device_id) ... ORDER BY created_at DESC，
+			// 即"取该设备最新的一条记录"——对多命令设备正是本端点要修的那个
+			// 缺陷（只能拿到最后执行的那条命令）。必须按 sensor_name 分组取
+			// 各自的最新时间戳。
+			cond, args := dataScopeCond(qs)
+			var rows []models.UnifiedData
+			db.Where(cond, args...).
+				Order("sensor_name ASC, timestamp DESC").
+				Find(&rows)
+			// 按 sensor_name 去重，保留时间戳最新的那条（上面的 DESC 已保证）。
+			seen := make(map[string]struct{}, len(rows))
+			for _, r := range rows {
+				if _, dup := seen[r.SensorName]; dup {
+					continue
+				}
+				seen[r.SensorName] = struct{}{}
+				out = append(out, latestValue{
+					SensorName: r.SensorName,
+					Value:      r.Value,
+					Unit:       r.Unit,
+					Timestamp:  r.Timestamp,
+				})
+			}
+		}
+
+		Success(c, out)
 	})
 
 	// GET /api/v1/edge-devices/:id/data

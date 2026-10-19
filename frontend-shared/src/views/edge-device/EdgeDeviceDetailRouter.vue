@@ -34,10 +34,26 @@ const BmsDetailPage = defineAsyncComponent(() => import('./bms/BmsDetailPage.vue
 const InverterDetailPage = defineAsyncComponent(() => import('./inverter/InverterDetailPage.vue'))
 const GenericDeviceDetail = defineAsyncComponent(() => import('./GenericDeviceDetail.vue'))
 
-// device_type → dedicated page mapping
+/**
+ * device_type → 专用详情页映射。
+ *
+ * ⚠ key 必须是**后端驱动的注册名**（日志 "Driver registered: <name>"、
+ * edge_devices.device_type 列），不是人类可读的分类名。
+ *
+ * 2026-10-18 实测缺陷：这里原先把逆变器写成 `inverter`，而驱动注册名是
+ * `techfine_inverter` ⇒ 映射永远 miss ⇒ 逆变器设备**一直走 GenericDeviceDetail**，
+ * 那个 950 行的专用页面（功率流/MPPT/告警/发电量）从来没被渲染过。
+ * 症状很容易误判成"页面数据没接上"，实际是路由根本没选中它。
+ *
+ * 因此对每个 key 都注明来源；新增驱动时**必须**同步此表，否则会静默退化为通用页。
+ */
 const componentMap: Record<string, any> = {
+  // backend/internal/drivers/jiabaida*.go → "Driver registered: jiabaida_bms"
   jiabaida_bms: BmsDetailPage,
   battery: BmsDetailPage,        // battery shares BMS page (simplified)
+  // backend/internal/drivers/inverter_techfine.go → "Driver registered: techfine_inverter"
+  techfine_inverter: InverterDetailPage,
+  // 兼容：早期数据/手工建库可能写成不带厂商前缀的名字
   inverter: InverterDetailPage,
 }
 

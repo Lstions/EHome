@@ -397,10 +397,24 @@ func (d *TechfineInverterDriver) ParseData(raw []byte) ([]SensorData, error) {
 		}
 	}
 
-	// --- HBMS1: (AA b7b6b5b4b3b2b1b0 c7c6c5c4c3c2c1c0 ...)
-	// Second and third fields are 8-character binary strings
-	if len(fields) >= 10 && len(fields[1]) == 8 && len(fields[2]) == 8 &&
-		isAllBinary(fields[1]) && isAllBinary(fields[2]) {
+	// --- HBMS1: (AA <二进制标志串> <二进制标志串> ...)
+	//
+	// ⚠ 2026-10-19 真机实测修正：真机的标志串是 **16 位**，不是 8 位。
+	// 实测应答：
+	//   (00 0001000000000000 000.0 000.0 002.0 000 0000.0 0000.0 00000 0000000
+	//                 ↑ 16 字符
+	// 旧判据写死 len==8 ⇒ 永远不匹配 ⇒ 落到 HBAT 分支（len>=7 且首字段是整数）
+	// ⇒ 把 fields[1]="0001000000000000" 当成 battery_voltage
+	// ⇒ **每 3 分钟写入一条 1e12 伏特**（实测污染 359 条，占 battery_voltage 的 20%）。
+	//
+	// 判据改成"长度 >= 8 且全为 0/1"，由 parseHBMS1 内部按位解释（它已经用
+	// len(status1) >= 8 做了防护，取的是**最高 8 个有效位**）。
+	//
+	// ⚠ 第二个标志串**不能**要求 isAllBinary：真机的 fields[2] 是 "000.0"，
+	// 带小数点。第一版写成 fields[2] 也必须全二进制 ⇒ 仍然不匹配 ⇒ 又落回
+	// HBAT（回归测试正是这样抓到的）。判据只需 fields[1] 是二进制串 +
+	// 总字段数 >=10：HBAT 的 fields[1] 是 "051.1"（带小数点），天然不会命中。
+	if len(fields) >= 10 && len(fields[1]) >= 8 && isAllBinary(fields[1]) {
 		return d.parseHBMS1(fields)
 	}
 
@@ -514,6 +528,17 @@ func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteDa
 
 // workModeMap maps work mode letters to numeric codes for LastData storage.
 var workModeMap = map[byte]float64{'P': 0, 'S': 1, 'L': 2, 'B': 3, 'F': 4, 'D': 5, 'X': 6}
+
+// hbatMaxPlausibleVoltage 是 HBAT 电压字段的物理上界（V）。
+//
+// 为什么需要：ParseData 靠形状挑解析器，任何一次形状放宽都可能让**别的命令**
+// 的应答落到 parseHBAT。若不设界，"0001000000000000" 会被读成 1e12 伏特并
+// 写库（2026-10-19 实测发生过，污染 359 条）。
+//
+// 取 1000V 而不是精确的 60V：家用储能 48V/96V 体系远低于此，而 1000V 仍能
+// 拦住所有"把长整数字符串当电压"的误判。界要能拦住**错误类型**，不是要
+// 精确描述电池。
+const hbatMaxPlausibleVoltage = 1000.0
 
 func (d *TechfineInverterDriver) parseHSTS(fields []string) ([]SensorData, error) {
 	if len(fields) < 2 {
@@ -676,6 +701,22 @@ func (d *TechfineInverterDriver) parseHBAT(fields []string) ([]SensorData, error
 		return nil, fmt.Errorf("techfine HBAT: invalid voltage %q", fields[1])
 	}
 
+	// 合理性闸门（2026-10-19 真机缺陷后加）。
+	//
+	// ParseData 靠**形状**猜命令类型。HBMS1 的标志串是 16 位二进制，而闸门
+	// 曾写死 len==8 ⇒ 不匹配 ⇒ 落到本函数 ⇒ 把 "0001000000000000" 读成
+	// 1e12 V 写进数据库（实测污染 359 条）。闸门已修，但**不能只修根因**：
+	// 任何一次判别顺序调整都可能让同类形状再次落到这里。
+	//
+	// 判据取物理边界而非魔法数：48V 电池系统最高约 60V，96V 系统约 120V；
+	// 取 0..1000V 覆盖所有家用场景，超出即"这不是电压字段"，fail-closed。
+	// **宁可丢弃这一帧，也不写一个看起来像真读数的垃圾值** —— 后者会让
+	// 运维去查电池，而真相是解析器认错了帧。
+	if voltage < 0 || voltage > hbatMaxPlausibleVoltage {
+		return nil, fmt.Errorf("techfine HBAT: implausible battery voltage %.1f V (field %q) — "+
+			"响应形状与该动作不符，拒绝采信以免写入垃圾值", voltage, fields[1])
+	}
+
 	capacity := parseFloat(fields[2])
 	chargeCurrent := parseFloat(fields[3])
 	dischargeCurrent := parseFloat(fields[4])
@@ -772,7 +813,23 @@ func (d *TechfineInverterDriver) parsePV(fields []string, prefix string) ([]Sens
 
 func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, error) {
 	if len(fields) < 11 {
-		return nil, fmt.Errorf("techfine HTEMP: need >=11 fields, got %d", len(fields))
+		// ⚠ 2026-10-19 真机数据：GB3024 对 HTEMP 的实际应答只有 **6** 个字段，
+		// 且形状与下面的 11 字段假设完全不同：
+		//
+		//	(000.0 00.0 00000 0 380.0 00000000000000000000000
+		//	                          ↑ 与 bus_voltage 实测值(379~388)吻合
+		//
+		// 也就是说：**这不是温度帧**，或者至少不是本函数假设的那种温度帧。
+		// 字段语义无法从单一样本反推（[0]=000.0 若是温度则设备在冰点，与实际
+		// 运行状态不符）。
+		//
+		// 因此这里**保持拒绝**，并把实测原始帧写进错误信息 —— 下一次有人拿到
+		// 厂商文档时，凭这一行就能核对映射，而不用再去翻历史日志。
+		// 绝不"按位置硬套"：那会把 380.0 当成 pv_temp=380°C，制造一个
+		// 看起来像真读数的假数据（比缺失更糟）。
+		return nil, fmt.Errorf("techfine HTEMP: need >=11 fields, got %d (fields=%v) — "+
+			"真机实测该命令返回 6 字段且形状与解析器假设不符，字段语义待厂商文档确认；"+
+			"拒绝猜测性映射以免写入假温度", len(fields), fields)
 	}
 
 	pvTemp := parseFloat(fields[0])

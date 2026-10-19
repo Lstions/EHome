@@ -232,3 +232,7 @@ esp32-collector/tools/*_nvs.bin
 
 # 本机凭据（生产 SSH 等）—— 绝不入库
 .secrets/
+
+# 一次性浏览器验收脚本与截图（不入库）
+frontend-shared/verify-*.mjs
+frontend-shared/*.png
