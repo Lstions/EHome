@@ -89,21 +89,33 @@ func TestTechfineHBATAcceptsRealVoltage(t *testing.T) {
 	}
 }
 
-// TestTechfineHTEMPRejectsUnexpectedShape 锁住"温度帧形状不符时必须拒绝"。
+// TestTechfineHTEMPRejectsSixFieldFrame 锁住"6 字段既不是真机 8 字段形状、
+// 也不是旧机型 11 字段形状 ⇒ 必须拒绝"。
 //
-// 真机 HTEMP 只回 6 个字段，且第 5 个 380.0 与 bus_voltage 吻合 —— 说明
-// 既不是解析器假设的 11 字段温度帧，也不能按位置硬套（否则会把 380V 当
-// pv_temp=380°C 写完库）。
+// ## 这个用例的来历与一次误判（2026-10-19 更正）
 //
-// 反向验证：把 parseHTEMP 的门槛从 >=11 改成 >=6，本用例变红。
-func TestTechfineHTEMPRejectsUnexpectedShape(t *testing.T) {
+// 最初我以为这 6 字段帧就是真机的 HTEMP 应答，据此写下"温度帧形状不符、
+// 待厂商文档确认"，并保留了拒绝逻辑。**那个前提是错的**：
+//
+//	(000.0 00.0 00000 0 380.0 00000000000000000000000
+//
+// 这是 command_index=5 的应答，而 command_index 按**驱动声明顺序**
+// （HSTS/HGRID/HOP/HBAT/HPV/HPVB/HTEMP/HGEN/HBMS1）排 ⇒ 索引 5 是 **HPVB**
+// （PV2），不是 HTEMP。PV2 未接线，所以电流/功率为 0、电压字段是残留值。
+// 真正的 HTEMP 在索引 6，形状是 8 字段（见 inverter_htemp_real_test.go）。
+//
+// 用例本身仍然**有效且必要**：6 字段确实是畸形帧（既非 8 也非 >=11），
+// 拒绝是对的 —— 只是理由要写对。留着它防的是"将来有人放宽门槛到 >=6"。
+func TestTechfineHTEMPRejectsSixFieldFrame(t *testing.T) {
+	// PV2 未接线时的应答（曾被误认为是温度帧）
 	fields := []string{"000.0", "00.0", "00000", "0", "380.0", "00000000000000000000000"}
 	data, err := (&TechfineInverterDriver{}).parseHTEMP(fields)
 	if err == nil {
-		t.Fatalf("6 字段的 HTEMP 应答必须拒绝（形状不符），实际返回 %d 个字段: %v", len(data), data)
+		t.Fatalf("6 字段帧必须拒绝（既非真机 8 字段形状，也非旧机型 11 字段形状），"+
+			"实际返回 %d 个字段: %v", len(data), data)
 	}
-	// 错误信息要能让人凭它去核对厂商文档，而不是只说"格式错误"。
-	if !strings.Contains(err.Error(), "待厂商文档确认") {
-		t.Logf("提示：错误信息建议包含实测帧便于核对，当前: %v", err)
+	// 错误信息要能让人一眼看出"该给几种形状"，而不是只说"格式错误"。
+	if !strings.Contains(err.Error(), "8 or >=11") {
+		t.Logf("提示：错误信息宜写明可接受的字段数范围，当前: %v", err)
 	}
 }

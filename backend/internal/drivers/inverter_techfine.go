@@ -47,11 +47,12 @@ func (d *TechfineInverterDriver) HardwareTypes() []string { return []string{"uar
 // Process: the same document (§4.2 item 3) requires an unfreeze to flip the
 // guarded assertion in the same change and to register the action in the gate
 // ledger.  Both are done:
-//   · backend/internal/deviceaction/definition_test.go -- the GB3024 read
-//     assertions flipped to "enabled", plus a new guard proving the
-//     AvailabilityCode actions (reset_rainfall / clear_rainfall_write) still
-//     fail closed.
-//   · docs/分析/动作门禁台账.md -- ledger row for these eleven actions.
+//
+//	· backend/internal/deviceaction/definition_test.go -- the GB3024 read
+//	  assertions flipped to "enabled", plus a new guard proving the
+//	  AvailabilityCode actions (reset_rainfall / clear_rainfall_write) still
+//	  fail closed.
+//	· docs/分析/动作门禁台账.md -- ledger row for these eleven actions.
 //
 // Firmware dependency (this is the part that was actually broken, and it is
 // why enabling the flag alone would not have been enough): the driver used to
@@ -216,14 +217,15 @@ var techfineActionMinSensors = map[string]int{
 	"read_energy":      4,  // daily/monthly/yearly/total
 	"read_bms":         10,
 	"read_eeprom":      15,
-	"read_version":     2,  // software_version + software_date
+	"read_version":     2, // software_version + software_date
 }
 
 // expectActionSensors 校验解析结果确实属于该动作期望的传感器族，且形状完整。
 //
 // 两道判据缺一不可：
-//   1. **每一个**返回字段都必须属于期望族（拦"喂错形状"）；
-//   2. 字段数不得少于该动作的完整形状（拦"同族但被截短"）。
+//  1. **每一个**返回字段都必须属于期望族（拦"喂错形状"）；
+//  2. 字段数不得少于该动作的完整形状（拦"同族但被截短"）。
+//
 // 只做 1 会放过截短的 HSTS（12 个告警位全 0 = fail-open）；
 // 只做 2 会放过"字段数够但根本不是这个动作"的错配帧。
 func expectActionSensors(actionID string, data []SensorData) error {
@@ -526,15 +528,16 @@ func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteDa
 // techfineParserFor 把命令字面量映射到**精确**的解析函数。
 //
 // 为什么必须有这张表（2026-10-19 实测缺陷，污染 2087 条数据）：
-//   ParseDataWithCommand 原先只对 HPV/HPVB 用了命令上下文，其余 9 条命令一律
-//   `return d.ParseData(raw)` —— **拿到上下文却只用在一个地方**，剩下全靠猜形状。
-//   后果是实测的：HBMS1 的 16 位标志串被 parseHBAT 当成电池电压，
-//   每 30 秒往库里写一条 1e12 伏特。
 //
-//   当时我错误地判断成"设备没上报 command_template_id"。实际设备**报了**
-//   （field 9 有值：后端能查到 config_template 并取到 write_data —— 否则
-//   consumers_heavy.go:316 会在 ID==0 分支直接 return，一个传感器都进不了库，
-//   而实测每分钟稳定入库 254 条）。真正缺的是这张表。
+//	ParseDataWithCommand 原先只对 HPV/HPVB 用了命令上下文，其余 9 条命令一律
+//	`return d.ParseData(raw)` —— **拿到上下文却只用在一个地方**，剩下全靠猜形状。
+//	后果是实测的：HBMS1 的 16 位标志串被 parseHBAT 当成电池电压，
+//	每 30 秒往库里写一条 1e12 伏特。
+//
+//	当时我错误地判断成"设备没上报 command_template_id"。实际设备**报了**
+//	（field 9 有值：后端能查到 config_template 并取到 write_data —— 否则
+//	consumers_heavy.go:316 会在 ID==0 分支直接 return，一个传感器都进不了库，
+//	而实测每分钟稳定入库 254 条）。真正缺的是这张表。
 //
 // 语义：有命令就**必须**用命令指定的解析器，不猜。猜只留给未知命令。
 func techfineParserFor(cmdStr string) (func([]string) ([]SensorData, error), bool) {
@@ -575,6 +578,41 @@ func techfineParserFor(cmdStr string) (func([]string) ([]SensorData, error), boo
 
 // workModeMap maps work mode letters to numeric codes for LastData storage.
 var workModeMap = map[byte]float64{'P': 0, 'S': 1, 'L': 2, 'B': 3, 'F': 4, 'D': 5, 'X': 6}
+
+// plausible 是一组统一的物理边界，供各解析器做"这个值不可能是真的"判断。
+//
+// 为什么需要统一（2026-10-19）：解析器靠命令字面量精确分派之后，仍可能收到
+// **错配帧**（上游把别的命令的应答投递过来）。此时 parseXXX 会按自己的位置
+// 硬取值，产出一个"看起来合理"的数字 —— 这类假数据比报错危险得多：
+// 运维会去查硬件，而真相是帧错了。
+//
+// 边界取**宽于任何真实工况、窄于任何明显错位**的值：
+//
+//	· 家用储能市电 220V±20% ⇒ [80,300] 足够了，但留到 [50,600] 容纳宽压机型
+//	· 输出同样 [50,600]；频率 50/60Hz ⇒ [40,70] 已很宽
+//	· 功率上限按 20kW 机型留到 50000W/VA
+//	· 百分比 [0,120]（允许短暂过载显示 100+）
+//
+// 判据的目的不是精确描述设备，而是**拦住错位**：把 380V 母线电压当成
+// 220V 市电是拦不住的（都在区间内），但把 000.0 或 1e12 当市电一定拦得住。
+var (
+	minVoltAC  = 50.0
+	maxVoltAC  = 600.0
+	minFreq    = 40.0
+	maxFreq    = 70.0
+	maxPower   = 50000.0
+	maxPercent = 120.0
+)
+
+// checkRange 校验 v 是否落在 [min,max] 内，越界返回带上下文的错误。
+func checkRange(v, min, max float64, field string) error {
+	if v < min || v > max {
+		return fmt.Errorf("techfine: %s=%.3f out of plausible range [%.1f,%.1f] — "+
+			"该帧与该动作不符，拒绝采信以免写入假数据（错位的帧比缺失更难排查）",
+			field, v, min, max)
+	}
+	return nil
+}
 
 // hbatMaxPlausibleVoltage 是 HBAT 电压字段的物理上界（V）。
 //
@@ -679,6 +717,15 @@ func (d *TechfineInverterDriver) parseHGRID(fields []string) ([]SensorData, erro
 		return nil, fmt.Errorf("techfine HGRID: invalid frequency %q", fields[1])
 	}
 
+	// 物理闸门：市电电压/频率错位时数值往往仍"看起来正常"，
+	// 但 000.0V 或 380V+ 这类一定会被下面拦住。
+	if err := checkRange(voltage, minVoltAC, maxVoltAC, "grid_voltage"); err != nil {
+		return nil, err
+	}
+	if err := checkRange(freq, minFreq, maxFreq, "grid_frequency"); err != nil {
+		return nil, err
+	}
+
 	return []SensorData{
 		{Name: "grid_voltage", Value: voltage, Unit: "V"},
 		{Name: "grid_frequency", Value: freq, Unit: "Hz"},
@@ -716,6 +763,23 @@ func (d *TechfineInverterDriver) parseHOP(fields []string) ([]SensorData, error)
 	apparentPower := parseFloat(fields[2])
 	activePower := parseFloat(fields[3])
 	loadPercent := parseFloat(fields[4])
+
+	// 物理闸门（同 HGRID 的理由）
+	if err := checkRange(voltage, minVoltAC, maxVoltAC, "output_voltage"); err != nil {
+		return nil, err
+	}
+	if err := checkRange(freq, minFreq, maxFreq, "output_frequency"); err != nil {
+		return nil, err
+	}
+	if err := checkRange(apparentPower, 0, maxPower, "output_apparent_power"); err != nil {
+		return nil, err
+	}
+	if err := checkRange(activePower, 0, maxPower, "output_active_power"); err != nil {
+		return nil, err
+	}
+	if err := checkRange(loadPercent, 0, maxPercent, "output_load_percent"); err != nil {
+		return nil, err
+	}
 
 	return []SensorData{
 		{Name: "output_voltage", Value: voltage, Unit: "V"},
@@ -871,25 +935,41 @@ func (d *TechfineInverterDriver) parsePV(fields []string, prefix string) ([]Sens
 // which is 11 space-separated fields (HI is one 2-char field).
 // NOTE: fan status fields [7] and [8] are space-separated single chars; needs real device verification.
 
+// parseHTEMP — 温度与风扇状态。
+//
+// ## 真机格式（2026-10-19 实测定稿，40 帧一致）
+//
+//	(027 037 031 033 037 030 030 11000000000000000000
+//	 └───────── 7 个温度值 ─────────┘ └── 20 位状态串 ──┘
+//
+// 值域实测 27~38°C，与设备工况（51.5V 电池充电中、市电 222V）自洽。
+//
+// ## 与旧假设的差异（为什么之前一直解析失败）
+//
+// 代码原先是按 11 个字段写的：7 温度 + 2 风扇转速 + 2 风扇状态 + 2 额外温度。
+// 真机只给 8 个字段：7 温度 + **1 个状态位串**。风扇不在独立字段里，
+// 而是打包在位串的前几位（实测 "11" = 双风扇都在转）。
+//
+// 我上一轮只看到「6 字段」就判定"不是温度帧"——那是**看错了命令索引**：
+// command_index=5 的应答 (000.0 00.0 00000 0 380.0 ...) 其实是 HPVB，
+// 真正的 HTEMP 在 command_index=6。索引按**驱动声明顺序**排（HSTS/HGRID/
+// HOP/HBAT/HPV/HPVB/HTEMP/HGEN/HBMS1），不是按 channel.template_ids 的
+// 数字顺序 —— 这一点也曾让我误以为"应答整体错位"。
+//
+// ## 为什么仍然保留 11 字段分支
+//
+// 老固件/老机型可能真的发 11 字段。两种形状靠**字段数**区分（8 vs >=11），
+// 都能给出合理结果，互不干扰。少于 8 才是真的畸形帧。
 func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, error) {
+	// 8 字段真机形状：7 温度 + 1 状态位串
+	if len(fields) == 8 {
+		return d.parseHTEMPCompact(fields)
+	}
+
 	if len(fields) < 11 {
-		// ⚠ 2026-10-19 真机数据：GB3024 对 HTEMP 的实际应答只有 **6** 个字段，
-		// 且形状与下面的 11 字段假设完全不同：
-		//
-		//	(000.0 00.0 00000 0 380.0 00000000000000000000000
-		//	                          ↑ 与 bus_voltage 实测值(379~388)吻合
-		//
-		// 也就是说：**这不是温度帧**，或者至少不是本函数假设的那种温度帧。
-		// 字段语义无法从单一样本反推（[0]=000.0 若是温度则设备在冰点，与实际
-		// 运行状态不符）。
-		//
-		// 因此这里**保持拒绝**，并把实测原始帧写进错误信息 —— 下一次有人拿到
-		// 厂商文档时，凭这一行就能核对映射，而不用再去翻历史日志。
-		// 绝不"按位置硬套"：那会把 380.0 当成 pv_temp=380°C，制造一个
-		// 看起来像真读数的假数据（比缺失更糟）。
-		return nil, fmt.Errorf("techfine HTEMP: need >=11 fields, got %d (fields=%v) — "+
-			"真机实测该命令返回 6 字段且形状与解析器假设不符，字段语义待厂商文档确认；"+
-			"拒绝猜测性映射以免写入假温度", len(fields), fields)
+		return nil, fmt.Errorf("techfine HTEMP: need 8 or >=11 fields, got %d (fields=%v) — "+
+			"8 字段为真机实测形状(7温度+1状态串)，>=11 为旧机型形状；"+
+			"当前既不是任何一种，拒绝采信", len(fields), fields)
 	}
 
 	pvTemp := parseFloat(fields[0])
@@ -917,6 +997,74 @@ func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, erro
 		{Name: "pv2_temp", Value: pv2Temp, Unit: "°C"},
 		{Name: "dc_rectifier_temp", Value: dcRectifierTemp, Unit: "°C"},
 	}, nil
+}
+
+// parseHTEMPCompact 解析 8 字段真机形状：7 个温度 + 1 个 20 位状态串。
+//
+// 温度位序**按实测相关性**定：40 帧里 [1] 与 [4] 总是同步变化（37↔38），
+// 其余位置恒定。因此 [1]=inverter_temp 与 [4]=max_temp 的关系是
+// "逆变器温度"与其"历史最高值"，这是唯一的正向证据。
+//
+// 其余位置（pv/boost/transformer/pv2/dc_rectifier）**只能按厂商位序约定**
+// 归属，实测期间它们恒定不变，无法用数据自证。这一点必须诚实标注：
+// 若将来发现某位对不上，改这里的顺序即可，判据不受影响。
+func (d *TechfineInverterDriver) parseHTEMPCompact(fields []string) ([]SensorData, error) {
+	// 温度位 [0..6] 必须是可解析的数值；状态位 [7] 必须是位串。
+	temps := make([]float64, 7)
+	for i := 0; i < 7; i++ {
+		v, err := strconv.ParseFloat(strings.TrimSpace(fields[i]), 64)
+		if err != nil {
+			return nil, fmt.Errorf("techfine HTEMP: temperature field %d (%q) is not numeric: %w",
+				i, fields[i], err)
+		}
+		// 物理闸门：逆变器温度不可能低于 -40°C 或高于 150°C。
+		// 与 parseHBAT 的电压闸门同理 —— 宁可丢这一帧，也不写一个看起来
+		// 像真读数的垃圾值（那会让人去查散热，而真相是解析错位）。
+		if v < -40 || v > 150 {
+			return nil, fmt.Errorf("techfine HTEMP: temperature field %d = %.1f°C is implausible — "+
+				"该帧形状与本机型不符，拒绝采信", i, v)
+		}
+		temps[i] = v
+	}
+
+	statusBits := strings.TrimSpace(fields[7])
+	if !isAllBinary(statusBits) {
+		return nil, fmt.Errorf("techfine HTEMP: status field %q is not a binary string — "+
+			"第 8 字段应为风扇/状态位串", statusBits)
+	}
+
+	out := []SensorData{
+		{Name: "pv_temp", Value: temps[0], Unit: "°C"},
+		{Name: "inverter_temp", Value: temps[1], Unit: "°C"},
+		{Name: "boost_temp", Value: temps[2], Unit: "°C"},
+		{Name: "transformer_temp", Value: temps[3], Unit: "°C"},
+		{Name: "max_temp", Value: temps[4], Unit: "°C"},
+		{Name: "pv2_temp", Value: temps[5], Unit: "°C"},
+		{Name: "dc_rectifier_temp", Value: temps[6], Unit: "°C"},
+	}
+
+	// 风扇状态取位串前两位（实测 "11" = 双风扇在转）。
+	// 取不到就**不发**该字段，而不是补 0 —— 0 会被读成"风扇停转"，
+	// 那是另一种假数据。
+	if len(statusBits) >= 2 {
+		out = append(out,
+			SensorData{Name: "fan1_status", Value: bitAt(statusBits, 0), Unit: ""},
+			SensorData{Name: "fan2_status", Value: bitAt(statusBits, 1), Unit: ""},
+		)
+	}
+
+	return out, nil
+}
+
+// bitAt 返回位串第 i 位的数值（0 或 1）；越界返回 0。
+func bitAt(bits string, i int) float64 {
+	if i < 0 || i >= len(bits) {
+		return 0
+	}
+	if bits[i] == '1' {
+		return 1
+	}
+	return 0
 }
 
 // ============================================================================
@@ -1018,10 +1166,18 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 	chargeCurrent := parseFloat(fields[7])
 	dischargeCurrent := parseFloat(fields[8])
 	tempRaw := parseFloat(fields[9])
-	// HHHHH is 5 digits in 0.01K → convert to °C
+	// HHHHH 是 0.01K 单位的 5 位定宽值 ⇒ /100.0 - 273.15 得 °C。
+	//
+	// ⚠ 2026-10-19 真机发现：BMS **未接入**时该字段为 "00000"，直接换算得到
+	// **-273.15°C（绝对零度）** 并写进库。这不是"读数偏低"，而是"没有读数"。
+	// 绝对零度物理上不可能出现，画进曲线会把 Y 轴整个拉平。
+	//
+	// 判据：tempRaw == 0 是设备表达"未接 BMS"的哨兵（0 K 无法表示任何工况），
+	// 此时**不产出** bms_temp 字段 —— 缺失好过荒谬值，前端会显示"—"。
+	hasBmsTemp := tempRaw > 0
 	tempCelsius := tempRaw/100.0 - 273.15
 
-	return []SensorData{
+	out := []SensorData{
 		{Name: "bms_comm_ok", Value: bmsCommOK, Unit: ""},
 		{Name: "bms_charge_allowed", Value: bmsChargeAllowed, Unit: ""},
 		{Name: "bms_discharge_allowed", Value: bmsDischargeAllowed, Unit: ""},
@@ -1036,8 +1192,14 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 		{Name: "bms_charge_voltage_limit", Value: chargeVLimit, Unit: "V"},
 		{Name: "bms_discharge_voltage_limit", Value: dischargeVLimit, Unit: "V"},
 		{Name: "bms_charge_current_limit", Value: chargeILimit, Unit: "A"},
-		{Name: "bms_temp", Value: tempCelsius, Unit: "°C"},
-	}, nil
+	}
+
+	// bms_temp 只在设备给了有效值时才产出（见上方 hasBmsTemp 的说明）。
+	// 不产出而不是给 0/-273.15：前者前端显示"—"，后者会被当成真实读数。
+	if hasBmsTemp {
+		out = append(out, SensorData{Name: "bms_temp", Value: tempCelsius, Unit: "°C"})
+	}
+	return out, nil
 }
 
 // ============================================================================
