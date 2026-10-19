@@ -20,7 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, defineAsyncComponent, watch } from 'vue'
+import { ref, shallowRef, defineAsyncComponent, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { useRoute } from 'vue-router'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -57,7 +57,15 @@ const componentMap: Record<string, any> = {
   inverter: InverterDetailPage,
 }
 
-const targetComponent = ref<any>(null)
+/*
+ * ⚠ 必须用 shallowRef 而不是 ref：
+ * ref() 会对赋值对象做深度 reactive 包装，而 defineAsyncComponent() 返回的是
+ * **组件**（带 __asyncLoader 等字段的对象）。被 reactive 包装后交给 <component :is>
+ * 时 Vue 会打出 "Vue received a Component that was made a reactive object" 警告，
+ * 且包装过程会遍历组件对象带来无谓开销（控制台已实测到该警告）。
+ * shallowRef 只存引用、不做深度代理，是"持有组件"的正确容器。
+ */
+const targetComponent = shallowRef<any>(null)
 const loading = ref(false)
 const error = ref(false)
 let resolveSequence = 0

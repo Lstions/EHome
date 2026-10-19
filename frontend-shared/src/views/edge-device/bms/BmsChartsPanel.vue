@@ -42,7 +42,7 @@
         <div v-for="g in trendGroups" :key="g.title" class="trend-sub">
           <p class="trend-sub-title">{{ g.title }}</p>
           <div class="trend-sub-body">
-            <div v-if="metricLoading" class="trend-sub-state">加载中…</div>
+            <div v-if="metricLoading" class="trend-sub-state is-loading">加载中…</div>
             <div v-else-if="!online" class="trend-sub-state">设备离线</div>
             <LineChart
               v-else-if="g.series.length"
@@ -262,7 +262,26 @@ defineExpose({ fetchCells, fetchMetrics })
   background: var(--el-fill-color-lighter);
 }
 .trend-sub-body { padding: 8px 12px 4px; }
-.trend-sub-state { height: 200px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 12px; }
+/*
+  空态高度（2026-10-20 实测修正）：
+  旧规则固定 height:200px，本意是与图表等高、数据到达时不跳动。
+  但实测：5 个分组**全部无数据**时，卡片仍占 5×200px ≈ 1000px 纯空白
+  （BMS 页「运行趋势」卡实测 831px，其中约 1000px 是空态占位），
+  页面被拉得极长，且用户看不出"是没数据还是没加载"。
+
+  取舍：单空态改紧凑 48px；但**加载中**仍保持 200px ——
+  加载位置是用户已预期要等的地方，保留占位避免数据到达时二次跳动。
+  数据从无到有那一次的跳动发生在首屏加载期，用户对页面变化有预期。
+*/
+.trend-sub-state {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.trend-sub-state.is-loading { min-height: 200px; }
 
 @media (max-width: 1100px) {
   .trend-grid { grid-template-columns: minmax(0, 1fr); }

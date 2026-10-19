@@ -22,9 +22,22 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
     expect(source).toContain('class="row')
     expect(source).toMatch(/\.row \{[^}]*display:\s*flex/)
     expect(source).toMatch(/\.row \{[^}]*flex-wrap:\s*wrap/)
-    expect(source, '矮卡片不得被同行高卡拉高（历史踩过 el-row stretch 造大片空白）').toMatch(
+    /*
+     * 2026-10-20 契约调整：align-items 从"全行 flex-start"改为**分档**。
+     *
+     * 改前的问题：全行 flex-start 让同排底边参差（实测 MOS 312 vs 保护 279 差 34px、
+     * 实时流 461 vs 轮询 446 差 16px）。但**不能**简单改成全行 stretch ——
+     * 「受控操作 740px」会把「操作历史 129px」拉成 740px，凭空多 611px 空白，
+     * 正是本用例原名警告的坑。定稿：高度相近的并排行 stretch，悬殊行仍 flex-start。
+     * 契约必须为两件事同时设防，否则会修一个坏一个。
+     */
+    expect(source, '基础行仍须 flex-start（防高矮悬殊行被拉出大片空白）').toMatch(
       /\.row \{[^}]*align-items:\s*flex-start/,
     )
+    expect(source, '高度相近的并排行须 stretch（消除底边参差）').toMatch(
+      /\.row\.mos-protect[^{]*\{[^}]*align-items:\s*stretch/,
+    )
+    expect(source, '指标卡行须 stretch').toMatch(/\.row\.metrics[^{]*\{[^}]*align-items:\s*stretch/)
   })
 
   it('诉求①：保护明细默认展开，没有折叠开关', () => {

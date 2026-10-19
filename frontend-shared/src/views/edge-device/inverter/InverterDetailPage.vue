@@ -314,4 +314,18 @@ onMounted(() => {
 .inverter-detail { padding: 0; }
 
 .alarm-list { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/*
+  指标卡等高（2026-10-20 二次复审 N2）：
+  本页用 el-row/el-col 布局，el-col 默认 align-items:stretch ⇒ 列会被拉成同高，
+  但 MetricStatCard 是 el-col 的**直接子元素**，不设 height:100% 时它按自身内容
+  高度显示 ⇒ 实测 1024px 下电池卡（副文本折 5 行）127px、其余 110/181px，
+  同排底边差最大 71px。
+
+  ⚠ 不要改回固定辅助槽高度来"对齐" —— 那会把多行副文本裁掉（已被复审证伪）。
+  正确做法是让卡片撑满列高，内容在卡内居中；高度由最高那张决定，信息完整。
+*/
+.inverter-detail :deep(.el-row > .el-col > .metric-card) {
+  height: 100%;
+}
 </style>

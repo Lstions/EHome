@@ -84,9 +84,32 @@ describe('BmsCellVoltageChart container-aware label degradation (P0-1)', () => {
   })
 
   it('wires shouldShowCellLabel into series.label and keeps the axis tooltip for full values', () => {
-    expect(cellChartSource).toMatch(/formatter: \(p: any\) => \{[\s\S]*?shouldShowCellLabel\([\s\S]*?\.toFixed\(3\) ?: ''/)
+    /*
+     * ⚠ 两条经验，都来自本用例的真实误红：
+     *   ① 正则不要写死参数列表 —— 2026-10-20 给 shouldShowCellLabel 增加了
+     *      (index, maxIndex, minIndex) 用于并列极值去重；
+     *   ② 不要在 formatter: 后贪婪跨段匹配 —— 源码里 tooltip 的 formatter 出现在
+     *      series.label 之前，从第一个 formatter 起匹配会跨过 } 边界而失配。
+     *      直接锚定系列标签 formatter 内部对 shouldShowCellLabel 的调用。
+     */
+    expect(cellChartSource).toMatch(/shouldShowCellLabel\([^)]*\)\s*\?\s*v\.toFixed\(3\)\s*:\s*''/)
     expect(cellChartSource).toContain("trigger: 'axis' as const")
     expect(cellChartSource).toContain('V</b>`')
+  })
+
+  /**
+   * 并列极值去重（2026-10-20 新增缺陷）：
+   * 生产实测 #4 与 #11 同为 3.227(min)、#8 与 #16 同为 3.234(max)。
+   * 降级模式下若按"值相等"判定，并列项全部返回标签 ⇒ 相邻柱标签压字。
+   * 契约：必须按首个下标判定，且把 dataIndex 传进判定函数。
+   */
+  it('并列极值只标注第一个（防相邻柱标签压字）', () => {
+    expect(cellChartSource).toMatch(/const maxIndex = values\.findIndex/)
+    expect(cellChartSource).toMatch(/const minIndex = values\.findIndex/)
+    expect(cellChartSource).toMatch(/shouldShowCellLabel\(v, cellWidthPx, p\.dataIndex, maxIndex, minIndex\)/)
+    // 反向断言：不得回退成"值相等即标注"
+    expect(cellChartSource).not.toMatch(/value === maxValue/)
+    expect(cellChartSource).not.toMatch(/value === minValue/)
   })
 
   it('keeps min/max mark lines and theme-driven colors intact', () => {

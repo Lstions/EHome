@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { authApi } from '@/api/auth'
 import { clearAttempts, recordFailedAttempt } from '@/utils/loginLockout'
 import { clearSessionCaches } from '@/utils/sessionCache'
+import { persistLoginPreference } from '@/utils/loginPreference'
 
 const getStoredToken = (): string => localStorage.getItem('token') || sessionStorage.getItem('token') || ''
 
@@ -32,12 +33,19 @@ export const useUserStore = defineStore('user', {
       this.token = response.token
       this.userInfo = response.user as UserInfo
       this.isLoggedIn = true
+      // token 落哪个 storage 决定「关浏览器后是否免登录」：
+      //   rememberMe=true  → localStorage  （持久，下次打开直接进系统）
+      //   rememberMe=false → sessionStorage（随标签页关闭而失效）
+      // 后端同时按 rememberMe 签发 7d / 24h TTL，两侧语义必须一致。
       const storage = rememberMe ? localStorage : sessionStorage
       storage.setItem('token', response.token)
       storage.setItem('user', JSON.stringify(response.user))
       const other = rememberMe ? sessionStorage : localStorage
       other.removeItem('token')
       other.removeItem('user')
+      // 表单意愿（勾选 + 用户名）必须在**登录成功后**才落盘：
+      // 登录失败时不该把用户输错的名字记住，也不该在凭据错误时留下"已记住"的假象。
+      persistLoginPreference(rememberMe, username)
       clearAttempts()
     },
     async refreshAccount() {
@@ -62,6 +70,10 @@ export const useUserStore = defineStore('user', {
         sessionStorage.removeItem('token')
         localStorage.removeItem('user')
         sessionStorage.removeItem('user')
+        // ⚠ 刻意**不**清除 login_remember_me / login_remembered_username：
+        // 「主动登出」表达的是"我现在不想保持登录"，而不是"以后别再记住我"。
+        // 若在这里清掉，用户每次登出后都要重新勾选、重新输用户名 —— 这正是
+        // 用户报「记住我根本没记住」的直接原因之一。只有明文取消勾选才清除。
       }
     },
   },

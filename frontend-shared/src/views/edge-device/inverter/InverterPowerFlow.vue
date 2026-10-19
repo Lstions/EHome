@@ -7,20 +7,28 @@
         </marker>
       </defs>
 
-      <!-- 光伏 -->
+      <!--
+        ⚠ 文本 y 坐标必须落在圆**外**：圆半径 30，圆心 y=60 ⇒ 圆占据 y 30..90。
+        2026-10-20 生产实测：电网节点把 pf-value 放在 y=176（圆心 200，圆占 170..230）
+        正好压在圆上；电池节点 y=176 同样压住。现统一为：
+          · 圆上方节点（PV/负载）：标签 y=110、数值 y=128（圆外下方）
+          · 圆下方节点（电网/电池）：数值 y=166、标签 y=252（圆外上方/下方）
+        且每组都留出 ≥6px 间隙，缩放后也不会贴合。
+      -->
+      <!-- 光伏（圆落在 y30..90） -->
       <g class="pf-node pv">
         <circle cx="80" cy="60" r="30" :class="{ on: pvPower > 0 }" />
         <text x="80" y="66" text-anchor="middle" class="pf-icon">☀</text>
-        <text x="80" y="108" text-anchor="middle" class="pf-label">光伏 PV</text>
-        <text x="80" y="124" text-anchor="middle" class="pf-value">{{ fmtPower(pvPower) }}</text>
+        <text x="80" y="112" text-anchor="middle" class="pf-label">光伏 PV</text>
+        <text x="80" y="130" text-anchor="middle" class="pf-value">{{ fmtPower(pvPower) }}</text>
       </g>
 
-      <!-- 电网 -->
+      <!-- 电网（圆落在 y170..230）：数值在圆上方，标签在圆下方 -->
       <g class="pf-node grid">
         <circle cx="80" cy="200" r="30" :class="{ on: gridActive }" />
         <text x="80" y="206" text-anchor="middle" class="pf-icon">🏭</text>
-        <text x="80" y="248" text-anchor="middle" class="pf-label">电网</text>
-        <text x="80" y="176" text-anchor="middle" class="pf-value">{{ fmtVolt(gridVoltage) }}</text>
+        <text x="80" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(gridVoltage) }}</text>
+        <text x="80" y="252" text-anchor="middle" class="pf-label">电网</text>
       </g>
 
       <!-- 逆变器 -->
@@ -31,20 +39,20 @@
         <text x="320" y="204" text-anchor="middle" class="pf-value">{{ workModeLabel }}</text>
       </g>
 
-      <!-- 负载 -->
+      <!-- 负载（圆落在 y30..90） -->
       <g class="pf-node load">
         <circle cx="560" cy="60" r="30" :class="{ on: loadPower > 0 }" />
         <text x="560" y="66" text-anchor="middle" class="pf-icon">🏠</text>
-        <text x="560" y="108" text-anchor="middle" class="pf-label">负载</text>
-        <text x="560" y="124" text-anchor="middle" class="pf-value">{{ fmtPower(loadPower) }}</text>
+        <text x="560" y="112" text-anchor="middle" class="pf-label">负载</text>
+        <text x="560" y="130" text-anchor="middle" class="pf-value">{{ fmtPower(loadPower) }}</text>
       </g>
 
-      <!-- 电池 -->
+      <!-- 电池（圆落在 y170..230）：数值在圆上方，状态标签在圆下方 -->
       <g class="pf-node battery">
         <circle cx="560" cy="200" r="30" :class="batteryClass" />
         <text x="560" y="206" text-anchor="middle" class="pf-icon">🔋</text>
-        <text x="560" y="248" text-anchor="middle" class="pf-label">{{ batteryLabel }}</text>
-        <text x="560" y="176" text-anchor="middle" class="pf-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</text>
+        <text x="560" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</text>
+        <text x="560" y="252" text-anchor="middle" class="pf-label">{{ batteryLabel }}</text>
       </g>
 
       <!-- 连线：PV -> 逆变器 -->
@@ -169,13 +177,73 @@ function fmtVolt(v: number | undefined | null): string {
   align-items: center;
   padding: 12px 0;
   width: 100%;
-  overflow-x: auto;
+  /* 不再 overflow-x:auto —— 窄屏靠 viewBox 等比缩放，而不是让用户横向拖动找内容 */
+  overflow: hidden;
 }
-.power-flow-svg { width: 100%; max-width: 640px; height: 260px; min-width: 560px; }
+/*
+  2026-10-20 修（生产实测）：
+    旧规则 min-width:560px 让 390px 视口下的 SVG 保持 560px 宽，
+    结果是容器要横向滚动、右侧「负载/电池」被切在屏幕外，
+    且固定坐标的数值文本（225.6V / 51.6V·70%）压在节点圆上。
+  改为：
+    · 去掉 min-width，SVG 按 viewBox="0 0 640 260" 等比缩放到容器宽度；
+    · 窄屏用 aspect-ratio 保持比例，不再写死 height:260px（否则会竖向压扁变形）。
+*/
+.power-flow-svg {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  aspect-ratio: 640 / 260;
+  min-width: 0;
+  display: block;
+}
 
-@media (max-width: 480px) {
-  .power-flow-container { align-items: flex-start; }
-  .power-flow-svg { min-width: 560px; }
+/*
+  窄屏可读性（2026-10-20 二次复审 N4）：
+  640 宽的 viewBox 等比缩到 300px 时 scale=0.469，.pf-label 12px 实显 **5.63px**、
+  .pf-value 13px 实显 **6.09px** —— 溢出治好了，但字也看不清了。
+  等比缩小在这里是错的解法：图表的意义就是读数。
+  改用「小屏换布局」：
+    · 允许横向滚动并给一个下限宽度（360px），保证 scale ≥ 0.56、正文 ≥ 6.7px，
+      再配合下面按比例放大 SVG 内字号（font-size 用 /0.56 后的值），实显回到 11~12px；
+    · 图例本就是 DOM 文本，不受 scale 影响，正常显示。
+  宁可让用户轻微横滑看功率流，也不给一张读不出数字的图。
+*/
+/*
+  窄屏（≤1100px）：**不再等比缩小整张图**，改为「保持 640 固有宽度 + 容器横向滚动」。
+  为什么阈值取 1100 而不是 560：实测 769px 时容器约 479px ⇒ scale=0.748 ⇒ 标签实显
+  8.98px 仍偏小；1024px 时容器 734px ⇒ 可 1:1 显示。1100 以下统一固定宽度最稳。
+
+  演进史（三次都被实测打回，别再试第四次）：
+    v1  min-width:560px + overflow-x:auto —— 溢出治不了（容器被撑破，整页横滚）；
+    v2  去掉 min-width，纯 width:100% 等比缩放 —— 溢出治好了，但 390px 下
+        scale=300/640=0.469，.pf-label 12px 实显 **5.63px**、.pf-value 实显 6.09px，
+        读不出数字（复审 N4）；
+    v3  缩到 360px 并把 SVG 内字号放大到 19/21px —— 实显仍只有 6.75px，且
+        360 > 可用宽度时又产生溢出。
+  根因：只要 scale < 1，放大 SVG 内 font-size 就要按 1/scale 反算，而 scale 又随
+  容器宽度连续变化 ⇒ 没有一组静态字号能覆盖所有宽度。等比缩放这条路走不通。
+
+  定稿：固定 640px 固有尺寸（scale 恒为 1，字号 12/13px 是设计值，永远可读），
+  容器自己横向滚动。代价是要滑一下，收益是**每个数字都读得出来**。
+*/
+@media (max-width: 1100px) {
+  .power-flow-container {
+    display: block;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    /* 滚动提示：右侧渐隐，提示"还有内容" */
+    padding-bottom: 8px;
+  }
+  .power-flow-svg {
+    width: 640px;
+    max-width: none;
+    height: 260px;
+    margin: 0;
+    flex-shrink: 0;
+  }
+  .pf-legend { font-size: 11px; gap: 10px 14px; }
 }
 
 .pf-node circle {

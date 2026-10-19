@@ -38,12 +38,24 @@ const chartWidth = ref(0)
  * - 单柱可用宽度 ≥ 阈值：全量显示标签（v > 0）
  * - 单柱可用宽度 < 阈值：仅对越界节（<3.0 或 >3.6，与 getBarColors 阈值一致）与
  *   最高/最低节返回标签，其余返回 ''（全量精确数值仍可通过 axis tooltip 查看）
+ * - 最高/最低按**首个下标**判定：并列极值只标注第一个，否则相邻柱标签会压字
  */
-function shouldShowCellLabel(value: number, cellWidthPx: number, maxValue: number, minValue: number): boolean {
+function shouldShowCellLabel(
+  value: number,
+  cellWidthPx: number,
+  index: number,
+  maxIndex: number,
+  minIndex: number,
+): boolean {
   if (cellWidthPx >= LABEL_DEGRADE_THRESHOLD) return value > 0
   if (value <= 0) return false
   if (value < 3.0 || value > 3.6) return true
-  return value === maxValue || value === minValue
+  // 2026-10-20 修：旧实现把「数值等于最值」当作标注条件，
+  // **并列最值会同时命中**，于是相邻柱的标签互相压字（实测 #4 与 #11 同为 3.227、
+  // #8 与 #16 同为 3.234，移动端标签直接叠在一起）。
+  // 改为按"首个最值下标"判定：并列时只标注第一个，其余交给 tooltip ——
+  // 用户仍能一眼看到极值，但不会出现重叠。
+  return index === maxIndex || index === minIndex
 }
 
 function getBarColors(values: number[]): string[] {
@@ -71,6 +83,9 @@ function buildChartOption() {
   // 最高/最低节（降级模式下仍保留标签的关键信息）
   const maxValue = validValues.length > 0 ? Math.max(...validValues) : 0
   const minValue = validValues.length > 0 ? Math.min(...validValues) : 0
+  // 并列极值只取**第一个**出现的位置：标签降级时只给它标注，避免相邻柱压字
+  const maxIndex = values.findIndex(v => v === maxValue && v > 0)
+  const minIndex = values.findIndex(v => v === minValue && v > 0)
   // 单柱可用宽度 = 容器宽度 / 电芯数，驱动标签降级（容器感知，非写死 media query）
   const cellWidthPx = props.cellCount > 0 ? chartWidth.value / props.cellCount : 0
 
@@ -117,7 +132,10 @@ function buildChartOption() {
         position: 'top',
         formatter: (p: any) => {
           const v = p.value
-          return shouldShowCellLabel(v, cellWidthPx, maxValue, minValue) ? v.toFixed(3) : ''
+          // p.dataIndex 是当前柱在 series.data 中的下标（与 values 同序）
+          return shouldShowCellLabel(v, cellWidthPx, p.dataIndex, maxIndex, minIndex)
+            ? v.toFixed(3)
+            : ''
         },
         fontSize: 10,
         color: surface.text

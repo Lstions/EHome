@@ -127,6 +127,15 @@ const statusMessages: Record<AuthState, string> = {
 }
 
 onMounted(() => {
+  // 会话过期回跳的原因提示：client.ts 的 401 分支会带 reason=session_expired
+  // 硬跳回登录页。不解释的话，用户体感就是"莫名其妙被踢出登录"，并且会误以为
+  // 「记住我」失效（实际多半是那个 token 本身就到期了）。
+  if (route.query.reason === 'session_expired') {
+    errorMsg.value = '登录状态已过期，请重新登录。勾选「记住我」后，下次打开浏览器可直接进入系统（有效期 7 天）。'
+    const q = { ...route.query }
+    delete q.reason
+    void router.replace({ path: route.path, query: q })
+  }
   void authApi.initialization().then((status) => {
     authState.value = status.state
     if (status.state !== 'initialized' && status.state !== 'uninitialized') {

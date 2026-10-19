@@ -26,20 +26,36 @@
       <p class="metric-value">
         {{ value }}<span v-if="unit" class="metric-unit">{{ unit }}</span>
       </p>
+      <!--
+        辅助槽：内容自适应多行，卡片高度由同一行的**最高**卡片决定（见 CSS 的
+        .metric-card 说明）。
+
+        演进史（两版都被实测证伪，记下来防回退）：
+          v1  min-height:18px —— 只兜住"有没有副文本"，没兜住 progress(6px)
+              与 direction 第二行 ⇒ SOC 卡高 5px、逆变器电池卡高 17px；
+          v2  height:18px + overflow:hidden + progress 绝对定位 —— 等高做到了，
+              但把多行副文本**硬裁**掉（实测 1024px 下电池卡裁 70px、BMS 卡裁 34px），
+              且进度条与文本实交 4px。这是"用信息丢失换等高"，不可接受。
+          v3（当前）槽体不设固定高度、不裁切；等高改由外层 .row 的 stretch +
+              卡片 flex 布局保证（见各页 CSS）。信息完整优先于形态整齐。
+      -->
       <div class="metric-aux">
-        <p v-if="subText" class="metric-sub">{{ subText }}</p>
+        <div class="metric-aux-line">
+          <p v-if="subText" class="metric-sub">{{ subText }}</p>
+          <span
+            v-if="direction"
+            class="metric-direction"
+            :style="{ color: directionColor }"
+          >{{ directionLabel }}</span>
+        </div>
         <el-progress
           v-if="progress !== undefined"
+          class="metric-progress"
           :percentage="progress"
           :stroke-width="6"
           :show-text="false"
         />
-        <span
-          v-if="direction"
-          class="metric-direction"
-          :style="{ color: directionColor }"
-        >{{ directionLabel }}</span>
-        <!-- 辅助槽永远占位：无任何辅助内容时渲染等高 invisible 占位行，同排卡片底边对齐 -->
+        <!-- 辅助槽永远占位：无任何辅助内容时渲染等高 invisible 占位行 -->
         <span
           v-if="!subText && progress === undefined && !direction"
           class="metric-aux-placeholder"
@@ -108,7 +124,14 @@ const directionColor = computed(() => {
   align-items: center;
   gap: 16px;
   transition: transform 0.3s, box-shadow 0.3s;
+  /*
+    同排等高靠外层 .row 的 align-items:stretch 实现（本组件不再用固定高度兜）。
+    高度被拉伸时，让内容在垂直方向居中而不是吊在顶端 —— 否则矮内容卡片
+    底部会出现一片空白，视觉上像"卡片没对齐"。
+  */
+  box-sizing: border-box;
 }
+
 .metric-card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
@@ -130,12 +153,17 @@ const directionColor = computed(() => {
 }
 
 /* 右内容区：标签 - 主值 - 辅助槽 */
+/*
+  内容区纵向 flex。justify-content 用 center 而不是 flex-start：
+  同排等高由外层 .row 的 stretch 实现后，矮内容卡片会被拉高，
+  若内容吊在顶端，底部会留下一片空白，视觉上像"没对齐"。
+*/
 .metric-info {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  justify-content: center;
 }
 .metric-label {
   margin: 0;
@@ -162,26 +190,65 @@ const directionColor = computed(() => {
   margin-left: 2px;
 }
 
-/* 辅助槽：min-height 保证永远占位，同排卡片底边对齐 */
+/*
+  辅助槽：**恒定高度预算**（固定 height，不是 min-height）。
+  为什么必须是 height 而不是 min-height：
+    min-height 只能兜住"内容更少"的情况；一旦某张卡多出 progress(6px) 或
+    第二行 direction，min-height 会被内容顶开 —— 这正是实测 115 vs 110、
+    127 vs 110 的来源。用固定 height + 内部 overflow 收敛，任何组合都同高。
+  direction 与 subText 走同一行（.metric-aux-line 用 flex），因此不会占第二行。
+*/
+/*
+  辅助槽：**不设固定高度、不裁切**（v3，2026-10-20 二次复审后定稿）。
+  v2 的 height:18px + overflow:hidden 能等高，但把多行副文本硬裁掉
+  （实测 1024px：逆变器电池卡裁 70px、BMS 四卡裁 16~34px）——用信息丢失换整齐，
+  不可接受。现在槽体随内容增高，同排等高改由外层 .row 的 align-items:stretch
+  + 卡片自身 flex 布局保证（见 BmsDetailPage / InverterDetailPage）。
+*/
 .metric-aux {
   margin-top: 4px;
-  min-height: 18px;
   font-size: 12px;
   line-height: 18px;
   color: var(--el-text-color-secondary);
 }
+.metric-aux-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+/*
+  副文本允许折行而不是省略号：
+  移动端实测卡片内容区仅 97px，「健康区间 20% – 90%」「充电中（电流为正）」
+  在 nowrap+ellipsis 下会被截成「健康区间 20% –…」—— 同样是"用信息丢失换行齐"。
+  槽体高度固定 18px 只够一行，因此窄屏把槽体高度放宽到两行（见媒体查询），
+  让文字完整可读且同排仍然等高。
+*/
 .metric-sub {
   margin: 0;
   font-size: 12px;
   line-height: 18px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .metric-direction {
   font-size: 12px;
   line-height: 18px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .metric-aux-placeholder {
   visibility: hidden;
   line-height: 18px;
+}
+/*
+  progress 回到正常文档流（v2 曾用绝对定位压到槽底，实测与副文本行盒相交 4px，
+  390px 下蓝色进度条正压在「90%」上）。现在作为独立一行排在副文本下方，
+  margin-top 给 2px 视觉间隙；卡片总高增加 6px，由 stretch 保证同排仍等高。
+*/
+.metric-progress {
+  margin-top: 2px;
+  line-height: 0;
 }
 
 /* 移动端紧凑：图标 34px / 圆角 8px / 图标字号 22px，数值 20px，单位 13px */
@@ -206,6 +273,11 @@ const directionColor = computed(() => {
   }
   .metric-unit {
     font-size: 13px;
+  }
+  /* 窄屏副文本折行：允许换行，槽体自增高，不再用固定 36px 硬裁 */
+  .metric-aux-line {
+    flex-wrap: wrap;
+    gap: 0 6px;
   }
 }
 </style>

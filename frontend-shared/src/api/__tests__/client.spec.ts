@@ -123,7 +123,9 @@ describe('apiClient 拦截器', () => {
     expect(localStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('token')).toBeNull()
     expect(mockClearSessionCaches).toHaveBeenCalledOnce()
-    expect(assign).toHaveBeenCalledWith('/login')
+    // 2026-10-20：跳转必须带原因参数，否则用户只会看到"莫名其妙被踢出登录"，
+    // 并误以为「记住我」失效（实际是那个 token 本身过期了）。
+    expect(assign).toHaveBeenCalledWith('/login?reason=session_expired')
 
     // 还原
     ;(window as any).location = originalLocation
@@ -141,7 +143,8 @@ describe('apiClient 拦截器', () => {
     const handler = mockResponseRejected.getMockImplementation() as any
     await expect(handler({ config: { url: '/api/v1/account' }, response: { status: 401 } })).rejects.toBeDefined()
 
-    expect(assign).toHaveBeenCalledWith('/ehome-dev/login')
+    // 子路径部署时前缀必须保留，且原因参数同样要带上
+    expect(assign).toHaveBeenCalledWith('/ehome-dev/login?reason=session_expired')
 
     // 还原
     ;(window as any).location = originalLocation

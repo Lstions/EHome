@@ -84,7 +84,18 @@ apiClient.interceptors.response.use(
       clearSessionCaches()
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
-      if (window.location.pathname !== loginPath()) window.location.assign(loginPath())
+      // 硬跳转必须带原因。否则用户只会看到"又莫名其妙被踢回登录页"，无法区分
+      // 是会话过期（记住我到期 / 服务端吊销 / 改过密码）还是别的问题 ——
+      // 这正是「记住我"没生效"」最常见的真实原因：勾了，但那是 24h 的旧 token，
+      // 24 小时后就过期了，而页面从未解释过这一点。
+      // 登录页据 reason=session_expired 渲染明确文案。
+      if (window.location.pathname !== loginPath()) {
+        // 纯字符串拼接而不是 new URL(...)：单元测试会替换 window.location（只保留
+        // pathname/assign），此时 location.origin 可能不存在，new URL 会抛错。
+        const target = loginPath()
+        const separator = target.includes('?') ? '&' : '?'
+        window.location.assign(target + separator + 'reason=session_expired')
+      }
     }
     const errorData = error.response?.data as ErrorEnvelope | undefined
     return Promise.reject(new ApiError(errorData?.message || error.message, error.response, errorData?.error_code))

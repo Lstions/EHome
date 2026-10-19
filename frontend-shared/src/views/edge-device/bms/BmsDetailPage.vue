@@ -1843,8 +1843,18 @@ onUnmounted(() => {
      · 一行放不下就**自动换行**，窄屏自然堆叠成单列。
    这是流式与硬栅格的关键差别：宽度由内容需要决定，而不是由列数决定。
 
-   ⚠ 仍保留 align-items: flex-start：矮卡片绝不被同行的高卡片拉高
-     （历史踩过的坑 —— el-row/el-col 默认 stretch 会制造大片空白）。 */
+   ⚠ 关于 align-items（2026-10-20 修正，两次迭代才定稿）：
+
+     · flex-start（原值）：矮卡不被拉高，但**同排底边参差** —— 实测 MOS 312 vs 保护 279
+       差 34px、实时流 461 vs 轮询 446 差 16px，视觉上并排两块像被切断。
+     · 全行 stretch：底边齐了，但「受控操作 740px」会把「操作历史 129px」拉成 740px，
+       凭空多出 611px 空白 —— 比参差更糟（老注释警告的正是这个）。
+     · **定稿**：按"同排两卡高度是否相近"分别处理：
+         - 高度天然相近的并排行（指标卡 / MOS+保护 / 实时流+轮询）→ stretch，底边齐且
+           多出的空白 ≤40px，可接受；
+         - 高度悬殊的行（受控操作 740 vs 操作历史 129）→ 保持 flex-start，
+           不为对齐制造 600px 空白。
+       判据是**实测高度差**，不是"看起来应该并排"。 */
 .row {
   display: flex;
   flex-wrap: wrap;
@@ -1852,10 +1862,34 @@ onUnmounted(() => {
   margin-bottom: 16px;
   align-items: flex-start;
 }
+
+/* 高度相近的并排行：同排等高，消除底边参差（差值实测均 ≤40px） */
+.row.metrics,
+.row.mos-protect,
+.row.stream-poll {
+  align-items: stretch;
+}
 .row > .card,
 .row > .metric-card { flex-grow: 1; flex-shrink: 1; }
+/* 同排等高后：卡片自身作为纵向 flex 容器，内容顶部对齐、空白留在底部间隙，
+   避免"卡片被拉高但内容仍挤在顶部"的空旷感 */
+.row > .card { display: flex; flex-direction: column; }
+.row > .card > .card-head { flex-shrink: 0; }
+/* 需要撑满剩余高度的内容区（列表/网格）显式声明，未声明者按内容高度、自然留白 */
+.row > .card > .op-groups,
+.row > .card > .poll-list,
+.row > .card > .history-list,
+.row > .card > .stream-box { flex: 1 1 auto; min-height: 0; }
 
-/* 四个指标卡：等权重，220px 起算自动折行 */
+/*
+  四个指标卡：等权重自动折行。
+
+  ⚠ flex-basis 与 min-width 的取值有实测依据（2026-10-20 二次复审修正）：
+    v2 用 flex-basis:140 / min-width:0 → 在 **769~809px** 区间容器约 473px，
+    140*3 + gap32 = 452 < 473 ⇒ 排成 3+1，每张仅 147px ⇒ 「8.34Ah」「51.71V」
+    被省略号吃掉（实测 63>33 / 67>33）。769px 只比 768px 宽 1px 就崩，属悬崖式回归。
+    修正：basis 回到 160、min-width 回到 150（放不下就折成 2 列而不是硬塞 3 列），
+    窄屏 2 列由下方 @media (max-width:768px) 显式接管。 */
 .metrics > .metric-card { flex: 1 1 160px; min-width: 150px; }
 
 /* 各组按设计意图给大/小卡不同的基准宽度；窄屏自动堆叠 */
@@ -2024,9 +2058,15 @@ onUnmounted(() => {
 .op-caret { color: var(--el-text-color-secondary); transition: transform 0.2s; }
 .op-caret.open { transform: rotate(90deg); }
 .op-group-icon { color: var(--el-color-primary); }
-.op-group-name { font-weight: 600; }
-.op-group-count { font-size: 12px; color: var(--el-text-color-secondary); }
-.op-group-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-left: auto; }
+/*
+  中文标签必须禁逐字断行（2026-10-20 移动端实测）：
+  390px 下分组头只有 290px，图标/caret/计数/风险标签/提示 挤占后，
+  「读取信息」被逐字拆成 4 行（49×38px，像竖排），分组头高 54~73px 参差。
+  用 word-break: keep-all 保证中文词不被拆开，再用 flex-wrap 让整块换行。
+*/
+.op-group-name { font-weight: 600; word-break: keep-all; white-space: nowrap; }
+.op-group-count { font-size: 12px; color: var(--el-text-color-secondary); white-space: nowrap; flex-shrink: 0; }
+.op-group-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-left: auto; word-break: keep-all; }
 .op-list { display: flex; flex-direction: column; }
 .op-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--el-border-color-lighter); flex-wrap: wrap; }
 .op-info { flex: 1; min-width: 220px; }
@@ -2065,19 +2105,100 @@ onUnmounted(() => {
   .stream-poll > .stream-card,
   .ops-history > .ops-card { flex-basis: 420px; }
 }
+/* 平板/窄桌面（769~1100）：指标卡固定 2 列。
+   为什么需要单独一档：这个区间容器宽度刚好能塞下 3 张 160px 的卡，
+   但每张只剩 ~147px，数值会被省略号吃掉（复审实测 N1）。宁可 2 列宽松，
+   不要 3 列挤爆。 */
+@media (max-width: 1100px) {
+  .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
+  /* 保护项在 1100 以下单列：2 列时 820/1024 会把「前端 IC 错误」截断 18~19px */
+  .protect-grid { grid-template-columns: 1fr; }
+  .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
+}
+
 @media (max-width: 768px) {
   .page-head { padding: 12px 12px 14px; }
   .page-body { padding: 12px; }
   .head-actions { margin-left: 0; }
   .card { padding: 14px 12px; }
-  .protect-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .head-right, .stream-actions { margin-left: 0; }
   .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
   .mos-switch, .op-group-head, .back-latest { min-height: 44px; }
+  /* 分组头在窄屏允许换行：名称/计数/风险标签占第一行，提示自动掉到第二行，
+     而不是把「读取信息」挤成竖排 */
+  .op-group-head { flex-wrap: wrap; row-gap: 4px; align-items: center; }
+  .op-group-hint { margin-left: 0; flex-basis: 100%; }
   .poll-row { align-items: flex-start; }
   .poll-controls { width: 100%; }
   .poll-interval { flex: 1; width: auto; }
+
+  /* ── 指标卡：窄屏固定 2 列（此前是 1 列 × 4 行，白占 386px 高度） ──
+     用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。 */
+  .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
+
+  /*
+    极窄屏（≤360px）改回单列：2 列时每张仅 116px，
+    「SOC 剩余电量」「充电中（电流为正）」这类标签/副文本会被压到折行或截断。
+    360px 以下本身已是小屏设备，单列可读性优先于紧凑度。
+  */
+  @media (max-width: 360px) {
+    .metrics > .metric-card { flex: 1 1 100%; }
+  }
+
+  /* ── 硬 min-width 在窄屏必须清零 ──
+     根因（实测）：.ops-card { min-width: 400px }、.stream-card { min-width: 380px }
+     等在 318px 的容器里**不能收缩**（min-width 是硬底线），于是卡片宽 400、
+     整页 el-main scrollWidth 432 > clientWidth 382，页面可以横向拖动。
+     桌面端这些 min-width 用于保证"卡片不会被压到不可读"，窄屏已经是单列堆叠，
+     不需要它们 —— 清零后卡片跟随容器 100% 宽。 */
+  .row > .card,
+  .mos-protect > .mos-card,
+  .mos-protect > .protect-card,
+  .stream-poll > .stream-card,
+  .stream-poll > .poll-card,
+  .ops-history > .ops-card,
+  .ops-history > .history-card {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /*
+    保护网格：窄屏单列。
+    实测：2 列时每项 ≤153px，name+tag+bit 挤不下，「短路保护」→「短路…」、
+    「前端 IC 错误」→「前端 …」。保护名是关键信息，绝不能截断。
+    单列断点从 768 提到 1100（复审：820px 与 1024px 下 2 列仍截「前端 IC 错误」
+    18~19px）——1100px 以下统一单列，宽度充裕后再回 2 列。
+  */
+  .protect-grid { grid-template-columns: 1fr; }
+  .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
+
+  /* ── 实时流：横向溢出治理（实测 el-main scrollWidth 432 > clientWidth 382） ──
+     根因：.stream-row { min-width: 420px } 在 354px 容器里硬撑，把整页撑出横向滚动条。
+     窄屏改为**两行网格**（上行 时间+项目，下行 值+单位+状态）：
+       · 不删任何字段（单位/状态都是有效信息）；
+       · 不设 min-width ⇒ 不再溢出；
+       · 单行高度只增加约 16px，比重排整页代价低得多。
+     grid-template-areas 让读屏顺序与视觉顺序保持一致。 */
+  .stream-row {
+    /* 列宽必须固定（不能用 auto）：auto 列每行独立计算宽度，
+       实测单位列 left 在 286/283.3/270/空列 0 之间抖动 3~16px，
+       整列看起来是锯齿。固定 40px 后各行对齐（复审 N5）。 */
+    grid-template-columns: 58px minmax(0, 1fr) 68px 34px 46px;
+    grid-template-areas:
+      "time item  item  item  item"
+      "time value unit  unit  status";
+    min-width: 0;
+    row-gap: 2px;
+    padding: 8px 10px;
+  }
+  .stream-row .s-value { text-align: right; }
+  .stream-row .s-time   { grid-area: time; align-self: start; }
+  .stream-row .s-item   { grid-area: item; }
+  .stream-row .s-value  { grid-area: value; text-align: left; }
+  .stream-row .s-unit   { grid-area: unit; }
+  .stream-row .s-status { grid-area: status; }
+  .stream-scroll { overflow-x: hidden; }
 }
 @media (pointer: coarse) {
   .mos-switch, .op-group-head, .back-latest { min-height: 44px; }

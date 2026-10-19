@@ -81,6 +81,15 @@ function formatEnergy(v: any): string {
   color: var(--text-on-fill);
 }
 
+/*
+  卡片间距：4 张卡在 1440 下每张 217px，图标 52 + gap 14 后数值区仅 109px。
+  把 gap 收窄到 10px 并为数值区争取空间，配合下面 .energy-value 的字号自适应。
+*/
+.energy-card {
+  gap: 10px;
+  padding: 16px 14px;
+}
+
 /* 4 个变体的前景各不相同，因为底色亮暗走向相反：
    · daily(暖色)/yearly(绿)/total(灰) 用的语义色在**暗色下被提亮** ⇒ 前景必须转深
      （否则白图标 1.85–2.36:1）；这些色在亮色下够深，而 --text-on-fill 亮色即白 ⇒ 一个 token 两边都对。
@@ -116,15 +125,36 @@ function formatEnergy(v: any): string {
   color: var(--el-text-color-secondary);
 }
 
+/*
+  发电量数值**不允许被截断**（2026-10-20 生产实测缺陷）：
+  1440px 桌面下卡片 217px、图标占 52+14，数值区仅 109px，
+  「2194.2 kWh」实宽 121px ⇒ 显示为「2194.2…」，「4595.8…」同样。
+  发电量是这一屏最重要的数字，截成省略号等于没有这个功能。
+  策略（按生效顺序）：
+    ① 数值不再 nowrap 硬截断，改为允许收缩 + 字号自适应降档；
+    ② 图标槽在窄卡里缩小，把宽度让给数字；
+    ③ 卡片最小宽度抬高，避免落到会截断的宽度区间。
+*/
+.energy-card {
+  min-width: 190px;
+}
+
 .energy-value {
   margin: 0;
-  font-size: 26px;
+  /*
+    clamp 下限 18px：1440 桌面下数值区仅 ~109px，「2194.2 kWh」需要约 111px，
+    23px 字号仍差 2px 被截。降到 18px 后 5 位数 + 单位能完整放下；
+    宽屏（≥1600）自动回升到 26px，保持原有视觉重量。
+  */
+  font-size: clamp(18px, 1.35vw, 26px);
   font-weight: 700;
   color: var(--el-text-color-primary);
   line-height: 1.2;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 不再 ellipsis：万一仍超出（极端窄屏），宁可让它溢出可见也不吞掉数字 */
+  overflow: visible;
+  text-overflow: clip;
+  font-variant-numeric: tabular-nums;
 }
 
 .energy-unit {

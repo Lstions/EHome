@@ -24,6 +24,12 @@
 
     <el-skeleton v-if="chartLoading" :rows="8" animated />
     <template v-else>
+      <!--
+        2026-10-20 修（实测：BMS「运行趋势」卡在**全部子图无数据**时仍高达 831px）：
+        旧模板对每个分组都渲染一个 height=260px 的 LineChart，即便该组 series 为空；
+        5 个空组 = 1300px 的空白图表区，把页面拉得极长且看不出哪里有问题。
+        现在：只在**该组确实有数据点**时才渲染图表，否则渲染一行紧凑的空态文案。
+      -->
       <div v-if="chartSubGroups.length > 0" class="chart-grid">
         <div
           v-for="group in chartSubGroups"
@@ -32,12 +38,14 @@
         >
           <p class="chart-sub-title">{{ group.title }}</p>
           <LineChart
+            v-if="groupHasData(group)"
             :series="group.series"
             :title="''"
             height="260px"
             :yAxisMin="group.yAxisMin"
             :yAxisMax="group.yAxisMax"
           />
+          <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
         </div>
       </div>
       <LineChart
@@ -46,7 +54,21 @@
         :title="`${deviceTypeText}数据趋势`"
         height="400px"
       />
-      <el-empty v-else description="暂无历史数据" :image-size="60" />
+      <!--
+        空态必须说明"查了什么范围"，否则用户无法判断是设备没上报、还是时间范围选错。
+        2026-10-20 实测：逆变器历史卡曾长期只显示"暂无历史数据"，而库里该设备
+        24h 内有 2000+ 个数据点 —— 根因是设备类型判定漏了厂商前缀（已修），
+        但空态本身不给任何线索，让排查方向完全错误。这里补上范围与可能原因。
+      -->
+      <el-empty v-else :image-size="60">
+        <template #description>
+          <div class="empty-desc">
+            <p class="empty-title">当前时间范围内暂无历史数据</p>
+            <p class="empty-hint">已查询：{{ timeRangeLabel }}（{{ queryScopeHint }}）</p>
+            <p class="empty-hint">可能原因：设备刚接入尚未上报、该类型数据未被采集，或所选时间范围无数据。</p>
+          </div>
+        </template>
+      </el-empty>
     </template>
   </el-card>
 </template>
@@ -176,13 +198,25 @@ const inverterChartGroups: ChartSubGroup[] = [
 
 /** 判断是否为BMS设备类型 */
 const isBmsDevice = (deviceType: string): boolean => {
-  const bmsTypes = ['jiabaida_bms', 'bms', 'battery']
-  return bmsTypes.includes(deviceType.toLowerCase())
+  const t = deviceType.toLowerCase()
+  // 同样兼容厂商前缀（jiabaida_/daly_ 等）与历史裸名；battery 是 BMS 页的别名
+  return t === 'bms' || t === 'battery' || t.endsWith('_bms') || t.includes('bms')
 }
 
-/** 判断是否为逆变器设备类型 */
+/**
+ * 判断是否为逆变器设备类型。
+ *
+ * ⚠ 2026-10-20 修：原实现只认字面量 'inverter'，而生产驱动的注册名是
+ * `techfine_inverter`（见 EdgeDeviceDetailRouter 的 componentMap 注释 —— 那里
+ * 已经因为同一个坑修过一次）。于是 true 的逆变器落进下方"通用设备"分支，
+ * 用 SENSOR_ORDER 等通用 category 去查 unified-data，而逆变器实际写入的分类是
+ * pv1_voltage / grid_voltage / battery_voltage 等 ⇒ 一条都查不到 ⇒
+ * 页面永远显示「暂无历史数据」，尽管库里 24h 有 2000+ 个点。
+ * 改成前缀/包含匹配，兼容厂商前缀（techfine_/growatt_ 等）与历史裸名。
+ */
 const isInverterDevice = (deviceType: string): boolean => {
-  return deviceType.toLowerCase() === 'inverter'
+  const t = deviceType.toLowerCase()
+  return t === 'inverter' || t.endsWith('_inverter') || t.includes('inverter')
 }
 
 interface ChartSubGroupResult {
@@ -265,6 +299,31 @@ const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
   return groups.map(g => ({ ...g, ...adaptive(g.series) }))
 })
 
+/** 该分组是否确实有数据点（没有就不渲染 260px 图表，避免大片空白） */
+function groupHasData(group: ChartSubGroupResult): boolean {
+  return group.series.some(s => Array.isArray(s.data) && s.data.length > 0)
+}
+
+/** 空态展示用的时间范围文案（与 TimeRangeSelector 的档位一一对应） */
+const timeRangeLabel = computed(() => {
+  const map: Record<string, string> = {
+    '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天',
+  }
+  if (timeRange.value === 'custom') {
+    const [s, e] = getTimeRange()
+    return s.toLocaleString('zh-CN') + ' ~ ' + e.toLocaleString('zh-CN')
+  }
+  return map[timeRange.value] || timeRange.value
+})
+
+/** 空态展示用的查询范围说明（告诉用户查了哪些物理量，便于判断是没采到还是选错范围） */
+const queryScopeHint = computed(() => {
+  const t = props.deviceType
+  if (isBmsDevice(t)) return 'BMS 电压 / 电流 / SOC / 温度 / 单体电压'
+  if (isInverterDevice(t)) return '逆变器 PV / 电网 / 输出 / 电池 / 温度 / 发电量'
+  return '通用传感器分类'
+})
+
 async function fetchHistoryData() {
   if (!props.deviceId) return
   const [startTime, endTime] = getTimeRange()
@@ -299,8 +358,16 @@ async function fetchHistoryData() {
           start_time: startTime.toISOString(), end_time: endTime.toISOString(), page: 1, page_size: 1000
         })
         chartSeries.value = []
-        if (response.items && response.items.length > 0) {
-          const firstItem = response.items[0]
+        /*
+         * ⚠ 2026-10-20 实测崩溃：`response` 可能是 **null**（后端该端点在无数据/
+         * 参数异常时返回 data:null），旧代码直接 response.items ⇒
+         * "TypeError: Cannot read properties of null (reading 'items')"，
+         * 被 catch 后弹「获取历史数据失败」，用户看到的是报错而不是空态。
+         * 这里先把响应收敛成数组，缺失即空态（空态是正常业务状态，不是错误）。
+         */
+        const items = (response && Array.isArray(response.items)) ? response.items : []
+        if (items.length > 0) {
+          const firstItem = items[0]
           const data = firstItem.data || {}
           // 过滤掉状态量字段
           const numericKeys = Object.keys(data)
@@ -309,13 +376,13 @@ async function fetchHistoryData() {
           if (numericKeys.length > 1) {
             chartSeries.value = numericKeys.map(key => ({
               name: sensorNameMap[key] || key, unit: sensorUnitMap[key] || '', category: key,
-              data: response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
+              data: items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
             }))
             historyData.value = []
           } else {
             const valueKey = numericKeys[0] || Object.keys(data).find(key => typeof data[key] === 'number' && !statusCategories.includes(key))
             historyData.value = valueKey
-              ? response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
+              ? items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
               : []
           }
         } else {
@@ -376,6 +443,19 @@ onMounted(() => fetchHistoryData())
 </script>
 
 <style scoped>
+/* 空态说明：给出「查了什么范围 + 可能原因」，而不是只说「暂无」 */
+.chart-sub-empty {
+  margin: 0;
+  padding: 18px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color-lighter);
+  border-radius: 6px;
+}
+.empty-desc { text-align: center; line-height: 1.7; }
+.empty-title { margin: 0; font-size: 14px; color: var(--el-text-color-regular); }
+.empty-hint { margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .header-controls { display: flex; align-items: center; }
 .chart-grid { display: flex; flex-direction: column; gap: 16px; }
 .chart-sub-section {

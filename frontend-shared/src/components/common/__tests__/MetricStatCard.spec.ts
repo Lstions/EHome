@@ -139,9 +139,39 @@ describe('MetricStatCard.vue 契约（源码字符串断言）', () => {
     expect(src).not.toContain('.negative')
   })
 
-  it('辅助槽有 min-height 且存在 invisible 占位行规则（永远占位契约）', () => {
-    expect(css).toMatch(/\.metric-aux\s*\{[^}]*min-height/)
+  /**
+   * 辅助槽的等高策略演进（三次迭代的最终契约）：
+   *   v1  min-height:18px              → SOC 卡高 5px、电池卡高 17px（没兜住 progress/第二行）
+   *   v2  height:18px + overflow:hidden → 等高做到了，但把多行副文本**硬裁**
+   *        （实测 1024px 电池卡裁 70px、BMS 卡裁 34px）——用信息丢失换整齐
+   *   v3（当前）槽体不设固定高度、不裁切；等高交给外层行容器（stretch / el-col）
+   *
+   * 契约必须同时锁住两件事：
+   *   ① 不得再用固定 height 硬裁（否则多行副文本被吃掉）；
+   *   ② 不得用 overflow:hidden 藏内容。
+   * 若有人想"改回固定高度来对齐"，这条会当场红。
+   */
+  it('辅助槽不得用固定高度或 overflow:hidden 硬裁多行副文本', () => {
+    const auxRule = css.match(/\.metric-aux\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(auxRule, '辅助槽规则应存在').not.toBe('')
+    // 反向断言：不得回到固定 height
+    expect(auxRule).not.toMatch(/\n\s*height:\s*\d/)
+    // 反向断言：不得用 overflow:hidden 藏内容
+    expect(auxRule).not.toMatch(/overflow:\s*hidden/)
+    // 占位行契约保留（无副文本时仍要占位，保证行内不塌陷）
     expect(css).toMatch(/\.metric-aux-placeholder\s*\{[^}]*visibility:\s*hidden/)
+  })
+
+  it('progress 参与正常文档流（不得绝对定位压住副文本）', () => {
+    const progressRule = css.match(/\.metric-progress\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(progressRule, 'progress 规则应存在').not.toBe('')
+    // v2 曾用绝对定位压到槽底，实测与副文本相交 4px（390 下进度条正压「90%」）
+    expect(progressRule).not.toMatch(/position:\s*absolute/)
+  })
+
+  it('direction 与 subText 同行（不占第二行，否则电池卡比同排高 17px）', () => {
+    const lineRule = css.match(/\.metric-aux-line\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(lineRule).toMatch(/display:\s*flex/)
   })
 
   it('移动端断点完整覆盖图标/数值/单位紧凑规格', () => {
