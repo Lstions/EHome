@@ -640,14 +640,180 @@ func TestPostgresUnionPlanUsesCompositeIndexes(t *testing.T) {
 	// change: 分支 ORDER BY -> Merge Append + Index Only Scan (无 external sort)。
 	requirePlanMentions(t, changePlan, "Index Only Scan")
 
-	// (3) latest-data 两段式: A 分支走 (logical_device_id, created_at DESC),
-	//     B 分支走 legacy 部分索引。
-	latestQueries := latestDeviceDataQueries(qs)
-	if len(latestQueries) != 2 {
-		t.Fatalf("latest-data queries = %d, want 2 (logical + NULL-logical fallback)", len(latestQueries))
+	// (3) latest-data: 每个 scope 分支各自 (… ORDER BY created_at DESC LIMIT 1)
+	//     再取较新, 因此 A 分支走 (logical_device_id, created_at DESC)、B 分支走
+	//     legacy 部分索引。按分支分别 EXPLAIN（合并后单条 SQL 的节点顺序不稳定）。
+	branches := dataScopeBranches(qs)
+	if len(branches) != 2 {
+		t.Fatalf("latest-data branches = %d, want 2 (logical + NULL-logical fallback)", len(branches))
 	}
-	latestAPlan := explainPlan(t, db, latestQueries[0].SQL, latestQueries[0].Args...)
-	requirePlanMentions(t, latestAPlan, datalifecycle.IndexDevDataLogicalCreated)
-	latestBPlan := explainPlan(t, db, latestQueries[1].SQL, latestQueries[1].Args...)
-	requirePlanMentions(t, latestBPlan, datalifecycle.IndexDevDataLegacyNullCreat)
+	for i, wantIndex := range []string{
+		datalifecycle.IndexDevDataLogicalCreated,
+		datalifecycle.IndexDevDataLegacyNullCreat,
+	} {
+		branchSQL := fmt.Sprintf(
+			"SELECT * FROM device_data WHERE %s ORDER BY created_at DESC LIMIT 1",
+			branches[i].cond)
+		branchPlan := explainPlan(t, db, branchSQL, branches[i].args...)
+		requirePlanMentions(t, branchPlan, wantIndex)
+	}
+	// 合并语句本身也必须可执行（语义由 TestLatestDeviceDataPostgres_NewestAcrossBranches 锁）。
+	latestSQL, latestArgs := latestDeviceDataSQL(qs)
+	if latestSQL == "" {
+		t.Fatal("latest-data SQL is empty")
+	}
+	var latestRow models.DeviceData
+	if err := db.Raw(latestSQL, latestArgs...).Scan(&latestRow).Error; err != nil {
+		t.Fatalf("latest-data union query failed: %v", err)
+	}
+}
+
+// ==================== latest-data: A/B 两分支取较新（语义回归门禁） ====================
+
+// TestLatestDeviceDataPostgres_NewestAcrossBranches 锁住评审 2026-10-21 指出的
+// 语义回归：旧 OR scope 查询返回 max(created_at) over (A ∪ B)；实现若改成
+// 「A 命中即止」，当 B 行比 A 最新行更新时（backfill 未完成 / 写路径回退写
+// NULL-logical）会返回 stale 行。这里构造两种顺序，断言必须取较新。
+func TestLatestDeviceDataPostgres_NewestAcrossBranches(t *testing.T) {
+	requirePostgresAPI(t)
+	db := testutil.OpenTestDB(t)
+	ctx := context.Background()
+	if err := datalifecycle.EnsureLogicalDataIndexes(ctx, db); err != nil {
+		t.Fatalf("ensure indexes: %v", err)
+	}
+
+	ld := models.LogicalDevice{IdentityKey: "bms-latest-branches:0x76", Name: "latest-branches", DeviceType: "bms"}
+	if err := db.Create(&ld).Error; err != nil {
+		t.Fatalf("create logical device: %v", err)
+	}
+	dev := models.EdgeDevice{Name: "latest-branches", Type: "bms", NodeID: "N-LB", ChannelID: 1,
+		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
+	if err := db.Create(&dev).Error; err != nil {
+		t.Fatalf("create edge device: %v", err)
+	}
+	qs, err := datalifecycle.ResolveDataQueryScope(db, dev.ID)
+	if err != nil {
+		t.Fatalf("resolve query scope: %v", err)
+	}
+	sqlText, args := latestDeviceDataSQL(qs)
+	if sqlText == "" {
+		t.Fatal("latest-data SQL is empty")
+	}
+	readLatest := func() models.DeviceData {
+		t.Helper()
+		var row models.DeviceData
+		if err := db.Raw(sqlText, args...).Scan(&row).Error; err != nil {
+			t.Fatalf("latest-data query failed: %v", err)
+		}
+		return row
+	}
+
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	mkRow := func(ts time.Time, logical bool, payload string) models.DeviceData {
+		row := models.DeviceData{
+			DeviceID: dev.ID, NodeID: "N-LB", DataJSON: payload,
+			Timestamp: ts, CreatedAt: ts,
+		}
+		if logical {
+			row.LogicalDeviceID = &ld.ID
+		}
+		return row
+	}
+
+	// 场景 1: A 有旧行 (T+0), B 有更新的 NULL-logical 行 (T+10) => 必须返回 B。
+	if err := db.Create(&[]models.DeviceData{
+		mkRow(base, true, `{"branch":"A","n":1}`),
+		mkRow(base.Add(10*time.Second), false, `{"branch":"B","n":2}`),
+	}).Error; err != nil {
+		t.Fatalf("seed scenario 1: %v", err)
+	}
+	if got := readLatest(); got.DataJSON != `{"branch":"B","n":2}` {
+		t.Fatalf("scenario 1: latest-data = %q (created_at=%s), want the newer NULL-logical row",
+			got.DataJSON, got.CreatedAt.Format(time.RFC3339))
+	}
+
+	// 场景 2: 再写一条更新的 A 行 (T+20) => 必须返回 A（两个方向都取较新）。
+	newerA := mkRow(base.Add(20*time.Second), true, `{"branch":"A","n":3}`)
+	if err := db.Create(&newerA).Error; err != nil {
+		t.Fatalf("seed scenario 2: %v", err)
+	}
+	if got := readLatest(); got.DataJSON != `{"branch":"A","n":3}` {
+		t.Fatalf("scenario 2: latest-data = %q (created_at=%s), want the newer logical row",
+			got.DataJSON, got.CreatedAt.Format(time.RFC3339))
+	}
+}
+
+// ==================== change 模式: 跨 A/B 分支的全局有序与并集语义 ====================
+
+// TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered 锁住评审指出的测试缺口：
+// 既有 change 测试的 B 分支为空，从未验证「A/B 行交错时按 timestamp 全局有序、
+// 变更点等于全量并集的 lag」。这里两分支交错插入，断言时间升序且序列与
+// 手工计算的并集 lag 完全一致。
+func TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered(t *testing.T) {
+	requirePostgresAPI(t)
+	db := testutil.OpenTestDB(t)
+
+	ld := models.LogicalDevice{IdentityKey: "bms-change-branches:0x76", Name: "change-branches", DeviceType: "bms"}
+	if err := db.Create(&ld).Error; err != nil {
+		t.Fatalf("create logical device: %v", err)
+	}
+	dev := models.EdgeDevice{Name: "change-branches", Type: "bms", NodeID: "N-CB", ChannelID: 1,
+		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
+	if err := db.Create(&dev).Error; err != nil {
+		t.Fatalf("create edge device: %v", err)
+	}
+	qs, err := datalifecycle.ResolveDataQueryScope(db, dev.ID)
+	if err != nil {
+		t.Fatalf("resolve query scope: %v", err)
+	}
+	if len(qs.Scope.LogicalIDs) == 0 || len(qs.Scope.InstanceIDs) == 0 {
+		t.Fatalf("precondition: scope must have both branches")
+	}
+
+	// 交错时间轴: t=0,2,4 走 A 分支; t=1,3 走 B 分支 (NULL-logical)。
+	// 并集值序列 0,1,0,0,1 => 变更点: t0=0(首点), t1=1(0->1), t2=0(1->0), t4=1(0->1)。
+	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	type point struct {
+		offset  int
+		value   float64
+		logical bool
+	}
+	points := []point{
+		{0, 0, true}, {1, 1, false}, {2, 0, true}, {3, 0, false}, {4, 1, true},
+	}
+	for _, pt := range points {
+		row := models.UnifiedData{
+			DeviceID: dev.ID, SensorName: "protection_status",
+			Value: pt.value, Timestamp: start.Add(time.Duration(pt.offset) * time.Second),
+		}
+		if pt.logical {
+			row.LogicalDeviceID = &ld.ID
+		}
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatalf("seed unified row t=%d: %v", pt.offset, err)
+		}
+	}
+
+	got, err := queryHistoryPoints(context.Background(), db, historyPointQuery{
+		Scope: qs, Category: "protection_status",
+		Start: start, End: start.Add(time.Hour), MaxPoints: 500, Mode: AggModeChange,
+	})
+	if err != nil {
+		t.Fatalf("change query: %v", err)
+	}
+	wantOffsets := []int{0, 1, 2, 4}
+	wantValues := []float64{0, 1, 0, 1}
+	if len(got) != len(wantOffsets) {
+		t.Fatalf("change points = %d, want %d: %#v", len(got), len(wantOffsets), got)
+	}
+	for i := range wantOffsets {
+		wantTs := start.Add(time.Duration(wantOffsets[i]) * time.Second)
+		if !got[i].Timestamp.Equal(wantTs) {
+			t.Errorf("point[%d].timestamp = %s, want %s (global order across branches)",
+				i, got[i].Timestamp.Format(time.RFC3339), wantTs.Format(time.RFC3339))
+		}
+		if got[i].Value != wantValues[i] {
+			t.Errorf("point[%d].value = %v, want %v", i, got[i].Value, wantValues[i])
+		}
+	}
 }

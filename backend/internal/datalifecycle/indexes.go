@@ -115,27 +115,15 @@ func ensurePostgresIndexes(ctx context.Context, db *gorm.DB) error {
 		// 自动把索引传播到各分区; 普通表仍走 CONCURRENTLY 不阻塞在线写入。
 		partitioned := IsTablePartitioned(db, spec.Table)
 		concurrently := !partitioned
-		if concurrently {
-			// INVALID 索引检测: CONCURRENTLY 构建失败会留下 indisvalid=false
-			// 的残骸, IF NOT EXISTS 对其生效 → 索引实际缺失却被静默跳过。
-			var invalid bool
-			err := db.WithContext(ctx).Raw(
-				`SELECT COUNT(*) > 0 FROM pg_class c
-JOIN pg_index i ON i.indexrelid = c.oid
-WHERE c.relname = ? AND NOT i.indisvalid`, spec.Name).
-				Scan(&invalid).Error
-			if err != nil {
-				return fmt.Errorf("check invalid index %s: %w", spec.Name, err)
-			}
-			if invalid {
-				if err := db.WithContext(ctx).
-					Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s", spec.Name)).Error; err != nil {
-					return fmt.Errorf("drop invalid index %s: %w", spec.Name, err)
-				}
-				slog.Warn("datalifecycle: dropped INVALID index before rebuild",
-					"index", spec.Name)
-			}
-		} else {
+		// INVALID 索引检测 (两种分支都做): 构建中途失败会留下 indisvalid=false
+		// 的残骸, 而 CREATE INDEX IF NOT EXISTS 对其静默生效 → 索引实际缺失却
+		// 永远补不上。评审 2026-10-21 指出：原实现只在非分区(CONCURRENTLY)分支
+		// 做这件事，而生产要建的两个新索引恰好都在**分区母表**上（非并发建，
+		// 失败概率更高），漏检会静默少索引。分区母表索引被 DROP 时子索引级联删除。
+		if err := dropInvalidIndexIfAny(ctx, db, spec.Name); err != nil {
+			return err
+		}
+		if !concurrently {
 			// 分区母表分支: IF NOT EXISTS 以 schema 全局关系名为准 (非按表)。
 			// 分区迁移把原平表保留为 <table>_legacy, 其上的同名复合索引仍占用
 			// 规范名, 不移走则 CREATE INDEX IF NOT EXISTS 被静默跳过, 分区母表
@@ -161,6 +149,31 @@ WHERE c.relname = ? AND NOT i.indisvalid`, spec.Name).
 		slog.Info("datalifecycle: index ensured",
 			"index", spec.Name, "table", spec.Table, "concurrently", concurrently)
 	}
+	return nil
+}
+
+// dropInvalidIndexIfAny drops an INVALID (indisvalid=false) index left behind
+// by an interrupted build, so the following CREATE INDEX IF NOT EXISTS actually
+// runs. Idempotent: absent/valid index → no-op.
+func dropInvalidIndexIfAny(ctx context.Context, db *gorm.DB, indexName string) error {
+	var invalid bool
+	err := db.WithContext(ctx).Raw(
+		`SELECT COUNT(*) > 0 FROM pg_class c
+JOIN pg_index i ON i.indexrelid = c.oid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = current_schema() AND NOT i.indisvalid`, indexName).
+		Scan(&invalid).Error
+	if err != nil {
+		return fmt.Errorf("check invalid index %s: %w", indexName, err)
+	}
+	if !invalid {
+		return nil
+	}
+	if err := db.WithContext(ctx).
+		Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s", indexName)).Error; err != nil {
+		return fmt.Errorf("drop invalid index %s: %w", indexName, err)
+	}
+	slog.Warn("datalifecycle: dropped INVALID index before rebuild", "index", indexName)
 	return nil
 }
 

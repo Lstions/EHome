@@ -1280,23 +1280,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// 从 device_data 表查最新一条。
 		var data models.DeviceData
 		if isPostgresDialect(db) {
-			// BMS 页慢修复 §1.6 (2026-10-20 23:09 Lead 补充「两段式」): 先查
-			// 逻辑分支 LIMIT 1, 命中即止; 未命中再查 NULL-logical 回退分支。
-			// 每支各自 ORDER BY created_at DESC LIMIT 1, 分别走
-			// (logical_device_id, created_at DESC) 复合索引与
-			// idx_devdata_legacy_null_created 部分索引 —— 旧的 OR scope 条件
-			// 使 PG 退化为 device_data 200 万行 Parallel Seq Scan + top-N
-			// (生产实测 341 ms, 并发下 33 s)。
-			ctxDB := db.WithContext(c.Request.Context())
-			for _, query := range latestDeviceDataQueries(qs) {
-				if query.SQL == "" {
-					continue
-				}
-				if err := ctxDB.Raw(query.SQL, query.Args...).Scan(&data).Error; err != nil {
-					break // 与旧实现一致: 查询错误忽略 (返回零值), 不 500
-				}
-				if data.ID != 0 {
-					break
+			// BMS 页慢修复 §1.6: 每个 scope 分支各自走索引 + LIMIT 1, 再取较新
+			// (与旧 OR scope 查询的 max(created_at) 语义严格等价; 评审 2026-10-21
+			// 指出「A 命中即止」在 backfill 未完成/NULL 回退写入时会返回 stale,
+			// 见 latestDeviceDataSQL 注释)。旧的 OR scope 条件使 PG 退化为
+			// device_data 200 万行 Parallel Seq Scan + top-N (生产实测 341 ms)。
+			sqlText, args := latestDeviceDataSQL(qs)
+			if sqlText != "" {
+				if err := db.WithContext(c.Request.Context()).Raw(sqlText, args...).Scan(&data).Error; err != nil {
+					// 与旧实现一致: 查询错误忽略 (返回零值), 不 500。
+					logger.Warnf("[latest-data] query failed device_pk=%d: %v", id, err)
 				}
 			}
 		} else {

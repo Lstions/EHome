@@ -300,3 +300,60 @@ describe('取消（AbortController）：不置错、不弹 toast、不覆盖旧�
     expect(clientGet.mock.calls[0][1].signal).toBeUndefined()
   })
 })
+
+describe("聚合响应形状（新后端 lean {timestamp,value}）与旧响应兼容", () => {
+  it("lean 响应只有 timestamp 时也能映射出 time（本次修复的关键兼容路径）", async () => {
+    clientGet.mockResolvedValue({
+      code: 0,
+      message: "ok",
+      data: [{ category: "a", data: [{ timestamp: POINT_TIME, value: 7 }] }],
+    })
+    const c = useHistoryData()
+    const series = await c.fetch(DEVICE, ["a"], START, END)
+    // 新后端（agg=auto 分桶聚合）只返回 {timestamp,value}，没有 created_at；
+    // mapItem 若只读 created_at，这里会得到 time=undefined ⇒ 图表全空。
+    expect(series[0].data).toEqual([{ time: POINT_TIME, value: 7 }])
+  })
+
+  it("旧后端全字段响应（created_at）仍兼容（滚动部署期间新旧可混跑）", async () => {
+    clientGet.mockResolvedValue(batchPayload(["a"]))
+    const c = useHistoryData()
+    const series = await c.fetch(DEVICE, ["a"], START, END)
+    expect(series[0].data).toEqual([{ time: POINT_TIME, value: 3.3 }])
+  })
+})
+
+describe("并发 fetch + abort 竞态：旧请求不得熄灭新请求的 loading / 覆盖新数据", () => {
+  it("旧请求被 abort 后，新请求的 loading 与数据不被旧请求的 finally 抹掉", async () => {
+    let resolveNew: (value: unknown) => void = () => {}
+    // 第 1 次（旧请求）：被 abort 时 reject；第 2 次（新请求）：手动控制何时返回。
+    clientGet.mockImplementationOnce(
+      (_url: string, cfg: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          cfg.signal?.addEventListener("abort", () => reject(canceledError()))
+        }),
+    )
+    clientGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveNew = resolve }),
+    )
+
+    const c = useHistoryData()
+    const controller = new AbortController()
+    const oldPending = c.fetch(DEVICE, ["old"], START, END, { signal: controller.signal })
+    const newPending = c.fetch(DEVICE, ["new"], START, END)
+    expect(c.loading.value).toBe(true)
+
+    // 旧请求被取消：its catch/finally 会在微任务里执行（修复前会把 loading 置回 false）。
+    controller.abort()
+    await oldPending
+    await sleep(0)
+    expect(c.loading.value, "旧请求的 finally 不得熄灭新请求的 loading").toBe(true)
+    expect(c.error.value).toBe("")
+
+    resolveNew(batchPayload(["new"]))
+    const result = await newPending
+    expect(result.map((s) => s.category)).toEqual(["new"])
+    expect(c.series.value.map((s) => s.category)).toEqual(["new"])
+    expect(c.loading.value).toBe(false)
+  })
+})

@@ -259,6 +259,17 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
     })
   }
 
+  /**
+   * 请求序号：只有**最新一次** fetch 可以写 loading / series / error。
+   *
+   * 为什么需要（评审 2026-10-21 发现的真实竞态）：BmsChartsPanel 刷新时先
+   * abort 旧请求再立即发新请求，而旧请求的 catch/finally 在微任务里稍后执行；
+   * 若无护栏，旧请求的 finally 会把**新请求**的 loading 置回 false，模板随即
+   * 落到 error / 空数据分支 —— 刷新期间出现「暂无数据」或旧图无加载指示。
+   * 取消本身仍然不置错、不弹 toast、不覆盖旧数据。
+   */
+  let requestSeq = 0
+
   async function fetch(
     deviceId: number | string,
     categories: string[],
@@ -268,6 +279,8 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
   ): Promise<HistorySeries[]> {
     const signal = fetchOptions.signal
     if (!deviceId || categories.length === 0) return []
+    const seq = ++requestSeq
+    const isLatest = () => seq === requestSeq
     loading.value = true
     error.value = ''
     try {
@@ -278,7 +291,7 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
         if (isCanceled(firstError, signal)) return series.value
         // ② 原样重试一次（同一 timeoutMs / signal）——「一次重试 + 明确错误态」比无限降级便宜得多
         await waitForRetry(signal)
-        if (signal?.aborted) return series.value
+        if (signal?.aborted || !isLatest()) return series.value
         try {
           result = await requestBatch(deviceId, categories, startTime, endTime, signal)
         } catch (retryError) {
@@ -291,18 +304,22 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
           result = degraded.series
         }
       }
+      // 已被更新的请求取代：不得覆盖更新请求的状态与数据
+      if (!isLatest()) return series.value
       series.value = result
       return result
     } catch (e) {
       // 取消不是失败：不置错、不弹 toast、不覆盖旧数据（切换时间范围时旧请求被 abort 是常态）
       if (isCanceled(e, signal)) return series.value
+      if (!isLatest()) return series.value
       const reason = reasonOf(e)
       error.value = `${failHead()}：${reason}`
       if (showError) feedback.handleError(e, errorPrefix)
       if (throwOnError) throw new Error(reason)
       return []
     } finally {
-      loading.value = false
+      // 只有最新请求可以结束 loading（旧请求的 finally 不得熄灭新请求的加载态）
+      if (isLatest()) loading.value = false
     }
   }
 

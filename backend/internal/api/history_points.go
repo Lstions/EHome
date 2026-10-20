@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
+	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
 )
@@ -162,6 +163,35 @@ func shouldAggregateHistory(db *gorm.DB, maxPoints int, start, end time.Time) bo
 	return isPostgresDialect(db) && historyAggregationEligible(maxPoints, start, end)
 }
 
+// maxChangePoints 是 change 模式的硬上限 (评审 2026-10-21 发现): change 返回
+// 「首点 + 每次值变化」，点数由状态翻转次数决定而不是 max_points；虽然有上限
+// 的连续量走 avg 分桶，但 fet_status 这类高频翻转位在极端情况下可远超 500 点
+// (旧路径 downsample 始终把响应封在 ~max_points)。超过上限时**不能静默截断**
+// ——保护触发次数按 0→1 跃变计数，截断会让数字变小（错误数据比报错更坏）——
+// 因此直接报错让调用方返回失败态（前端修复后能显示「加载失败+重试」）。
+const maxChangePoints = 50000
+
+// exceedsChangePointCap reports whether a change-mode result exceeds the hard
+// cap. Pure function so the boundary is unit-testable without PostgreSQL.
+func exceedsChangePointCap(mode AggMode, n int) bool {
+	return mode == AggModeChange && n > maxChangePoints
+}
+
+// trimAvgPointsBeforeStart drops leading avg-bucket points whose bucket start
+// is earlier than the requested window start (floor(epoch/W)*W can push the
+// first bucket up to W-1 seconds before start). Pure function; change mode
+// points are real row timestamps and are never trimmed.
+func trimAvgPointsBeforeStart(points []HistoryPoint, start time.Time) []HistoryPoint {
+	cut := 0
+	for cut < len(points) && points[cut].Timestamp.Before(start) {
+		cut++
+	}
+	if cut == 0 {
+		return points
+	}
+	return points[cut:]
+}
+
 // historyPointQuery describes one aggregated history read.
 type historyPointQuery struct {
 	// Scope is the resolved §六 data query scope. Its branches are rendered as
@@ -196,6 +226,22 @@ func queryHistoryPoints(ctx context.Context, db *gorm.DB, q historyPointQuery) (
 	// 一条 raw SQL 自带两个互斥分支; 绑定请求上下文 (客户端超时/断开即取消)。
 	if err := db.WithContext(ctx).Raw(sqlText, args...).Scan(&points).Error; err != nil {
 		return nil, fmt.Errorf("history points: query category %q: %w", q.Category, err)
+	}
+	// avg 的首桶起点可能早于窗口起点 (floor 对齐, 最多 W-1 秒): 裁掉, 保持
+	// 「返回点都在 [start, end] 内」的旧语义 (评审 2026-10-21 可忽略项, 顺手修)。
+	if q.Mode != AggModeChange {
+		points = trimAvgPointsBeforeStart(points, q.Start)
+	}
+	// change 点数由翻转次数决定, 不受 max_points 约束; 超过硬上限时如实报错
+	// 而不是静默截断 (截断会让 0→1 跃变计数变小 = 错数据)。详见 maxChangePoints。
+	if exceedsChangePointCap(q.Mode, len(points)) {
+		return nil, fmt.Errorf(
+			"history points: change mode returned %d points for category %q, exceeds cap %d (narrow the time range or use agg=raw)",
+			len(points), q.Category, maxChangePoints)
+	}
+	if q.Mode == AggModeChange && len(points) > q.MaxPoints*100 && len(points) > 1000 {
+		logger.Warnf("[unified-data] change-mode history returned %d points (max_points=%d, window=%s..%s) — response is transition-bound, not capped at max_points",
+			len(points), q.MaxPoints, q.Start.Format(time.RFC3339), q.End.Format(time.RFC3339))
 	}
 	return points, nil
 }

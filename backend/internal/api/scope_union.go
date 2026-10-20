@@ -200,36 +200,48 @@ WHERE s.prev IS DISTINCT FROM s."value"
 ORDER BY s."timestamp"`, src)
 }
 
-// latestDeviceDataQuery is one ordered branch read of the PG latest-data
-// two-stage query. Branch order matters: logical branch first (post-backfill
-// rows are the newest), NULL-logical fallback branch only when the first
-// returns nothing.
-type latestDeviceDataQuery struct {
-	// SQL selects at most one device_data row for one scope branch.
-	SQL  string
-	Args []interface{}
-}
-
-// latestDeviceDataQueries renders the PG latest-data reads (契约 §1.6, 2026-10-20
-// 23:09 Lead 补充「两段式」): 先查 A 分支 LIMIT 1, 命中即止; 未命中再查 B 分支。
-// 每支各自 `ORDER BY created_at DESC LIMIT 1`:
+// latestDeviceDataSQL renders the PG latest-data read (契约 §1.6). Each scope
+// branch is read with its own `ORDER BY created_at DESC LIMIT 1` so the planner
+// can use that branch's index; the two one-row results are then merged and the
+// newest wins:
+//
+//	SELECT * FROM (
+//	  (SELECT * FROM device_data WHERE A ORDER BY created_at DESC LIMIT 1)
+//	  UNION ALL
+//	  (SELECT * FROM device_data WHERE B ORDER BY created_at DESC LIMIT 1)
+//	) AS latest_scope ORDER BY created_at DESC LIMIT 1
 //
 //   - A 分支走 (logical_device_id, created_at DESC) 复合索引;
-//   - B 分支 (logical_device_id IS NULL) 走部分索引
-//     idx_devdata_legacy_null_created。
+//   - B 分支 (logical_device_id IS NULL) 走部分索引 idx_devdata_legacy_null_created。
 //
-// 旧实现是一条 OR scope 查询, PG 无法用任何前导列索引 ⇒ device_data 200 万行
-// Parallel Seq Scan + top-N。两段式在 A 命中时零 B 成本 (B 在生产 backfill 完成
-// 后恒 0 行; 新增行只写 A 分支且 created_at 更新, 故 A 命中即最新)。
-func latestDeviceDataQueries(qs *datalifecycle.DataQueryScope) []latestDeviceDataQuery {
+// 为什么必须取较新而不是「A 命中即止」(评审 2026-10-21)：旧实现是一条 OR
+// scope 查询，语义是 max(created_at) over (A ∪ B)；只要存在「B 行比 A 最新行
+// 更新」的窗口（backfill 未完成时 A 只有旧行 / 写路径 ResolveMergeTarget 失败
+// 落 NULL-logical 行），A-first 会返回 stale 行。两分支各 LIMIT 1 后取较新
+// 与旧语义严格等价，且 B 分支在生产 backfill 完成后恒 0 行（部分索引扫描
+// 立即结束），成本与 A-first 基本相同。
+//
+// 旧实现(OR scope) PG 无法用任何前导列索引 ⇒ device_data 200 万行 Parallel
+// Seq Scan + top-N (生产实测 341 ms, 并发下 33 s)。本写法恢复了索引可用的计划。
+//
+// 单分支 scope 时直接返回该分支的 LIMIT 1 查询，不拼 UNION。
+func latestDeviceDataSQL(qs *datalifecycle.DataQueryScope) (string, []interface{}) {
 	branches := dataScopeBranches(qs)
-	queries := make([]latestDeviceDataQuery, 0, len(branches))
-	for _, branch := range branches {
-		queries = append(queries, latestDeviceDataQuery{
-			SQL: fmt.Sprintf(
-				"SELECT * FROM device_data WHERE %s ORDER BY created_at DESC LIMIT 1", branch.cond),
-			Args: branch.args,
-		})
+	switch len(branches) {
+	case 0:
+		return "", nil
+	case 1:
+		return fmt.Sprintf(
+			"SELECT * FROM device_data WHERE %s ORDER BY created_at DESC LIMIT 1", branches[0].cond),
+			branches[0].args
 	}
-	return queries
+	parts := make([]string, 0, len(branches))
+	args := make([]interface{}, 0, len(branches))
+	for _, branch := range branches {
+		parts = append(parts, fmt.Sprintf(
+			"(SELECT * FROM device_data WHERE %s ORDER BY created_at DESC LIMIT 1)", branch.cond))
+		args = append(args, branch.args...)
+	}
+	return "SELECT * FROM (" + strings.Join(parts, " UNION ALL ") +
+		") AS latest_scope ORDER BY created_at DESC LIMIT 1", args
 }

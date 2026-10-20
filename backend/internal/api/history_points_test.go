@@ -432,29 +432,87 @@ func TestHistoryAggregateSQLShape(t *testing.T) {
 	}
 }
 
-func TestLatestDeviceDataQueries(t *testing.T) {
-	// 两分支: A 先查 (逻辑分支), B 后查 (NULL-logical 回退), 各带 LIMIT 1。
-	queries := latestDeviceDataQueries(bothScope())
-	if len(queries) != 2 {
-		t.Fatalf("latest queries = %d, want 2", len(queries))
+func TestLatestDeviceDataSQL(t *testing.T) {
+	// 两分支: 每支各自 LIMIT 1, 外层按 created_at 取较新 —— 与旧 OR scope
+	// 查询的 max(created_at) over (A ∪ B) 严格等价（评审 2026-10-21：
+	// 「A 命中即止」在 backfill 未完成 / NULL 回退写入时会返回 stale）。
+	sqlText, args := latestDeviceDataSQL(bothScope())
+	if sqlText == "" {
+		t.Fatal("both-branch latest SQL is empty")
 	}
-	if !strings.Contains(queries[0].SQL, "logical_device_id IN ?") ||
-		strings.Contains(queries[0].SQL, "IS NULL") {
-		t.Errorf("latest query[0] must be the logical branch: %s", queries[0].SQL)
+	if !strings.Contains(sqlText, "logical_device_id IN ?") {
+		t.Errorf("latest SQL missing logical branch: %s", sqlText)
 	}
-	if !strings.Contains(queries[1].SQL, "logical_device_id IS NULL AND device_id IN ?") {
-		t.Errorf("latest query[1] must be the NULL-logical fallback branch: %s", queries[1].SQL)
+	if !strings.Contains(sqlText, "logical_device_id IS NULL AND device_id IN ?") {
+		t.Errorf("latest SQL missing NULL-logical fallback branch: %s", sqlText)
 	}
-	for i, q := range queries {
-		if !strings.Contains(q.SQL, "ORDER BY created_at DESC LIMIT 1") {
-			t.Errorf("latest query[%d] missing ORDER BY created_at DESC LIMIT 1: %s", i, q.SQL)
-		}
+	if !strings.Contains(sqlText, "UNION ALL") {
+		t.Errorf("latest SQL must merge both branch rows: %s", sqlText)
 	}
-	// 单分支: 只查一次 (不打第二条 SQL)。
-	single := latestDeviceDataQueries(&datalifecycle.DataQueryScope{
+	// 两个分支各一条 + 外层排序一条 = 3（每支各自 LIMIT 1 后才能走各自索引）。
+	if strings.Count(sqlText, "ORDER BY created_at DESC LIMIT 1") != 3 {
+		t.Errorf("each branch and the outer query must order by created_at DESC LIMIT 1: %s", sqlText)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(sqlText), "ORDER BY created_at DESC LIMIT 1") {
+		t.Errorf("outer query must pick the newest across branches: %s", sqlText)
+	}
+	if len(args) != 2 {
+		// 每支一个 IN 切片参数（GORM 负责把 IN ? 展开）；多出的说明条件拼错了。
+		t.Errorf("latest args = %d, want 2 (one IN slice per branch)", len(args))
+	}
+
+	// 单分支: 不拼 UNION（语义优先 + 少一次 Gather）。
+	singleSQL, _ := latestDeviceDataSQL(&datalifecycle.DataQueryScope{
 		LogicalID: 14, Scope: &datalifecycle.Scope{LogicalIDs: []uint{14}},
 	})
-	if len(single) != 1 {
-		t.Fatalf("single-branch latest queries = %d, want 1", len(single))
+	if strings.Contains(singleSQL, "UNION ALL") {
+		t.Errorf("single-branch latest SQL must not union: %s", singleSQL)
+	}
+	if !strings.Contains(singleSQL, "ORDER BY created_at DESC LIMIT 1") {
+		t.Errorf("single-branch latest SQL missing LIMIT 1: %s", singleSQL)
+	}
+
+	// 空 scope: 不打扰数据库。
+	if emptySQL, emptyArgs := latestDeviceDataSQL(nil); emptySQL != "" || emptyArgs != nil {
+		t.Errorf("nil scope must render empty SQL, got %q args=%v", emptySQL, emptyArgs)
+	}
+}
+
+func TestTrimAvgPointsBeforeStart(t *testing.T) {
+	start := time.Date(2026, 10, 19, 14, 0, 0, 0, time.UTC)
+	pts := []HistoryPoint{
+		{Timestamp: start.Add(-116 * time.Second), Value: 1}, // floor 对齐推到窗口前的首桶
+		{Timestamp: start, Value: 2},
+		{Timestamp: start.Add(173 * time.Second), Value: 3},
+	}
+	got := trimAvgPointsBeforeStart(pts, start)
+	if len(got) != 2 || got[0].Value != 2 || got[1].Value != 3 {
+		t.Fatalf("trim = %#v, want the two in-window points", got)
+	}
+	// 全部在窗口内: 原样返回（不复制不裁剪）。
+	inWindow := []HistoryPoint{{Timestamp: start, Value: 1}}
+	if out := trimAvgPointsBeforeStart(inWindow, start); len(out) != 1 {
+		t.Fatalf("in-window points must be kept, got %#v", out)
+	}
+	// 空切片安全。
+	if out := trimAvgPointsBeforeStart(nil, start); len(out) != 0 {
+		t.Fatalf("nil points = %#v", out)
+	}
+}
+
+func TestExceedsChangePointCap(t *testing.T) {
+	// change 模式的点数由翻转次数决定, 旧路径有 max_points 封顶; 超过硬上限
+	// 必须报错而不是静默截断（截断会让 0→1 跃变计数变小 = 错数据）。
+	if !exceedsChangePointCap(AggModeChange, maxChangePoints+1) {
+		t.Error("change mode above cap must be rejected")
+	}
+	if exceedsChangePointCap(AggModeChange, maxChangePoints) {
+		t.Error("change mode exactly at cap must pass")
+	}
+	if exceedsChangePointCap(AggModeAvg, maxChangePoints+1) {
+		t.Error("avg mode is bucket-capped and must never be rejected by the change cap")
+	}
+	if exceedsChangePointCap(AggModeRaw, maxChangePoints+1) {
+		t.Error("raw mode is legacy and must not be affected")
 	}
 }
