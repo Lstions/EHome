@@ -46,6 +46,17 @@ beforeEach(() => {
 })
 
 describe('CommandList 重设计：状态语义与容器感知', () => {
+  /*
+   * 2026-10-20 契约变更（用户报障「逆变器指令配置的指令显示不对」）：
+   *
+   * 旧契约断言状态标签写「轮询中 · 100 ms」。但同一行的输入框右侧**已经有**一个
+   * 独立的「ms」单位 ⇒ 页面出现「轮询中 · 100 ms  [100] ms」，同一行两个 ms，
+   * 读屏/复制文本时会读成两个单位。这是显示缺陷，不是设计意图。
+   *
+   * 新契约：**状态标签只表达状态**（轮询中 / 已禁用），数值与单位归输入框那一路。
+   * 语义分离后：颜色双通道仍在，但标签文本不再携带数值。
+   * 若有人把数值塞回标签，本用例会当场红。
+   */
   it('启用指令显示文字+颜色双通道状态（success 轮询中），禁用指令显示 info 已禁用', async () => {
     const wrapper = await mountList([
       command({ id: 'on', name: '读取综合信息', current_interval_ms: 100 }),
@@ -54,10 +65,13 @@ describe('CommandList 重设计：状态语义与容器感知', () => {
 
     const stateTags = wrapper.findAll('.cmd-state')
     expect(stateTags).toHaveLength(2)
-    expect(stateTags[0].text()).toBe('轮询中 · 100 ms')
+    expect(stateTags[0].text()).toBe('轮询中')
     expect(stateTags[0].attributes('data-type')).toBe('success')
     expect(stateTags[1].text()).toBe('已禁用')
     expect(stateTags[1].attributes('data-type')).toBe('info')
+    // 防回退：状态标签内不得再出现数值或单位（数值属于输入框那一路）
+    expect(stateTags[0].text()).not.toMatch(/\d/)
+    expect(stateTags[0].text()).not.toContain('ms')
     wrapper.unmount()
   })
 
@@ -72,7 +86,9 @@ describe('CommandList 重设计：状态语义与容器感知', () => {
     expect(wrapper.find('.cmd-state').text()).toBe('已禁用')
 
     await sw.trigger('click') // ON → 恢复模板默认 3000
-    expect(wrapper.find('.cmd-state').text()).toBe('轮询中 · 3000 ms')
+    // 状态标签只表达状态；数值可从输入框读回（单一事实源仍是 interval 数值）
+    expect(wrapper.find('.cmd-state').text()).toBe('轮询中')
+    expect((wrapper.find('input.el-input-number').element as HTMLInputElement).value).toBe('3000')
     wrapper.unmount()
   })
 
@@ -83,7 +99,8 @@ describe('CommandList 重设计：状态语义与容器感知', () => {
     expect(saveBtn.attributes('disabled')).toBeDefined()
 
     await input.setValue('2000')
-    expect(wrapper.find('.cmd-state').text()).toBe('轮询中 · 2000 ms')
+    expect(wrapper.find('.cmd-state').text()).toBe('轮询中')
+    expect((input.element as HTMLInputElement).value).toBe('2000')
     expect(saveBtn.attributes('disabled')).toBeUndefined()
 
     await input.setValue('0')

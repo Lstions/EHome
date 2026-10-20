@@ -70,6 +70,10 @@ export const REGISTERED_ROUTE_EXCLUSIONS: Record<string, string> = {
   '/403': '无权限错误页：无数据面，不进受审分母',
   '/dev/mock-bms': 'DEV-only 页面（import.meta.env.DEV 门控），生产构建里不存在',
   '/dev/bms-demo': 'DEV-only 设计稿预览页（同上），不进受审分母',
+  // 2026-10-20：BMS 移动端改版视觉稿（A/B/C 三方案对比），同样 DEV 门控。
+  // 它是**评审用静态稿**（纯 mock、不接 API、尚未转正），按本文件既有先例登记为例外；
+  // 转正时应删除本例外并把该页登记进 ROUTES 受审分母（同下方 2026-10-17 两条的处置）。
+  '/dev/mobile-redesign': 'DEV-only 移动端改版设计稿（同上），评审通过前不进受审分母',
   // 2026-10-17 删除两条 DEV 例外，对应两个 demo 已转正为生产页面：
   //   · '/dev/bms-demo2'          -> views/edge-device/bms/BmsDetailPage.vue
   //                                   （经 EdgeDeviceDetailRouter 按 device_type 分派）

@@ -165,6 +165,13 @@ const routes: RouteRecordRaw[] = [
     name: 'BmsDemoPage',
     component: () => import('@/dev/BmsDemoPage.vue'),
     meta: { requiresAuth: false, hidden: true },
+  }, {
+    // BMS 设备详情页「移动端改版」视觉稿：A/B/C 三方案可切换，供评审对比。
+    // 纯静态 mock（不接 API），只读不改任何既有页面 —— 评审通过后才进入实现。
+    path: '/dev/mobile-redesign',
+    name: 'MobileRedesignDemo',
+    component: () => import('@/dev/MobileRedesignDemo.vue'),
+    meta: { requiresAuth: false, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {
