@@ -210,6 +210,28 @@
         </div>
       </section>
 
+      <!-- 保护触发历史（新增）：计数口径是 protection_status 的 0→1 跃变次数，不是数值求和
+           （实测非零值恒为 1 —— 它是状态位序列，求和会得到「1239 次」这种错数）。
+           窄屏默认折叠，摘要由卡片自己 emit（「近 30 天 6 次」/「近 30 天无触发」）。 -->
+      <section class="row diag-row">
+        <CollapseBlock
+          block-id="protection-history"
+          title="保护触发历史"
+          :summary="diagSummary.protection"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('protection-history')"
+          @toggle="collapse.toggle('protection-history')"
+        >
+          <div class="card diag-card">
+            <div class="card-head">
+              <span class="card-title">保护触发历史</span>
+              <span class="card-hint">按天统计 · 0→1 跃变口径 · 可切 7/30/90 天</span>
+            </div>
+            <ProtectionHistoryCard :device-id="deviceId" :online="deviceOnline" @summary="onProtectionSummary" />
+          </div>
+        </CollapseBlock>
+      </section>
+
       <!-- 电芯电压分布：图表卡是固定高度的"异类"，独占一行 ——
            与内容驱动卡片同行时，矮卡下方必然留出页面底色（padding 无法吸收固定高度差）。 -->
       <section class="row cell-chart-row">
@@ -264,12 +286,53 @@
         </div>
       </section>
 
+      <!-- 温度趋势（新增）：温度探头只给瞬时值，看不出「3 路一起升 = 环境升温 / 单路升 = 该测点异常」，
+           所以要看时间维。窄屏默认折叠，摘要「当前 xx℃」由卡片 emit。 -->
+      <section class="row diag-row">
+        <CollapseBlock
+          block-id="temp-trend"
+          title="温度趋势"
+          :summary="diagSummary.temp"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('temp-trend')"
+          @toggle="collapse.toggle('temp-trend')"
+        >
+          <div class="card diag-card">
+            <div class="card-head">
+              <span class="card-title">温度趋势</span>
+              <span class="card-hint">3 路探头 · 45℃ 告警线</span>
+            </div>
+            <TempTrendCard :device-id="deviceId" :online="deviceOnline" @summary="onTempSummary" />
+          </div>
+        </CollapseBlock>
+      </section>
+
+      <!-- SOC 与电流（新增）：SOC 单独看分不清「没充电」还是「充不进」，要叠加电流看电是进是出。 -->
+      <section class="row diag-row">
+        <CollapseBlock
+          block-id="soc-current"
+          title="SOC 与电流"
+          :summary="diagSummary.soc"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('soc-current')"
+          @toggle="collapse.toggle('soc-current')"
+        >
+          <div class="card diag-card">
+            <div class="card-head">
+              <span class="card-title">SOC 与电流</span>
+              <span class="card-hint">双线 · 量级分轴</span>
+            </div>
+            <SocCurrentCard :device-id="deviceId" :online="deviceOnline" @summary="onSocSummary" />
+          </div>
+        </CollapseBlock>
+      </section>
+
       <!-- 图表：业务逻辑参考旧 BMS 页面（BmsCellVoltageHistoryChart / HistoryChartSection）重建，
            复用 LineChart / TimeRangeSelector / useHistoryData / useTimeRange / computeAdaptiveYAxisRange。
            容器高度固定，避免内容变化撑变页面高度而破坏 overflow-anchor:none 防跳动。 -->
       <!-- 移动端默认折叠：电芯历史 + 运行趋势两张图合计有 620px（压缩后），
            折叠态只留标题行 + 一行关键结论（压差 / 总电压），展开状态记忆在 bms-collapse:<deviceId>。
-           桌面 collapsible=false → CollapseBlock 两层 div 均为 display:contents，布局与改前逐像素一致。 -->
+           桌面 collapsible=false → CollapseBlock 直接返回插槽（零包装节点），布局与改前逐像素一致。 -->
       <CollapseBlock
         block-id="charts"
         title="历史趋势"
@@ -280,6 +343,27 @@
       >
         <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
       </CollapseBlock>
+
+      <!-- 轮询间隔分布（新增）：把各条指令的毫秒数画成同一条 0~60s 轴上的横条 + 汇总采样负载，
+           回答「谁刷得快、是不是某条把总线刷爆了」。窄屏默认折叠，摘要「N 条轮询中」。 -->
+      <section class="row diag-row">
+        <CollapseBlock
+          block-id="poll-interval"
+          title="轮询间隔分布"
+          :summary="diagSummary.poll"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('poll-interval')"
+          @toggle="collapse.toggle('poll-interval')"
+        >
+          <div class="card diag-card">
+            <div class="card-head">
+              <span class="card-title">轮询间隔分布</span>
+              <span class="card-hint">各指令间隔与采样负载</span>
+            </div>
+            <PollIntervalCard :device-id="deviceId" :online="deviceOnline" @summary="onPollSummary" />
+          </div>
+        </CollapseBlock>
+      </section>
 
       <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
       <section class="row stream-poll">
@@ -584,6 +668,10 @@ import MetricStatCard from '@/components/common/MetricStatCard.vue'
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
 import BmsChartsPanel from './BmsChartsPanel.vue'
 import CollapseBlock from './CollapseBlock.vue'
+import ProtectionHistoryCard from './diag/ProtectionHistoryCard.vue'
+import TempTrendCard from './diag/TempTrendCard.vue'
+import SocCurrentCard from './diag/SocCurrentCard.vue'
+import PollIntervalCard from './diag/PollIntervalCard.vue'
 import { useCollapseState } from '@/composables/useCollapseState'
 // 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
 import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
@@ -642,6 +730,17 @@ const deviceId = computed(() => Number(route.params.id) || 0)
  * 轮询间隔分布、实时数据流、操作历史。默认全部收起，所以这里不传任何默认展开项。
  */
 const collapse = useCollapseState(() => deviceId.value)
+
+/**
+ * 新增诊断卡（保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布）的折叠态摘要。
+ * 这些卡自己取数，摘要由它们在数据就绪后 emit('summary') 出来 ——
+ * 父页不重复请求同一份历史数据（否则一个区块两次历史请求）。
+ */
+const diagSummary = reactive<Record<string, string>>({ protection: '', temp: '', soc: '', poll: '' })
+const onProtectionSummary = (t: string) => { diagSummary.protection = t }
+const onTempSummary = (t: string) => { diagSummary.temp = t }
+const onSocSummary = (t: string) => { diagSummary.soc = t }
+const onPollSummary = (t: string) => { diagSummary.poll = t }
 const device = ref<EdgeDevice | null>(null)
 const detailError = ref('')
 const refreshing = ref(false)
@@ -2033,6 +2132,7 @@ onUnmounted(() => {
 .mos-protect > .mos-card      { flex-basis: 380px; min-width: 320px; }
 .mos-protect > .protect-card  { flex-basis: 520px; min-width: 340px; }
 .cell-chart-row > .cell-card  { flex: 1 1 100%; }   /* 图表卡独占一行 */
+.diag-row > .card            { flex: 1 1 100%; }   /* 新增诊断卡同样独占一行（图表宽度优先） */
 .temp-row > .temp-card         { flex: 1 1 100%; }   /* 与 .op-groups 同宽，内部 auto-fill 决定列数 */
 .stream-poll > .stream-card   { flex-basis: 520px; min-width: 380px; }
 .stream-poll > .poll-card     { flex-basis: 380px; min-width: 340px; }
@@ -2329,6 +2429,13 @@ onUnmounted(() => {
   .cell-legend { gap: 8px; margin-top: 6px; font-size: 10px; }
   /* 「点击柱体可查看精确值」是触摸交互的提示，手机上点柱子本身即可发现，收起省 20px */
   .cell-card > .card-footnote { display: none; }
+
+  /* ── 新增诊断卡（保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布）──
+     ① 折叠块占满一行：它是 .row 的 flex 子项，不给 basis 会按内容宽做「窄条」；
+     ② 卡片头在窄屏整块隐藏：折叠头已经写了区块名，两级同名标题就是用户点名的「顶部重复内容」。
+        组件内容区自带工具行（时间范围选择器 / 弹层触发器），不会因此丢控件。 */
+  .diag-row > .collapse-block { flex: 1 1 100%; min-width: 0; }
+  .diag-card > .card-head { display: none; }
   /* 「参考线 3.000V / 3.600V」与图例里「偏高 > 3.600V / 偏低 < 3.000V」是同一组阈值的重复表述，
      窄屏只保留图例（它带色块，能直接对上柱子颜色），省一行 16px。 */
   .cell-thresholds { display: none; }

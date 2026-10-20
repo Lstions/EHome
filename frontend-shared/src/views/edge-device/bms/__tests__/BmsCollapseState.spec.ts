@@ -135,3 +135,39 @@ describe('BmsDetailPage 接入契约（源码层）', () => {
     expect(bmsDetailSource).toMatch(/\.stream-card > \.card-head > \.card-title,[\s\S]{0,120}?\.history-card > \.card-head > \.card-title \{ display: none; \}/)
   })
 })
+
+describe('新增诊断卡接入（4 张图 + 折叠头摘要）', () => {
+  it('4 张新卡都挂上了：保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布', () => {
+    for (const tag of ['ProtectionHistoryCard', 'TempTrendCard', 'SocCurrentCard', 'PollIntervalCard']) {
+      expect(bmsDetailSource).toContain(`<${tag} :device-id="deviceId" :online="deviceOnline"`)
+    }
+  })
+
+  it('4 张新卡默认折叠，折叠 id 与记忆键一一对应', () => {
+    for (const blockId of ['protection-history', 'temp-trend', 'soc-current', 'poll-interval']) {
+      expect(bmsDetailSource).toContain(`block-id="${blockId}"`)
+      expect(bmsDetailSource).toContain(`collapse.isOpen('${blockId}')`)
+      expect(bmsDetailSource).toContain(`collapse.toggle('${blockId}')`)
+    }
+  })
+
+  it('摘要由子组件 emit 出来（父页不重复请求同一份历史数据）', () => {
+    expect(bmsDetailSource).toContain('const diagSummary = reactive<Record<string, string>>(')
+    for (const key of ['protection', 'temp', 'soc', 'poll']) {
+      expect(bmsDetailSource).toContain(`diagSummary.${key}`)
+    }
+    // 事件监听必须挂上，否则折叠态只剩标题、没有一行结论
+    for (const handler of ['onProtectionSummary', 'onTempSummary', 'onSocSummary', 'onPollSummary']) {
+      expect(bmsDetailSource).toContain(`@summary="${handler}"`)
+    }
+  })
+
+  it('新卡在桌面独占一行（.row > .card 的 basis:auto 撑不满），窄屏折叠块占满一行', () => {
+    expect(bmsDetailSource).toContain('.diag-row > .card            { flex: 1 1 100%; }')
+    expect(bmsDetailSource).toContain('.diag-row > .collapse-block { flex: 1 1 100%; min-width: 0; }')
+  })
+
+  it('新卡在窄屏隐藏卡片头（折叠头已给标题）；组件内容区工具行不受影响', () => {
+    expect(bmsDetailSource).toContain('.diag-card > .card-head { display: none; }')
+  })
+})
