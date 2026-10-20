@@ -351,7 +351,8 @@ function fmtVolt(v: number | undefined | null): string {
 .pfm-icon { font-size: 20px; line-height: 1.2; }
 .pfm-label {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  /* 复核实测：secondary #909399 on success-light-9 #e8f2eb = 2.7:1，12px 正文需 ≥4.5:1 */
+  color: var(--el-text-color-regular);
   /* 中文不逐字竖排；放不下就换行，不截断 */
   word-break: keep-all;
   overflow-wrap: anywhere;
@@ -386,7 +387,8 @@ function fmtVolt(v: number | undefined | null): string {
 }
 .pfm-hub-value {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  /* 同一成功色底上的灰副文本：改 regular（5.7:1） */
+  color: var(--el-text-color-regular);
   word-break: keep-all;
 }
 
@@ -433,5 +435,7 @@ function fmtVolt(v: number | undefined | null): string {
 }
 .pf-legend .dot.on { background: var(--el-color-success); }
 .pf-legend .dot.idle { background: var(--el-border-color); }
-.pf-legend-note { color: var(--el-text-color-placeholder); }
+/* 复核实测：placeholder #a8abb2 on #fff = 2.3:1（12px 正文要求 4.5:1）。
+   这行是「箭头方向 = 能量流向；数据来自各传感器最新值」的解释性文字，属有效信息，不允许低对比。 */
+.pf-legend-note { color: var(--el-text-color-regular); }
 </style>

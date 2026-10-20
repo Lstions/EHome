@@ -147,7 +147,9 @@ const runningFlags = computed(() => {
 }
 .status-label {
   font-size: 13px;
-  color: var(--el-text-color-secondary);
+  /* 2026-10-20 独立复核（WCAG 计算）：secondary #909399 on #fff = 3.1:1，13px 正文要求 ≥4.5:1。
+     改 regular #606266 = 5.7:1。 */
+  color: var(--el-text-color-regular);
 }
 
 /* 运行标志：中性色，**不用红/绿** —— 它不是告警，不能让用户以为出了问题。
@@ -185,7 +187,13 @@ const runningFlags = computed(() => {
   color: var(--el-text-color-primary);
 }
 .run-flag.on .rf-value {
-  color: var(--el-color-primary);
+  /* 浅色主题：primary #409eff on primary-light-9 = 2.4:1（复核实测），primary-dark-2 也只有 3.64:1，
+     再深到 #1f5fa8 = 5.58:1。暗色主题必须换亮色（见下方 html.dark 覆盖），否则 2.5:1 更糟。 */
+  color: #1f5fa8;
+}
+html.dark .run-flag.on .rf-value {
+  /* 本项目暗色主题是自定义调色板：primary-light-3 #3375b9 偏暗（3.4:1），亮色在 dark-2（#66b1ff） */
+  color: var(--el-color-primary-dark-2);
 }
 
 @media (max-width: 768px) {
@@ -227,9 +235,26 @@ const runningFlags = computed(() => {
     padding: 0 4px;
     margin: 0;
   }
+  /* 复核实测：success #67c23a on #fff = 2.2:1（12px 正文要求 4.5:1）。
+     只在**本卡**把 plain 徽标文字加深（浅色主题 #2f6b12 = 6.0:1），
+     不污染 BMS 保护卡与其它页面；暗色主题用亮绿（见下方 html.dark 覆盖）。 */
+  .inverter-status-grid :deep(.grid-item .el-tag--success) {
+    --el-tag-text-color: #2f6b12;
+    --el-tag-border-color: #67c23a;
+    --el-tag-bg-color: #f0f9eb;
+  }
   .status-header { gap: 12px; margin-bottom: 10px; }
   .status-header .status-item { flex-wrap: wrap; gap: 6px; }
   .run-flags { gap: 6px; margin-left: 0; flex-basis: 100%; }
   .run-flag { padding: 6px 10px; font-size: 12px; }
+}
+
+/* 暗色主题：上面为「浅色底」算的加深色在深色底上反而读不清（#1f5fa8 on #18222b = 2.5:1，实测）。
+   这里换回 Element Plus 的亮色 token —— 深色底 + 亮绿/亮蓝 ≈ 7~8:1。 */
+html.dark .inverter-status-grid :deep(.grid-item .el-tag--success) {
+  /* 同上：暗色主题的 light-3 是**更深**的绿（#4e8e2f，1.8:1），亮色在 --el-color-success（#85ce61） */
+  --el-tag-text-color: var(--el-color-success);
+  --el-tag-border-color: var(--el-color-success);
+  --el-tag-bg-color: rgba(133, 206, 97, 0.12);
 }
 </style>
