@@ -334,8 +334,22 @@ const applyChartOption = () => {
       ? {
         // 紧凑图没有轴名，图例可以贴顶；常规图保持 30（给多轴轴名留位置）
         top: isCompactChart.value ? 6 : 30,
-        type: 'scroll' as const,
-        textStyle: { color: theme.regular },
+        /*
+         * 图例溢出策略（2026-10-20 生产实测后定稿）：
+         *   319px 宽的紧凑图里 5~7 条序列，`type:'scroll'` 只显示 2~3 条 + 「◀ 1/3 ▶」翻页器 ——
+         *   用户根本不知道被折叠的序列是什么，等于**默认隐藏数据**（违反「不拿信息换对齐」）。
+         *   `type:'plain'` 会在容器宽度用尽时自动换行成 2~3 行，所有序列名始终可见。
+         *   紧凑图 grid.top 固定 60px，图例 top 6 + 2 行(各 16px) = 38 < 60，不会压到绘图区；
+         *   条目尺寸同步收小，保证 2 行内放得下 7 条。
+         */
+        type: (isCompactChart.value ? 'plain' : 'scroll') as 'plain' | 'scroll',
+        itemGap: isCompactChart.value ? 8 : 10,
+        itemWidth: isCompactChart.value ? 10 : undefined,
+        itemHeight: isCompactChart.value ? 8 : undefined,
+        textStyle: {
+          color: theme.regular,
+          fontSize: isCompactChart.value ? 10 : undefined,
+        },
       }
       : undefined,
     // ⚠ 这里**不覆盖** grid.top：紧凑图的既有默认值（60px）被其它组件当常量用

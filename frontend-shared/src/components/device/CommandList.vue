@@ -30,7 +30,8 @@
             <el-tag size="small" :type="cmd.type === 'read' ? 'info' : 'warning'">
               {{ cmd.type === 'read' ? '读' : '写' }}
             </el-tag>
-            <span class="cmd-hex">0x{{ hex(cmd.cmd_byte) }}</span>
+            <!-- ASCII 协议（cmd_byte=0）显示 write_data 解码出的命令助记符，不显示假 0x00 -->
+            <span v-if="commandToken(cmd)" class="cmd-hex" :title="`协议命令帧：${commandToken(cmd)}`">{{ commandToken(cmd) }}</span>
             <!--
               状态：文字 + 颜色双通道（规范 4.2.1/4.2.2）；禁用用 info 灰，不用 danger。
 
@@ -263,6 +264,35 @@ const dirty = computed(() => schedulableCommands.value.some(
 
 function hex(byte: number): string {
   return (byte & 0xff).toString(16).padStart(2, '0').toUpperCase()
+}
+
+/**
+ * 指令标识徽标：不同协议族展示的东西不一样。
+ *
+ * ⚠ 2026-10-20 生产实测（设备 15 泰琪丰逆变器）：11 条指令全部显示 `0x00`。
+ *   根因不是前端读错字段，而是**这类设备没有命令字节**：
+ *   `backend/internal/drivers/inverter_techfine.go:1411` 对 ASCII 行协议显式写
+ *   `CmdByte: 0`（注释原文「不适用于 ASCII 协议行，保留 0 表示见 WriteData」）。
+ *   于是 `0x00` 成了一个既无信息又占位的假读数 —— 用户看到「所有指令都是 0x00」会怀疑解析坏了。
+ *
+ * 修法（纯呈现层，不改协议/后端）：
+ *   · cmd_byte > 0（Modbus 等二进制协议）→ 仍显示 `0x03` 这种字节码；
+ *   · cmd_byte == 0 → 从 `write_data` 十六进制帧解码出 ASCII 命令助记符（如 `HSTS` / `HGRID`），
+ *     设备工程师真正用来对协议的就是这段 ASCII；解不出来（含非可打印字节）则不显示，
+ *     绝不再回退成 `0x00`。
+ */
+function commandToken(cmd: { cmd_byte: number; write_data?: string }): string {
+  if (cmd.cmd_byte > 0) return `0x${hex(cmd.cmd_byte)}`
+  const raw = (cmd.write_data || '').replace(/[^0-9a-fA-F]/g, '')
+  if (raw.length < 2 || raw.length % 2 !== 0) return ''
+  let text = ''
+  for (let i = 0; i < raw.length; i += 2) {
+    const code = parseInt(raw.slice(i, i + 2), 16)
+    // 只取可打印 ASCII；遇控制字符（\r / \n / NUL）即停止 —— 帧尾不是命令名的一部分
+    if (code < 0x20 || code > 0x7e) break
+    text += String.fromCharCode(code)
+  }
+  return text
 }
 
 /** 手动输入间隔：归一化越界/非法值；interval=0 即禁用语义由 isEnabled 派生。
