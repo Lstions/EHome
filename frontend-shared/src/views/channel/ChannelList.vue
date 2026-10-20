@@ -588,6 +588,18 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+/*
+ * 2026-10-21 复核实测：节点名回退成「节点 #30EDA0A9A808」后，该串 148px > 单元格 140px，
+ * 在空格处折行后第二行仍 148px → 末尾被裁 8px（信息损失）。
+ * 节点 ID 是无空格的十六进制长串，允许在字符间断行才是不丢信息的解法。
+ */
+.node-name-cell span {
+  min-width: 0;
+  word-break: break-all;
+  line-height: 1.3;
 }
 
 .text-muted {

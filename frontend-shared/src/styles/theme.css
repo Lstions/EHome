@@ -1427,3 +1427,32 @@ html.dark .el-tabs__item.is-active,
 .dark-theme .el-tabs__item.is-active {
   color: var(--el-color-primary-dark-2);
 }
+/* ---- 复核复审修复（2026-10-21 独立复核 review3 发现）----
+   ① 暗色 el-button 的文字型/链接型 primary 仍用 #1f5ad8 当文字色：
+      实测 /dashboard「查看完整数据」2.91:1、/channel「查看节点」2.43:1、/logical-device「编辑」2.43:1，
+      全站 27 处同类写法（18 个文件）。EP 的 link/text button 用 --el-button-text-color=primary，
+      必须在暗色下换成亮色，且**不能**只改 a 标签（这批是 <button>）。
+   ② 我上一条给 .el-pager li.is-active 的亮蓝覆盖把**背景式分页**（is-background，白字落在实心主色上）
+      也覆盖了，实测从 5.98:1 掉到 2.95:1 —— 属修复引入的回归，必须限定为非背景式分页。 */
+html.dark .el-button.is-link.el-button--primary,
+[data-theme="dark"] .el-button.is-link.el-button--primary,
+.dark-theme .el-button.is-link.el-button--primary,
+html.dark .el-button.is-text.el-button--primary,
+[data-theme="dark"] .el-button.is-text.el-button--primary,
+.dark-theme .el-button.is-text.el-button--primary {
+  --el-button-text-color: var(--el-color-primary-dark-2);
+  color: var(--el-color-primary-dark-2);
+}
+
+/* 非背景式分页（无实心底）才需要把当前页数字换成亮蓝；is-background 变体保持 EP 的白字。 */
+html.dark .el-pagination:not(.is-background) .el-pager li.is-active,
+[data-theme="dark"] .el-pagination:not(.is-background) .el-pager li.is-active,
+.dark-theme .el-pagination:not(.is-background) .el-pager li.is-active {
+  color: var(--el-color-primary-dark-2) !important;
+}
+/* 双向守卫：背景式分页不得被上面的亮蓝覆盖（EP 默认白字 #ffffff 在实心主色上 5.98:1）。 */
+html.dark .el-pagination.is-background .el-pager li.is-active,
+[data-theme="dark"] .el-pagination.is-background .el-pager li.is-active,
+.dark-theme .el-pagination.is-background .el-pager li.is-active {
+  color: #ffffff !important;
+}
