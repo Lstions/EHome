@@ -31,9 +31,17 @@
               {{ cmd.type === 'read' ? '读' : '写' }}
             </el-tag>
             <span class="cmd-hex">0x{{ hex(cmd.cmd_byte) }}</span>
-            <!-- 状态：文字 + 颜色双通道（规范 4.2.1/4.2.2）；禁用用 info 灰，不用 danger -->
+            <!--
+              状态：文字 + 颜色双通道（规范 4.2.1/4.2.2）；禁用用 info 灰，不用 danger。
+
+              ⚠ 2026-10-20 修（用户报障「逆变器指令配置的指令显示不对」）：
+              这里原先是「轮询中 · 10000 ms」——但下方输入框右侧**已经**有独立的
+              「ms」单位，于是同一行出现两次 ms，读屏/复制文本也读成两个单位。
+              单位只保留一处（输入框旁），状态标签只表达「是否在轮询」，
+              与 BMS 页同类组件（BmsDetailPage 的 poll-row）保持同一形态。
+            -->
             <el-tag size="small" :type="isEnabled(cmd.id) ? 'success' : 'info'" class="cmd-state">
-              {{ isEnabled(cmd.id) ? `轮询中 · ${localIntervals[cmd.id]} ms` : '已禁用' }}
+              {{ isEnabled(cmd.id) ? '轮询中' : '已禁用' }}
             </el-tag>
           </div>
           <div v-if="cmd.description" class="cmd-desc" :title="cmd.description">{{ cmd.description }}</div>
