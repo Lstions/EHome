@@ -229,7 +229,7 @@
               v-if="cellVoltages.length"
               :voltages="cellVoltages"
               :cell-count="cellVoltages.length"
-              height="300px"
+              :height="isMobileViewport ? '112px' : '300px'"
             />
             <div v-else class="cell-chart-empty">暂无单体电压数据</div>
           </div>
@@ -267,11 +267,31 @@
       <!-- 图表：业务逻辑参考旧 BMS 页面（BmsCellVoltageHistoryChart / HistoryChartSection）重建，
            复用 LineChart / TimeRangeSelector / useHistoryData / useTimeRange / computeAdaptiveYAxisRange。
            容器高度固定，避免内容变化撑变页面高度而破坏 overflow-anchor:none 防跳动。 -->
-      <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
+      <!-- 移动端默认折叠：电芯历史 + 运行趋势两张图合计有 620px（压缩后），
+           折叠态只留标题行 + 一行关键结论（压差 / 总电压），展开状态记忆在 bms-collapse:<deviceId>。
+           桌面 collapsible=false → CollapseBlock 两层 div 均为 display:contents，布局与改前逐像素一致。 -->
+      <CollapseBlock
+        block-id="charts"
+        title="历史趋势"
+        :summary="chartsCollapseSummary"
+        :collapsible="isMobileViewport"
+        :open="collapse.isOpen('charts')"
+        @toggle="collapse.toggle('charts')"
+      >
+        <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
+      </CollapseBlock>
 
       <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
       <section class="row stream-poll">
         <!-- 诉求② 落点：跟随模式 + 上滚即暂停 + 回到最新 -->
+        <CollapseBlock
+          block-id="stream"
+          title="实时数据流"
+          :summary="streamCollapseSummary"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('stream')"
+          @toggle="collapse.toggle('stream')"
+        >
         <div class="card stream-card">
           <div class="card-head">
             <span class="card-title">实时数据流</span>
@@ -312,6 +332,7 @@
             数据来自设备实时上报（新的在前）。向上滚动即暂停跟随，新数据只累积计数；滚回底部或点「回到最新」恢复。
           </p>
         </div>
+        </CollapseBlock>
 
         <!-- 诉求③ 落点：轮询指令配置（上限由节点上报，超限点名要禁用哪几条） -->
         <div class="card poll-card">
@@ -473,6 +494,14 @@
           </div>
         </div>
 
+        <CollapseBlock
+          block-id="history"
+          title="操作历史"
+          :summary="historyCollapseSummary"
+          :collapsible="isMobileViewport"
+          :open="collapse.isOpen('history')"
+          @toggle="collapse.toggle('history')"
+        >
         <div class="card history-card">
           <div class="card-head">
             <span class="card-title">操作历史</span>
@@ -490,6 +519,7 @@
             <div v-if="!historyRows.length" class="history-empty">暂无操作记录</div>
           </div>
         </div>
+        </CollapseBlock>
       </section>
     </main>
 
@@ -553,6 +583,8 @@ import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
 import BmsChartsPanel from './BmsChartsPanel.vue'
+import CollapseBlock from './CollapseBlock.vue'
+import { useCollapseState } from '@/composables/useCollapseState'
 // 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
 import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
 import { feedback, extractErrorMessage } from '@/utils/feedback'
@@ -604,6 +636,12 @@ const router = useRouter()
 const edgeDeviceStore = useEdgeDeviceStore()
 // 生产路由是 edge-device/:id（params），不是 demo 的 ?device= 查询串。
 const deviceId = computed(() => Number(route.params.id) || 0)
+/**
+ * 诊断类区块的折叠状态，按设备记忆（§3.3 bms-collapse:<deviceId>）。
+ * 默认折叠的 7 组：历史趋势（电芯历史+运行趋势）、保护触发历史、温度趋势、SOC 与电流、
+ * 轮询间隔分布、实时数据流、操作历史。默认全部收起，所以这里不传任何默认展开项。
+ */
+const collapse = useCollapseState(() => deviceId.value)
 const device = ref<EdgeDevice | null>(null)
 const detailError = ref('')
 const refreshing = ref(false)
@@ -1672,6 +1710,18 @@ const historyRows = computed<HistoryRow[]>(() => {
     }
   })
 })
+
+// ════════════ 折叠态摘要（§3.2：折叠不是隐藏信息，标题行要留一行关键结论） ════════════
+/** 历史趋势：压差 + 总电压，两个最常用的判读量 */
+const chartsCollapseSummary = computed(() => {
+  const parts: string[] = []
+  if (cells.value.length) parts.push('压差 ' + Math.round(diff.value * 1000) + 'mV')
+  if (totalVoltage.value !== null) parts.push('总电压 ' + totalVoltage.value.toFixed(2) + 'V')
+  return parts.join(' · ')
+})
+const streamCollapseSummary = computed(() => '实时 · ' + streamRows.value.length + ' 条')
+const historyCollapseSummary = computed(() => '最近 ' + historyRows.value.length + ' 条')
+
 function resultTag(r: HistoryResult): TagType {
   return r === 'success' ? 'success' : r === 'failed' ? 'danger' : r === 'cancelled' ? 'info' : 'warning'
 }
@@ -2263,6 +2313,36 @@ onUnmounted(() => {
   .dev-sub > span { white-space: nowrap; }
   .card { padding: 14px 12px; }
   .head-right, .stream-actions { margin-left: 0; }
+  /* 折叠头已经写了区块名，展开后卡片自己的标题就是重复内容（用户点名「顶部重复内容」）：
+     窄屏隐藏这两个标题文本（卡片头的标签/按钮全部保留，不会被一起藏掉）。 */
+  .stream-card > .card-head > .card-title,
+  .history-card > .card-head > .card-title { display: none; }
+
+  /* ── 电芯电压分布：477 → ≈200px ──
+     393px 下每根柱只有 ~24px，柱顶标签已降级为「只标越界/极值」，
+     300px 高的图里大半是空白；卡头（最高/最低/压差）在 393px 会折成 3 行，图例也折 2 行。
+     压法：图区 112px + 卡头 2 行 + 图例 1 行 + 脚注收起。
+     最高/最低/压差全部保留（不截断），信息一条不少。 */
+  .cell-chart-host, .cell-chart-empty { height: 112px; }
+  .cell-card > .card-head { flex-wrap: wrap; row-gap: 2px; margin-bottom: 6px; }
+  .cell-summary { font-size: 11px; line-height: 16px; }
+  .cell-legend { gap: 8px; margin-top: 6px; font-size: 10px; }
+  /* 「点击柱体可查看精确值」是触摸交互的提示，手机上点柱子本身即可发现，收起省 20px */
+  .cell-card > .card-footnote { display: none; }
+  /* 「参考线 3.000V / 3.600V」与图例里「偏高 > 3.600V / 偏低 < 3.000V」是同一组阈值的重复表述，
+     窄屏只保留图例（它带色块，能直接对上柱子颜色），省一行 16px。 */
+  .cell-thresholds { display: none; }
+
+  /* ── 温度探头：240 → ≈170px ──
+     桌面 auto-fill 在 295px 下退化成 1 列（minmax 150px × 2 > 295），4 个探头竖排 160px。
+     窄屏固定 2 列、数值与状态同排，行高 44px（触摸目标不变）。 */
+  .temp-card > .card-head { margin-bottom: 6px; }
+  .temp-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .temp-item { padding: 6px 8px; gap: 6px; }
+  .temp-label { font-size: 11px; }
+  .temp-value { font-size: 15px; }
+  .temp-item :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 4px; }
+  .temp-card > .card-footnote { font-size: 10px; margin-top: 6px; }
   .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
   .mos-switch, .op-group-head, .back-latest { min-height: 44px; }
