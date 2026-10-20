@@ -211,3 +211,34 @@ describe('DeviceHeader mobile overflow dropdown (P1-5)', () => {
     expect(deviceHeaderSource).toMatch(/:global\(\.device-header-more-popover\)\s*\{[^}]*max-width:\s*calc\(100vw - 24px\)[^}]*\}/)
   })
 })
+describe('BmsDetailPage 轮询指令行窄屏重排（762 → 522px）', () => {
+  it('桌面仍是 flex 单段布局，窄屏才改成 2×2 网格（区域名 ctl 跨两行）', () => {
+    // 桌面规则必须原样保留：一旦被网格规则顶掉，1440 下输入框会掉到第二行
+    expect(bmsDetailSource).toMatch(/\.poll-row \{ display: flex; align-items: center; gap: 12px;/)
+    expect(bmsDetailSource).toMatch(/grid-template-areas: 'name ctl' 'desc desc'/)
+    // ctl 只写在第一行 → 控件列不跨行，行高会被 44px 输入框顶成两段（实测 75px）
+    // 这里锁住「控件跨行 + 描述独占整行」的组合意图
+    expect(bmsDetailSource).toMatch(/\.poll-controls \{ grid-area: ctl; width: auto; gap: 6px; \}/)
+  })
+
+  it('输入框收窄到 104px 但仍可输入任意毫秒（0–60000，无 precision 限制）', () => {
+    expect(bmsDetailSource).toMatch(/\.poll-interval \{ flex: 0 0 auto; width: 104px; \}/)
+    expect(bmsDetailSource).toContain(':min="0"')
+    expect(bmsDetailSource).toContain(':max="60000"')
+    // 有 precision 就只能填整千，用户明确要求任意毫秒
+    expect(bmsDetailSource).not.toMatch(/<el-input-number[\s\S]{0,400}?precision=/)
+  })
+
+  it('窄屏只隐藏与开关同义的「已禁用」标签，带告警色的「超限」标签保留', () => {
+    expect(bmsDetailSource).toMatch(/\.poll-name-line :deep\(\.el-tag--info\) \{ display: none; \}/)
+    expect(bmsDetailSource).toContain('type="warning" size="small" effect="dark">超限</el-tag>')
+  })
+
+  it('卡头机制说明包进 .note-limit-detail 只在桌面显示，约束另有两个可见通道', () => {
+    expect(bmsDetailSource).toContain('<span class="note-limit-detail">')
+    expect(bmsDetailSource).toMatch(/\.poll-card \.card-note \.note-limit-detail \{ display: none; \}/)
+    // 通道一：卡头配额标签；通道二：超限/占满告警条
+    expect(bmsDetailSource).toContain('已启用 {{ enabledCount }}/{{ pollLimitValue }}')
+    expect(bmsDetailSource).toContain('超过上限 {{ pollLimitValue }} 条，保存会被拒绝')
+  })
+})

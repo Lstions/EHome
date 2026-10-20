@@ -322,12 +322,16 @@
           </div>
           <p class="card-note">
             每条指令可单独设间隔，<b>0 = 禁用</b>。
-            <template v-if="hasPollLimit">
-              固件静态上限为同时最多 <b>{{ pollLimitValue }} 条</b>；超过会被后端整单拒绝（HTTP 400）且不落库 —— 所以这里在保存前就把约束摆出来。
-            </template>
-            <template v-else>
-              本节点未上报轮询条数上限，保存前不显示容量提示（后端仍会在超限时整单拒绝）。
-            </template>
+            <!-- 上限机制的技术细节：桌面完整展示；移动端整段隐藏（窄屏这块要占 4 行 ≈ 64px），
+                 约束本身仍有两处可见 —— 卡头标签「已启用 x/32」，以及超限/占满时出现的告警条。 -->
+            <span class="note-limit-detail">
+              <template v-if="hasPollLimit">
+                固件静态上限为同时最多 <b>{{ pollLimitValue }} 条</b>；超过会被后端整单拒绝（HTTP 400）且不落库 —— 所以这里在保存前就把约束摆出来。
+              </template>
+              <template v-else>
+                本节点未上报轮询条数上限，保存前不显示容量提示（后端仍会在超限时整单拒绝）。
+              </template>
+            </span>
           </p>
 
           <el-alert v-if="pollLoadError" type="error" :closable="false" show-icon class="inline-alert">
@@ -2260,9 +2264,46 @@ onUnmounted(() => {
      而不是把「读取信息」挤成竖排 */
   .op-group-head { flex-wrap: wrap; row-gap: 4px; align-items: center; }
   .op-group-hint { margin-left: 0; flex-basis: 100%; }
-  .poll-row { align-items: flex-start; }
-  .poll-controls { width: 100%; }
-  .poll-interval { flex: 1; width: auto; }
+  /* ── 轮询行：393px 下每行 114 → 73px ──
+     旧布局把一行拆成三竖段：名称+标签 / 描述 / 234px 输入框 + ms + 开关。
+     那个输入框吃掉视口 60%（234px）却只承载「1000」4 个字符，
+     把另外两段整个挤到独立行，5 条例令就是 573px。
+     新布局改用 2×2 网格（`.poll-main` 只作桌面容器，移动端 display:contents
+     让名称行/描述直接成为网格项）：
+       name                    ctl
+       desc(整行吃满剩余宽度)
+     ① 输入框按内容收缩到 104px，min/max/step 与任意毫秒输入完全不变；
+     ② 控件列跨两行，行高由 44px 输入框决定，描述不再另起一段；
+     ③ 描述跨两列，整句读得完（不会被挤成每行 6 个字）。 */
+  .poll-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'name ctl' 'desc desc';
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 2px;
+    padding: 6px 0;
+  }
+  .poll-main { display: contents; }
+  .poll-name-line { grid-area: name; flex-wrap: wrap; min-width: 0; }
+  /* 「已禁用」标签和右侧开关表达的是同一个布尔值（isPollEnabled），纯重复：
+     窄屏下它把名称行从 19px 撑到 45px（名称栏仅 126px，名称+标签要 136px，
+     必然折行）。这里只隐藏这条重复信息，状态仍由开关（role=switch +
+     aria-label「启用轮询」）和输入框的禁用态传达；
+     「超限」标签保留 —— 它带告警色和「禁用」按钮，不是重复信息。 */
+  .poll-name-line :deep(.el-tag--info) { display: none; }
+  .poll-desc { grid-area: desc; margin-top: 0; }
+  .poll-controls { grid-area: ctl; width: auto; gap: 6px; }
+  .poll-interval { flex: 0 0 auto; width: 104px; }
+  /* 超限行会多出「禁用」按钮（+56px）：那行本来就是让用户去处理的对象，
+     退回纵向堆叠，别把名称栏压到 100px 以下换行三次。 */
+  .poll-row.is-over { display: flex; flex-wrap: wrap; align-items: flex-start; }
+  .poll-row.is-over .poll-main { display: block; flex: 1 1 100%; }
+  .poll-row.is-over .poll-controls { width: 100%; }
+  /* 卡头这段「固件上限 / 后端整单拒绝」是机制说明，窄屏要占 4 行（≈64px），
+     而约束本身由卡头标签「已启用 x/32」和超限时的告警条承担 —— 两个通道都在，
+     所以移动端只留第一句「0 = 禁用」这条操作说明。 */
+  .poll-card .card-note .note-limit-detail { display: none; }
 
   /* ── 指标卡：窄屏 2×2（此前是 1 列 × 4 行，白占 386px 高度） ──
      用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。
