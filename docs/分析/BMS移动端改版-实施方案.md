@@ -308,3 +308,45 @@
 
 已知限制：保护触发历史默认 30 天窗口的单次查询实测 17~26s（后端按 2 万点扫描，前端已 max_points=500），
 折叠态摘要因此会显示「加载中…」较久；这是数据量本身决定的，未在前端假装成「无数据」。
+
+---
+
+## 11. 生产更新（2026-10-20）
+
+代码已推送 `main`（`34bcacdd`），CI `Build and Publish Docker Image` 成功，镜像：
+
+```
+ghcr.io/lstions/ehome:main
+  index digest   sha256:7303695dfb480f762efeba8ca66a2c504f257b04ee8efaee2edc4fe626cc1c2c
+  amd64 manifest sha256:910782889ee52e0aa9e94adb8874269086c5c9ee509000cbf670faa14b858242
+```
+
+本机**无生产 SSH 权限**（100.64.0.7 的 root/sun/lstions 均 `Permission denied (publickey)`，
+与 `docs/分析/部署到生产服务器192.168.20.6-方案-2026-10-18.md` 记录的阻断 A 一致），
+因此最后一步「更新生产容器」需要在服务器上执行：
+
+```bash
+cd <服务器上的仓库>/deploy/prod
+# 1) 记录当前镜像（回滚用）
+docker inspect --format '{{.Config.Image}}' ehome-web
+# 2) 拉新镜像并只重启 web 容器（PG/EMQX 不动）
+docker compose -f docker-compose.prod.yml pull ehome
+docker compose -f docker-compose.prod.yml up -d ehome
+# 3) 验收
+docker compose -f docker-compose.prod.yml ps ehome
+curl -s http://127.0.0.1:18090/health          # → {"status":"ok"}
+curl -s http://127.0.0.1:18090/ | grep -o 'index-[A-Za-z0-9_-]*\.js'   # 应为 index-BjRlrSan.js（新构建）
+```
+
+回滚（任一步失败）：
+
+```bash
+# 若服务器 .env 里 EHOME_IMAGE_TAG 有固定值，改回旧 tag 后 up -d；
+# 否则指定上一版 sha tag（CI 每次 push 都会打 sha-<7位>）：
+EHOME_IMAGE_TAG=sha-<上一版> docker compose -f docker-compose.prod.yml up -d ehome
+```
+
+更新后自检点（手机 393px）：
+- BMS 详情页顶部「轮询 1/32」在、7 个折叠行（保护触发历史/温度趋势/SOC 与电流/历史趋势/轮询间隔分布/实时数据流/操作历史）都在且可展开；
+- 桌面 1440 与改前逐像素一致（区块高度不变）；
+- 登录页「记住我」勾选后关闭浏览器再打开仍是已登录态。
