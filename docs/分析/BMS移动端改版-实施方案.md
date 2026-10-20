@@ -350,3 +350,40 @@ EHOME_IMAGE_TAG=sha-<上一版> docker compose -f docker-compose.prod.yml up -d 
 - BMS 详情页顶部「轮询 1/32」在、7 个折叠行（保护触发历史/温度趋势/SOC 与电流/历史趋势/轮询间隔分布/实时数据流/操作历史）都在且可展开；
 - 桌面 1440 与改前逐像素一致（区块高度不变）；
 - 登录页「记住我」勾选后关闭浏览器再打开仍是已登录态。
+
+### 11.1 生产实际更新方式（2026-10-20 实测，与上面假设不同）
+
+生产**不用 GHCR 镜像**：容器 `ehome-prod-web` 跑的是本地镜像 `ehome-new:vN`，
+compose 在 `/srv/ehomesystem/docker-compose.yml`，镜像由 `.env` 的 `EHOME_IMAGE` 决定。
+后端是 **3.0 / mTLS** 世代（`EHOME_DEVICE_ADDR=:8443`，不是 MQTT），设备通道走 8443。
+
+因此前端 UI 更新的正确姿势是**只换前端静态文件、后端一个字节不动**：
+
+```bash
+# 1) 本地打包（仓库代码已 push 到 main 后）
+cd frontend-shared && npm run build
+tar czf /tmp/ehome-dist.tar.gz -C dist .
+scp /tmp/ehome-dist.tar.gz root@<prod>:/tmp/
+
+# 2) 服务器：以当前运行镜像为基底，用 Dockerfile 只替换 /app/static/dist
+#    注意：不要用 docker commit --change 改 ENTRYPOINT/CMD —— 引号转义会把 CMD 变成
+#    sh -c '[...]'，容器起不来（2026-10-20 实测踩坑，已回滚）。
+mkdir -p /tmp/uibuild/dist && tar xzf /tmp/ehome-dist.tar.gz -C /tmp/uibuild/dist
+printf 'FROM ehome-new:vN\nRUN rm -rf /app/static/dist\nCOPY dist/ /app/static/dist/\n' > /tmp/uibuild/Dockerfile
+cd /tmp/uibuild && docker build -t ehome-new:ui-fix-YYYYMMDD .
+
+# 3) 切换 + 验收（只重建 web 容器，postgres 不动）
+cd /srv/ehomesystem
+cp -a .env .env.bak-$(date +%Y%m%d-%H%M%S)
+sed -i 's/^EHOME_IMAGE=.*/EHOME_IMAGE=ehome-new:ui-fix-YYYYMMDD/' .env
+docker compose up -d ehome
+curl -s http://127.0.0.1:18090/health
+docker exec ehome-prod-web sh -c "grep -o 'index-[A-Za-z0-9_-]*\.js' /app/static/dist/index.html"
+```
+
+回滚：把 `.env` 的 `EHOME_IMAGE` 改回 `ehome-new:v8` 再 `docker compose up -d ehome`。
+
+本次（2026-10-20）结果：镜像 `ehome-new:ui-fix2`，容器 healthy；
+生产 393px 实测 mainScroll 2660px、7 个折叠行摘要均为真实数据、横向溢出 0、控制台 0 错误；
+1440px 既有区块高度不变（电芯 423 / 保护 300 / 受控操作 718，collapse 节点 0）；
+登录页「记住我」验证：勾选后重开 `/login` 自动回 `/dashboard`（store key `login_remember_me` / `login_remembered_username`）。
