@@ -160,6 +160,7 @@ import DeviceControlPanel from '../shared/DeviceControlPanel.vue'
 import InverterPowerFlow from './InverterPowerFlow.vue'
 import InverterMpptCard from './InverterMpptCard.vue'
 import InverterStatusGrid from './InverterStatusGrid.vue'
+import { RUNNING_FLAG_KEYS } from './runningFlags'
 import InverterTempCard from './InverterTempCard.vue'
 import InverterEnergyCard from './InverterEnergyCard.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
@@ -205,12 +206,21 @@ const totalPvPower = computed(() => {
   return total
 })
 
-// Alarm detection — count only, detailed display is in InverterStatusGrid
+/**
+ * 告警计数 —— 只数**真告警位**。
+ *
+ * ⚠ 不能再用 `key.startsWith('alarm_')` 扫全部字段：
+ *   协议里 `alarm_output` / `alarm_pv_to_load` 是**运行状态位**（有输出 / PV 馈能在工作），
+ *   而设备正常带载时它们恒为 1。2026-10-20 生产实测：work_mode=市电、fault_code=0，
+ *   页面却因为 `alarm_output=1` 常驻「1 条告警」—— 假告警会让真告警失去可信度。
+ *   状态位集合由 ./runningFlags.ts 单一真源提供，这里复用而不另写一份前缀判断。
+ */
 const alarmCount = computed(() => {
   if (!latestData.value) return 0
   let count = 0
   for (const [key, val] of Object.entries(latestData.value)) {
-    if (key.startsWith('alarm_') && (val === 1 || val > 0)) {
+    if (RUNNING_FLAG_KEYS.has(key)) continue
+    if (key.startsWith('alarm_') && (val === 1 || (val as any) > 0)) {
       count++
     }
   }
@@ -327,5 +337,24 @@ onMounted(() => {
 */
 .inverter-detail :deep(.el-row > .el-col > .metric-card) {
   height: 100%;
+}
+
+@media (max-width: 768px) {
+  /* 实时数据流：桌面列表 569px（约 10 条铺开），窄屏封顶 340px 内部滚动。
+     实时流是「看最新几条」的组件，不该在页面里铺满一屏；
+     与受控操作的历史容器（max-height 320）采用同一处理方式。 */
+  .inverter-detail :deep(.realtime-data-list .plain-list) {
+    max-height: 340px;
+    overflow-y: auto;
+  }
+
+  /* 指标卡同排等高：PV/电网无副文本时 83px，电池/负载有副文本 101px —— 同行错位 18px。
+     窄屏统一 min-height，缺副文本的卡由自身居中补齐（不隐藏任何信息）。 */
+  .inverter-detail :deep(.el-row > .el-col > .metric-card) {
+    min-height: 96px;
+  }
+  .inverter-detail :deep(.el-row) {
+    row-gap: 8px;
+  }
 }
 </style>

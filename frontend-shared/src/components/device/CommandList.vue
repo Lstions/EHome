@@ -387,16 +387,56 @@ onUnmounted(() => { operationGeneration++; stopSyncPoll() })
 .load-error-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 .no-commands { margin-top: 8px; }
 
-/* ≤768px：两段式纵向堆叠，控件行占满宽 —— 窄容器下裁剪从结构上不可能 */
+/*
+  ≤768px：2×2 网格（与 BMS 页 poll-row 同一套做法，两处形态必须一致）。
+
+  改前是「三竖段」：身份行 / 描述 / 控件行，每条 176px；9 条 = 1586px。
+  其中 234px 宽的 el-input-number 吃掉视口 60%，却只承载「10000」5 个字符。
+
+  新布局：
+      name(cmd 名+标签)          ctl(输入框 ms 开关)
+      desc(跨两列，整句可读)
+  行高由 44px 输入框决定 ⇒ 每条约 74px；输入框收窄到 104px 但 min 0 / max 60000 不变
+  （用户明确要求可输入任意毫秒）。
+*/
 @media (max-width: 768px) {
-  .command-item { flex-direction: column; align-items: stretch; gap: 8px; }
-  /* 桌面 row 方向的 flex-basis:160px 作用在宽度上；column 后会错误作用到高度，
-     撑出 ~160px 空白 —— 移动端必须重置为内容高度 */
-  .cmd-desc { flex: none; white-space: normal; word-break: keep-all; }
-  .cmd-controls { margin-left: 0; justify-content: space-between; min-height: 44px; }
-  .interval-input { flex: 1; width: auto; }
-  /* 输入框字号 ≥16px 防 iOS 聚焦缩放，由 App.vue 全局媒体查询统一保证 */
+  .command-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'name ctl' 'desc desc';
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 2px;
+    padding: 6px 8px;
+  }
+  .cmd-identity { grid-area: name; min-width: 0; row-gap: 2px; }
+  .cmd-name { font-size: 13px; }
+  /* 「轮询中 / 已禁用」与右侧开关表达同一布尔值（与 BMS 轮询行同理）：
+     窄屏隐藏这条重复标签，状态由开关（role=switch + aria-label）传达，省一行 19px。 */
+  .cmd-state { display: none; }
+  .cmd-desc {
+    grid-area: desc;
+    flex: none;
+    white-space: normal;
+    word-break: keep-all;
+    overflow: visible;
+    text-overflow: clip;
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .cmd-controls {
+    grid-area: ctl;
+    margin-left: 0;
+    gap: 6px;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .interval-input { flex: 0 0 auto; width: 104px; }
+  .interval-unit { font-size: 11px; }
   /* 开关触控区扩到 ≥44px（规范 4.4.5） */
   .enable-switch { padding: 11px 0; }
+  /* 卡片头已写「指令频率」，内层「轮询指令」标题是重复的第二级标题 */
+  .section-title { display: none; }
+  .section-desc { margin-bottom: 8px; font-size: 11px; }
 }
 </style>

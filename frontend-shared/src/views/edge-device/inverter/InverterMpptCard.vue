@@ -82,9 +82,27 @@ const mpptChannels = computed<MpptChannel[]>(() => {
 .mppt-value { font-size: 14px; font-weight: 500; }
 .mppt-value.power { color: var(--el-color-success); font-size: 16px; }
 
-@media (max-width: 480px) {
-  .mppt-cards { gap: 10px; }
+/*
+  窄屏（≤768px）移动端压缩布局（2026-10-20，生产实测缺陷）。
+  缺陷：393px 下 1 个 MPPT 通道占 170px —— 名称/状态一行 + 电压/电流/功率 **各占一整行**，
+  卡高 230px（组件根 130px），与桌面信息密度差 3 倍。
+  修法：名称+状态一行；电压/电流/功率 **三列一行**（每列标签在上、数值+单位在下）。
+  本组件内层 el-card 是自己的子元素，可用 :deep(.el-card__body) 收紧内距（8px）。
+  桌面（>768px）规则一律不动 —— 本块之外改前改后完全相同。
+*/
+@media (max-width: 768px) {
+  .mppt-cards { gap: 8px; }
   .mppt-card { min-width: 0; flex-basis: 100%; }
-  .mppt-card :deep(.el-card__body) { padding: 14px; }
+  .mppt-card :deep(.el-card__body) { padding: 8px 10px; }
+
+  .mppt-title { font-size: 13px; line-height: 18px; }
+  .mppt-header { margin-bottom: 6px; }
+
+  /* 三个电气量 → 一行三列（不再竖排 3 行） */
+  .mppt-body { flex-direction: row; gap: 6px; }
+  .mppt-metric { flex: 1 1 0; min-width: 0; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .mppt-label { font-size: 11px; line-height: 15px; }
+  .mppt-value { font-size: 14px; line-height: 19px; font-variant-numeric: tabular-nums; }
+  .mppt-value.power { font-size: 15px; line-height: 19px; }
 }
 </style>

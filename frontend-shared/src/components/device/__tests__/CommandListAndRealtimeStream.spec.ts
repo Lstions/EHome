@@ -26,8 +26,16 @@ describe('CommandList 容器感知契约', () => {
     expect(commandListSource).toMatch(/\.command-item\s*\{[^}]*flex-wrap:\s*wrap/s)
   })
 
-  it('≤768px 切两段式纵向堆叠', () => {
-    expect(commandListSource).toMatch(/@media\s*\(max-width:\s*768px\)[^]*flex-direction:\s*column/)
+  it('≤768px 用 2×2 网格（名称+控件同排、说明独占整行），而非三竖段堆叠', () => {
+    // 2026-10-20 改版：改前「身份行 / 说明 / 控件行」三竖段，每条 176px（9 条 1586px），
+    // 输入框 234px 吃掉视口 60% 却只装 5 个字符。现改为网格：
+    //   name            ctl
+    //   desc（跨两列）
+    expect(commandListSource).toMatch(/@media\s*\(max-width:\s*768px\)[^]*grid-template-areas:\s*'name ctl'\s*'desc desc'/)
+    // 输入框按内容收缩到 104px，但 min/max 不变（用户要求可输入任意毫秒）
+    expect(commandListSource).toMatch(/\.interval-input\s*\{\s*flex:\s*0 0 auto;\s*width:\s*104px;/)
+    expect(commandListSource).toContain(':min="0"')
+    expect(commandListSource).toContain(':max="60000"')
     // column 方向下 .cmd-desc 的 flex-basis:160px 会错误作用到高度撑出空白，必须重置
     expect(commandListSource).toMatch(/@media\s*\(max-width:\s*768px\)[^]*\.cmd-desc\s*\{[^}]*flex:\s*none/s)
   })

@@ -227,8 +227,51 @@ function formatTemp(v: any): string {
   margin-top: 4px;
 }
 
-@media (max-width: 480px) {
-  .temp-grid, .fan-grid { grid-template-columns: 1fr; gap: 8px; }
-  .temp-item, .fan-item { padding: 10px; }
+/*
+  窄屏（≤768px）移动端压缩布局（2026-10-20，生产实测缺陷）。
+  缺陷：旧 @media(max-width:480px) 把温度网格压成 **1 列**，7 个温度各占一整行，
+  393px 下实测卡高 788px（组件根 688px），几乎全是竖排留白，温度一屏看不全。
+  修法：
+    · 温度 → 2 列网格（每格「标签 / 数值°C」上下排，min-height 48px），7 个值 4 行放下；
+    · 风扇 → 仍是**一行一个风扇**（标签+状态在左、转速条占右侧剩余宽度），只收间距/内边距，
+      行高 ≥44px；不隐藏任何数据（状态 tag 与转速条都保留）；
+    · 温度级别配色由 .temp-normal/warning/danger 承载，本块**不重复定义颜色**，
+      桌面与移动端共用同一套主题 token（明暗都跟随主题）。
+  桌面（>768px）规则一律不动 —— 本块之外改前改后完全相同。
+*/
+@media (max-width: 768px) {
+  .temp-card-container { gap: 6px; }
+
+  .section-title { margin: 0 0 4px; font-size: 13px; line-height: 18px; }
+
+  /* 温度：2 列 × 4 行（7 个值），每格 min-height 48px */
+  .temp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; }
+  .temp-item {
+    min-height: 48px;
+    padding: 4px 8px;
+    gap: 2px;
+    justify-content: center;
+  }
+  .temp-label { font-size: 12px; line-height: 16px; }
+  .temp-value {
+    font-size: 16px;
+    line-height: 20px;
+    /* 等宽数字：不同温度值宽度一致，2 列网格不会因数字抖动而重排 */
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 风扇：保持行式布局（一行一个风扇，标签+状态在左、转速条占右侧），只压缩高度 */
+  .fan-grid { grid-template-columns: 1fr; gap: 4px; }
+  .fan-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 6px 10px;
+  }
+  .fan-header { flex: 0 0 auto; gap: 6px; margin-bottom: 0; }
+  .fan-label { font-size: 12px; }
+  .fan-speed-bar { flex: 1 1 auto; min-width: 0; margin-top: 0; }
 }
 </style>

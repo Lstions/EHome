@@ -1,6 +1,48 @@
 <template>
   <div class="power-flow-container">
-    <svg class="power-flow-svg" viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg">
+    <!--
+      窄屏（≤768px）：**不用桌面那张 640 固有宽的 SVG**。
+      2026-10-20 生产实测：345px 卡片里塞 640×260 的图，节点坐标 x=80/320/560
+      ⇒ 右侧「负载 / 电池」两个节点直接出屏，必须横向拖动才能看到一半内容；
+      而等比缩放又会把 12/13px 的标签压到 6px 读不出来（这个死结已试过三次，见下方 CSS 注释）。
+      改用 DOM 版：上排 PV / 电网，中间逆变器，下排负载 / 电池，
+      文字是真实 DOM 文本（12~15px），宽度自适应，零横滚。
+    -->
+    <div v-if="isMobileViewport" class="pf-mobile">
+      <div class="pfm-row">
+        <div class="pfm-node" :class="{ on: pvPower > 0 }">
+          <span class="pfm-icon">☀</span>
+          <span class="pfm-label">光伏 PV</span>
+          <span class="pfm-value">{{ fmtPower(pvPower) }}</span>
+        </div>
+        <div class="pfm-node" :class="{ on: gridActive }">
+          <span class="pfm-icon">🏭</span>
+          <span class="pfm-label">电网</span>
+          <span class="pfm-value">{{ fmtVolt(gridVoltage) }}</span>
+        </div>
+      </div>
+      <div class="pfm-arrow" aria-hidden="true">↓</div>
+      <div class="pfm-hub">
+        <span class="pfm-hub-icon">⚡</span>
+        <span class="pfm-hub-label">逆变器</span>
+        <span class="pfm-hub-value">{{ workModeLabel }}</span>
+      </div>
+      <div class="pfm-arrow" aria-hidden="true">↓</div>
+      <div class="pfm-row">
+        <div class="pfm-node" :class="{ on: loadPower > 0 }">
+          <span class="pfm-icon">🏠</span>
+          <span class="pfm-label">负载</span>
+          <span class="pfm-value">{{ fmtPower(loadPower) }}</span>
+        </div>
+        <div class="pfm-node" :class="batteryClass">
+          <span class="pfm-icon">🔋</span>
+          <span class="pfm-label">{{ batteryLabel }}</span>
+          <span class="pfm-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</span>
+        </div>
+      </div>
+    </div>
+
+    <svg v-else class="power-flow-svg" viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <marker id="pf-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
           <path d="M0,0 L6,3 L0,6 z" class="marker-fill" />
@@ -74,8 +116,29 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { formatPower } from '@/utils/format'
+
+/**
+ * 窄屏用 DOM 版布局（结构变化，CSS 媒体查询只能隐藏不能换结构）。
+ * SSR/测试环境没有 matchMedia 时按桌面渲染，保证既有契约测试稳定。
+ */
+const MOBILE_MAX = 768
+const isMobileViewport = ref(
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(max-width: ${MOBILE_MAX}px)`).matches
+    : false,
+)
+let mobileMql: MediaQueryList | null = null
+const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
+if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+  mobileMql = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`)
+  mobileMql.addEventListener('change', onMobileChange)
+}
+onUnmounted(() => {
+  mobileMql?.removeEventListener('change', onMobileChange)
+  mobileMql = null
+})
 
 const props = defineProps<{
   /** 光伏总功率（pv1_power + pv2_power + …） */
@@ -228,12 +291,12 @@ function fmtVolt(v: number | undefined | null): string {
   容器自己横向滚动。代价是要滑一下，收益是**每个数字都读得出来**。
 */
 @media (max-width: 1100px) {
+  /* 769~1100px 仍用 SVG（卡片还有 700px+，640 固有宽放得下），只需要不溢出 */
   .power-flow-container {
     display: block;
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
-    /* 滚动提示：右侧渐隐，提示"还有内容" */
     padding-bottom: 8px;
   }
   .power-flow-svg {
@@ -244,6 +307,87 @@ function fmtVolt(v: number | undefined | null): string {
     flex-shrink: 0;
   }
   .pf-legend { font-size: 11px; gap: 10px 14px; }
+}
+
+/* ── 窄屏 DOM 版布局（≤768px）──
+   卡片内容宽实测 295~321px，两列各约 150px，图标+标签+数值三行竖排也不挤。
+   节点配色与 SVG 版共用同一套语义：primary=充电、warning=放电、success=工作。 */
+.pf-mobile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+}
+.pfm-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.pfm-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-md);
+  background: var(--el-fill-color-lighter);
+  text-align: center;
+}
+.pfm-node.on {
+  border-color: var(--el-color-success-light-5);
+  background: var(--el-color-success-light-9);
+}
+.pfm-node.charging {
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+}
+.pfm-node.discharging {
+  border-color: var(--el-color-warning-light-5);
+  background: var(--el-color-warning-light-9);
+}
+.pfm-icon { font-size: 20px; line-height: 1.2; }
+.pfm-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  /* 中文不逐字竖排；放不下就换行，不截断 */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.pfm-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  overflow-wrap: anywhere;
+}
+.pfm-arrow {
+  text-align: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--el-text-color-placeholder);
+}
+.pfm-hub {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border: 1px solid var(--el-color-success-light-5);
+  border-radius: var(--radius-md);
+  background: var(--el-color-success-light-9);
+}
+.pfm-hub-icon { font-size: 20px; }
+.pfm-hub-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.pfm-hub-value {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  word-break: keep-all;
 }
 
 .pf-node circle {

@@ -1,7 +1,8 @@
 <template>
   <el-card style="margin-top: 20px;" shadow="hover">
     <template #header>
-      <div style="display: flex; justify-content: space-between; align-items: center;">
+      <!-- hist-header 仅承载窄屏 @media 规则（桌面无任何基础样式 ⇒ 1440 像素不变） -->
+      <div class="hist-header" style="display: flex; justify-content: space-between; align-items: center;">
         <span>历史数据</span>
         <div class="header-controls">
           <TimeRangeSelector
@@ -22,7 +23,7 @@
       </div>
     </template>
 
-    <el-skeleton v-if="chartLoading" :rows="8" animated />
+    <el-skeleton v-if="chartLoading" :rows="isMobileViewport ? 3 : 8" animated />
     <template v-else>
       <!--
         2026-10-20 修（实测：BMS「运行趋势」卡在**全部子图无数据**时仍高达 831px）：
@@ -30,7 +31,16 @@
         5 个空组 = 1300px 的空白图表区，把页面拉得极长且看不出哪里有问题。
         现在：只在**该组确实有数据点**时才渲染图表，否则渲染一行紧凑的空态文案。
       -->
-      <div v-if="chartSubGroups.length > 0" class="chart-grid">
+      <!--
+        2026-10-20 再修（393 生产实测：本卡 2441px / 内部 7 个 277×260 画布 / 图例翻页「◀ 1/5 ▶」/
+        X 轴刻度挤成乱码 / 轴名「(V)(Hz)(W)」压图例）：
+        窄屏（≤768px）改「**单图 + 分组下拉**」—— 下拉选分组、只渲染选中组的 1 张图，
+        图高 150px ⇒ 自动进入 LineChart 的 isCompactChart 分支（不画轴名、图例贴顶、axisLabel.hideOverlap），
+        正好治上述三个症状；分组切换只换渲染（数据已在 chartSeries 内存里），**不重新发请求**。
+        桌面（>768px）保持 7 子图平铺、height=260px，结构与改前完全一致（逐像素契约）。
+      -->
+      <!-- 桌面分支：7 子图平铺 -->
+      <div v-if="!isMobileViewport && chartSubGroups.length > 0" class="chart-grid">
         <div
           v-for="group in chartSubGroups"
           :key="group.title"
@@ -44,6 +54,38 @@
             height="260px"
             :yAxisMin="group.yAxisMin"
             :yAxisMax="group.yAxisMax"
+          />
+          <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
+        </div>
+      </div>
+      <!-- 窄屏分支：单图 + 分组下拉（切换分组不触发 fetchHistoryData） -->
+      <div
+        v-else-if="isMobileViewport && chartSubGroups.length > 0"
+        class="hist-mobile"
+        :data-group="activeGroupTitle"
+        :data-series-count="mobileSeriesCount"
+        :data-point-count="mobilePointCount"
+      >
+        <div class="hist-group-bar">
+          <el-select
+            v-model="activeGroupTitle"
+            class="hist-group-select"
+            size="small"
+            popper-class="hist-group-dropdown"
+            aria-label="切换历史数据分组"
+            @change="onGroupChange"
+          >
+            <el-option v-for="g in chartSubGroups" :key="g.title" :value="g.title" :label="g.title" />
+          </el-select>
+        </div>
+        <div class="hist-mobile-chart">
+          <LineChart
+            v-if="activeGroup && groupHasData(activeGroup)"
+            :series="activeGroup.series"
+            :title="''"
+            height="150px"
+            :yAxisMin="activeGroup.yAxisMin"
+            :yAxisMax="activeGroup.yAxisMax"
           />
           <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
         </div>
@@ -74,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
@@ -93,6 +135,20 @@ const props = defineProps<{
   deviceType: string
   deviceTypeText: string
 }>()
+
+/* ---- 视口判定（≤768px 走窄屏「单图 + 分组下拉」）----
+ * 为什么用 JS 判定而不是纯 CSS：窄屏要的是**结构**变化（7 张图 → 1 张图 + 下拉）。
+ * CSS 只能隐藏不能减少节点；被 display:none 藏起来的 6 张图仍会创建 echarts 实例、
+ * 仍在读屏与 Tab 顺序里，属于可访问性与性能双重缺陷。
+ * 无 window.matchMedia 的环境（SSR / 部分测试）按桌面处理，保证既有桌面契约稳定。 */
+const MOBILE_MAX = 768
+const isMobileViewport = ref(
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(max-width: ${MOBILE_MAX}px)`).matches
+    : false,
+)
+let mobileMql: MediaQueryList | null = null
+const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
 
 const historyData = ref<HistoryDataPoint[]>([])
 const chartSeries = ref<SeriesData[]>([])
@@ -304,6 +360,36 @@ function groupHasData(group: ChartSubGroupResult): boolean {
   return group.series.some(s => Array.isArray(s.data) && s.data.length > 0)
 }
 
+/* ---- 窄屏分组下拉 ----
+ * 默认选中「第一个有数据的分组」；无数据时回退第一个分组。
+ * 用户手动切换后不再被数据到达覆盖（groupTouched），但若所选分组在数据刷新后
+ * 已不存在（例如切到 1h 后该量全无数据），仍回退到第一个有数据的分组，避免下拉显示空值。
+ * 切换只改 activeGroupTitle，不调用 fetchHistoryData ⇒ 不产生新请求。 */
+const activeGroupTitle = ref('')
+const groupTouched = ref(false)
+function onGroupChange() { groupTouched.value = true }
+
+const activeGroup = computed<ChartSubGroupResult | undefined>(
+  () => chartSubGroups.value.find(g => g.title === activeGroupTitle.value) ?? chartSubGroups.value[0],
+)
+const mobileSeriesCount = computed(() => activeGroup.value?.series.length ?? 0)
+/** 当前分组实际绘制的点数（测试/探针用：>0 才证明横轴真有数据，不是空图） */
+const mobilePointCount = computed(
+  () => (activeGroup.value?.series ?? []).reduce((n, s) => n + s.data.length, 0),
+)
+
+watch(
+  () => chartSubGroups.value.map(g => `${g.title}:${groupHasData(g) ? 1 : 0}`).join(','),
+  () => {
+    const groups = chartSubGroups.value
+    if (groups.length === 0) { activeGroupTitle.value = ''; return }
+    if (groupTouched.value && groups.some(g => g.title === activeGroupTitle.value)) return
+    const firstWithData = groups.find(g => groupHasData(g))
+    activeGroupTitle.value = firstWithData ? firstWithData.title : groups[0].title
+  },
+  { immediate: true },
+)
+
 /** 空态展示用的时间范围文案（与 TimeRangeSelector 的档位一一对应） */
 const timeRangeLabel = computed(() => {
   const map: Record<string, string> = {
@@ -439,7 +525,21 @@ function handleExportCSV() {
 
 defineExpose({ fetchHistoryData })
 
-onMounted(() => fetchHistoryData())
+onMounted(() => {
+  // 监听视口变化：横竖屏切换 / 桌面窗口缩放时在「7 子图平铺」与「单图 + 分组下拉」之间切换
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    mobileMql = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`)
+    mobileMql.addEventListener('change', onMobileChange)
+    isMobileViewport.value = mobileMql.matches
+  }
+  void fetchHistoryData()
+})
+
+onUnmounted(() => {
+  // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听（内存泄漏）
+  mobileMql?.removeEventListener('change', onMobileChange)
+  mobileMql = null
+})
 </script>
 
 <style scoped>
@@ -469,5 +569,55 @@ onMounted(() => fetchHistoryData())
   font-size: 14px;
   font-weight: 600;
   color: var(--el-text-color-primary);
+}
+
+/* ---- 窄屏（≤768px）独有：卡头换行 + 分组下拉 + 单图 150px ----
+   全部写在媒体查询内：>768px 一条都不匹配 ⇒ 桌面结构/像素与改前一致。 */
+@media (max-width: 768px) {
+  /* 卡头：标题与控件分行；display:contents 让「导出CSV」与标题同排右对齐、时间档位独占一行，
+     不再挤成改前那种 109px 高的错位两行（393 实测 headerH=109）。 */
+  .hist-header { flex-wrap: wrap; row-gap: 8px; align-items: center; }
+  .header-controls { display: contents; }
+  /* 时间档位独占一行、四档均分，触摸目标 ≥44px */
+  .hist-header .time-range-selector { order: 2; flex: 1 1 100%; width: 100%; }
+  .hist-header :deep(.el-radio-group) { display: flex; width: 100%; }
+  .hist-header :deep(.el-radio-button) { flex: 1 1 0; }
+  .hist-header :deep(.el-radio-button__inner) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 44px;
+    padding: 0 8px;
+    font-size: 13px;
+  }
+  /* 导出CSV：与标题同排右对齐（桌面 inline margin-left:10px 在窄屏收回），触摸目标 ≥44px */
+  .hist-header :deep(.el-button) {
+    order: 1;
+    margin-left: auto !important;
+    min-height: 44px;
+    padding: 0 14px;
+  }
+  /* 分组下拉：整行宽、触摸目标 ≥44px */
+  .hist-group-bar { display: flex; margin-bottom: 8px; }
+  .hist-group-select { width: 100%; }
+  .hist-group-select :deep(.el-select__wrapper) { min-height: 44px; font-size: 14px; }
+  /* 选项/已选文案不得 ellipsis 截断：数值与分组名必须完整可读 */
+  .hist-group-select :deep(.el-select__selected-item) { text-overflow: clip; }
+  :global(.hist-group-dropdown .el-select-dropdown__item) { text-overflow: clip; }
+  :global(.hist-group-dropdown) { max-width: calc(100vw - 24px); }
+  /* 单图容器固定 150px：空态/加载态不撑变卡片高度（数据不隐藏：无数据时就地给文案） */
+  .hist-mobile-chart { height: 150px; }
+  .hist-mobile-chart .chart-sub-empty {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 12px;
+    box-sizing: border-box;
+  }
+  /* 卡片内距收窄，为单图腾高度（内容/数据一律不变） */
+  :deep(.el-card__header) { padding: 12px; }
+  :deep(.el-card__body) { padding: 12px; }
 }
 </style>

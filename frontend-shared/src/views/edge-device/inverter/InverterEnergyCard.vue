@@ -163,4 +163,25 @@ function formatEnergy(v: any): string {
   color: var(--el-text-color-secondary);
   margin-left: 4px;
 }
+
+/*
+  窄屏（≤768px）移动端压缩布局（2026-10-20，生产实测缺陷）。
+  缺陷：4 项发电量在 393px 下落到 **1 列竖排**（auto-fill minmax(200px,1fr) 放不下第二列），
+  实测卡高 492px（组件根 392px），「日/月/年/总」四项要滚一整屏。
+  修法：2×2 网格；每格仍「图标 + 标签 + 数值 kWh」横排，图标与字号按格子宽度降档，
+  保证 5~7 位整数 + 单位在 ~150px 格宽内完整可见（**不截断、不换行**）。
+  桌面（>768px）规则一律不动 —— 本块之外改前改后完全相同。
+*/
+@media (max-width: 768px) {
+  .energy-card-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  /* 桌面为防截断设了 min-width:190px（见上），窄屏 2 列后必须放开，否则会撑破网格 */
+  .energy-card { min-width: 0; gap: 8px; padding: 10px; }
+  .energy-icon { width: 24px; height: 24px; border-radius: 6px; }
+  .energy-label { margin-bottom: 2px; font-size: 12px; line-height: 16px; }
+  .energy-value { font-size: 16px; line-height: 20px; }
+  .energy-unit { font-size: 12px; margin-left: 2px; }
+}
 </style>

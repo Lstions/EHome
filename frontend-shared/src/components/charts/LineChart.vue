@@ -94,8 +94,12 @@ const getChartTheme = () => ({
  * 判据用「量级比」而不是「单位」：单位相同不代表可以共轴。
  */
 const MAGNITUDE_SPLIT_RATIO = 10
-/** 轴数上限：超过后按"量级最接近"合并，避免 grid 被挤爆、图不可读。 */
+/** 轴数上限：超过后按"量级最接近"合并，避免 grid 被挤爆、图不可读。
+ * 紧凑图（窄屏小图，高度 ≤220px）再收紧到 2 根：实测 319px 宽 + 4 根轴
+ * （每根 offset 60px + containLabel）会把绘图区压到 20~30px，曲线完全读不出。
+ * 合并后次要量纲改由 tooltip / 图例读数，绘图区宽度回到可用区间。 */
 const MAX_Y_AXIS = 4
+const MAX_Y_AXIS_COMPACT = 2
 
 /** 该序列的量级参考值（绝对值最大者）。空/全 null 返回 0，表示"无从比较"。 */
 const seriesMagnitude = (s: SeriesConfig): number => {
@@ -125,8 +129,9 @@ const buildYAxisList = (theme = getChartTheme()) => {
   props.series.forEach(s => {
     const unit = s.unit || ''
     const magnitude = seriesMagnitude(s)
+    const maxAxis = isCompactChart.value ? MAX_Y_AXIS_COMPACT : MAX_Y_AXIS
     let idx = axes.findIndex(a => a.unit === unit && magnitudeComparable(a.magnitude, magnitude))
-    if (idx < 0 && axes.length >= MAX_Y_AXIS) {
+    if (idx < 0 && axes.length >= maxAxis) {
       // 触顶：并入量级最接近的那根轴，保持图可读（宁可共轴也不新增轴）。
       let best = 0
       let bestDistance = Infinity
@@ -155,12 +160,18 @@ const buildYAxisList = (theme = getChartTheme()) => {
       // 图例项已带「#1 (V)」「探头 1 (℃)」后缀。
       name: isCompactChart.value ? '' : axis.unit ? `(${axis.unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
-      offset: i > 1 ? (i - 1) * 60 : 0,
+      // 紧凑图最多 2 根轴（左 1 右 1），不再需要叠加偏移；常规图沿用 60px 递进
+      offset: i > 1 ? (i - 1) * (isCompactChart.value ? 30 : 60) : 0,
       min: hasCustomRange ? props.yAxisMin : undefined,
       max: hasCustomRange ? props.yAxisMax : undefined,
       axisLine: { lineStyle: { color: theme.border } },
       splitLine: { show: i === 0, lineStyle: { color: theme.split } },
-      axisLabel: { color: theme.regular, formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) },
+      axisLabel: {
+        color: theme.regular,
+        // 紧凑图轴标签小一号，给绘图区留宽度
+        fontSize: isCompactChart.value ? 10 : undefined,
+        formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1),
+      },
       nameTextStyle: { color: theme.regular }
     })),
     seriesToYAxis

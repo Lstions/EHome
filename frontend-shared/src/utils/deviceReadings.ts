@@ -53,7 +53,13 @@ const GENERIC_PRIORITY = [
 export function readingPriorityFor(deviceType: string): string[] {
   const t = (deviceType || '').toLowerCase()
   if (t.indexOf('bms') >= 0 || t === 'battery') return BMS_PRIORITY
-  if (t === 'inverter') return INVERTER_PRIORITY
+  // ⚠ 必须用 includes 而不是全等：真实 device_type 是**带厂商前缀**的
+  // `techfine_inverter`（还有 `generic_inverter` 等写法）。
+  // 2026-10-20 生产实测：写成 `t === 'inverter'` 时厂商前缀型号全部落到通用表，
+  // 卡片于是显示数据里字母序最靠前的字段 —— 正好是 `alarm_battery_low` 这类
+  // 告警位，呈现为「电池低电报警 0.0 / 电池未接 0.0」（且标签被省略号截断）。
+  // 这与 HistoryChartSection 漏判 `_inverter` 后缀是同一类缺陷，别再犯第三次。
+  if (t.indexOf('inverter') >= 0) return INVERTER_PRIORITY
   return GENERIC_PRIORITY
 }
 

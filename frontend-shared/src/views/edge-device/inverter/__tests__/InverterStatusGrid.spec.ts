@@ -108,7 +108,7 @@ describe('InverterStatusGrid', () => {
     expect(wrapper.text()).not.toContain('输出过载')
   })
 
-  it('renders all twelve alarm fields when fully present', () => {
+  it('12 个标志位里只有 10 个进「告警」列表，另外 2 个是运行标志', () => {
     const payload: Record<string, number> = {}
     const keys = [
       'alarm_pv_to_load', 'alarm_output', 'alarm_battery_low', 'alarm_battery_missing',
@@ -117,6 +117,20 @@ describe('InverterStatusGrid', () => {
     ]
     for (const k of keys) payload[k] = 0
     const wrapper = mountGrid(payload)
-    expect(wrapper.findAll('.grid-item')).toHaveLength(12)
+    // 真告警位 10 项
+    expect(wrapper.findAll('.grid-item')).toHaveLength(10)
+    // 运行标志 2 项（交流输出 / PV 馈能负载）—— 中性色，不参与告警计数
+    expect(wrapper.findAll('.run-flag')).toHaveLength(2)
+  })
+
+  it('alarm_output=1 不得被当成告警（生产假告警缺陷的回归护栏）', () => {
+    // 生产实测（设备 15，work_mode=2 市电、fault_code=0）：alarm_output=1、其余 10 位全 0，
+    // 改前页面显示「1 条告警」+「有输出 / 异常」红行 —— 只要逆变器带载就常驻假告警。
+    const wrapper = mountGrid({ alarm_output: 1 })
+    expect(wrapper.findAll('.grid-item.active')).toHaveLength(0)
+    const flag = wrapper.find('.run-flag')
+    expect(flag.exists()).toBe(true)
+    expect(flag.text()).toContain('有输出')
+    expect(flag.classes()).toContain('on')
   })
 })

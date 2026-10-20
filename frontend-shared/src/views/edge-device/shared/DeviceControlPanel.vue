@@ -225,4 +225,16 @@ watch(() => props.deviceId, () => { expandedHistory.value = false; load() }); on
 .history-scroll.is-expanded{max-height:70vh}
 .history-more{display:flex;justify-content:center;margin-top:4px}
 .history-count{margin-left:6px;font-size:12px;font-weight:400;color:var(--el-text-color-secondary)}
-@media (max-width:768px){.op-list{grid-template-columns:1fr}.history-scroll{max-height:320px}}</style>
+@media (max-width:768px){
+  /* 受控操作列表：改前窄屏 1 列，每个 op-item 是「图标 + 名称/标签 + 描述」纵向约 120px，
+     9 项 ≈ 1080px。改 2 列紧凑卡：名称+标签一行、描述最多 2 行，每格约 84px。
+     描述被截到 2 行属可接受（下钻有完整说明的弹窗），名称与风险标签**绝不截断**。 */
+  .op-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .op-item{flex-direction:column;align-items:flex-start;gap:4px;padding:8px 10px;min-height:64px}
+  .op-icon{display:none}
+  .op-name{font-size:12px;flex-wrap:wrap;gap:4px;word-break:keep-all}
+  .op-desc{margin-top:0;font-size:11px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .ops-sub{margin-bottom:6px;font-size:11px}
+  .history-scroll{max-height:320px}
+}
+</style>
