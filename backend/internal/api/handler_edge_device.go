@@ -1277,10 +1277,33 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
-		// 从 device_data 表查最新一条
+		// 从 device_data 表查最新一条。
 		var data models.DeviceData
-		cond, args := dataScopeCond(qs)
-		db.Where(cond, args...).Order("created_at DESC").First(&data)
+		if isPostgresDialect(db) {
+			// BMS 页慢修复 §1.6 (2026-10-20 23:09 Lead 补充「两段式」): 先查
+			// 逻辑分支 LIMIT 1, 命中即止; 未命中再查 NULL-logical 回退分支。
+			// 每支各自 ORDER BY created_at DESC LIMIT 1, 分别走
+			// (logical_device_id, created_at DESC) 复合索引与
+			// idx_devdata_legacy_null_created 部分索引 —— 旧的 OR scope 条件
+			// 使 PG 退化为 device_data 200 万行 Parallel Seq Scan + top-N
+			// (生产实测 341 ms, 并发下 33 s)。
+			ctxDB := db.WithContext(c.Request.Context())
+			for _, query := range latestDeviceDataQueries(qs) {
+				if query.SQL == "" {
+					continue
+				}
+				if err := ctxDB.Raw(query.SQL, query.Args...).Scan(&data).Error; err != nil {
+					break // 与旧实现一致: 查询错误忽略 (返回零值), 不 500
+				}
+				if data.ID != 0 {
+					break
+				}
+			}
+		} else {
+			// SQLite: 旧实现一分不改 (既有测试是契约)。
+			cond, args := dataScopeCond(qs)
+			db.Where(cond, args...).Order("created_at DESC").First(&data)
+		}
 		Success(c, data)
 	})
 

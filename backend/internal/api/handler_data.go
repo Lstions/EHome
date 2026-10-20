@@ -303,7 +303,33 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
+		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
 		cond, args := dataScopeCond(qs)
+
+		// BMS 页慢修复 P0-1 (契约 §1.2) + §1.6: PG 下把 max_points 降采样下推到
+		// SQL, 且 scope 以 UNION ALL 两分支进入 (让复合索引真正生效); 只返回
+		// 轻量点。失败按旧语义返回 500 (旧路径 DB 错误也返回 500)。
+		// SQLite / maxPoints<=0 / 非法时间窗 / agg=raw 完全走下面的旧路径。
+		aggMode := parseAggMode(c.Query("agg"))
+		if aggMode != AggModeRaw && shouldAggregateHistory(db, maxPoints, startTime, endTime) {
+			points, err := queryHistoryPoints(c.Request.Context(), db, historyPointQuery{
+				Scope:       qs,
+				DedupNeeded: qs.DedupNeeded,
+				Category:    sensorName,
+				Start:       startTime,
+				End:         endTime,
+				MaxPoints:   maxPoints,
+				Mode:        resolveAggMode(aggMode, sensorName),
+			})
+			if err != nil {
+				logger.Warnf("[unified-data-historical] aggregate failed device_pk=%d category=%s: %v", devicePK, sensorName, err)
+				Error(c, http.StatusInternalServerError, "failed to query historical data")
+				return
+			}
+			Success(c, points)
+			return
+		}
+
 		// P2.2 取消传播: 全量拉取 (含保形去重外层链) 绑定请求上下文。
 		q := db.WithContext(c.Request.Context()).Where(cond+" AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
 			append(args, sensorName, startTime, endTime)...)
@@ -319,7 +345,6 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		// Server-side downsampling: if max_points specified and data exceeds it,
 		// uniformly sample to cap response size.
-		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
 		data = downsampleUnifiedData(data, maxPoints)
 		if data == nil {
 			data = []models.UnifiedData{}
@@ -371,10 +396,16 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		cond, args := dataScopeCond(qs)
 
+		// BMS 页慢修复 P0-1 (契约 §1.2): PG 下每个 category 用 SQL 分桶聚合,
+		// 只返回轻量点; SQLite / maxPoints<=0 / 非法时间窗 / agg=raw 完全走
+		// 下面的旧路径 (全量拉取 + Go 侧 downsample, 既有测试是契约)。
+		aggMode := parseAggMode(c.Query("agg"))
+		useAgg := aggMode != AggModeRaw && shouldAggregateHistory(db, maxPoints, startTime, endTime)
+
 		// Query all categories in parallel
 		type catResult struct {
-			Category string               `json:"category"`
-			Data     []models.UnifiedData `json:"data"`
+			Category string      `json:"category"`
+			Data     interface{} `json:"data"`
 		}
 		results := make([]catResult, len(categories))
 
@@ -383,6 +414,27 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			wg.Add(1)
 			go func(idx int, category string) {
 				defer wg.Done()
+				if useAgg {
+					points, err := queryHistoryPoints(c.Request.Context(), db, historyPointQuery{
+						Scope:       qs,
+						DedupNeeded: qs.DedupNeeded,
+						Category:    category,
+						Start:       startTime,
+						End:         endTime,
+						MaxPoints:   maxPoints,
+						Mode:        resolveAggMode(aggMode, category),
+					})
+					if err != nil {
+						// 单 category 查询错误: 保持现状 (忽略 error 返回空 data,
+						// 不改 500), 仅记录 warn。
+						logger.Warnf("[unified-data-historical-batch] aggregate failed device_pk=%d category=%s: %v",
+							devicePK, category, err)
+						results[idx] = catResult{Category: category, Data: []HistoryPoint{}}
+						return
+					}
+					results[idx] = catResult{Category: category, Data: points}
+					return
+				}
 				// Use a new Session to avoid Statement sharing between concurrent goroutines.
 				// GORM v2's *gorm.DB shares Statement state across chained calls; without
 				// Session{}, concurrent db.Where() calls race and corrupt each other's conditions,

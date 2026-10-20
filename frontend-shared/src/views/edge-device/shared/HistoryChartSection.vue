@@ -106,6 +106,8 @@ const { loading: chartLoading, fetch: historyFetch } = useHistoryData({
   excludeCategories: statusCategories,
   errorPrefix: '获取历史数据失败',
   showError: false, // caller handles errors for device_data fallback
+  // 历史 API 单独放宽到 30s（client.ts 全局仍 10s）；不改其它行为（契约 §2.7）
+  timeoutMs: 30000,
 })
 
 const { timeRange, customTimeRange, getTimeRange, handleTimeRangeChange } = useTimeRange(fetchHistoryData)

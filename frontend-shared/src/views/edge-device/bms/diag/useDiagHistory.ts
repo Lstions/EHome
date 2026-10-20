@@ -4,7 +4,8 @@
  * 为什么需要它（而不是每张卡直接调 useHistoryData）：
  *  ① **并发上限**：BMS 页会同时挂多张诊断卡，若每张各自 fetch，一次性会打出
  *     4~6 个 historical-batch 请求。移动端弱网下这会让首屏竞争、互相拖慢。
- *     这里用模块级信号量把并发压到 ≤3（plan §4 要求）。
+ *     并发闸门已抽到共享模块 @/composables/useHistoryQueue（契约 §2.2），
+ *     与 BmsChartsPanel 的两张主图共用同一个页面级 ≤3 上限。
  *  ② **失败隔离**：任一卡取数失败只影响它自己 —— 本模块的 fetch 永不 reject，
  *     统一返回 { series, error }，调用方据此渲染本卡空态/失败态。
  *  ③ **单点口径**：max_points 固定 500（plan §4 要求），避免各卡各写一个数字。
@@ -14,43 +15,15 @@
  */
 import { ref } from 'vue'
 import { useHistoryData, type HistorySeries } from '@/composables/useHistoryData'
+import { withHistorySlot } from '@/composables/useHistoryQueue'
 
-/** 同时在途的历史数据请求上限（plan §4：2~3） */
-const MAX_CONCURRENT = 3
+/**
+ * 历史请求并发闸门已移到共享模块（契约 §2.2），这里继续 re-export 保持既有 import 路径可用。
+ * BmsChartsPanel 与 4 张诊断卡共用同一个**页面级**上限（MAX_CONCURRENT_HISTORY = 3）。
+ */
+export { withHistorySlot }
 /** 单次请求的最大降采样点数（plan §4：≤500） */
 export const MAX_POINTS = 500
-
-let activeCount = 0
-const waiting: Array<() => void> = []
-
-function acquire(): Promise<void> {
-  if (activeCount < MAX_CONCURRENT) {
-    activeCount += 1
-    return Promise.resolve()
-  }
-  return new Promise<void>((resolve) => {
-    waiting.push(() => {
-      activeCount += 1
-      resolve()
-    })
-  })
-}
-
-function release(): void {
-  activeCount = Math.max(0, activeCount - 1)
-  const next = waiting.shift()
-  if (next) next()
-}
-
-/** 在并发名额内执行（超出上限时排队）。仅用于历史数据请求 */
-export async function withHistorySlot<T>(task: () => Promise<T>): Promise<T> {
-  await acquire()
-  try {
-    return await task()
-  } finally {
-    release()
-  }
-}
 
 export interface DiagHistoryResult {
   series: HistorySeries[]
@@ -74,6 +47,12 @@ export function useDiagHistory(options: UseDiagHistoryOptions = {}) {
     maxPoints: MAX_POINTS,
     showError: false,
     errorPrefix: '获取历史数据失败',
+    // 诊断卡窗口更长（protection 默认 30 天）：10s 会把正常慢查询误判为失败，
+    // 30s 与修复后目标（单页 < 3s、单请求远低于 10s）之间留足余量。
+    timeoutMs: 30000,
+    // 让失败真正上抛到 fetchRange 的 {error}，卡片才能渲染「加载失败 + 重试」；
+    // 修复前 useHistoryData 吞掉全部错误 ⇒ error 恒为空 ⇒ 静默变「暂无数据」（根因 R4）。
+    throwOnError: true,
   })
 
   /** 是否已完成过至少一次请求（区分"首屏加载中"与"确实为空"） */

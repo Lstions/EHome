@@ -236,3 +236,7 @@ esp32-collector/tools/*_nvs.bin
 # 一次性浏览器验收脚本与截图（不入库）
 frontend-shared/verify-*.mjs
 frontend-shared/*.png
+
+# 本机性能基线 scratch（场景/二进制/日志/DO NOT COMMIT）
+.bench/
+.gocache/

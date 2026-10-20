@@ -11,20 +11,61 @@ import (
 
 // 复合索引 (方案 §1.1 CRITICAL, v1-H2 闭环): 逻辑身份维度时序查询走
 // (logical_device_id, timestamp DESC)。索引名与方案一致。
+//
+// 后两个是 BMS 页慢修复 P0-2 追加的索引 (BMS页慢修复-实施契约-2026-10-20 §1.4):
+//   - idx_unified_logical_sensor_ts: 图表历史查询恒按
+//     (logical_device_id, sensor_name, timestamp) 过滤, 旧索引只有前两列之一,
+//     PG 只能扫整个时间窗再过滤 (单测点 24h 扫 2,808,951 行只返回 86,251 行)。
+//   - idx_devdata_logical_created: latest-data 的
+//     ORDER BY created_at DESC LIMIT 1 走索引, 不再并行 seq scan 214 万行。
+//
+// 最后两个是 §1.6 UNION ALL 重写配套的**部分索引** (2026-10-20 23:09 Lead 补充):
+// UNION ALL 的 B 分支是 `logical_device_id IS NULL AND device_id IN (...)`
+// (backfill 前的旧行), 若没有对应索引, 22.5M 行上它仍会退化为全窗口
+// timestamp/device_id 扫描, 把 A 分支省下的成本吃回去。生产 NULL-logical 行
+// 应为 0/极少, 因此用 WHERE 部分索引: 体积与建索引时间可忽略, 且 B 分支的
+// device_id / sensor_name / timestamp 全部成为索引条件。
 const (
 	IndexUnifiedLogicalTS = "idx_unified_logical_ts"
 	IndexDevDataLogicalTS = "idx_devdata_logical_ts"
+
+	IndexUnifiedLogicalSensorTS = "idx_unified_logical_sensor_ts"
+	IndexDevDataLogicalCreated  = "idx_devdata_logical_created"
+
+	IndexUnifiedLegacyNullTS    = "idx_unified_legacy_null_ts"
+	IndexDevDataLegacyNullCreat = "idx_devdata_legacy_null_created"
 )
 
 // logicalIndexSpecs maps index name → CREATE INDEX body (without the
 // CREATE INDEX <name> prefix, which differs per dialect).
+//
+// PGDDL 是 PostgreSQL 专用覆盖: 覆盖索引用 INCLUDE ("value") 让 avg/change 的
+// 查询变成 Index Only Scan (不回落 86,400 次随机 heap fetch, 代价模型才肯选它);
+// SQLite 不支持 INCLUDE 语法, 因此 SQLite 用 DDL (普通复合索引)。
 var logicalIndexSpecs = []struct {
 	Name  string
 	Table string
-	DDL   string // column list
+	DDL   string // column list (SQLite / 通用)
+	PGDDL string // PostgreSQL override (INCLUDE 等); empty = use DDL
 }{
-	{IndexUnifiedLogicalTS, "unified_data", "(logical_device_id, timestamp DESC)"},
-	{IndexDevDataLogicalTS, "device_data", "(logical_device_id, timestamp DESC)"},
+	{IndexUnifiedLogicalTS, "unified_data", "(logical_device_id, timestamp DESC)", ""},
+	{IndexDevDataLogicalTS, "device_data", "(logical_device_id, timestamp DESC)", ""},
+	// BMS 页慢修复 P0-2 (契约 §1.4)：图表历史查询覆盖索引。
+	// INCLUDE ("value"): 实测 bench 上只有 covering 索引才会被选中 ——
+	// Index Only Scan 执行 67ms / Buffers 622 / Heap Fetches 0,
+	// 而普通三列索引因 86,400 次随机 heap fetch 仍被 planner 放弃。
+	{IndexUnifiedLogicalSensorTS, "unified_data",
+		"(logical_device_id, sensor_name, timestamp)",
+		`(logical_device_id, sensor_name, "timestamp") INCLUDE ("value")`},
+	{IndexDevDataLogicalCreated, "device_data", "(logical_device_id, created_at DESC)", ""},
+	// BMS 页慢修复 §1.6: UNION ALL B 分支 (NULL-logical 旧行) 的部分索引。
+	// PG 侧同样 INCLUDE ("value") 走 Index Only Scan; SQLite 只建普通部分索引
+	// (DDL 尾部直接带 WHERE, CREATE INDEX ... (cols) WHERE ...)。
+	{IndexUnifiedLegacyNullTS, "unified_data",
+		"(device_id, sensor_name, timestamp) WHERE logical_device_id IS NULL",
+		`(device_id, sensor_name, "timestamp") INCLUDE ("value") WHERE logical_device_id IS NULL`},
+	{IndexDevDataLegacyNullCreat, "device_data",
+		"(device_id, created_at DESC) WHERE logical_device_id IS NULL", ""},
 }
 
 // EnsureLogicalDataIndexes creates the §1.1 composite indexes idempotently.
@@ -35,6 +76,20 @@ var logicalIndexSpecs = []struct {
 // 静默跳过它), 先 DROP 再重建。
 //
 // SQLite: 普通 CREATE INDEX IF NOT EXISTS (无 CONCURRENTLY 概念)。
+//
+// # 生产升级注意 (BMS 页慢修复-实施契约-2026-10-20 §1.4)
+//
+// 分区母表分支用**非并发** CREATE INDEX —— PostgreSQL 禁止对分区母表执行
+// CREATE INDEX CONCURRENTLY。unified_data 生产约 4.4 GB / 2400 万行, 因此
+// 升级后**首次**建 idx_unified_logical_sensor_ts / idx_devdata_logical_created
+// 会持有 SHARE 锁, 期间该表写入阻塞 (可能数十秒到数分钟)。部署流程必须走
+// 维护窗口: 停旧容器 → `ehomectl datalifecycle ensure-indexes` 建索引 →
+// 起新容器。索引建成后 IF NOT EXISTS 幂等跳过, 后续启动是 O(1) 检查;
+// 之后由 PG 新建的分区会自动继承父索引, 不需要再全量建索引。
+//
+// 入口说明: 显式运维入口是 `ehomectl datalifecycle ensure-indexes`;
+// 服务端启动时 cmd/server 的 datalifecycle.NewBackfiller(db).Start() 也会在
+// 后台 goroutine 内调用本函数 (backfill.go:97, 非阻塞启动), 两条路径都幂等。
 func EnsureLogicalDataIndexes(ctx context.Context, db *gorm.DB) error {
 	if db.Dialector != nil && db.Dialector.Name() == "postgres" {
 		return ensurePostgresIndexes(ctx, db)
@@ -90,9 +145,13 @@ WHERE c.relname = ? AND NOT i.indisvalid`, spec.Name).
 			}
 		}
 
+		ddl := spec.DDL // SQLite 不支持 INCLUDE; PG 用 PGDDL 覆盖 (covering 索引)
+		if spec.PGDDL != "" {
+			ddl = spec.PGDDL
+		}
 		stmt := fmt.Sprintf("CREATE INDEX %sIF NOT EXISTS %s ON %s %s",
 			map[bool]string{true: "CONCURRENTLY ", false: ""}[concurrently],
-			spec.Name, spec.Table, spec.DDL)
+			spec.Name, spec.Table, ddl)
 		// 独立连接 + 无事务: CONCURRENTLY 不能在事务块内执行。GORM 顶层
 		// Exec 不开事务; 无参数时 pgx 走 simple protocol, 不会被隐式事务
 		// 包裹。
@@ -177,8 +236,12 @@ func RenderIndexDDL(dialect, name string) (string, error) {
 		}
 		switch strings.ToLower(dialect) {
 		case "postgres":
+			ddl := spec.DDL
+			if spec.PGDDL != "" {
+				ddl = spec.PGDDL
+			}
 			return fmt.Sprintf("CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s",
-				spec.Name, spec.Table, spec.DDL), nil
+				spec.Name, spec.Table, ddl), nil
 		case "sqlite":
 			return fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s %s",
 				spec.Name, spec.Table, spec.DDL), nil

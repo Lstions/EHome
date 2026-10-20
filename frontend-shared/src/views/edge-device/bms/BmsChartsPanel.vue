@@ -38,6 +38,12 @@
       </div>
       <div v-if="cellLoading" class="chart-state">正在加载历史数据…</div>
       <div v-else-if="!online" class="chart-state">设备离线，历史数据暂不可用</div>
+      <!-- 失败可见（契约 §2.3 / 根因 R4）：请求失败且无数据时给错误态 + 重试，
+           不能静默退化成「暂无数据」——那会让用户误判「设备真没数据」 -->
+      <div v-else-if="cellError" class="chart-state is-error" role="alert">
+        <span>历史数据加载失败，请稍后重试</span>
+        <el-button link size="small" type="primary" @click="fetchCells">重试</el-button>
+      </div>
       <div v-else-if="cellAll.length === 0" class="chart-state">暂无电芯电压历史数据</div>
       <template v-else>
         <!-- 桌面：16 个勾选框平排（契约：1440 下结构与改前一致） -->
@@ -69,6 +75,7 @@
         <span class="card-title">运行趋势</span>
         <span class="card-hint">按量纲分组（总电压 / 单体电压 / 电流 / 电池状态 / 温度），状态量未纳入</span>
         <span class="head-right">
+          <el-button v-if="metricError" size="small" text type="primary" class="retry-btn" @click="fetchMetrics">重试</el-button>
           <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
         </span>
       </div>
@@ -80,6 +87,7 @@
           <div class="trend-sub-body">
             <div v-if="metricLoading" class="trend-sub-state is-loading">加载中…</div>
             <div v-else-if="!online" class="trend-sub-state">设备离线</div>
+            <div v-else-if="metricError" class="trend-sub-state is-error" role="alert">历史数据加载失败，请稍后重试</div>
             <LineChart
               v-else-if="g.series.length"
               :series="g.series"
@@ -115,6 +123,7 @@
         <div class="trend-mobile-chart">
           <div v-if="metricLoading" class="trend-sub-state is-loading">加载中…</div>
           <div v-else-if="!online" class="trend-sub-state">设备离线</div>
+          <div v-else-if="metricError" class="trend-sub-state is-error" role="alert">历史数据加载失败，请稍后重试</div>
           <LineChart
             v-else-if="mobileGroup && mobileGroup.series.length"
             :series="mobileGroup.series"
@@ -134,6 +143,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { useHistoryData } from '@/composables/useHistoryData'
+import { withHistorySlot } from '@/composables/useHistoryQueue'
 import { useTimeRange } from '@/composables/useTimeRange'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import type { SeriesData } from '@/types/chart'
@@ -156,14 +166,29 @@ const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.
 
 /* ---- 图1 电芯电压历史（逻辑同旧页 BmsCellVoltageHistoryChart） ---- */
 const cellCats = computed(() => Array.from({ length: props.cellCount }, (_, i) => 'cell_voltage_' + (i + 1)))
-const { loading: cellLoading, fetch: cellFetch } = useHistoryData({ errorPrefix: '获取电芯电压历史数据失败' })
+// 历史查询超时放宽到 30s：24h×16 类本就很重，全局 10s 会把正常慢请求误判为失败并触发降级风暴；
+// 只覆盖历史 API，client.ts 全局 10s 不动（契约 §2.3）
+const { loading: cellLoading, error: cellError, fetch: cellFetch } = useHistoryData({
+  errorPrefix: '获取电芯电压历史数据失败',
+  timeoutMs: 30000,
+})
 const cellAll = ref<SeriesData[]>([])
 const cellPicked = ref<number[]>([])
+/** 图1 的取消器：切时间范围/重复触发/卸载时 abort 旧请求（旧响应不得覆盖新响应） */
+let cellController: AbortController | null = null
 
 async function fetchCells() {
   if (!props.deviceId) return
+  cellController?.abort()
+  const controller = new AbortController()
+  cellController = controller
   const [start, end] = getCellRange()
-  const res = await cellFetch(props.deviceId, cellCats.value, start, end)
+  // 与诊断卡共用页面级历史请求闸门（并发 ≤3），不再和另外 5 个重查询一起打满后端
+  const res = await withHistorySlot(() =>
+    cellFetch(props.deviceId, cellCats.value, start, end, { signal: controller.signal }),
+  )
+  // 已被更新的请求取代（或组件已卸载）：丢弃本次结果
+  if (controller.signal.aborted) return
   cellAll.value = cellCats.value
     .map((cat, i) => {
       const hit = res.find((x) => x.category === cat)
@@ -228,17 +253,26 @@ const trendGroupDefs: TrendDimDef[] = [
   { key: 'temperature', label: '温度', title: '温度 (℃)', categories: ['temperature_1', 'temperature_2', 'temperature_3'] },
 ]
 
-const { loading: metricLoading, fetch: metricFetch } = useHistoryData({
+const { loading: metricLoading, error: metricError, fetch: metricFetch } = useHistoryData({
   nameMap: metricNameMap,
   unitMap: metricUnitMap,
   errorPrefix: '获取运行趋势数据失败',
+  timeoutMs: 30000,
 })
 const metricAll = ref<SeriesData[]>([])
+/** 图2 的取消器（与图1 各自独立：一张图切范围不应取消另一张的请求） */
+let metricController: AbortController | null = null
 
 async function fetchMetrics() {
   if (!props.deviceId) return
+  metricController?.abort()
+  const controller = new AbortController()
+  metricController = controller
   const [start, end] = getMetricRange()
-  const res = await metricFetch(props.deviceId, metricDefs.map((m) => m.cat), start, end)
+  const res = await withHistorySlot(() =>
+    metricFetch(props.deviceId, metricDefs.map((m) => m.cat), start, end, { signal: controller.signal }),
+  )
+  if (controller.signal.aborted) return
   metricAll.value = res.map((s) => ({ name: s.name, unit: s.unit, category: s.category, data: s.data }))
 }
 const { timeRange: metricRange, customTimeRange: metricCustom, getTimeRange: getMetricRange, handleTimeRangeChange: metricRangeChanged } = useTimeRange(fetchMetrics)
@@ -318,6 +352,9 @@ onUnmounted(() => {
   // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听（内存泄漏）
   mobileMql?.removeEventListener('change', onMobileChange)
   mobileMql = null
+  // 卸载后不再需要响应：abort 在途请求，避免它们继续占用页面级并发名额
+  cellController?.abort()
+  metricController?.abort()
 })
 
 defineExpose({ fetchCells, fetchMetrics })
@@ -365,6 +402,15 @@ defineExpose({ fetchCells, fetchMetrics })
 /* 固定高度：内容变化不得撑变页面高度（本页依赖 overflow-anchor:none 防跳动） */
 .chart-box { height: 280px; }
 .chart-state { height: 280px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 13px; }
+/* 失败态：与「暂无数据」必须一眼可分（颜色 + 重试按钮），高度不变避免页面跳动 */
+.chart-state.is-error {
+  flex-direction: column;
+  gap: 8px;
+  color: var(--el-color-danger);
+  text-align: center;
+  padding: 0 16px;
+  box-sizing: border-box;
+}
 .cell-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 
 .trend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -406,6 +452,8 @@ defineExpose({ fetchCells, fetchMetrics })
   font-size: 12px;
 }
 .trend-sub-state.is-loading { min-height: 200px; }
+/* 失败态用 danger 色，和「暂无该项历史数据」的灰色空态区分开（文案也不同） */
+.trend-sub-state.is-error { color: var(--el-color-danger); }
 
 /* ---- 窄屏独有：电芯选择弹层触发器 + 运行趋势单图 + 量纲切换器 ---- */
 .cell-picker-trigger { flex: 0 0 auto; }

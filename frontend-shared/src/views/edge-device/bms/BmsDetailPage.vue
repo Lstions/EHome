@@ -219,6 +219,7 @@
           title="保护触发历史"
           :summary="diagSummary.protection"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('protection-history')"
           @toggle="collapse.toggle('protection-history')"
         >
@@ -294,6 +295,7 @@
           title="温度趋势"
           :summary="diagSummary.temp"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('temp-trend')"
           @toggle="collapse.toggle('temp-trend')"
         >
@@ -314,6 +316,7 @@
           title="SOC 与电流"
           :summary="diagSummary.soc"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('soc-current')"
           @toggle="collapse.toggle('soc-current')"
         >
@@ -338,6 +341,7 @@
         title="历史趋势"
         :summary="chartsCollapseSummary"
         :collapsible="isMobileViewport"
+        :lazy="true"
         :open="collapse.isOpen('charts')"
         @toggle="collapse.toggle('charts')"
       >
@@ -352,6 +356,7 @@
           title="轮询间隔分布"
           :summary="diagSummary.poll"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('poll-interval')"
           @toggle="collapse.toggle('poll-interval')"
         >
@@ -360,7 +365,13 @@
               <span class="card-title">轮询间隔分布</span>
               <span class="card-hint">各指令间隔与采样负载</span>
             </div>
-            <PollIntervalCard :device-id="deviceId" :online="deviceOnline" @summary="onPollSummary" />
+            <PollIntervalCard
+              :device-id="deviceId"
+              :online="deviceOnline"
+              :commands="pollTemplates"
+              :parent-loading="pollTemplatesLoading"
+              @summary="onPollSummary"
+            />
           </div>
         </CollapseBlock>
       </section>
@@ -373,6 +384,7 @@
           title="实时数据流"
           :summary="streamCollapseSummary"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('stream')"
           @toggle="collapse.toggle('stream')"
         >
@@ -583,6 +595,7 @@
           title="操作历史"
           :summary="historyCollapseSummary"
           :collapsible="isMobileViewport"
+          :lazy="true"
           :open="collapse.isOpen('history')"
           @toggle="collapse.toggle('history')"
         >
@@ -1292,6 +1305,14 @@ const pollSaveState = ref<'idle' | 'saving' | 'synced'>('idle')
 const pollError = ref('')
 const pollLoadError = ref('')
 const pollBusy = computed(() => pollSaveState.value === 'saving')
+/**
+ * 「轮询间隔分布」卡的原始取数结果（契约 §2.5）。
+ * 页面是唯一取数入口：loadPollCommands 只调一次 getCommandIntervals，
+ * 原始返回下发给 PollIntervalCard（它按 schedulable 自行过滤），消除 R7 实测的 commands ×2。
+ */
+const pollTemplates = ref<CommandTemplateWithInterval[] | null>(null)
+/** 页面是否正在取 commands（传给 PollIntervalCard 做去重协作：等待父页而不是再发一次） */
+const pollTemplatesLoading = ref(true)
 
 const isPollEnabled = (c: PollCommand) => c.interval > 0
 const enabledCount = computed(() => pollCommands.value.filter(isPollEnabled).length)
@@ -1331,9 +1352,15 @@ const pollHint = computed(() => {
 async function loadPollCommands() {
   pollLoadError.value = ''
   pollError.value = ''
+  // 新的一轮取数开始：先清空下发给 PollIntervalCard 的原始数据，并标记「已有人负责取数」
+  pollTemplates.value = null
+  pollTemplatesLoading.value = true
   try {
     const cmds = await edgeDeviceApi.getCommandIntervals(deviceId.value)
-    pollCommands.value = cmds.filter((c: CommandTemplateWithInterval) => c.schedulable).map((c: CommandTemplateWithInterval) => ({
+    const all = Array.isArray(cmds) ? cmds : []
+    // 原始返回下发给 PollIntervalCard（不再让它自己取一次）；页面仍是唯一取数入口
+    pollTemplates.value = all
+    pollCommands.value = all.filter((c: CommandTemplateWithInterval) => c.schedulable).map((c: CommandTemplateWithInterval) => ({
       id: c.id,
       name: c.name,
       desc: c.description || '',
@@ -1344,7 +1371,11 @@ async function loadPollCommands() {
     pollSaveState.value = 'idle'
   } catch (e) {
     pollCommands.value = []
+    // 保持 null（未取到）⇒ PollIntervalCard 会回退自取数并展示自己的失败态 + 重试；
+    // 本卡「轮询指令配置」的失败提示（pollLoadError + 重试）照旧。
     pollLoadError.value = extractErrorMessage(e, '轮询指令加载失败')
+  } finally {
+    pollTemplatesLoading.value = false
   }
 }
 

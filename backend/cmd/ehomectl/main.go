@@ -40,7 +40,7 @@ func main() {
 
 func usage() {
 	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
-		"       ehomectl datalifecycle backfill\n" +
+		"       ehomectl datalifecycle <backfill|ensure-indexes>\n" +
 		"       ehomectl command-intervals cleanup")
 }
 
@@ -61,6 +61,15 @@ func connectDB() *gorm.DB {
 // 校验自检 (§七-3) 非 0 或执行失败时 exit 非零, 供运维脚本判定。
 func runDatalifecycle() {
 	switch os.Args[2] {
+	case "ensure-indexes":
+		// 显式索引入口 (BMS 页慢修复-实施契约-2026-10-20 §1.4): 只建索引,
+		// 不跑回填。供部署维护窗口使用: 停旧容器 → ensure-indexes → 起新容器
+		// (分区母表上的普通 CREATE INDEX 会短暂阻塞写入, 见 indexes.go 注释)。
+		db := connectDB()
+		if err := datalifecycle.EnsureLogicalDataIndexes(context.Background(), db); err != nil {
+			fatal(fmt.Sprintf("index creation failed: %v", err))
+		}
+		fmt.Println("composite indexes ensured")
 	case "backfill":
 		db := connectDB()
 		ctx := context.Background()

@@ -59,7 +59,7 @@
       </div>
 
       <!-- ③ 请求失败：只影响本卡 -->
-      <div v-else-if="errorMsg" class="state-line is-error">
+      <div v-else-if="errorMsg" class="state-line is-error" role="alert">
         <el-icon :size="14"><CircleCloseFilled /></el-icon>
         <span class="err-text">保护历史加载失败：{{ errorMsg }}</span>
         <el-button link size="small" type="primary" @click="load">重试</el-button>
