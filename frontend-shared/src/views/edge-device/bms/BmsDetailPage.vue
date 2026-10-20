@@ -445,7 +445,9 @@
                     <div v-if="op.note" class="op-desc">{{ op.note }}</div>
                     <div v-if="!op.available && op.reason" class="op-desc op-desc-warn">不可用原因：{{ op.reason }}</div>
                     <!-- 不再把人支到生产页：本页现在就能填（2026-10-16 用户要求） -->
-                    <div v-else-if="op.needsParams" class="op-desc">该操作需要参数，点「填写参数」按后端 Schema 逐项填写后提交。</div>
+                    <!-- movedTo 的条目右侧按钮是「去上方开关」，没有「填写参数」入口；
+                         再显示「点填写参数…」等于指着不存在的按钮（2026-10-20 实测），故排除。 -->
+                    <div v-else-if="op.needsParams && !op.movedTo" class="op-desc">该操作需要参数，点「填写参数」按后端 Schema 逐项填写后提交。</div>
                   </div>
                   <div class="op-right">
                     <span v-if="opState(op.id).phase !== 'idle'" class="op-state">
@@ -1305,7 +1307,11 @@ const opGroups = computed<OpGroup[]>(() => {
   return groups
 })
 const totalOps = computed(() => catalog.value.length)
-const openGroups = reactive<Record<string, boolean>>({ runtime: true })
+// 窄屏默认全部收起（桌面保持「运行控制」展开）：
+// 「运行控制」5 条指令展开就是 762px，把「始终可见」预算顶穿；
+// 而 MOS/直控开关已经上移到页首主位，不需要再从清单里翻。
+// 每条目只有在用户点开分组后才渲染（v-show），展开后条条目也已网格化（~78px/条）。
+const openGroups = reactive<Record<string, boolean>>({ runtime: !isMobileViewport.value })
 function toggleGroup(id: string) {
   openGroups[id] = !openGroups[id]
 }
@@ -2260,10 +2266,35 @@ onUnmounted(() => {
   .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
   .mos-switch, .op-group-head, .back-latest { min-height: 44px; }
-  /* 分组头在窄屏允许换行：名称/计数/风险标签占第一行，提示自动掉到第二行，
-     而不是把「读取信息」挤成竖排 */
-  .op-group-head { flex-wrap: wrap; row-gap: 4px; align-items: center; }
-  .op-group-hint { margin-left: 0; flex-basis: 100%; }
+  /* ── 受控操作：折叠分层后默认 1280 → ~370px ──
+     ① 卡头那句「状态文案：已发送 → 执行中 → …」是状态机词表，窄屏要占 4 行 55px；
+        每条操作执行后就地显示圆点+状态词，失败还有红色原因条，所以移动端只留标题+计数；
+     ② 分组头：名称行 + 提示行（提示区分「只读」「会改运行状态」「需进厂模式」，
+        是执行前的风险预判，不能删），内距压到 4px 让每条正好 44px 触摸目标；
+     ③ 条目网格化：桌面是「信息块 220px + 右侧按钮」的 flex，窄屏会折成 3~4 行（实测 152px/条），
+        改成「名称+标签 | 按钮」一行、说明独占整行。 */
+  .ops-card .state-legend { display: none; }
+  .op-groups { gap: 6px; }
+  .op-group-head { flex-wrap: wrap; row-gap: 1px; align-items: center; gap: 6px; padding: 4px 10px; }
+  .op-group-hint { margin-left: 0; flex-basis: 100%; font-size: 11px; line-height: 15px; }
+  .op-item {
+    display: grid;
+    /* 动作列定宽 88px：用 auto 时按钮宽度随文案变（执行 44 / 填写参数 84 / 确认后执行 99），
+       每行按钮起点都不一样，视觉上像「浮在右边」；定宽后 5 行按钮左边缘对齐。 */
+    grid-template-columns: minmax(0, 1fr) 88px;
+    column-gap: 8px;
+    row-gap: 2px;
+    align-items: center;
+    padding: 8px 10px;
+  }
+  .op-info { display: contents; }
+  .op-name-line { grid-column: 1; grid-row: 1; }
+  .op-desc { grid-column: 1 / -1; margin-top: 0; font-size: 11px; line-height: 16px; }
+  .op-right { grid-column: 2; grid-row: 1; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+  /* 判别标签（风险/普通/需参数/暂不可用）降一档：默认尺寸在 393px 下会把名称行挤成 3 行 */
+  .op-name-line :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 4px; }
+  .op-right :deep(.el-button) { padding: 0 8px; font-size: 12px; }
+  .op-reason { grid-column: 1 / -1; margin: 2px 0 0; }
   /* ── 轮询行：393px 下每行 114 → 73px ──
      旧布局把一行拆成三竖段：名称+标签 / 描述 / 234px 输入框 + ms + 开关。
      那个输入框吃掉视口 60%（234px）却只承载「1000」4 个字符，
