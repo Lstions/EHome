@@ -198,24 +198,34 @@ const runningFlags = computed(() => {
     gap: 6px;
     grid-auto-rows: minmax(40px, auto);
   }
+  /* 每格 148px 里要塞「图标 14 + 标签 + 状态徽标 26」，空间很紧。
+     2026-10-20 生产暗色实测：图标 18 + gap 6 时「电池低电报警」被压成两行（「电池低电报/警」），
+     同一行左右两格高度不一致，整卡看起来参差。收紧图标与间距让 6 字标签单行。 */
   .inverter-status-grid :deep(.grid-item) {
     padding: 6px 8px;
-    gap: 6px;
+    gap: 4px;
     min-width: 0;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+  }
+  .inverter-status-grid :deep(.grid-item .el-icon) {
+    flex: 0 0 auto;
+    font-size: 14px;
   }
   .inverter-status-grid :deep(.grid-label) {
+    flex: 1 1 auto;
     font-size: 12px;
-    /* 中文不逐字竖排；放不下整词换行，绝不 ellipsis（信息比对齐重要） */
+    /* 中文按词整体排列：keep-all 禁止 CJK 逐字断行，且**不能**再写 overflow-wrap:anywhere
+       （那条会覆盖 keep-all，把「电池低电报警」拆成「电池低电报/警」）。 */
     word-break: keep-all;
-    overflow-wrap: anywhere;
     min-width: 0;
   }
-  .inverter-status-grid :deep(.grid-item :deep(.el-tag)) {
+  .inverter-status-grid :deep(.grid-item .el-tag) {
+    flex: 0 0 auto;
     font-size: 10px;
     height: 18px;
     line-height: 16px;
     padding: 0 4px;
+    margin: 0;
   }
   .status-header { gap: 12px; margin-bottom: 10px; }
   .status-header .status-item { flex-wrap: wrap; gap: 6px; }
