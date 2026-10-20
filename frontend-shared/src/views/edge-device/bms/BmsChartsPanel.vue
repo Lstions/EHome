@@ -5,6 +5,33 @@
       <div class="card-head">
         <span class="card-title">电芯电压历史趋势</span>
         <span class="card-hint">{{ cellHint }}</span>
+        <!-- 窄屏：16 个勾选框收进弹层（触发器常显「已选 N/16」）。
+             桌面端 v-if 为 false ⇒ 原结构完全不变（16 个 checkbox 仍平排）。 -->
+        <el-popover
+          v-if="isMobileViewport && cellAll.length > 0"
+          placement="bottom-end"
+          :width="300"
+          trigger="click"
+          popper-class="bms-cell-picker-popover"
+        >
+          <template #reference>
+            <!-- 触摸目标：theme.css 的 `.el-button--small:not(...)` 规则（0,4,0）会把小按钮压到 36px，
+                 组件 scoped 规则（0,2,0）赢不了 ⇒ 这里用内联 44px（该触发器只在窄屏渲染，桌面无影响） -->
+            <el-button class="cell-picker-trigger" size="small" style="min-height: 44px" aria-label="选择要显示的电芯">
+              {{ cellPickLabel }}
+            </el-button>
+          </template>
+          <div class="cell-picker-pop">
+            <p class="cell-picker-pop-title">选择电芯（{{ cellPickLabel }}）</p>
+            <el-checkbox-group v-model="cellPicked" size="small" class="cell-picker-pop-group">
+              <el-checkbox v-for="i in cellCount" :key="i" :value="i" :label="'#' + i" border size="small" />
+            </el-checkbox-group>
+            <div class="cell-picker-pop-actions">
+              <el-button size="small" text style="min-height: 44px" @click="pickAll">全选</el-button>
+              <el-button size="small" text style="min-height: 44px" @click="invertPick">反选</el-button>
+            </div>
+          </div>
+        </el-popover>
         <span class="head-right">
           <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" @change="onCellRange" />
         </span>
@@ -13,7 +40,8 @@
       <div v-else-if="!online" class="chart-state">设备离线，历史数据暂不可用</div>
       <div v-else-if="cellAll.length === 0" class="chart-state">暂无电芯电压历史数据</div>
       <template v-else>
-        <div class="cell-picker">
+        <!-- 桌面：16 个勾选框平排（契约：1440 下结构与改前一致） -->
+        <div v-if="!isMobileViewport" class="cell-picker">
           <el-checkbox-group v-model="cellPicked" size="small">
             <el-checkbox v-for="i in cellCount" :key="i" :value="i" :label="'#' + i" border size="small" />
           </el-checkbox-group>
@@ -21,14 +49,21 @@
           <el-button size="small" text @click="invertPick">反选</el-button>
         </div>
         <div class="chart-box">
-          <LineChart :series="cellShown" :y-axis-min="cellY.min" :y-axis-max="cellY.max" :show-area="false" height="280px" />
+          <LineChart
+            :series="cellShown"
+            :y-axis-min="cellY.min"
+            :y-axis-max="cellY.max"
+            :show-area="false"
+            :height="isMobileViewport ? '160px' : '280px'"
+          />
         </div>
       </template>
     </div>
 
     <!-- 图2 运行趋势：按量纲分组（参考旧页 HistoryChartSection 的 bmsChartGroups）。
          总电压(~53V) 与单体电压(~3.3V) 同为 V 但量级差 16 倍，共用一根 Y 轴会把单体压成贴底直线，
-         故拆成独立子图；状态量 protection_status / fet_status 不适合折线，沿用旧页判断不纳入。 -->
+         故拆成独立子图；状态量 protection_status / fet_status 不适合折线，沿用旧页判断不纳入。
+         窄屏：5 子图平铺改为「单图 + 量纲切换器」（el-select），桌面仍保留 5 子图平铺。 -->
     <div class="card chart-card">
       <div class="card-head">
         <span class="card-title">运行趋势</span>
@@ -37,8 +72,9 @@
           <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
         </span>
       </div>
-      <!-- 恒定 5 个分组槽位：组数不随数据到达而变，页面高度稳定（本页依赖 overflow-anchor:none 防跳动） -->
-      <div class="trend-grid">
+      <!-- 桌面契约：恒定 5 个分组槽位，组数不随数据到达而变，页面高度稳定
+           （本页依赖 overflow-anchor:none 防跳动） -->
+      <div v-if="!isMobileViewport" class="trend-grid">
         <div v-for="g in trendGroups" :key="g.title" class="trend-sub">
           <p class="trend-sub-title">{{ g.title }}</p>
           <div class="trend-sub-body">
@@ -56,11 +92,45 @@
           </div>
         </div>
       </div>
+      <!-- 窄屏：单图 + 量纲切换器。容器固定高度 ⇒ loading/empty/offline 也不撑变卡片高度 -->
+      <div
+        v-else
+        class="trend-mobile"
+        :data-dim="activeDim"
+        :data-series-count="mobileSeriesCount"
+        :data-point-count="mobilePointCount"
+      >
+        <div class="trend-dim-bar">
+          <el-select
+            v-model="activeDim"
+            class="trend-dim-select"
+            size="small"
+            popper-class="bms-trend-dim-dropdown"
+            aria-label="切换运行趋势量纲"
+            @change="onDimChange"
+          >
+            <el-option v-for="d in trendGroupDefs" :key="d.key" :value="d.key" :label="d.label" />
+          </el-select>
+        </div>
+        <div class="trend-mobile-chart">
+          <div v-if="metricLoading" class="trend-sub-state is-loading">加载中…</div>
+          <div v-else-if="!online" class="trend-sub-state">设备离线</div>
+          <LineChart
+            v-else-if="mobileGroup && mobileGroup.series.length"
+            :series="mobileGroup.series"
+            :y-axis-min="mobileGroup.yAxisMin"
+            :y-axis-max="mobileGroup.yAxisMax"
+            :show-area="false"
+            height="196px"
+          />
+          <div v-else class="trend-sub-state">暂无该项历史数据</div>
+        </div>
+      </div>
     </div>
   </section>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { useHistoryData } from '@/composables/useHistoryData'
@@ -69,6 +139,20 @@ import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import type { SeriesData } from '@/types/chart'
 
 const props = withDefaults(defineProps<{ deviceId: number; cellCount?: number; online?: boolean }>(), { cellCount: 16, online: true })
+
+/* ---- 视口判定（≤768px 走移动端布局）----
+ * 为什么用 JS 判定而不是纯 CSS：窄屏要**结构**变化（5 子图 → 单图 + 量纲切换器、
+ * 16 checkbox → 弹层），CSS 只能隐藏不能减少节点；被 display:none 藏起来的 5 张图
+ * 仍会创建 echarts 实例、仍会进读屏与 Tab 顺序，属于可访问性与性能双重缺陷。
+ * SSR/测试环境没有 window.matchMedia 时按桌面处理，保证既有桌面契约测试稳定。 */
+const MOBILE_MAX = 768
+const isMobileViewport = ref(
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(max-width: ${MOBILE_MAX}px)`).matches
+    : false,
+)
+let mobileMql: MediaQueryList | null = null
+const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
 
 /* ---- 图1 电芯电压历史（逻辑同旧页 BmsCellVoltageHistoryChart） ---- */
 const cellCats = computed(() => Array.from({ length: props.cellCount }, (_, i) => 'cell_voltage_' + (i + 1)))
@@ -111,6 +195,8 @@ const cellY = computed(() => {
   return computeAdaptiveYAxisRange(vals, { minBound: 2.0, maxBound: 4.5 })
 })
 const cellHint = computed(() => '已选 ' + cellShown.value.length + '/' + cellAll.value.length + ' 串')
+/** 窄屏弹层触发器文案：不带「串」后缀，控制触发器宽度（≤44px 高，文案单行不截断）。 */
+const cellPickLabel = computed(() => '已选 ' + cellShown.value.length + '/' + cellAll.value.length)
 
 /* ---- 图2 运行趋势：按量纲分组（逻辑同旧页 HistoryChartSection 的 bmsChartGroups） ----
  * 状态量 protection_status / fet_status 不适合折线，沿用旧页判断，不纳入。 */
@@ -131,13 +217,15 @@ const metricUnitMap = Object.fromEntries(metricDefs.map((m) => [m.cat, m.unit]))
 /**
  * 量纲分组 —— 与旧页 HistoryChartSection.bmsChartGroups 一一对应。
  * 同组共享一根 Y 轴；跨组不共轴，避免 53V 把 3.3V 压成贴底直线。
+ * key/label 供窄屏量纲切换器使用；title 供桌面子图标题使用（两者不可混用，否则桌面标题会变）。
  */
-const trendGroupDefs: Array<{ title: string; categories: string[] }> = [
-  { title: '总电压 (V)', categories: ['total_voltage'] },
-  { title: '单体电压 (V)', categories: ['cell_voltage_max', 'cell_voltage_min'] },
-  { title: '电流 (A)', categories: ['current'] },
-  { title: '电池状态', categories: ['rsoc', 'remaining_capacity'] },
-  { title: '温度 (℃)', categories: ['temperature_1', 'temperature_2', 'temperature_3'] },
+interface TrendDimDef { key: string; label: string; title: string; categories: string[] }
+const trendGroupDefs: TrendDimDef[] = [
+  { key: 'total_voltage', label: '总电压', title: '总电压 (V)', categories: ['total_voltage'] },
+  { key: 'cell_voltage', label: '单体电压', title: '单体电压 (V)', categories: ['cell_voltage_max', 'cell_voltage_min'] },
+  { key: 'current', label: '电流', title: '电流 (A)', categories: ['current'] },
+  { key: 'status', label: '电池状态', title: '电池状态', categories: ['rsoc', 'remaining_capacity'] },
+  { key: 'temperature', label: '温度', title: '温度 (℃)', categories: ['temperature_1', 'temperature_2', 'temperature_3'] },
 ]
 
 const { loading: metricLoading, fetch: metricFetch } = useHistoryData({
@@ -159,7 +247,7 @@ function onMetricRange() {
   if (metricRange.value === 'custom' && metricCustom.value) void fetchMetrics()
 }
 
-interface TrendGroupView { title: string; series: SeriesData[]; yAxisMin?: number; yAxisMax?: number }
+interface TrendGroupView { key: string; label: string; title: string; series: SeriesData[]; yAxisMin?: number; yAxisMax?: number }
 
 /**
  * 自适应 Y 轴范围只在「组内各序列量级可比」时才给。
@@ -187,13 +275,49 @@ function adaptiveRange(series: SeriesData[]): { yAxisMin?: number; yAxisMax?: nu
 const trendGroups = computed<TrendGroupView[]>(() =>
   trendGroupDefs.map((g) => {
     const series = metricAll.value.filter((s) => s.category && g.categories.includes(s.category))
-    return { title: g.title, series, ...adaptiveRange(series) }
+    return { key: g.key, label: g.label, title: g.title, series, ...adaptiveRange(series) }
   }),
 )
 
+/* ---- 窄屏量纲切换器 ----
+ * 默认选中「第一个有数据的分组」；用户手动切换后不再被数据到达覆盖（dimTouched）。
+ * 数据仍一次拉取全部 5 组，切换不重新请求。 */
+const activeDim = ref(trendGroupDefs[0].key)
+const dimTouched = ref(false)
+function onDimChange() { dimTouched.value = true }
+watch(
+  () => trendGroups.value.map((g) => g.series.length).join(','),
+  () => {
+    if (dimTouched.value) return
+    const firstWithData = trendGroups.value.find((g) => g.series.length > 0)
+    activeDim.value = firstWithData ? firstWithData.key : trendGroupDefs[0].key
+  },
+  { immediate: true },
+)
+const mobileGroup = computed<TrendGroupView | undefined>(
+  () => trendGroups.value.find((g) => g.key === activeDim.value) ?? trendGroups.value[0],
+)
+const mobileSeriesCount = computed(() => mobileGroup.value?.series.length ?? 0)
+/** 当前量纲实际绘制的点数（探针/测试用：>0 才证明横轴真有数据，不是空图） */
+const mobilePointCount = computed(
+  () => (mobileGroup.value?.series ?? []).reduce((n, s) => n + s.data.length, 0),
+)
+
 onMounted(() => {
+  // 监听视口变化：横竖屏切换/桌面窗口缩放时在「5 子图平铺」与「单图 + 切换器」间切换
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    mobileMql = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`)
+    mobileMql.addEventListener('change', onMobileChange)
+    isMobileViewport.value = mobileMql.matches
+  }
   void fetchCells()
   void fetchMetrics()
+})
+
+onUnmounted(() => {
+  // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听（内存泄漏）
+  mobileMql?.removeEventListener('change', onMobileChange)
+  mobileMql = null
 })
 
 defineExpose({ fetchCells, fetchMetrics })
@@ -283,12 +407,45 @@ defineExpose({ fetchCells, fetchMetrics })
 }
 .trend-sub-state.is-loading { min-height: 200px; }
 
+/* ---- 窄屏独有：电芯选择弹层触发器 + 运行趋势单图 + 量纲切换器 ---- */
+.cell-picker-trigger { flex: 0 0 auto; }
+.cell-picker-pop { display: flex; flex-direction: column; gap: 8px; }
+.cell-picker-pop-title { margin: 0; font-size: 12px; color: var(--el-text-color-secondary); }
+.cell-picker-pop-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.cell-picker-pop-actions { display: flex; justify-content: flex-end; gap: 4px; }
+/* 弹层内容根节点带本组件 scope id（teleport 不丢 scoped），但弹层外层 popper 不带 ⇒ 宽度约束走 :global */
+:global(.bms-cell-picker-popover) { max-width: calc(100vw - 24px); }
+:global(.bms-cell-picker-popover .el-checkbox) { margin-right: 0; }
+.trend-dim-bar { display: flex; }
+.trend-dim-select { width: 100%; }
+/* 量纲切换器的选项文案必须完整可读（不 ellipsis 截断）：
+   Element Plus 的 .el-select__selected-item / .el-select-dropdown__item 默认 text-overflow: ellipsis，
+   即使当前 5 个量纲名都很短（≤4 字）也会被截断扫描判为「可能丢字」，故显式收回。 */
+.trend-dim-select :deep(.el-select__selected-item) { text-overflow: clip; }
+:global(.bms-trend-dim-dropdown .el-select-dropdown__item) { text-overflow: clip; }
+:global(.bms-trend-dim-dropdown) { max-width: calc(100vw - 24px); }
+.trend-mobile-chart { height: 196px; }
+.trend-mobile-chart .trend-sub-state { min-height: 0; height: 100%; }
+
 @media (max-width: 1100px) {
   .trend-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 768px) {
-  /* 与父页 .card 的窄屏内距一致 */
-  .chart-card { padding: 14px 12px; }
+  /* 与父页 .card 的窄屏内距一致；上下收到 12px 为「单图 + 切换器」腾高度 */
+  .chart-card { padding: 12px; }
+  .card-head { margin-bottom: 4px; }
+  /* 窄屏标题行空间让给量纲切换器/电芯选择触发器：
+     静态说明文字（按量纲分组说明、已选 N/16 串）信息已分别由切换器选项与触发器承载，
+     不是数据本身 —— 数值/保护名称等业务数据一律不隐藏。 */
+  .card-hint { display: none; }
+  .chart-box { height: 160px; }
+  .chart-state { height: 160px; }
+  .trend-dim-bar { margin-bottom: 4px; }
+  .trend-dim-select :deep(.el-select__wrapper) { min-height: 44px; font-size: 14px; }
+  /* 触发器/弹层勾选框：窄屏触摸目标 ≥44px（高密度弹层勾选框允许 36px，间距补足） */
+  .cell-picker-trigger { min-height: 44px; }
+  .cell-picker-pop :deep(.el-checkbox) { min-height: 36px; }
+  .cell-picker-pop :deep(.el-checkbox__label) { font-size: 13px; }
   .head-right :deep(.el-radio-button__inner) { min-height: 44px; padding: 0 12px; }
 }
 @media (pointer: coarse) {
