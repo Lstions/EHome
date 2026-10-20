@@ -11,7 +11,7 @@
     正文用内联 style 的 display:none 收起（不用 v-if：图表组件要保活，避免展开时重新取数/重新 init）。
 -->
 <script lang="ts">
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, ref, watch } from 'vue'
 import { ArrowRight } from '@element-plus/icons-vue'
 
 export default defineComponent({
@@ -26,10 +26,27 @@ export default defineComponent({
     collapsible: { type: Boolean, default: false },
     /** 当前是否展开 */
     open: { type: Boolean, default: false },
+    /**
+     * 懒挂载（契约 §2.4）：collapsible && lazy 时，正文在**首次展开前不渲染**，
+     * 首次展开后保活（不再卸载）。默认 false = 现在的行为（收起时 display:none 保活）。
+     *
+     * 为什么需要：窄屏 7 个诊断区块默认收起，但 children（图表卡）在首屏就挂载并取数 ——
+     * 用户根本看不到的 protection 30 天 / 温度 / SOC 三张卡照样发出 3 个重查询（根因 R3）。
+     * 桌面 collapsible=false 时本 prop 不生效（零包装直出插槽，布局与改前一致）。
+     */
+    lazy: { type: Boolean, default: false },
   },
   emits: ['toggle'],
   setup(props, { slots, emit }) {
     const bodyId = 'collapse-body-' + props.blockId
+    /** 是否已经历过「首次展开」—— lazy 下决定正文是否已挂载（一旦挂载不再卸载） */
+    const openedOnce = ref(props.open)
+    watch(
+      () => props.open,
+      (open) => {
+        if (open) openedOnce.value = true
+      },
+    )
     return () => {
       // 桌面：不产生任何节点，插槽内容直接成为父容器的子节点
       if (!props.collapsible) return slots.default ? slots.default() : null
@@ -49,10 +66,13 @@ export default defineComponent({
           props.summary ? h('span', { class: 'collapse-summary' }, props.summary) : null,
         ],
       )
+      // lazy && 尚未展开过：只留一个空的 body 占位（保住 aria-controls 的指向），不创建子组件。
+      // 兜底 || props.open：watch 是 pre-flush，理论上先于本次渲染，但首帧展开不依赖 flush 更稳。
+      const bodyRendered = !props.lazy || openedOnce.value || props.open
       const body = h(
         'div',
         { id: bodyId, class: 'collapse-body', style: props.open ? undefined : { display: 'none' } },
-        slots.default ? slots.default() : [],
+        bodyRendered && slots.default ? slots.default() : [],
       )
       return h(
         'div',

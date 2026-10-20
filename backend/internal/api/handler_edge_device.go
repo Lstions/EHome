@@ -1277,10 +1277,26 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
-		// 从 device_data 表查最新一条
+		// 从 device_data 表查最新一条。
 		var data models.DeviceData
-		cond, args := dataScopeCond(qs)
-		db.Where(cond, args...).Order("created_at DESC").First(&data)
+		if isPostgresDialect(db) {
+			// BMS 页慢修复 §1.6: 每个 scope 分支各自走索引 + LIMIT 1, 再取较新
+			// (与旧 OR scope 查询的 max(created_at) 语义严格等价; 评审 2026-10-21
+			// 指出「A 命中即止」在 backfill 未完成/NULL 回退写入时会返回 stale,
+			// 见 latestDeviceDataSQL 注释)。旧的 OR scope 条件使 PG 退化为
+			// device_data 200 万行 Parallel Seq Scan + top-N (生产实测 341 ms)。
+			sqlText, args := latestDeviceDataSQL(qs)
+			if sqlText != "" {
+				if err := db.WithContext(c.Request.Context()).Raw(sqlText, args...).Scan(&data).Error; err != nil {
+					// 与旧实现一致: 查询错误忽略 (返回零值), 不 500。
+					logger.Warnf("[latest-data] query failed device_pk=%d: %v", id, err)
+				}
+			}
+		} else {
+			// SQLite: 旧实现一分不改 (既有测试是契约)。
+			cond, args := dataScopeCond(qs)
+			db.Where(cond, args...).Order("created_at DESC").First(&data)
+		}
 		Success(c, data)
 	})
 

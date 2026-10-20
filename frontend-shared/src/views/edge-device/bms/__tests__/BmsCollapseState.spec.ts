@@ -139,9 +139,14 @@ describe('BmsDetailPage 接入契约（源码层）', () => {
 
 describe('新增诊断卡接入（4 张图 + 折叠头摘要）', () => {
   it('4 张新卡都挂上了：保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布', () => {
-    for (const tag of ['ProtectionHistoryCard', 'TempTrendCard', 'SocCurrentCard', 'PollIntervalCard']) {
+    for (const tag of ['ProtectionHistoryCard', 'TempTrendCard', 'SocCurrentCard']) {
       expect(bmsDetailSource).toContain(`<${tag} :device-id="deviceId" :online="deviceOnline"`)
     }
+    // 2026-10-20 契约 §2.5：轮询间隔分布卡改为「父页下发 commands」以消除 commands ×2（R7），
+    // 模板变成多行并带 commands / parent-loading 两个新 props。
+    expect(bmsDetailSource).toContain('<PollIntervalCard')
+    expect(bmsDetailSource).toContain(':commands="pollTemplates"')
+    expect(bmsDetailSource).toContain(':parent-loading="pollTemplatesLoading"')
   })
 
   it('4 张新卡默认折叠，折叠 id 与记忆键一一对应', () => {

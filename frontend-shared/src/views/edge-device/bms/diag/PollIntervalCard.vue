@@ -11,6 +11,14 @@
   把各指令的间隔画成横条：一眼看出快慢，且汇总出**采样负载（帧/秒）** ——
   这是判断"是不是某条指令把总线刷爆了"的直接依据。
 
+  ── 取数：父页优先（2026-10-20 契约 §2.6）────────────────────────────────────
+  页面本身已经要取 GET /edge-devices/:id/commands 来渲染「轮询指令配置」卡；
+  本卡再取一次就是根因报告 R7 实测的 commands ×2（同毫秒发出）。
+  因此新增 commands prop：父页把**原始返回**下发给本卡，本卡只按 schedulable 过滤、不再发请求。
+  commands 为 null 时保持旧行为（本卡自取数），保证单测 / 其它入口不变。
+  parentLoading 是去重协作的小补充：父页首屏取数期间为 true，本卡不自取数、只显示加载中，
+  避免「父页取一次 + 本卡再取一次」的重复（无此 prop 时默认 false ⇒ 行为与旧版一致）。
+
   ── 为什么不用 ECharts ──────────────────────────────────────────────────────
   数据只有 5~10 行、只需要长度编码。Canvas 图在这点信息量上反而：
     · 文字被缩放（手机上会小于 10px）
@@ -29,7 +37,7 @@
       <span class="diag-tip" v-if="enabledCount > 0">
         {{ enabledCount }} 条轮询中 · 合计 {{ loadPerSec.toFixed(1) }} 帧/秒
       </span>
-      <span class="diag-tip is-quiet" v-else-if="loaded && commands.length">全部已禁用</span>
+      <span class="diag-tip is-quiet" v-else-if="loaded && commandRows.length">全部已禁用</span>
       <span class="diag-tip is-quiet" v-else></span>
     </div>
 
@@ -40,10 +48,10 @@
         <span class="err-text">轮询配置加载失败：{{ errorMsg }}</span>
         <el-button link size="small" type="primary" @click="load">重试</el-button>
       </div>
-      <div v-else-if="!commands.length" class="state-line is-muted">暂无轮询指令</div>
+      <div v-else-if="!commandRows.length" class="state-line is-muted">暂无轮询指令</div>
 
       <div v-else class="bar-list" role="list" aria-label="各轮询指令的间隔">
-        <div v-for="c in commands" :key="c.id" class="bar-row" role="listitem">
+        <div v-for="c in commandRows" :key="c.id" class="bar-row" role="listitem">
           <span class="bar-label" :title="c.name">{{ c.name }}</span>
           <span class="bar-track" aria-hidden="true">
             <span
@@ -67,10 +75,24 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { CircleCloseFilled } from '@element-plus/icons-vue'
 import { edgeDeviceApi, type CommandTemplateWithInterval } from '@/api/edgeDevice'
 
-const props = defineProps<{
-  deviceId: number | string
-  online: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    deviceId: number | string
+    online: boolean
+    /**
+     * 父页已取到的指令原始返回（契约 §2.6）。
+     * null（默认）= 旧行为：本卡自取数；非 null 时不再请求，只按 schedulable 过滤后重建列表。
+     */
+    commands?: CommandTemplateWithInterval[] | null
+    /**
+     * 父页是否正在取 commands（仅 commands === null 时有意义）。
+     * true 时本卡等待父页数据、不发请求（消除首屏 commands ×2）；父页取数失败（false 且仍为 null）
+     * 时本卡回退自取数，保证失败态 + 重试按钮仍然可见。
+     */
+    parentLoading?: boolean
+  }>(),
+  { commands: null, parentLoading: false },
+)
 
 /** 折叠态摘要上抛给父页的折叠头（§3.2） */
 const emit = defineEmits<{ (e: 'summary', text: string): void }>()
@@ -78,15 +100,28 @@ const emit = defineEmits<{ (e: 'summary', text: string): void }>()
 /** 间隔轴满刻度 = 后端上限 60000ms（与 el-input-number 的 max 一致） */
 const FULL_SCALE_MS = 60000
 
-const commands = ref<CommandTemplateWithInterval[]>([])
+/** 实际渲染的指令行（来自父页 props 或本卡请求；只保留可调度项） */
+const commandRows = ref<CommandTemplateWithInterval[]>([])
 const loading = ref(false)
 const loaded = ref(false)
 const errorMsg = ref('')
 
-const enabledCount = computed(() => commands.value.filter((c) => c.current_interval_ms > 0).length)
+function schedulableOnly(all: CommandTemplateWithInterval[] | null | undefined): CommandTemplateWithInterval[] {
+  return Array.isArray(all) ? all.filter((c) => c.schedulable) : []
+}
+
+/** 父页下发数据：只建列表，不发请求（父页是唯一取数入口） */
+function applyFromParent(all: CommandTemplateWithInterval[]): void {
+  commandRows.value = schedulableOnly(all)
+  errorMsg.value = ''
+  loading.value = false
+  loaded.value = true
+}
+
+const enabledCount = computed(() => commandRows.value.filter((c) => c.current_interval_ms > 0).length)
 /** 采样负载：每条启用指令的 1000/interval 之和（帧/秒）。用来判断总线压力 */
 const loadPerSec = computed(() =>
-  commands.value.reduce(
+  commandRows.value.reduce(
     (sum, c) => sum + (c.current_interval_ms > 0 ? 1000 / c.current_interval_ms : 0),
     0,
   ),
@@ -97,7 +132,7 @@ const summaryText = computed(() => {
   if (errorMsg.value) return ''
   if (loading.value) return '加载中…'
   if (!loaded.value) return ''
-  return commands.value.length === 0 ? '暂无轮询指令' : `${enabledCount.value} 条轮询中`
+  return commandRows.value.length === 0 ? '暂无轮询指令' : `${enabledCount.value} 条轮询中`
 })
 watch(summaryText, (t) => emit('summary', t), { immediate: true })
 
@@ -116,24 +151,68 @@ function formatInterval(ms: number): string {
 }
 
 async function load() {
+  const deviceId = Number(props.deviceId)
   errorMsg.value = ''
   loading.value = true
   try {
     // 只取可调度的指令（与轮询配置卡口径一致：schedulable = 允许设置轮询间隔）
-    const all = await edgeDeviceApi.getCommandIntervals(Number(props.deviceId))
-    commands.value = Array.isArray(all) ? all.filter((c) => c.schedulable) : []
+    const all = await edgeDeviceApi.getCommandIntervals(deviceId)
+    // 请求期间父页数据到达 ⇒ 父页优先（避免本卡的旧响应覆盖父页新数据）
+    const fromParent = props.commands
+    if (fromParent !== null) {
+      applyFromParent(fromParent)
+      return
+    }
+    commandRows.value = schedulableOnly(all)
   } catch (e: unknown) {
     // 失败只影响本卡：渲染本卡失败态，不抛到父页
     errorMsg.value = e instanceof Error && e.message ? e.message : '请求失败'
-    commands.value = []
+    commandRows.value = []
   } finally {
     loading.value = false
     loaded.value = true
   }
 }
 
-onMounted(load)
-watch(() => props.deviceId, load)
+// 父页数据到达 / 变化：重建列表（不再请求）。初始即为非 null 时（页面已取到）直接使用。
+watch(
+  () => props.commands,
+  (all) => {
+    if (all !== null) {
+      applyFromParent(all)
+      return
+    }
+    // 父页开始新一轮取数（如切换设备）：跟随进入加载态，等它下发数据
+    if (props.parentLoading) {
+      errorMsg.value = ''
+      loading.value = true
+    }
+  },
+  { immediate: true },
+)
+
+// 父页取数结束：仍为 null（父页失败）⇒ 回退到本卡自取数，让失败态与重试按钮可见
+watch(
+  () => props.parentLoading,
+  (pending) => {
+    if (pending) {
+      errorMsg.value = ''
+      loading.value = true
+      return
+    }
+    if (props.commands === null) void load()
+  },
+)
+
+onMounted(() => {
+  // immediate watch 已处理两种「有人负责取数」的情形；只有无人负责时才自取（旧行为）
+  if (props.commands === null && !props.parentLoading && !loading.value) void load()
+})
+
+// 设备切换：父页会重新取数并下发；父页不负责（旧用法）时本卡自己重取
+watch(() => props.deviceId, () => {
+  if (props.commands === null && !props.parentLoading) void load()
+})
 </script>
 
 <style scoped>

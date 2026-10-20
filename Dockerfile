@@ -13,6 +13,10 @@ COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ .
 RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
+# 主机运维 CLI (BMS 页慢修复 §1.4): 部署维护窗口需要
+# `ehomectl datalifecycle ensure-indexes` 在启动新容器前建复合索引, 因此
+# 二进制必须随镜像发布 (此前只 COPY ehome-server, 生产无法执行该子命令)。
+RUN CGO_ENABLED=0 GOOS=linux go build -o ehomectl ./cmd/ehomectl/
 
 # ── Stage 2: Frontend build ─────────────────────────────────────────────
 FROM node:22-alpine AS frontend-builder
@@ -41,6 +45,8 @@ RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 COPY --from=backend-builder /app/ehome-server .
+# 运维 CLI: /app/ehomectl (供 docker run/exec 执行 datalifecycle ensure-indexes)
+COPY --from=backend-builder /app/ehomectl .
 COPY --from=frontend-builder /app/dist ./static/dist
 RUN mkdir -p /app/firmwares
 

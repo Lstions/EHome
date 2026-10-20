@@ -38,9 +38,9 @@
         <span>设备离线，历史数据暂不可用</span>
       </div>
       <div v-else-if="loading && !loaded" class="state-line is-muted">正在加载 SOC 与电流…</div>
-      <div v-else-if="errorMsg" class="state-line is-error">
+      <div v-else-if="errorMsg" class="state-line is-error" role="alert">
         <el-icon :size="14"><CircleCloseFilled /></el-icon>
-        <span class="err-text">{{ errorMsg }}</span>
+        <span class="err-text">SOC / 电流加载失败：{{ errorMsg }}</span>
         <el-button link size="small" type="primary" @click="load">重试</el-button>
       </div>
       <div v-else-if="!hasData" class="state-line is-muted">暂无 SOC / 电流历史数据</div>

@@ -71,6 +71,8 @@ const props = withDefaults(defineProps<{
 
 const { loading, fetch: historyFetch } = useHistoryData({
   errorPrefix: '获取电芯电压历史数据失败',
+  // 历史 API 单独放宽到 30s（client.ts 全局仍 10s）；24h×16 类查询本就很重
+  timeoutMs: 30000,
 })
 const allSeries = ref<SeriesData[]>([])
 const selectedCells = ref<number[]>([])
