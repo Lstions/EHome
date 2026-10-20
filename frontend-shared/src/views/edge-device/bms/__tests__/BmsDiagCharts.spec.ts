@@ -160,6 +160,14 @@ describe('集成契约：diag 卡片只渲染内容，不画卡片外壳', () =>
     expect(protectionCode).not.toMatch(/reduce\([^)]*value/)
   })
 
+  it('状态文案互斥：加载中/无数据时脚注不得写出「12 项保护均未触发」', () => {
+    // 主结论区：「没有该字段」在「有数据但全 0」之前判定（否则会把没有字段谎报成没触发）
+    expect(protectionCode.indexOf('v-else-if="!hasData"')).toBeGreaterThan(-1)
+    expect(protectionCode.indexOf('v-else-if="!hasData"')).toBeLessThan(protectionCode.indexOf('v-else-if="!hitBits.length"'))
+    // 脚注必须带 hasData + !loading 前置条件（曾经的 bug：加载中就写「均未触发」）
+    expect(protectionCode).toMatch(/v-if="hasData && !loading && !errorMsg && hitBits\.length"/)
+  })
+
   it('空态分三档：无数据 / 无触发 / 失败，不得把"没有字段"说成"没触发过"', () => {
     expect(protectionCode).toContain('暂无保护状态历史数据')
     expect(protectionCode).toContain('无保护触发记录')

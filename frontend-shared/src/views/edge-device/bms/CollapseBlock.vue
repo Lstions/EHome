@@ -69,6 +69,10 @@ export default defineComponent({
   display: block;
   min-width: 0;
   margin-bottom: 12px;
+  /* 作为 `.row` 的 flex 子项必须占满整行：默认 flex:0 1 auto 会收缩到「标题+摘要」的内容宽，
+     实测「操作历史」只有 157px、「实时数据流」178px（父容器 321px）—— 半屏宽的折叠行，
+     展开后里面的卡片也跟着半屏。父页的 .diag-row 规则只覆盖了新诊断卡，这两个既有区块没有。 */
+  flex: 1 1 100%;
 }
 .collapse-block:last-child {
   margin-bottom: 0;

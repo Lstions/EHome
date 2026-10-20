@@ -411,7 +411,7 @@
             </transition>
           </div>
 
-          <p v-if="snapshotError" class="card-footnote txt-danger">最新快照加载失败：{{ snapshotError }}</p>
+          <p v-if="snapshotError" class="card-footnote txt-danger">{{ snapshotErrorText }}</p>
           <p class="card-footnote">
             数据来自设备实时上报（新的在前）。向上滚动即暂停跟随，新数据只累积计数；滚回底部或点「回到最新」恢复。
           </p>
@@ -854,6 +854,19 @@ async function loadLatestSnapshot() {
   }
 }
 const snapshotError = ref('')
+/**
+ * 快照是**兜底**请求（WS 才是主通道），它的失败不该把 axios 原文怼到用户脸上。
+ * 生产实测：历史查询并发时 latest-data 会 10s 超时，页面就常驻一行
+ * 「最新快照加载失败：timeout of 10000ms exceeded」—— 纯技术噪声。
+ * 这里只保留「发生了什么 + 还能做什么」，原始信息不再展示（日志里仍有）。
+ */
+const snapshotErrorText = computed(() => {
+  const raw = snapshotError.value
+  if (!raw) return ''
+  if (/timeout/i.test(raw)) return '最新快照请求超时（设备数据较多时偶发；实时数据流仍会持续更新）'
+  if (/network|Network Error/i.test(raw)) return '最新快照请求失败：网络不可达（实时数据流仍会持续更新）'
+  return '最新快照加载失败：' + raw
+})
 
 // ── 字段口径：单体电压 cell_voltage_N / 温度 temp_N（或 temperature_N） ──
 const cellCount = computed(() => {
@@ -2050,8 +2063,22 @@ onUnmounted(() => {
   font-size: 12px;
   margin-bottom: 10px;
 }
-.crumb-link { cursor: pointer; }
+/* 这里是个原生 <button>（为了可点 + 键盘可达），但**必须把 UA 样式清零**：
+   否则桌面/手机都会出现 2px outset 黑边 + 灰底 + Arial 13.33px 的「老式按钮」，
+   与同排 11/12px 的面包屑文字完全不是一套（2026-10-20 视觉评审实测）。 */
+.crumb-link {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
 .crumb-link:hover { color: var(--el-color-primary); }
+.crumb-link:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; border-radius: 2px; }
 .crumb-current { color: var(--el-text-color-primary); }
 .sep { color: var(--el-border-color); }
 .head-main { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
@@ -2380,8 +2407,9 @@ onUnmounted(() => {
   .dev-ident { flex: 1; min-width: 0; }
 
   .crumb { margin-bottom: 6px; font-size: 11px; gap: 6px; }
-  /* 面包屑中间层级在手机上价值低（有头部返回），只留「当前页」语境 */
-  .crumb .crumb-link { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 面包屑层级文案**不截断**（「边缘设备管理」7 个字必须完整可读）：
+     热区用上下 padding 撑到 ~36px，再用负 margin 抵消，视觉高度不变、头部仍是 ≤120px。 */
+  .crumb .crumb-link { padding: 8px 0; margin: -8px 0; }
 
   .dev-name { font-size: 17px; }
   .dev-name-line { gap: 6px; }
@@ -2436,6 +2464,8 @@ onUnmounted(() => {
         组件内容区自带工具行（时间范围选择器 / 弹层触发器），不会因此丢控件。 */
   .diag-row > .collapse-block { flex: 1 1 100%; min-width: 0; }
   .diag-card > .card-head { display: none; }
+  /* 操作历史：折叠头已是「操作历史 · 最近 N 条」，卡内「审计线索 · 最近 N 条」同屏重复 */
+  .history-card > .card-head { display: none; }
   /* 「参考线 3.000V / 3.600V」与图例里「偏高 > 3.600V / 偏低 < 3.000V」是同一组阈值的重复表述，
      窄屏只保留图例（它带色块，能直接对上柱子颜色），省一行 16px。 */
   .cell-thresholds { display: none; }

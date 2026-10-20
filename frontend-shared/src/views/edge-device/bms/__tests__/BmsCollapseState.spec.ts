@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 import { useCollapseState } from '@/composables/useCollapseState'
 import CollapseBlock from '@/views/edge-device/bms/CollapseBlock.vue'
 import bmsDetailSource from '@/views/edge-device/bms/BmsDetailPage.vue?raw'
+import collapseBlockSource from '@/views/edge-device/bms/CollapseBlock.vue?raw'
 
 /**
  * BMS 移动端改版第 5 步：诊断类区块折叠机制（2026-10-20）。
@@ -169,5 +170,26 @@ describe('新增诊断卡接入（4 张图 + 折叠头摘要）', () => {
 
   it('新卡在窄屏隐藏卡片头（折叠头已给标题）；组件内容区工具行不受影响', () => {
     expect(bmsDetailSource).toContain('.diag-card > .card-head { display: none; }')
+  })
+
+  it('面包屑是原生 button，必须把 UA 样式清零（否则 2px outset 黑边 + Arial 13.33px）', () => {
+    expect(bmsDetailSource).toMatch(/\.crumb-link \{[\s\S]{0,260}?appearance: none;/)
+    expect(bmsDetailSource).toMatch(/\.crumb-link \{[\s\S]{0,260}?font: inherit;/)
+    // 反向：窄屏不得再用 ellipsis 裁掉「边缘设备管理」
+    expect(bmsDetailSource).not.toMatch(/\.crumb \.crumb-link \{[^}]*text-overflow: ellipsis/)
+  })
+
+  it('快照兜底失败不直出 axios 原文（timeout of 10000ms exceeded 属技术噪声）', () => {
+    expect(bmsDetailSource).toContain('const snapshotErrorText = computed(')
+    expect(bmsDetailSource).toMatch(/\{\{ snapshotErrorText \}\}/)
+    expect(bmsDetailSource).toMatch(/timeout/i)
+  })
+
+  it('折叠块作为 .row 的 flex 子项必须占满整行（实测曾只有 157/321px）', () => {
+    expect(collapseBlockSource).toContain('flex: 1 1 100%;')
+  })
+
+  it('操作历史卡头窄屏隐藏（折叠头「最近 N 条」与卡内「审计线索 · 最近 N 条」重复）', () => {
+    expect(bmsDetailSource).toContain('.history-card > .card-head { display: none; }')
   })
 })

@@ -381,7 +381,12 @@ export const edgeDeviceApi = {
   },
 
   async getLatestData(id: number): Promise<any> {
-    const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/edge-devices/${id}/latest-data`)
+    // 单独放宽到 20s：实测（2026-10-20）设备 14 在历史批量查询并发时该接口 10s 内不返回，
+    // 默认超时会让「实时数据流」卡首屏就常驻一条超时错误（快照只是 WS 的兜底，不该抢戏）。
+    const response = await client.get<unknown, ApiEnvelope<any>>(
+      `/api/v1/edge-devices/${id}/latest-data`,
+      { timeout: 20000 },
+    )
     return response.data
   },
 

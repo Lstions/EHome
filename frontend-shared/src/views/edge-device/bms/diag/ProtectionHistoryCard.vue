@@ -65,7 +65,12 @@
         <el-button link size="small" type="primary" @click="load">重试</el-button>
       </div>
 
-      <!-- ④ 有数据但 12 位全 0：这是好事，用绿色结论（不是"暂无数据"） -->
+      <!-- ④ 没有 protection_status 数据：这是「没这个字段」，**不是**「没触发过」 -->
+      <div v-else-if="!hasData" class="state-line is-muted">
+        <span>暂无保护状态历史数据</span>
+      </div>
+
+      <!-- ⑤ 有数据但 12 位全 0：这是好事，用绿色结论（不是"暂无数据"） -->
       <div v-else-if="!hitBits.length" class="state-line is-ok">
         <el-icon :size="15"><CircleCheckFilled /></el-icon>
         <span>近 {{ rangeDays }} 天无保护触发记录</span>
@@ -84,18 +89,14 @@
       </div>
     </div>
 
-    <!-- 脚注：未触发项合并成一行（12 项里恒为 0 的项不占行） -->
-    <p class="diag-foot">
-      <template v-if="!hasData && !loading && online && !errorMsg">
-        暂无保护状态历史数据
-      </template>
-      <template v-else-if="hitBits.length">
-        其余 {{ zeroCount }} 项近 {{ rangeDays }} 天未触发
-      </template>
-      <template v-else-if="rangeDays === 7">
-        近 7 天无记录，可切到 30 / 90 天查看更多
-      </template>
-      <template v-else>12 项保护均未触发</template>
+    <!-- 脚注：只在与主结论**不矛盾**时出现。
+         曾经的 bug：加载中/无数据时脚注仍走最后的 else，写出「12 项保护均未触发」——
+         一边「正在加载」一边「均未触发」= 谎报结论（2026-10-20 视觉评审实测）。 -->
+    <p v-if="hasData && !loading && !errorMsg && hitBits.length" class="diag-foot">
+      其余 {{ zeroCount }} 项近 {{ rangeDays }} 天未触发
+    </p>
+    <p v-else-if="hasData && !loading && !errorMsg && !hitBits.length && rangeDays === 7" class="diag-foot">
+      近 7 天无记录，可切到 30 / 90 天查看更多
     </p>
   </div>
 </template>

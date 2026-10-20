@@ -222,6 +222,9 @@ const getXAxisConfig = (theme = getChartTheme()) => {
     axisLabel: {
       color: theme.regular,
       fontSize: 11,
+      // 窄屏小图（295px）上 6 个时间刻度会挤成「20:0000:0004:0008:00…」（实测重叠），
+      // 交给 ECharts 丢弃重叠标签；大图无重叠时该开关不改变任何东西。
+      hideOverlap: isCompactChart.value,
       formatter: (value: number) => {
         const d = new Date(value)
         const now = new Date()

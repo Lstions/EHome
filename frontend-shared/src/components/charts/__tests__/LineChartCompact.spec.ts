@@ -29,6 +29,10 @@ describe('LineChart 紧凑图排版（轴名不得压图例）', () => {
     expect(lineChartSource).toMatch(/top: isCompactChart\.value \? 6 : 30/)
   })
 
+  it('紧凑图 X 轴标签开启 hideOverlap（6 个时间刻度曾挤成 20:0000:0004:00…）', () => {
+    expect(lineChartSource).toContain('hideOverlap: isCompactChart.value,')
+  })
+
   it('不得覆盖 grid.top —— 温度趋势卡的 45℃ 虚线依赖默认 60', () => {
     expect(lineChartSource).not.toContain('top: isCompactChart.value ? 40')
     // 该耦合的另一半：TempTrendCard 的注释里写明按默认 60 换算（改这里必须同步改那边）
