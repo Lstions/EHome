@@ -43,8 +43,30 @@
       </div>
     </el-card>
 
-    <!-- 列表 (instance_count 含已删实例, §1.1 Unscoped 聚合) -->
-    <div class="mobile-table-wrapper">
+    <!-- 列表四态互斥：首屏加载骨架 / 加载失败错误态 / 数据表格 / 空态。
+         P0（2026-10-21 生产实测）：GET /logical-devices 稳定 42.4s，而全局 axios timeout=10s
+         ⇒ 请求必然失败；改前失败后 items 为空，直接渲染「暂无逻辑设备 + 您还没有边缘设备」
+         —— **假空态 + 假断言**（实际 16 台逻辑设备、3 台边缘设备）。现在失败单独渲染
+         错误态 + 重试，加载中渲染骨架，绝不再拿"没有数据"冒充"加载失败"。 -->
+    <el-skeleton
+      v-if="loading && items.length === 0"
+      class="list-skeleton"
+      :rows="6"
+      animated
+      data-test="ld-skeleton"
+    />
+
+    <EmptyState
+      v-else-if="loadError"
+      kind="error"
+      :icon="WarningFilled"
+      title="加载逻辑设备列表失败"
+      :description="loadError"
+      :quick-actions="[{ label: '重试', type: 'primary', handler: fetchList }]"
+      data-test="ld-load-error"
+    />
+
+    <div v-else-if="items.length > 0" class="mobile-table-wrapper">
       <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table
         v-loading="loading"
@@ -65,7 +87,9 @@
         <el-table-column prop="device_type" label="类型" width="120">
           <template #default="{ row }">{{ getDeviceTypeLabel(row.device_type) }}</template>
         </el-table-column>
-        <el-table-column prop="instance_count" label="实例数（含已删）" width="140" align="center" />
+        <!-- P1：140px 装不下 8 个全角字符（实测 .cell scrollWidth 144 / clientWidth 140，
+             393 下表头被省略号截成「实例数（含已…」）→ 160px。 -->
+        <el-table-column prop="instance_count" label="实例数（含已删）" width="160" align="center" />
         <el-table-column label="数据量估算" width="120" align="right">
           <template #default="{ row }">
             <span v-if="row.row_estimate != null">{{ formatRows(row.row_estimate) }}</span>
@@ -83,25 +107,13 @@
             <el-tag size="small" effect="plain">{{ row.retention_days }} 天</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <!-- P1：393 下 sticky 操作列 100px 会盖住「类型」列 83px（69%）——
+             实测 op th x=265..365 vs 类型 x=228..348。按 F26 裁决窄屏取消 fixed。 -->
+        <el-table-column label="操作" width="100" :fixed="isMobile ? false : 'right'">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(asLogical(row))">编辑</el-button>
           </template>
         </el-table-column>
-        <template #empty>
-          <div class="empty-state-enhanced">
-            <el-empty description="暂无逻辑设备" :image-size="80">
-              <template #description>
-                <p class="empty-title">暂无逻辑设备</p>
-                <p class="empty-desc">逻辑设备用于聚合边缘设备数据，实现统一视图和数据保留策略管理。您还没有边缘设备，请先创建边缘设备。</p>
-              </template>
-              <el-button type="primary" @click="goToEdgeDevice">
-                <el-icon><Plus /></el-icon>
-                去创建边缘设备
-              </el-button>
-            </el-empty>
-          </div>
-        </template>
       </el-table>
       <!-- 分页 (真分页: 表格数据来自接口当前页)。
            改前 :data="filteredItems" 是本地全量数组 —— 后端一次返回 1003 条,
@@ -119,6 +131,22 @@
         />
       </div>
     </div>
+
+    <!-- 真空态：不再断言"您还没有边缘设备"（生产实际有 3 台，该断言是错的）；
+         是否缺设备交给 /edge-device 页回答，本页只说明用途与入口。 -->
+    <EmptyState
+      v-else
+      :kind="hasActiveFilters ? 'filtered' : 'initial'"
+      :icon="Connection"
+      :title="hasActiveFilters ? '没有匹配的逻辑设备' : '暂无逻辑设备'"
+      :description="hasActiveFilters
+        ? '请调整搜索关键词或设备型号后再试。'
+        : '逻辑设备用于聚合边缘设备数据，实现统一视图和数据保留策略管理。可前往边缘设备页面添加设备后再试。'"
+      :quick-actions="hasActiveFilters
+        ? [{ label: '清除筛选', type: 'primary', handler: clearFilters }]
+        : [{ label: '前往边缘设备', type: 'primary', handler: goToEdgeDevice }]"
+      data-test="ld-empty"
+    />
 
     <!-- 合并预览弹窗 (§3.4: 时间轴对比/重叠提示/数据量合计/target_retention_days, 二次确认) -->
     <el-dialog
@@ -293,8 +321,10 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Connection, Refresh, InfoFilled, WarningFilled, Plus } from '@element-plus/icons-vue'
+import { Connection, Refresh, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { deviceTypeOptions, getDeviceTypeLabel } from '@/utils/deviceType'
 import {
   logicalDeviceApi,
@@ -320,6 +350,13 @@ const goToEdgeDevice = () => {
 
 const loading = ref(false)
 const items = ref<LogicalDeviceItem[]>([])
+/** 加载失败原因：非空时渲染错误态 + 重试（与"真的没有数据"彻底分开）。 */
+const loadError = ref('')
+/** 只放宽本请求超时（生产实测该接口 42.4s；全局 10s 必然超时），不动全局 axios timeout。 */
+const LOGICAL_DEVICE_LIST_TIMEOUT = 60000
+
+// isMobile（<768px）用于窄屏取消「操作」列 fixed（F26 口径，断点与 theme.css 一致）。
+const { isMobile } = useResponsive()
 
 // ─── 分页 (服务端) ───
 const currentPage = ref(1)
@@ -333,6 +370,7 @@ const total = ref(0)
 const {
   searchKeyword,
   debouncedKeyword,
+  clear: clearSearch,
 } = useDebouncedSearch(items, {
   searchFields: (i) => [i.name || ''],
 })
@@ -340,9 +378,28 @@ const {
 const typeFilter = ref('')
 const selection = ref<LogicalDeviceItem[]>([])
 
+/** 当前是否有搜索/类型筛选：用于把空态区分为「筛选无结果」与「真的没有数据」。 */
+const hasActiveFilters = computed(() => debouncedKeyword.value.trim() !== '' || typeFilter.value !== '')
+
+/** 清除筛选：clearSearch 会立即同步 debouncedKeyword，watch 随即重取（与手动改筛选同一路径）。 */
+function clearFilters() {
+  clearSearch()
+  typeFilter.value = ''
+}
+
 // ─── 列表 ───
+/** 把加载异常翻译成用户能行动的说明（超时是最常见的一种）。 */
+function describeLoadError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  if (/timeout/i.test(message)) {
+    return '请求超时：逻辑设备列表接口响应较慢（生产实测约 42 秒），请稍后重试。'
+  }
+  return message ? `请求失败：${message}` : '请求失败，请稍后重试。'
+}
+
 const fetchList = async () => {
   loading.value = true
+  loadError.value = ''
   try {
     const params: { page: number; page_size: number; search?: string; device_type?: string } = {
       page: currentPage.value,
@@ -350,11 +407,16 @@ const fetchList = async () => {
     }
     if (debouncedKeyword.value.trim()) params.search = debouncedKeyword.value.trim()
     if (typeFilter.value) params.device_type = typeFilter.value
-    const res = await logicalDeviceApi.list(params)
+    // per-request timeout：只放宽这一个请求，不改 api/client.ts 的全局 10s。
+    const res = await logicalDeviceApi.list(params, { timeout: LOGICAL_DEVICE_LIST_TIMEOUT })
     items.value = res.items
     total.value = res.total
-  } catch (error: any) {
-    feedback.handleError(error, '加载逻辑设备列表失败')
+  } catch (error) {
+    // P0：失败必须与"无数据"区分。改前这里 catch 后什么都不做，items 仍为空，
+    // 模板直接渲染「暂无逻辑设备 / 您还没有边缘设备」——把加载失败伪装成真空态。
+    items.value = []
+    total.value = 0
+    loadError.value = describeLoadError(error)
   } finally {
     loading.value = false
   }
@@ -698,6 +760,13 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
+/* 首屏加载骨架：替代"加载中就闪一下空态"（P0 配套）。 */
+.list-skeleton {
+  padding: 16px;
+  background: var(--card-bg, var(--el-bg-color));
+  border-radius: 8px;
+}
+
 /* 分页控件换行（窄屏真实裁切修复）。
    根因**不是**"外层缺 flex-wrap" —— .ld-pagination 已有 wrap，但换行只发生在多个
    flex item **之间**，管不到单个过宽 item 的**内部**：el-pagination 自带
@@ -962,6 +1031,12 @@ onMounted(async () => {
 }
 
 @media (max-width: 768px) {
+  /* P1：行首多选 checkbox 实测热区 14×36（theme.css 只补了高度、没补宽度）。
+     这里只给窄屏补宽度，视觉 14px 方块不变（热区扩到 36px）。 */
+  :deep(.el-table .el-checkbox) {
+    min-width: 36px;
+  }
+
   .filter-bar {
     flex-direction: column;
     align-items: stretch;
@@ -983,6 +1058,13 @@ onMounted(async () => {
 
   .preview-summary {
     gap: 16px;
+  }
+}
+
+/* 粗指针（真机触屏）：与 theme.css §4.4.7 同档，热区补到 44px。 */
+@media (pointer: coarse) {
+  :deep(.el-table .el-checkbox) {
+    min-width: 44px;
   }
 }
 </style>

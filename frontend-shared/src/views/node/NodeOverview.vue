@@ -144,7 +144,7 @@
       </div>
 
       <!-- Tab 栏 -->
-      <div class="tab-bar card" ref="tabBarRef">
+      <div class="tab-bar card" ref="tabBarRef" :class="tabBarScrollClass" @scroll.passive="updateTabScrollState">
         <div
           v-for="tab in tabs"
           :key="tab.label"
@@ -773,7 +773,7 @@
               <span class="chan-sub">{{ getDeviceTypeLabel(row.device_type) }}</span>
               <span class="chan-sub mono">{{ String(row.hardware_id || '') }}</span>
               <span class="chan-sub mono">{{ deviceChannelText(row) }}</span>
-              <span class="chan-sub device-last-data">{{ formatLastData(row.last_data) }}</span>
+              <span class="chan-sub device-last-data" :title="formatLastData(row.last_data)">{{ formatLastData(row.last_data) }}</span>
               <StatusBadge :status="row.status" />
               <span class="chan-sub device-last-time">{{ row.last_data_time ? formatTime(row.last_data_time) : '—' }}</span>
               <button class="link-btn" type="button" @click="viewDevice(row)"><el-icon :size="12"><View /></el-icon>查看</button>
@@ -830,6 +830,10 @@
           <div v-if="otaHistoryLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
           <div v-else-if="otaHistory.length === 0" class="card-empty">暂无升级记录</div>
           <div v-else class="bus-table-wrap ota-table-wrap">
+            <!-- A-nodes P2：393px 下 6 列 680px 宽表可横滑但无任何提示（右侧三列默认看不见）。
+                 复用全站既有 .mobile-table-hint（theme.css：仅 ≤768px display:block），
+                 桌面零变化。 -->
+            <div class="mobile-table-hint" data-ota-scroll-hint>← 左右滑动查看完整表格 →</div>
             <table class="bus-table ota-table">
               <thead>
                 <tr>
@@ -1261,6 +1265,32 @@ watch(() => route.query.tab, applyTabQuery)
  * 滚到视口顶部，导致页面纵向跳动（移动端尤其明显）。
  */
 const tabBarRef = ref<HTMLElement | null>(null)
+
+/**
+ * A-nodes P2（2026-10-21）：393px 下 8 个页签只有前 3 个完整可见（第 4 个仅露 18px 图标），
+ * 其余 4 个完全不可见，而 .tab-bar 虽可横滑却没有任何指示（无滚动条、无渐隐）。
+ * 不改结构，只把滚动状态挂成类，窄屏用**两侧渐隐**（mask-image）表达"还有内容"：
+ *   · tab-overflow：内容确实溢出（桌面 1192/1192 不溢出 ⇒ 不加类 ⇒ 桌面零变化）；
+ *   · tab-at-start / tab-at-end：滚动到哪一端 —— 只对**还有内容的一侧**渐隐，
+ *     已经在最右时右侧不再变暗（避免"永远像被裁掉"的假信号）。
+ */
+const tabOverflow = ref(false)
+const tabAtStart = ref(true)
+const tabAtEnd = ref(true)
+function updateTabScrollState() {
+  const bar = tabBarRef.value
+  if (!bar) return
+  const max = bar.scrollWidth - bar.clientWidth
+  tabOverflow.value = max > 1
+  tabAtStart.value = bar.scrollLeft <= 1
+  tabAtEnd.value = bar.scrollLeft >= max - 1
+}
+const tabBarScrollClass = computed(() => ({
+  'tab-overflow': tabOverflow.value,
+  'tab-at-start': tabAtStart.value,
+  'tab-at-end': tabAtEnd.value,
+}))
+
 async function scrollActiveTabIntoView() {
   await nextTick()
   const bar = tabBarRef.value
@@ -1271,6 +1301,8 @@ async function scrollActiveTabIntoView() {
     .find(el => el.dataset.tab === activeTab.value)
   if (!active) return
   active.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  // scrollIntoView 的滚动位置在下一帧才稳定，故延后读 scrollLeft 刷新渐隐状态
+  requestAnimationFrame(() => { updateTabScrollState() })
 }
 // flush:'post' 保证在 DOM 更新后执行；同时观察 tabBarRef 覆盖"异步数据到达后标签栏才挂载"。
 watch([activeTab, tabBarRef], () => { void scrollActiveTabIntoView() }, { immediate: true, flush: 'post' })
@@ -1893,8 +1925,14 @@ watch(selectedResourceId, () => { scanResult.value = null })
 // ── 事件 ──
 const recentEvents = computed(() => nodeEvents.value.slice(0, 5))
 function eventText(ev: NodeEvent): string {
-  if (ev.event_type === 'status') {
-    return ev.new_status === 'online' ? '设备上线' : '设备离线'
+  // A-nodes P2（2026-10-21）：status_change 原先不在映射表里，落到 fallback 直接渲染
+  // 内部枚举「status_change（在线）」—— 1440 下事件卡只有 326px 宽，还被 ellipsis 截成
+  // 「status_change（在…」，把"在线/离线"这一关键结论截掉。它和 status 是同一语义
+  // （设备状态跃变），直接复用同一中文结论；new_status 缺失时给中性中文，不再泄漏英文。
+  if (ev.event_type === 'status' || ev.event_type === 'status_change') {
+    if (ev.new_status === 'online') return '设备上线'
+    if (ev.new_status === 'offline') return '设备离线'
+    return '状态变更'
   }
   // event_type 其他取值（如 hello/ota/config）做可读映射，避免英文原文泄漏
   const typeMap: Record<string, string> = {
@@ -2638,6 +2676,9 @@ function onPeripheralConfigure(_resourceName: string) {
 // ── 生命周期 ──
 onMounted(() => {
   void fetchDetail()
+  // A-nodes P2：页签栏横滑渐隐的初始状态（节点详情异步加载，tabBarRef 挂载时再测一次）
+  void nextTick(updateTabScrollState)
+  window.addEventListener('resize', updateTabScrollState)
   // 探测服务端是否具备节点级设备操作能力；只影响两个按钮显不显示。
   void loadDeviceOpSupport()
   sessionTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
@@ -2674,6 +2715,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', updateTabScrollState)
   componentOperationGeneration++
   detailSequence++
   channelsSequence++
@@ -2702,16 +2744,30 @@ onUnmounted(() => {
   --no-primary: #2E6BFF;
   --no-primary-hover: #1F56E0;
   --no-success: #22C55E;
-  --no-success-text: #16A34A;
+  /* A-nodes P1（2026-10-21 对比度）：原 #16A34A 当**文字色**用时只有 3.02~3.30:1
+     （正常 badge #16A34A on #E8F9EF=3.02、延迟 8 ms on 白=3.30），低于 WCAG AA 4.5。
+     压深到 #15803D 后：on 白 5.02 / on 页面底 4.76 / on #E8F9EF 4.59，全部 ≥4.5。
+     暗色块不变（html.dark 取 var(--color-success)=#85CE61，实测 7.6~8.73，不反向）。 */
+  --no-success-text: #15803D;
   --no-success-bg: #E8F9EF;
   --no-warning: #F59E0B;
-  --no-warning-text: #D97706;
+  /* A-nodes P1：原 #D97706 作为文字色只有 2.97（页头「46% 一般」on 页面底）、
+     3.19（信息卡 46%/一般 on 白）、2.90（bus-tag-orange on #FEF3DE）。
+     压深到 #B45309：页头 4.77 / 白卡 5.02 / #FEF3DE 4.56，全部 ≥4.5。
+     暗色块不变（html.dark 取 var(--color-warning)=#EBB563，实测 7.83~8.99，不反向）。 */
+  --no-warning-text: #B45309;
   --no-warning-bg: #FEF3DE;
   --no-danger: #EF4444;
   --no-text: #1F2329;
   /* 可读的三层文字：正文、字段/说明、仅作占位或禁用提示的弱文本。 */
   --no-text-secondary: #526072;
   --no-text-muted: #69778B;
+  /* A-nodes P1（2026-10-21）：chip 里的数值「0」用 muted 色落在 --no-chip-off-bg 上只有
+     4.13:1（<4.5）。muted 是三层文字层级的一环、被多处复用且被测试锁死取值，
+     不应为一个数字整体压深 ⇒ 单独加一层"数值弱化"token（仍浅于 secondary，不干扰层级）。
+     亮：#5A6675（on 白 5.85 / on 页底 5.55 / on chip 底 5.31）。
+     暗：var(--text-color-regular)=#C0C6D0（on 卡片底 8.46，远高于 4.5，不反向）。 */
+  --no-text-dim: #5A6675;
   --no-text-faint: #A7B1BF;
   --no-border: #E8EBF0;
   --no-border-light: #F0F2F5;
@@ -2759,6 +2815,9 @@ html.dark .node-overview-page {
   /* F8 层级修正：原值 #A7B1BF 在卡片底上实测 6.70，比 muted(#A3A6AD, 5.96) 还亮 → 层级反转。
      #7D8694 实测 3.95：明显弱于 muted，且仍高于 3.0 的禁用态下限。 */
   --no-text-faint: #7D8694;
+  /* A-nodes P1：chip 数值的亮色 token 的暗色档（亮 #5A6675 在深色底上不可读，
+     故取主题 regular 文字色；卡片底 rgb(41,41,43) 实测 8.46）。 */
+  --no-text-dim: var(--text-color-regular, #C0C6D0);
   /* F8：零使用，但属设计稿色板；补暗色覆盖，使其一旦被用即为正确的暗色页面底色。 */
   --no-bg-page: var(--bg-color-page, #0D0D0D);
   /* F32：紫色强调色的暗色档。深色底上原 #8B5CF6 偏暗，提亮一档保持可读性，
@@ -3243,14 +3302,18 @@ html.dark .node-overview-page {
 /* 时间线 */
 .timeline { padding: 12px 20px 16px; position: relative; }
 .timeline::before { content: ''; position: absolute; left: 27px; top: 20px; bottom: 24px; width: 2px; background: var(--no-border); }
-.tl-row { display: flex; align-items: center; height: 40px; gap: 12px; position: relative; }
+/* A-nodes P2（2026-10-21）：改前 height:40px 固定 + .tl-text nowrap/ellipsis，
+   1440 下「status_change（在线）」被截成「status_change（在…」，把在线/离线结论吃掉。
+   现在：行高改为「至少 40px、按内容自适应」，文字允许换行 ⇒ 全量可见；
+   短文案仍是 40px 行高，1440 事件卡高度不变（只有真正放不下的长文案才增高）。 */
+.tl-row { display: flex; align-items: center; min-height: 40px; gap: 12px; position: relative; }
 .tl-icon {
   width: 16px; height: 16px; border-radius: 50%; background: var(--card-bg, #fff); border: 1.5px solid;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0; z-index: 1;
 }
 .tl-ok { border-color: var(--no-success); color: var(--no-success); }
 .tl-bad { border-color: var(--no-danger); color: var(--no-danger); }
-.tl-text { flex: 1; font-size: 13px; color: var(--no-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-text { flex: 1; min-width: 0; font-size: 13px; color: var(--no-text-secondary); white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .tl-time { font-size: 12px; color: var(--no-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 通道健康 */
@@ -3263,7 +3326,7 @@ html.dark .node-overview-page {
 .chip-label { font-size: 12px; color: var(--no-text-secondary); display: flex; align-items: center; gap: 6px; }
 .chip-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .chip-num { font-size: 18px; font-weight: 600; line-height: 26px; }
-.dim-num { color: var(--no-text-muted); }
+.dim-num { color: var(--no-text-dim); }
 .chan-list { padding: 0 20px 12px; }
 .chan-row {
   display: flex; align-items: center; height: 44px; gap: 10px; cursor: pointer;
@@ -3370,6 +3433,21 @@ html.dark .node-overview-page {
   .stat-item { flex: 1 1 45%; }
   .tab-bar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; gap: 20px; padding: 0 12px; }
   .tab-bar::-webkit-scrollbar { display: none; }
+  /* A-nodes P2（2026-10-21）：393px 下 8 个页签只有前 3 个完整可见，且无任何横滑提示。
+     不改结构，用 mask-image 在"还有内容的一侧"做渐隐（状态类见 updateTabScrollState）。
+     桌面 .tab-bar 1192/1192 不溢出 ⇒ tab-overflow=false ⇒ 本组规则不命中，零变化。 */
+  .tab-bar.tab-overflow:not(.tab-at-end) {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .tab-bar.tab-overflow:not(.tab-at-start) {
+    -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+  }
+  .tab-bar.tab-overflow:not(.tab-at-start):not(.tab-at-end) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  }
   .tab-item { flex: 0 0 auto; }
   /* 移动端无悬停，统计值允许换行显示完整时间戳（默认 nowrap+ellipsis 在窄列截断） */
   .stat-value { white-space: normal; overflow: visible; text-overflow: unset; font-size: 13px; }
@@ -3410,6 +3488,50 @@ html.dark .node-overview-page {
     min-height: 44px;
     justify-content: center;
     flex-shrink: 0;
+  }
+
+  /* ── A-nodes P1（2026-10-21）：可点目标过小 ──
+     审计实测：.ph-edit 16×16、.copy-icon 13×13、.mini-edit 12×12、.card-link 52×20、
+     总线/OTA 行的 .link-btn 高 18~20 —— 都远低于 §4.4.5 的 36/44px 热区。
+     做法：视觉尺寸**不动**（保持设计稿密度），用内边距把**真实布局盒**撑到 ≥36×36，
+     再用等量负外边距抵消布局占位 ⇒ 行高/间距/换行完全不变。
+     不用 ::after 伪元素：实测它在 el-table 单元格内会被裁剪，elementFromPoint 也点不到；
+     这里增大的是真实可点的 border-box（getBoundingClientRect 直接可测）。 */
+  /* 页头两个图标动作是**主操作**（重命名 / 复制 ID），按 44×44 做（审计给的对照档）；
+     卡片内 mini-edit 与总线/OTA 行内 link-btn 属高密度列表，按 36×36 档（§4.4.5 下限），
+     避免 44 的负边距在 20px 行距的行间互相重叠、造成误点。 */
+  .ph-edit { padding: 14px; margin: -14px; min-width: 44px; min-height: 44px; justify-content: center; }
+  .copy-icon { padding: 15.5px; margin: -15.5px; min-width: 44px; min-height: 44px; justify-content: center; }
+  .mini-edit { padding: 12px; margin: -12px; min-width: 36px; min-height: 36px; justify-content: center; }
+  .card-link { display: inline-flex; align-items: center; min-height: 44px; padding: 12px 0; margin: -12px 0; }
+  .link-btn { min-height: 36px; min-width: 36px; padding: 8px 0; margin: -8px 0; justify-content: center; }
+  /* 热区用负外边距展开后，纵向相邻入口的间距必须补回来，否则两个 36px 热区会互相重叠
+     （实测总线配置：配置/改波特率 垂直间距仅 2px，展开后重叠 14px；「在通道管理中查看」
+     与下方首行配置按钮重叠 11px）。只加窄屏间距，桌面密度不变。 */
+  .bus-channel-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 16px 8px;
+    margin-left: auto;
+  }
+  /* 按钮不收缩：改波特率在窄列里会被压成两行（内容 40px ⇒ 展开热区 56px），
+     放开宽度后单行 20px，展开后 36px，行高也随之回落。 */
+  .bus-channel-actions .link-btn { flex: 0 0 auto; white-space: nowrap; }
+  .bus-channels-list { padding-top: 20px; }
+  /* 通道条目之间也要给热区留间距：相邻两条的「改波特率/配置」热区在 1px 行距下会重叠 15px */
+  .bus-channel-item { padding: 8px 0; }
+
+  /* ── A-nodes P2（2026-10-21）：「关联设备」最近数据预览被切 ──
+     审计实测 393px：内容 339px / 可见 144px，ellipsis 且无展开入口（cell_voltage_10… 被吃掉）。
+     窄屏（行本来就是 flex-wrap + 高自适应）把预览独占一行并允许换行 ⇒ 全量可读；
+     桌面保持单行省略（鼠标可悬停 title 看全量，紧凑表格密度不破坏桌面回归）。 */
+  .device-row .device-last-data {
+    flex: 1 1 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
   }
 }
 </style>

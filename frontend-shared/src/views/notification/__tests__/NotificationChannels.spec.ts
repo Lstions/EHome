@@ -198,4 +198,20 @@ describe('NotificationChannels 列表页', () => {
     expect(wrapper.find('[data-test="nc-goto-deliveries"]').exists()).toBe(false)
     expect(mockRouterPush).not.toHaveBeenCalled()
   })
+
+  // ── C-ops 审计回归钉（2026-10-21）：页面级空态与表格自带空态不得叠加 ──
+  it('空列表（total=0）只渲染页面级 EmptyState，不渲染 el-table（消除双空态）', async () => {
+    mockedApi.list.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+    const wrapper = mountPage()
+    await flushPromises()
+    expect(wrapper.find('[data-test="nc-empty"]').exists(), '页面级空态没渲染').toBe(true)
+    expect(wrapper.find('[data-test="nc-table"]').exists(), '页面级空态存在时仍渲染了 el-table（双空态叠加）').toBe(false)
+  })
+
+  it('有数据时 el-table 必须回来（反向守卫：不能为了去重空态把表格藏死）', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+    expect(wrapper.find('[data-test="nc-table"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="nc-empty"]').exists()).toBe(false)
+  })
 })

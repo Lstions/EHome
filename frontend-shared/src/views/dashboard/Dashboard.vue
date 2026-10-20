@@ -152,7 +152,7 @@
                   <el-radio-button value="24h">24小时</el-radio-button>
                   <el-radio-button value="7d">7天</el-radio-button>
                 </el-radio-group>
-                <el-select v-model="trendCategory" size="small" class="trend-category-select">
+                <el-select v-model="trendCategory" size="small" class="trend-category-select" @change="selectedTrendByUser = true">
                   <el-option
                     v-for="cat in availableTrendCategories"
                     :key="cat.value"
@@ -262,6 +262,27 @@
                本表 5 列合计 880px（设备名称 150 / 所属节点 150 / 解析数据 280 /
                原始数据 200），390px 视口下表格盒约 300px；「解析数据」「原始数据」
                两列几乎完全落在盒外且无横滚容器（el-table overflow:hidden）。 -->
+          <!--
+            2026-10-21 全站 UI 审计修复（P1）：
+              393 下这张 6 列表格自然宽 960px，视口内只有 303px；「解析数据」列把整行 JSON 直接塞进单元格，
+              单行高 500~776px（数据多时更高），可见的前两列下方是 400~700px 空白 —— 等于手机上读不到任何一条数据。
+              修法：窄屏改**卡片列表**（设备名/节点/采集时间/状态 + 解析数据摘要 + 「查看完整数据」弹层），
+              桌面保持原表格逐像素不变。摘要只截断展示、完整内容进弹层 —— 不拿信息换整洁。
+          -->
+          <div v-if="isMobile && (overview.latest_data || []).length > 0" class="latest-cards" data-test="dashboard-latest-cards">
+            <div v-for="row in overview.latest_data" :key="row.device_id" class="latest-card">
+              <div class="lc-head">
+                <router-link :to="`/edge-device/${row.device_id}`" class="device-link">{{ row.device_name || `设备 ${row.device_id}` }}</router-link>
+                <el-tag size="small" type="success">在线</el-tag>
+              </div>
+              <div class="lc-meta">
+                <span>所属节点：{{ displayNodeName(row) }}</span>
+                <span>{{ formatTime(row.collected_at) }}</span>
+              </div>
+              <p class="lc-data">{{ formatDataSummary(row.data) }}</p>
+              <el-button size="small" text type="primary" @click="openDataDetail(row)">查看完整数据</el-button>
+            </div>
+          </div>
           <div v-else-if="(overview.latest_data || []).length > 0" class="mobile-table-wrapper">
             <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
           <el-table :data="overview.latest_data" stripe>
@@ -272,7 +293,11 @@
                 </router-link>
               </template>
             </el-table-column>
-            <el-table-column prop="node_name" label="所属节点" width="150" />
+            <el-table-column prop="node_name" label="所属节点" width="150">
+              <template #default="{ row }">
+                <span>{{ displayNodeName(row) }}</span>
+              </template>
+            </el-table-column>
             <!-- 解析后数据 -->
             <el-table-column label="解析数据" width="280">
               <template #default="{ row }">
@@ -321,6 +346,20 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <!-- 完整数据弹层（窄屏卡片摘要的补充）：完整 K/V 逐条列出，不截断 -->
+    <el-dialog v-model="dataDetailVisible" :title="`${dataDetailRow?.device_name || '设备'} · 完整数据`" width="min(560px, 92vw)" append-to-body>
+      <div class="data-detail-list">
+        <div v-for="([k, v], i) in Object.entries(dataDetailRow?.data || {})" :key="i" class="data-detail-row">
+          <span class="dd-key">{{ sensorNameMap[k] || k }}</span>
+          <span class="dd-val">{{ sensorUnitMap[k] ? `${v} ${sensorUnitMap[k]}` : v }}</span>
+        </div>
+        <p v-if="Object.keys(dataDetailRow?.data || {}).length === 0" class="dd-empty">该设备本次未上报解析数据</p>
+      </div>
+      <template #footer>
+        <el-button @click="dataDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -344,8 +383,29 @@ import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
+import { useResponsive } from '@/composables/useResponsive'
 
 const router = useRouter()
+const { isMobile } = useResponsive()
+
+/** 最新数据详情弹层（窄屏卡片「查看完整数据」用）：摘要截断展示，完整 K/V 进弹层，不丢数据。 */
+const dataDetailVisible = ref(false)
+const dataDetailRow = ref<{ device_name?: string; data?: Record<string, any>; raw_data?: any } | null>(null)
+const openDataDetail = (row: any) => {
+  dataDetailRow.value = row
+  dataDetailVisible.value = true
+}
+
+/**
+ * 所属节点展示名：接口的 node_name 实测为空串（3 台设备全空），直接渲染会让整列空白。
+ * 回退到「节点 <物理 ID>」，节点名缺失时也始终有可识别信息。
+ */
+const displayNodeName = (row: { node_name?: string; node_id?: string }) => {
+  const name = (row.node_name || '').trim()
+  if (name) return name
+  const id = (row.node_id || '').toString().trim()
+  return id ? `节点 ${id}` : '—'
+}
 
 const overview = ref<Overview>({
   nodes: { total: 0, online: 0, offline: 0 },
@@ -416,6 +476,27 @@ const availableTrendCategories = computed(() => {
   }))
 })
 
+/*
+ * 趋势默认类别自愈（2026-10-20 生产实测）：
+ *   `trendCategory` 初值是硬编码的 `'temperature'`，但**没有任何设备上报这个键** ——
+ *   BMS 用 `temperature_1/2/3`，逆变器用 `pv_temp` / `inverter_temp`。
+ *   于是仪表盘「最近 24 小时趋势」永久显示「暂无趋势数据 / 需要设备数据才能显示趋势图表」，
+ *   而库里 24h 数据有几千点 —— 看起来像采集坏了。
+ *   修法：真实键集合变化后，若当前类别不在其中，自动切到第一个真实类别并重取。
+ *   用户手动选过（selectedTrendByUser）就不再自动改，避免和用户操作打架。
+ *   注意：回调里调用的 fetchTrendData 定义在下方，故不能用 immediate（会 TDZ）。
+ */
+const selectedTrendByUser = ref(false)
+watch(availableTrendCategories, (list) => {
+  if (selectedTrendByUser.value || list.length === 0) return
+  const realKeys = seenCategoryKeys.value
+  if (realKeys.has(trendCategory.value)) return
+  const first = list.find((c) => realKeys.has(c.value))
+  if (first) {
+    trendCategory.value = first.value
+    void fetchTrendData()
+  }
+})
 
 // 告警摘要计算属性
 const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
@@ -647,6 +728,33 @@ const handleRefresh = async () => {
   } finally {
     refreshing.value = false
   }
+}
+
+/**
+ * 窄屏摘要：只展示前 4 个指标（如 total_voltage: 52.34 · rsoc: 68 …），
+ * 完整内容通过「查看完整数据」弹层给出 —— 摘要不写省略号截断配置值本身。
+ */
+/** 摘要优先展示「人真正关心」的指标（字母序前 4 个往往是 cell_voltage_1/10/11，全是 3.27V）。 */
+const SUMMARY_PRIORITY = [
+  'total_voltage', 'current', 'rsoc', 'soc', 'remaining_capacity',
+  'output_active_power', 'grid_voltage', 'battery_voltage', 'battery_capacity',
+  'max_temp', 'temperature', 'humidity',
+]
+const formatDataSummary = (data: Record<string, any>) => {
+  if (!data || typeof data !== 'object') return UNKNOWN
+  const keys = Object.keys(data)
+  const ordered = [
+    ...SUMMARY_PRIORITY.filter((k) => keys.includes(k)),
+    ...keys.filter((k) => !SUMMARY_PRIORITY.includes(k)),
+  ].slice(0, 4)
+  if (ordered.length === 0) return UNKNOWN
+  return ordered
+    .map((k) => {
+      const v = data[k]
+      const val = typeof v === 'number' ? Number(v.toFixed(2)) : v
+      return `${sensorNameMap[k] || k} ${val}${sensorUnitMap[k] ? ` ${sensorUnitMap[k]}` : ''}`
+    })
+    .join(' · ')
 }
 
 const formatData = (data: Record<string, any>) => {
@@ -1041,4 +1149,38 @@ onUnmounted(() => {
     width: 100%;
   }
 }
+
+/* ---- narrow-screen latest-data cards (2026-10-21 audit fix) ---- */
+.latest-cards { display: flex; flex-direction: column; gap: 8px; }
+.latest-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--bg-color);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.lc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lc-head .device-link {
+  /* tap target >=44px: audited original link was 28-29x37 */
+  display: inline-flex; align-items: center; min-height: 44px;
+  font-size: 15px; font-weight: 600;
+}
+.lc-meta {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  font-size: 12px; color: var(--el-text-color-regular);
+}
+.lc-data {
+  margin: 0; font-size: 13px; line-height: 1.5;
+  color: var(--el-text-color-primary);
+  word-break: keep-all; overflow-wrap: anywhere;
+}
+.data-detail-list { max-height: 52vh; overflow-y: auto; }
+.data-detail-row {
+  display: grid; grid-template-columns: minmax(90px, 40%) 1fr; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid var(--el-border-color-lighter);
+  font-size: 13px;
+}
+.dd-key { color: var(--el-text-color-regular); }
+.dd-val { color: var(--el-text-color-primary); overflow-wrap: anywhere; }
+.dd-empty { margin: 12px 0; color: var(--el-text-color-regular); }
 </style>

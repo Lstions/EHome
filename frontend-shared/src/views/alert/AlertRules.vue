@@ -78,7 +78,9 @@
           <!-- 口径: 真分页后 store.events 只装当前页, 故此处标注「本页」, 不让页内计数冒充全量 firing 数。 -->
           <el-tag v-if="store.firingCount" type="danger" size="small" class="count-tag">本页 {{ store.firingCount }} firing</el-tag>
         </span>
-        <el-button link size="small" data-test="mark-read" @click="onMarkAllRead">全部标记已读</el-button>
+        <!-- 2026-10-21 审计 C-ops P2：事件 total=0 时没有可标记的内容，按钮只会给出
+             无意义的"已全部标记"；与分页器同条件隐藏（total>0 才渲染）。 -->
+        <el-button v-if="store.eventsTotal > 0" link size="small" data-test="mark-read" @click="onMarkAllRead">全部标记已读</el-button>
       </div>
       <!-- 事件筛选 (G1): 后端 GET /alert-events 已支持 rule_id/state/start_time/end_time,
            改前前端 0 使用 —— 用户无法把时间线收敛到某条规则/某个状态/某个时间段。
@@ -162,7 +164,9 @@
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表绑 store 的全量数组 —— 后端 Limit(500) 静默截断, 前端
            el-pagination 数量为 0, 用户既看不到 total 也没有翻页入口。 -->
-      <div class="events-pagination">
+      <!-- 2026-10-21 审计 C-ops P2：改前 total=0 也渲染分页器（实测「共 0 条 20条/页 1」，
+           393 下占 313×44），空列表出现无意义的翻页控件。total>0 才渲染（与通知两页同范式）。 -->
+      <div v-if="store.eventsTotal > 0" class="events-pagination">
         <el-pagination
           v-model:current-page="eventsPage"
           v-model:page-size="eventsPageSize"
@@ -370,7 +374,10 @@ const editingId = ref<number | null>(null)
 const emptyForm = () => ({
   name: '',
   target_type: 'edge_device' as const,
-  target_id: 0,
+  // 0 表示未选择，但 el-select 会把 0 当成有效值直接回显成「0」——
+  // 用户会以为已经选中了编号 0 的设备（2026-10-21 审计实测 /alerts 弹窗）。
+  // 只有 undefined 才是真正的空：显示 placeholder「请选择」。
+  target_id: undefined as number | undefined,
   sensor_name: '',
   comparator: 'gt' as AlertComparator,
   threshold: 0,
@@ -432,7 +439,9 @@ async function onSave() {
     const req = {
       name: form.name.trim(),
       target_type: form.target_type,
-      target_id: form.target_id,
+      // 表单初值是 undefined（为了显示 placeholder），提交前校验已保证已选设备；
+      // 这里显式转 number 满足 CreateAlertRuleRequest 类型。
+      target_id: Number(form.target_id),
       sensor_name: form.sensor_name.trim(),
       comparator: form.comparator,
       threshold: form.threshold,
@@ -584,7 +593,17 @@ onMounted(async () => {
 .card-title { font-size: 15px; font-weight: 600; }
 .count-tag { margin-left: 8px; }
 .mono { font-family: monospace; }
-.cond-row { display: flex; gap: 8px; align-items: center; }
+/* 2026-10-21 审计 C-ops P1：「条件」行改前无宽度约束 —— 比较符 select 与
+   el-input-number 各自 flex-shrink，393 弹窗里 input-number 被压到 84px，
+   内层 input clientWidth=0 / scrollWidth=35，阈值 "0.000" 完全不可见（只剩 −/+ 两个按钮）。
+   约束：比较符定宽 80px（标签只有 > ≥ < ≤ = ≠ 单字符），数值框弹性但保底 150px 盒宽
+   ⇒ 内层 input 可用宽度 = 176 − 88 ≈ 88px ≥ 84px 验收线。
+   实测（2026-10-21，393 粗指针）：EP 的 ± 钮各 44px（theme.css 触摸目标档），故盒宽必须
+   ≥ 84 + 88 = 172px；取 176px 留余量。比较符只有单字符（> ≥ < ≤ = ≠），定宽 52px 足够。
+   兜底再允许换行（更窄的视口下数值框整行铺满，绝不会回到 0 宽）。 */
+.cond-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cond-row .el-select { flex: 0 0 52px; min-width: 52px; }
+.cond-row .el-input-number { flex: 1 1 auto; min-width: 176px; max-width: 100%; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
 /* 事件筛选条 (G1): 窄容器下允许换行 (与 AutomationRules.vue 的 .event-filters 同范式)。 */
 .event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }

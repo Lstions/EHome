@@ -1206,5 +1206,37 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wide!).toContain('.action-meta')
     })
   })
+
+  // ── C-ops 审计回归钉（2026-10-21）────────────────────────────────────────
+  describe('C-ops 空列表 / 触发历史卡片头 / 固定列契约', () => {
+    it('total=0 时不渲染分页器；「刷新」入口仍在（空态不是"功能消失"）', async () => {
+      mockedAutomationApi.listEvents.mockResolvedValue(eventPage([]))
+      const wrapper = await mountPage()
+      expect(wrapper.find('.events-pagination').exists(), '空列表仍渲染分页器（共 0 条）').toBe(false)
+      expect(wrapper.find('[data-test="refresh-events"]').exists()).toBe(true)
+    })
+
+    it('触发历史卡片头可换行、标题单行不压缩、筛选条自身可换行（编译产物级）', async () => {
+      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      expect(css, '.card-head 缺 flex-wrap：标题会被筛选条挤成逐字竖排').toMatch(/\.card-head\[data-v-[a-z0-9]+\] \{[^}]*flex-wrap: wrap/)
+      expect(css, '.card-title 缺 white-space: nowrap').toMatch(/\.card-title\[data-v-[a-z0-9]+\] \{[^}]*white-space: nowrap/)
+      expect(css, '.event-filters 缺 flex-wrap：筛选条会溢出卡片').toMatch(/\.event-filters\[data-v-[a-z0-9]+\] \{[^}]*flex-wrap: wrap/)
+    })
+
+    it('触发历史表「操作」列保持 fixed=right（F26 判定 100px 不遮挡，不得顺手改）', () => {
+      // 2026-10-21 复审裁决：C-ops 审计把本列标为「待确认 P2」（当时无数据、只看到白色条带），
+      // 但 F26 契约（src/views/__tests__/FixedColumnOcclusion.spec.ts）明文裁决：
+      //   「事件表操作列 100px，fixedW 100 < 表格盒 280/310，该列唯一控件中心始终落在粘性区之外，
+      //    48/48 命中自身 ⇒ 保持 fixed」——改动它会触发 F26 的「超出修复范围」反证断言。
+      // 因此这里锁定「保持无条件 fixed」，防止后人再按猜测改成响应式绑定。
+      expect(source).toMatch(/label="操作" width="100" fixed="right"/)
+      expect(source).not.toMatch(/label="操作" width="100" :fixed="isMobile/)
+    })
+
+    it('「条件」阈值框盒宽 ≥176px（内层 input ≥84px），不再横向溢出弹窗', () => {
+      expect(source).toMatch(/\.cond-row \.el-input-number \{[^}]*min-width: 176px/)
+      expect(source).toMatch(/\.cond-row \{[^}]*flex-wrap: wrap/)
+    })
+  })
 })
 

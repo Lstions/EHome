@@ -165,7 +165,17 @@
               <strong>{{ metric(metrics?.control?.audit_write_failures) }}</strong>
             </div>
             <div class="control-metric"><span>操作成功</span><strong>{{ metric(metrics?.control?.succeeded) }}</strong></div>
-            <div class="control-metric" :class="{ attention: (metrics?.control?.failed || 0) > 0 }"><span>操作失败</span><strong>{{ metric(metrics?.control?.failed) }}</strong></div>
+            <!-- 2026-10-21 审计 C-ops P1：失败数是**进程启动以来的累计计数器**，与
+                 「未处置 UNKNOWN / 能力快照过期 / 审计写失败」这三个**待处置条件**不同口径。
+                 改前给它加 attention 红字却不计入 controlAttention ⇒ 同卡出现"横幅说 1 项、
+                 红字却是 6"的自相矛盾。现改为中性计数 + tooltip 说明口径，红字只保留给
+                 真正计入「需关注」的条件项。detailed 理由见审计修复报告。 -->
+            <div class="control-metric">
+              <el-tooltip content="累计计数：进程启动以来操作失败的次数（含历史已排查项），不是待处置条件，不计入「需关注」；只有未处置 UNKNOWN / 能力快照过期 / 审计写失败 才计入。" placement="top">
+                <span class="term">操作失败</span>
+              </el-tooltip>
+              <strong>{{ metric(metrics?.control?.failed) }}</strong>
+            </div>
           </div>
         </el-card>
       </el-col>
@@ -480,6 +490,13 @@ const metricText = (value: number | null | undefined, isCounter = false): string
 // 失败可归因到接口本身；字段缺失才是真的"接口没说"
 const errorDetail = computed(() => loadError.value || '网络请求失败')
 
+/**
+ * 「需关注」计数 = **待处置条件**之和。
+ * 刻意**不含** control.failed：操作失败是进程启动以来的累计计数器（重启归零、含历史已排查项），
+ * 把它算进"需要关注"会让横幅长期报警；但改前模板又给 failed 单独加了 attention 红字，
+ * 造成"横幅计数"与"红字读数"两个口径互相矛盾（审计 C-ops P1）。现统一为：
+ * 只有下面三项计入（failed 本身改中性计数 + tooltip 说明）。
+ */
 const controlAttention = computed(() =>
   (metrics.value?.control?.unresolved_unknown || 0) +
   (metrics.value?.control?.capability_stale_nodes || 0) +
@@ -767,6 +784,12 @@ onUnmounted(() => {
   transform: translateY(-50%);
   font-size: 48px;
   opacity: 0.3;
+  /* 2026-10-21 审计 C-ops P2：装饰图标是 absolute + opacity .3，改前绘在文字层之上，
+     且与 value/label 布局盒相交（393 下「全局」chip 有 19.5px 落在图标下面）。
+     两道保险：① 文字层 z-index 更高 + 图标 pointer-events:none，永不遮字/挡点击；
+     ② .stat-content 右侧留出图标宽度（下面 padding-right），从几何上不再相交。 */
+  z-index: 0;
+  pointer-events: none;
 }
 
 .stat-card.http .stat-icon { color: var(--el-color-primary); }
@@ -782,6 +805,12 @@ onUnmounted(() => {
 
 .stat-content {
   flex: 1;
+  min-width: 0;
+  /* 给右上角装饰图标留出真实布局空间（icon 48px 宽、right 20px ⇒ 距内容区右界 48px）。
+     不留位时 el 盒会与图标相交；393 下范围词「全局」实测 19.5px 被图标压住。 */
+  padding-right: 52px;
+  position: relative;
+  z-index: 1;
 }
 
 .stat-value {
@@ -899,6 +928,9 @@ onUnmounted(() => {
   }
   .toolbar-actions {
     flex-wrap: wrap;
+    /* 2026-10-21 审计 C-ops P2：操作区必须占满 .page-header-right 的第二行，
+       改前按 max-content 收缩（393 实测 113px vs 父 313px），右侧大片空白。 */
+    width: 100%;
   }
   .toolbar-actions .el-select {
     flex: 1;
@@ -909,6 +941,10 @@ onUnmounted(() => {
   .stat-card .stat-icon {
     font-size: 36px;
     right: 12px;
+  }
+  /* 窄屏图标 36px + right 12px ⇒ 距内容区右界 32px；留 40px 保证不压「全局」chip */
+  .stat-content {
+    padding-right: 40px;
   }
   .stat-value {
     font-size: 22px;
@@ -924,13 +960,25 @@ onUnmounted(() => {
 }
 
 @media (max-width: 480px) {
+  /* 2026-10-21 审计 C-ops P2：改前这里把操作区改成纵向拉伸（每控件各占一整行），
+     实测页头 159px（851 视口的 19%）且操作区仍只有 max-content 宽。
+     改为**整行铺满的横向一行**：选择器弹性占满剩余宽度，刷新按钮保持内容宽。 */
+  /* 保留 PageHeader 既有的 flex-end 对齐契约（Monitor.spec 390px 用例锁定）；
+     操作区自身 width:100% 后，右对齐与否都不影响"铺满一行"。 */
   .toolbar-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .toolbar-actions :deep(.el-select),
-  .toolbar-actions :deep(.el-button) {
     width: 100%;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+  .toolbar-actions :deep(.el-select) {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+  .toolbar-actions :deep(.el-button) {
+    flex: 0 0 auto;
+    width: auto;
   }
   /* 原 .toolbar h2 { font-size: 20px } 已删除：标题现由 PageHeader 承担，
      其自身窄屏规则已把 h2 收敛到 18px（组件内 @media (max-width: 768px)）。 */

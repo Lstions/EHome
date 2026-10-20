@@ -24,7 +24,9 @@
               <el-input v-model="form.old_password" type="password" show-password placeholder="请输入当前密码" />
             </el-form-item>
             <el-form-item label="新密码" prop="new_password">
-              <el-input v-model="form.new_password" type="password" show-password placeholder="至少 8 位字符" />
+              <!-- 2026-10-21 审计 C-ops P2：placeholder 改前与下方 .form-tip 文案重复（「至少 8 位字符」
+               同时出现在两处）。规则说明统一留给 form-tip，placeholder 只提示"要填什么"。 -->
+              <el-input v-model="form.new_password" type="password" show-password placeholder="请输入新密码" />
               <div class="form-tip">至少 8 位字符，且不能与当前密码相同</div>
             </el-form-item>
             <el-form-item label="确认新密码" prop="confirm_password">
@@ -136,9 +138,25 @@ const handleChangePassword = async () => {
   color: var(--text-color-secondary);
 }
 
+/* 2026-10-21 审计 C-ops P2：桌面下信息卡 235px / 改密卡 323.8px（差 89px）参差。
+   el-col 作为 flex 项会被拉齐，但内部 el-card 不会自动继承高度 ⇒ 让卡片撑满列高。 */
+.profile-page :deep(.el-row) {
+  align-items: stretch;
+}
+.profile-page :deep(.el-col) {
+  display: flex;
+}
+.profile-page :deep(.el-col > .el-card) {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
 @media (max-width: 768px) {
+  /* 2026-10-21 审计 C-ops P2：改前这里追加 padding:0 12px（叠加 main 的 20px），
+     卡片 x=32 / 宽 321，与其它 5 页（x=20 / 宽 345）不一致。水平 padding 交还 main，
+     只保留纵向间距。 */
   .profile-page {
-    padding: 0 12px 16px;
+    padding: 0 0 16px;
   }
   .profile-page .el-col {
     margin-bottom: 16px;

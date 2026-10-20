@@ -73,7 +73,14 @@
                 <el-button size="small" @click="handleDownload(asFirmware(row))">
                   <el-icon><Download /></el-icon> 下载
                 </el-button>
-                <el-button type="danger" size="small" @click="handleDelete(asFirmware(row))">
+                <!-- 仅图标的破坏性操作必须有可访问名（B-data 审计 P2）。 -->
+                <el-button
+                  type="danger"
+                  size="small"
+                  aria-label="删除固件"
+                  title="删除固件"
+                  @click="handleDelete(asFirmware(row))"
+                >
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </div>
@@ -81,6 +88,22 @@
           </el-table-column>
         </el-table>
         </div>
+
+        <!-- 页面级空态（覆盖两种"空"：全库无固件 / 当前页为空）。
+             B-data 审计 P2：改前 EmptyState 是分页器的 v-else —— total>0 但当前页为空时
+             表格与空态都不渲染，留下空白卡片无解释；且表格自身有 row 时不再叠加空态。 -->
+        <EmptyState
+          v-if="!loading && firmwares.length === 0"
+          :kind="total > 0 ? 'filtered' : 'empty'"
+          :icon="Upload"
+          :title="total > 0 ? '本页暂无固件' : '暂无固件数据'"
+          :description="total > 0
+            ? '当前页没有固件，可翻到上一页或调整每页条数。'
+            : '上传固件后，可在此管理版本并执行 OTA 升级。'"
+          :quick-actions="total > 0 ? [] : [
+            { label: '上传固件', icon: Upload, type: 'primary', handler: () => { showUploadDialog = true } }
+          ]"
+        />
 
         <div style="display: flex; justify-content: center; margin-top: 16px;" v-if="total > 0">
           <el-pagination
@@ -93,16 +116,6 @@
             @current-change="fetchFirmwares"
           />
         </div>
-        <EmptyState
-          v-else
-          kind="empty"
-          :icon="Upload"
-          title="暂无固件数据"
-          description="上传固件后，可在此管理版本并执行 OTA 升级。"
-          :quick-actions="[
-            { label: '上传固件', icon: Upload, type: 'primary', handler: () => { showUploadDialog = true } }
-          ]"
-        />
       </template>
     </el-card>
 
@@ -480,6 +493,11 @@ onMounted(() => {
   .firmware-manage :deep(.el-table) {
     width: 100%;
   }
+  /* P1（B-data 审计）：行首/全选 checkbox 实测热区 14×36（theme.css 只补了高度、
+     没补宽度）→ 窄屏补到 36px 宽；视觉 14px 方块不变，只扩热区。 */
+  .firmware-manage :deep(.el-table .el-checkbox) {
+    min-width: 36px;
+  }
   /* 分页在窄屏下换行并居中 */
   .firmware-manage :deep(.el-pagination) {
     flex-wrap: wrap;
@@ -487,6 +505,13 @@ onMounted(() => {
   }
   .firmware-manage :deep(.el-pagination .el-pagination__jump) {
     margin-left: 0;
+  }
+}
+
+/* 粗指针（真机触屏）：与 theme.css §4.4.7 同档，热区补到 44px。 */
+@media (pointer: coarse) {
+  .firmware-manage :deep(.el-table .el-checkbox) {
+    min-width: 44px;
   }
 }
 </style>

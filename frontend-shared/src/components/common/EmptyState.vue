@@ -2,7 +2,7 @@
   <div class="empty-state" :class="[size, kind]">
     <div class="empty-illustration">
       <slot name="illustration">
-        <el-icon :size="iconSize"><component :is="icon" /></el-icon>
+        <el-icon :size="iconSize"><component :is="resolveIcon(icon)" /></el-icon>
       </slot>
     </div>
     
@@ -23,7 +23,7 @@
           size="small"
           @click="action.handler"
         >
-          <el-icon v-if="action.icon"><component :is="action.icon" /></el-icon>
+          <el-icon v-if="action.icon"><component :is="resolveIcon(action.icon)" /></el-icon>
           {{ action.label }}
         </el-button>
       </div>
@@ -33,7 +33,25 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { FolderOpened } from '@element-plus/icons-vue'
+import {
+  Bell, Connection, Cpu, DataAnalysis, Document, FolderOpened, Link,
+  TrendCharts, WarningFilled,
+} from '@element-plus/icons-vue'
+
+/**
+ * 字符串 icon 名 → 组件映射。
+ *
+ * ⚠ 2026-10-21 全站 UI 审计实测（/notification-channels、/notification-deliveries 等）：
+ *   调用点写的是 `icon="Bell"`（**字符串**），而本组件 `<component :is="icon">` 只认组件对象；
+ *   项目没有全局注册 Element Plus 图标（main.ts 无 app.component），于是字符串被当作未知标签
+ *   渲染成 `<bell></bell>` 空元素 —— 空态只剩一个空白圆，图标静默消失（14+ 处调用点受影响）。
+ *   在组件内部做映射是单点修复：调用点保持字符串写法也能正常显示；未知名字回退默认图标而不是空白。
+ */
+const ICON_MAP: Record<string, any> = {
+  Bell, Connection, Cpu, DataAnalysis, Document, FolderOpened, Link, TrendCharts, WarningFilled,
+}
+const resolveIcon = (icon: unknown) =>
+  typeof icon === 'string' ? (ICON_MAP[icon] || FolderOpened) : icon
 
 interface QuickAction {
   label: string

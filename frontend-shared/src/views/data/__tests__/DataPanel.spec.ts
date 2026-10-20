@@ -304,8 +304,11 @@ describe('DataPanel', () => {
     await triggerQuery(wrapper, '1')
 
     // categories envelope 被解包 → 批量请求带上真实 category（而非空类别短路）
+    // 2026-10-21（B-data 修复）：该端点生产实测会挂起（>38s 无响应），前端给它独立的
+    // 8s 超时以便尽快转入逐个回退；契约同时钉住「envelope / 裸数组两种响应都能出图」。
     expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', {
       params: expect.objectContaining({ categories: 'temperature' }),
+      timeout: 8000,
     })
     // historical-batch envelope 被解包 → 图表真实渲染
     expect(wrapper.find('.line-chart').exists()).toBe(true)
@@ -327,8 +330,11 @@ describe('DataPanel', () => {
     await flushPromises()
     await triggerQuery(wrapper, '1')
 
+    // 2026-10-21（B-data 修复）：该端点生产实测会挂起（>38s 无响应），前端给它独立的
+    // 8s 超时以便尽快转入逐个回退；契约同时钉住「envelope / 裸数组两种响应都能出图」。
     expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', {
       params: expect.objectContaining({ categories: 'temperature' }),
+      timeout: 8000,
     })
     expect(wrapper.find('.line-chart').exists()).toBe(true)
   })

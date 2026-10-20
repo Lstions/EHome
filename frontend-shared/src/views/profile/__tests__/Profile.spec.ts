@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Profile from '../Profile.vue'
+import profileSource from '../Profile.vue?raw'
 
 // Mock vue-router
 vi.mock('vue-router', () => ({
@@ -119,5 +120,25 @@ describe('Profile.vue', () => {
     mount(Profile)
     await flushPromises()
     expect(mockChangePassword).not.toHaveBeenCalled()
+  })
+
+  // ── C-ops 审计回归钉（2026-10-21）──────────────────────────────────────
+  it('C-ops：新密码 placeholder 不再与 form-tip 规则说明重复', async () => {
+    const wrapper = mount(Profile)
+    await flushPromises()
+    const placeholders = wrapper.findAll('input').map(i => (i.element as HTMLInputElement).placeholder)
+    expect(placeholders).toContain('请输入新密码')
+    expect(placeholders, 'placeholder 与 form-tip 文案重复').not.toContain('至少 8 位字符')
+    // 规则说明仍完整保留在 form-tip 里（不能把提示也删了）
+    expect(wrapper.text()).toContain('至少 8 位字符，且不能与当前密码相同')
+  })
+
+  it('C-ops：窄屏横向内距交还 main（与其它页对齐），桌面两卡等高', () => {
+    // 窄屏去掉 12px 横向 padding 后，卡片 x 才与其它页的 main 内距一致
+    expect(profileSource).toMatch(/@media \(max-width: 768px\)[\s\S]*?\.profile-page \{\s*padding: 0 0 16px;/)
+    expect(profileSource, '仍保留叠加在 main 之上的 12px 横向内距').not.toContain('padding: 0 12px 16px')
+    // 桌面等高：el-col 变 flex 容器、卡片撑满列高
+    expect(profileSource).toMatch(/\.profile-page :deep\(\.el-col\) \{\s*display: flex;/)
+    expect(profileSource).toMatch(/\.profile-page :deep\(\.el-col > \.el-card\) \{[^}]*flex: 1 1 auto/)
   })
 })

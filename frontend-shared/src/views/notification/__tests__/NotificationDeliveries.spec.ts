@@ -224,6 +224,8 @@ describe('NotificationDeliveries 投递审计页', () => {
 
     const empty = () => wrapper.find('[data-test="nd-empty"]')
     expect(empty().exists()).toBe(true)
+    // C-ops：页面级空态存在时，el-table 不得再渲染自己的「暂无数据」空态（双空态叠加）。
+    expect(wrapper.find('[data-test="nd-table"]').exists(), '双空态：页面级空态与表格空态同时渲染').toBe(false)
     // 分母守卫：无过滤时确实是"暂无"这一支，否则下面的"有过滤"断言可能只是同一文案又出现一次。
     expect(empty().text()).toContain('暂无投递记录')
     expect(empty().text()).not.toContain('没有符合条件')
@@ -270,6 +272,8 @@ describe('NotificationDeliveries 投递审计页', () => {
     const wrapper = mountPage()
     await flushPromises()
 
+    // C-ops 反向守卫：有数据时必须渲染表格（不能为了去重空态把表格藏死）。
+    expect(wrapper.find('[data-test="nd-empty"]').exists()).toBe(false)
     const table = wrapper.find('table.el-table').element
     expect(table.closest('.mobile-table-wrapper'), 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
     const hint = wrapper.find('.mobile-table-wrapper > .mobile-table-hint')

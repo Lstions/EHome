@@ -5,6 +5,7 @@ import { createPinia } from 'pinia'
 import { ElMessageBox } from 'element-plus'
 import NotificationChannels from '../NotificationChannels.vue'
 import NotificationChannelFormDialog from '@/components/notification/NotificationChannelFormDialog.vue'
+import formDialogSource from '@/components/notification/NotificationChannelFormDialog.vue?raw'
 import { notificationChannelApi } from '@/api/notificationChannel'
 import type { NotificationChannel } from '@/api/notificationChannel'
 
@@ -238,5 +239,17 @@ describe('通知通道表单：secret 语义 + 预设模板 + 测试按钮', () 
     const payload = submittedPayload()
     expect('secret' in payload).toBe(true)
     expect(payload.secret).toBe('')
+  })
+
+  // ── C-ops 审计回归钉（2026-10-21）：393 提交按钮不得再在视口外 ──
+  it('C-ops：≤480 弹窗改为底部抽屉（满宽贴底 / 内容区独立滚动 / footer 常驻），桌面保持 680px 居中', () => {
+    expect(formDialogSource).toContain('@media (max-width: 480px)')
+    // 必须用 :global + 自定义 class：组件根就是 teleport 出去的 el-dialog，
+    // scoped :deep 生成的 "[data-v-x] .el-dialog" 在真实 DOM 上没有祖先可命中（首版实测未生效）。
+    expect(formDialogSource).toMatch(/:global\(\.el-dialog\.nc-channel-form-dialog\) \{[^}]*max-height: 92vh/)
+    expect(formDialogSource).toMatch(/:global\(\.nc-channel-form-dialog \.el-dialog__body\) \{[^}]*overflow: auto/)
+    expect(formDialogSource).toMatch(/:global\(\.nc-channel-form-dialog \.el-dialog__footer \.el-button\) \{[^}]*min-height: 44px/)
+    // 桌面宽度仍是 680px 居中弹窗（抽屉样式只在 ≤480 生效，不得泄漏到桌面）
+    expect(formDialogSource).toContain('width="680px"')
   })
 })

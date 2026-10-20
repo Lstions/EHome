@@ -1,6 +1,9 @@
 <template>
   <div class="channel-page">
-    <PageHeader title="通道管理" subtitle="查看和管理所有节点的通道配置">
+    <!-- A-nodes P2（2026-10-21，finding #38）：原副标题承诺「查看和管理」，
+         但本页没有新增/编辑通道入口（ChannelManager 只挂在节点详情）。
+         不改能力边界、只让文案与能力对齐，并指出真实入口在哪。 -->
+    <PageHeader title="通道管理" subtitle="查看所有节点的通道配置；新增/编辑通道请到节点详情 → 总线配置">
       <template #extra>
         <el-button @click="refreshData" :loading="loading">
           <el-icon><Refresh /></el-icon>
@@ -41,7 +44,7 @@
           <el-option
             v-for="node in nodeOptions"
             :key="node.node_id"
-            :label="node.name"
+            :label="nodeDisplayName(node)"
             :value="node.node_id"
           />
         </el-select>
@@ -239,6 +242,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
+import { nodeDisplayName } from '@/utils/nodeDisplay'
 
 const router = useRouter()
 const nodeStore = useNodeStore()
@@ -385,7 +389,7 @@ const visibleChannels = computed(() => {
  * "本页"来自服务端分页的 page_size 与当前页——关键词既不重新请求也不跨越未加载的页。
  */
 const searchScopeHint = computed(
-  () => `关键词检索范围：${SCOPE_PAGE}（第 ${currentPage.value} 页，共 ${pageSize} 条/页）`,
+  () => `关键词检索范围：${SCOPE_PAGE}（第 ${currentPage.value} 页，每页 ${pageSize} 条）`,
 )
 
 /**

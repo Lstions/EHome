@@ -1367,3 +1367,63 @@ a.device-link {
   --el-color-error-light-9: #f8e8e8 !important;
   --el-color-info-light-9: #eff0f1 !important;    /* 5.08 */
 }
+
+/* ============================================
+   全站 UI 审计修复（2026-10-21）
+   ============================================ */
+
+/* 1) 表格空态文案：EP 默认 `.el-table__empty-text{width:50%;line-height:60px}`
+   实测 /alerts、/automation 的空态被拆成 2~4 行、行距 60px，读起来像排版事故。
+   审计证据：c-ops-alerts-393-light-seg0.png（156.5×120，2 行）、
+   c-ops-automation-393-light-seg1.png（160.5×240，4 行）。 */
+.el-table__empty-text {
+  width: auto !important;
+  max-width: 90%;
+  line-height: 1.6 !important;
+  white-space: normal;
+  padding: 12px 0;
+}
+
+/* 2) 暗色「分页当前页」数字对比度 2.91:1（<4.5:1）。
+   根因：暗色 --el-color-primary #1f5ad8 是给「白字落在实心填充」选的，
+   当它作为**文字色**落在深色底上就不达标（同 theme.css 里 el-tag 已处理过同类问题）。
+   证据：c-ops-dark-contrast.json dark.pageActive（/alerts、/automation 都有）。 */
+[data-theme="dark"] .el-pager li.is-active,
+.dark-theme .el-pager li.is-active,
+html.dark .el-pager li.is-active {
+  color: #79bbff !important;
+}
+
+/* 3) 暗色「表格空态/说明」正文：多处页面用 --el-text-color-placeholder 当正文色，
+   实测 12px 仅 3.93:1（亮色 4.83 恰好过线）。统一抬到 secondary。 */
+[data-theme="dark"] .table-empty-hint,
+.dark-theme .table-empty-hint,
+html.dark .table-empty-hint {
+  color: var(--el-text-color-secondary) !important;
+}
+
+/* ---- 暗色主题：主色当文字用时对比度不足（2026-10-21 审计实测）----
+   本项目暗色 --el-color-primary = #1f5ad8 是为「白字落在实心按钮上」选的；
+   当它被当作**文字色**落在深色背景上时只有 2.43:1（设备名链接、查看节点、激活 tab 4.01:1），
+   低于 WCAG AA 正文 4.5:1。Element Plus 暗色默认的 primary 本来更亮（#409eff），
+   是本项目的暗色自定义覆盖把它压深了，所以在这里补回「文字用亮色」的一档。
+   实测 --el-color-primary-dark-2 = #66b1ff 在 #1a1a1a 上约 8.4:1。 */
+html.dark,
+[data-theme="dark"],
+.dark-theme {
+  --el-link-text-color: var(--el-color-primary-dark-2);
+  --el-menu-active-color: var(--el-color-primary-dark-2);
+}
+html.dark .device-link,
+[data-theme="dark"] .device-link,
+.dark-theme .device-link,
+html.dark .node-link,
+[data-theme="dark"] .node-link,
+.dark-theme .node-link {
+  color: var(--el-color-primary-dark-2);
+}
+html.dark .el-tabs__item.is-active,
+[data-theme="dark"] .el-tabs__item.is-active,
+.dark-theme .el-tabs__item.is-active {
+  color: var(--el-color-primary-dark-2);
+}

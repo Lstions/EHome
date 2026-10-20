@@ -99,7 +99,7 @@
         shadow="hover"
         role="button"
         tabindex="0"
-        :aria-label="`查看节点 ${node.name} 详情`"
+        :aria-label="`查看节点详情：${nodeDisplayName(node)}`"
         @click="goToDetail(node.node_id)"
         @keydown.enter.prevent="goToDetail(node.node_id)"
         @keydown.space.prevent="goToDetail(node.node_id)"
@@ -110,7 +110,7 @@
               <el-icon :size="24"><Cpu /></el-icon>
             </div>
             <div class="collector-meta">
-              <h3>{{ node.name }}</h3>
+              <h3>{{ nodeDisplayName(node) }}</h3>
               <span class="model">{{ node.model || '未知型号' }}</span>
             </div>
           </div>
@@ -184,7 +184,7 @@
                 <el-icon><Cpu /></el-icon>
               </div>
               <div>
-                <div class="name">{{ row.name }}</div>
+                <div class="name">{{ nodeDisplayName(row) }}</div>
                 <div class="model">{{ row.model || '未知型号' }}</div>
               </div>
             </div>
@@ -334,6 +334,7 @@ import {
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
+import { nodeDisplayName } from '@/utils/nodeDisplay'
 import { useNodeStore } from '@/stores/node'
 import { nodeApi, type NodeListParams } from '@/api/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -613,7 +614,7 @@ const handleDelete = async (row: any) => {
   let deleted = false
   try {
     const confirmed = await feedback.confirmDanger(
-      `确定要删除节点 "${row.name}" 吗？此操作不可恢复。`,
+      `确定要删除节点 "${nodeDisplayName(row)}" 吗？此操作不可恢复。`,
       { title: '警告', confirmText: '删除', cancelText: '取消' }
     )
     if (!confirmed) return

@@ -139,6 +139,10 @@
           </template>
         </el-table-column>
         <el-table-column prop="detail" label="详情" min-width="140" show-overflow-tooltip />
+        <!-- 2026-10-21 审计复核结论：本列 width=100 < 窄屏表格盒（280~310px），
+             F26 契约与实测探针都判定**不遮挡**（48/48 命中自身），故保持 fixed="right"。
+             C-ops 审计曾把它标为「待确认 P2」（当时无数据、只看到白色条带），
+             本轮按 F26 既有裁决回退 —— 不用未验证的猜测改动已通过的契约。 -->
         <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
             <el-button
@@ -170,7 +174,9 @@
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表一次性渲染后端 Limit(500) 的全部行 (实测 502 行/11902 节点,
            真实事件 >1006 条被静默截断), fixed 列为每行各注入一份 inline style。 -->
-      <div class="events-pagination">
+      <!-- 2026-10-21 审计 C-ops P2：total=0 时分页器仍渲染（实测 321×76「共 0 条 / 20条/页 / 1」），
+           空列表被两个空控件（空态 + 分页）拉长。total>0 才渲染。 -->
+      <div v-if="eventsTotal > 0" class="events-pagination">
         <el-pagination
           v-model:current-page="eventsPage"
           v-model:page-size="eventsPageSize"
@@ -738,7 +744,8 @@ function emptyForm() {
     trigger_window_start: '',
     trigger_window_end: '',
     trigger_window_edge: 'enter' as const,
-    trigger_edge_device_id: 0,
+    // 0 会在 el-select 里回显成「0」（看起来像已选中设备 0）；undefined 才是真空态
+    trigger_edge_device_id: undefined as number | undefined,
     latitude: undefined as number | undefined,
     longitude: undefined as number | undefined,
     timezone: '' as string | undefined,
@@ -821,7 +828,7 @@ function openEdit(rule: AutomationRule) {
     trigger_window_start: rule.trigger_window_start ?? '',
     trigger_window_end: rule.trigger_window_end ?? '',
     trigger_window_edge: rule.trigger_window_edge ?? 'enter',
-    trigger_edge_device_id: rule.trigger_edge_device_id ?? 0,
+    trigger_edge_device_id: rule.trigger_edge_device_id ?? undefined,
     latitude: rule.latitude,
     longitude: rule.longitude,
     timezone: rule.timezone ?? '',
@@ -1703,17 +1710,26 @@ onUnmounted(() => {
 <style scoped>
 .automation-rules-page { display: flex; flex-direction: column; gap: 16px; }
 .card { background: var(--el-bg-color); border-radius: 8px; padding: 16px; }
-.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.card-title { font-size: 15px; font-weight: 600; }
+/* 2026-10-21 审计 C-ops P1：「触发历史」卡片头改前不可换行 —— 标题被右侧 332px 的
+   筛选条挤到 15×84（逐字竖排），筛选条右界还溢出卡片 14px（卡片右 365 / 筛选右 379）。
+   修复：卡片头允许换行（筛选条整体落到第二行）、标题单行不压缩、筛选条自身也换行。 */
+.card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: 8px; margin-bottom: 12px; }
+.card-title { font-size: 15px; font-weight: 600; white-space: nowrap; flex: 0 0 auto; }
 .count-tag { margin-left: 8px; }
 .mono { font-family: monospace; }
-.cond-row { display: flex; gap: 8px; align-items: center; }
+/* 2026-10-21 审计 C-ops P2：「条件」行无宽度约束 ⇒ 393 弹窗 .el-dialog__body
+   scrollWidth 368 > clientWidth 361（横向溢出 7px），＋按钮贴到弹窗右内边。
+   与 /alerts 同口径：比较符定宽 52px、阈值框弹性保底 176px（± 钮各 44px ⇒ 内层 input ≈88px
+   ≥84px），更窄视口下允许换行而不是溢出。 */
+.cond-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cond-row .el-select { flex: 0 0 52px; min-width: 52px; }
+.cond-row .el-input-number { flex: 1 1 auto; min-width: 176px; max-width: 100%; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
 .text-muted { color: var(--el-text-color-secondary); }
 .trigger-cell, .action-cell { display: flex; align-items: center; gap: 6px; }
 .trigger-type-tag { flex-shrink: 0; }
 .trigger-summary, .action-summary { font-size: 12px; }
-.event-filters { display: flex; gap: 8px; align-items: center; }
+.event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
 /* 分页控件换行（窄屏真实裁切修复，与 LogicalDeviceList.vue 同根因）。
    .events-pagination 的 flex-wrap 只管多个 item 之间；内层 el-pagination 自身

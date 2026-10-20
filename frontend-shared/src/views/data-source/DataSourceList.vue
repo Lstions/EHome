@@ -44,28 +44,25 @@
     <!-- 筛选区 -->
     <el-card class="filter-card" shadow="never">
       <div class="filter-bar">
+        <!-- P1（B-data 审计）：改前 loadDevices 超时（接口实测 42.4s > 全局 10s）会**静默**
+             把筛选控件降级成裸「逻辑设备 ID」数字输入。现在：控件始终保留，失败时在旁显示
+             「加载失败 + 重试」，不再悄悄换形态。 -->
         <el-select
-          v-if="deviceOptions.length"
           v-model="filterDeviceId"
           placeholder="逻辑设备"
           clearable
           filterable
+          :loading="deviceOptionsLoading"
           class="filter-item"
           data-test="filter-device"
           @change="applyFilters"
         >
           <el-option v-for="d in deviceOptions" :key="d.id" :label="d.name || `逻辑设备 #${d.id}`" :value="d.id" />
         </el-select>
-        <el-input-number
-          v-else
-          v-model="filterDeviceId"
-          :min="1"
-          :controls="false"
-          placeholder="逻辑设备 ID"
-          class="filter-item"
-          data-test="filter-device-id"
-          @change="applyFilters"
-        />
+        <div v-if="deviceOptionsError" class="filter-device-error" data-test="filter-device-error">
+          <span>逻辑设备加载失败</span>
+          <el-button link type="primary" size="small" data-test="filter-device-retry" @click="loadDevices">重试</el-button>
+        </div>
         <el-input
           v-model="filterCategory"
           placeholder="数据类别"
@@ -94,10 +91,20 @@
 
     <!-- 来源表格 -->
     <section class="card">
+      <!-- 首屏加载：骨架代替"空白卡片 + 空态闪一下"；有数据时表格仍用 v-loading 刷新。 -->
+      <el-skeleton
+        v-if="store.loading && store.items.length === 0"
+        class="table-skeleton"
+        :rows="5"
+        animated
+        data-test="ds-skeleton"
+      />
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
            本表 9 列合计 1270px，且「操作」是 330px 的固定列 —— 390px 视口下占表格盒
-           106.5%，整列压住「名称」列（F26）。窄屏已取消该列的 fixed，见下表列定义。 -->
-      <div class="mobile-table-wrapper">
+           106.5%，整列压住「名称」列（F26）。窄屏已取消该列的 fixed，见下表列定义。
+           无数据时不渲染表格：页面级 EmptyState 已解释空态，避免 el-table 自带
+           「暂无数据」与 EmptyState 双空态叠加（B-data 审计 P2）。 -->
+      <div v-else-if="store.items.length > 0" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.items" v-loading="store.loading" data-test="ds-table">
         <el-table-column label="逻辑设备" min-width="100">
@@ -197,9 +204,9 @@
       </div>
 
       <EmptyState
-        v-if="!store.loading && store.items.length === 0"
+        v-if="!store.loading && !store.error && store.items.length === 0"
         kind="initial"
-        icon="Link"
+        :icon="Link"
         data-test="ds-empty"
         title="暂无数据源"
         description="创建数据源后，可按健康度自动切换权威来源。"
@@ -345,7 +352,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
-import { Plus, Connection, CircleCheck, Clock, WarningFilled } from '@element-plus/icons-vue'
+import { Plus, Connection, CircleCheck, Clock, WarningFilled, Link } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -537,14 +544,27 @@ const filterDeviceId = ref<number | undefined>(undefined)
 const filterCategory = ref('')
 const filterStatus = ref<'' | DataSourceStatus>('')
 
-// ── 逻辑设备下拉（真实 api；取不到时降级为设备 ID 数字输入） ──
+// ── 逻辑设备下拉（真实 api） ──
+// P1（B-data 审计）：改前失败（接口实测 42.4s > 全局 10s）会静默把筛选控件降级成裸
+// 「逻辑设备 ID」数字输入，且无任何解释。现在保留下拉 + 显示「加载失败/重试」。
 const deviceOptions = ref<LogicalDeviceItem[]>([])
+const deviceOptionsLoading = ref(false)
+const deviceOptionsError = ref('')
+/** 只放宽本请求，不动 api/client.ts 的全局 10s（接口富化段实测 42.4s）。 */
+const DEVICE_OPTIONS_TIMEOUT = 60000
 async function loadDevices() {
+  deviceOptionsLoading.value = true
+  deviceOptionsError.value = ''
   try {
-    const res = await logicalDeviceApi.list()
+    const res = await logicalDeviceApi.list(undefined, { timeout: DEVICE_OPTIONS_TIMEOUT })
     deviceOptions.value = Array.isArray(res?.items) ? res.items : []
-  } catch {
-    deviceOptions.value = []
+  } catch (error) {
+    // 保留上一次成功拿到的选项，只提示失败 + 重试入口；绝不悄悄换成 ID 输入。
+    deviceOptionsError.value = error instanceof Error && /timeout/i.test(error.message)
+      ? '逻辑设备列表请求超时'
+      : '逻辑设备列表请求失败'
+  } finally {
+    deviceOptionsLoading.value = false
   }
 }
 
@@ -779,6 +799,16 @@ onMounted(() => {
 .filter-item {
   width: 180px;
 }
+.filter-device-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+.table-skeleton {
+  padding: 16px;
+}
 .card {
   background: var(--el-bg-color);
   border-radius: 8px;
@@ -836,10 +866,16 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  /* 与 /device-configs 的 4×1 指标条统一（B-data 审计 P2：两页同为 4 张 StatCard，
+     改前一个 2×2（卡 165×76）、一个 4×1（卡 80×89），卡片高度参差）。 */
   .stats-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
   }
   .filter-item {
+    width: 100%;
+  }
+  .filter-device-error {
     width: 100%;
   }
 }

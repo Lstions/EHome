@@ -348,6 +348,20 @@ const handleInitialize = async (request: InitializeRequest) => {
   .login-box {
     padding: 32px 20px 24px;
   }
+  /* 2026-10-21 审计实测：登录页输入框高 38px、「记住我」32px、「忘记密码？」32px，
+     均 <44px 触控档位（手机单手操作易点偏）。这里把热区撑到 44px，视觉高度不变。 */
+  .login-box :deep(.el-input__wrapper) {
+    min-height: 44px;
+  }
+  .login-box :deep(.el-checkbox) {
+    min-height: 44px;
+    align-items: center;
+  }
+  .login-box :deep(.el-link) {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
   .brand {
     gap: 12px;
     margin-bottom: 24px;

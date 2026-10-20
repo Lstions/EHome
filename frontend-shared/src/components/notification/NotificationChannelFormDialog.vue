@@ -1,8 +1,11 @@
 <template>
+  <!-- class 落在 .el-dialog 元素上（EP dialog 用 v-bind="$attrs"），供 ≤480 的 :global
+       抽屉规则精确命中本弹窗，不影响其它页面的 el-dialog。 -->
   <el-dialog
     :model-value="visible"
     :title="isEdit ? '编辑通知通道' : '新建通知通道'"
     width="680px"
+    class="nc-channel-form-dialog"
     :close-on-click-modal="false"
     data-test="nc-dialog"
     @update:model-value="(v: boolean) => emit('update:visible', v)"
@@ -394,5 +397,44 @@ function onSubmit() {
 }
 .mono-input :deep(textarea) {
   font-family: monospace;
+}
+
+/* 2026-10-21 审计 C-ops P2：393 下改前弹窗 361.5×1039（y=127.6），footer 在 y=1090，
+   提交按钮位于视口 851 之外 —— 必须先在遮罩内滚动 391px 才能看到「创建」。
+   参考 /automation 已验证形态改为全宽面板（max-height:92vh + 内容区独立滚动 + footer 常驻）。
+
+   ⚠ 这里必须用 :global + 自定义 class，不能用 scoped :deep：
+   本组件根节点就是 <el-dialog>，它 teleport 到 body 后 DOM 上没有本组件的 data-v 祖先
+   （实测 .el-overlay / .el-dialog / .el-overlay-dialog 的 data-v 属性均为空），
+   编译产物 "[data-v-x] .el-dialog" 永远匹配不到 —— 第一版这么写实测完全没有生效。
+   仅 ≤480 生效，桌面（1440）保持 680px 居中弹窗不变。 */
+@media (max-width: 480px) {
+  :global(.el-dialog.nc-channel-form-dialog) {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    border-radius: 12px 12px 0 0 !important;
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+  }
+  :global(.nc-channel-form-dialog .el-dialog__header) {
+    flex: 0 0 auto;
+  }
+  :global(.nc-channel-form-dialog .el-dialog__body) {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+  }
+  :global(.nc-channel-form-dialog .el-dialog__footer) {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  :global(.nc-channel-form-dialog .el-dialog__footer .el-button) {
+    flex: 1 1 auto;
+    min-height: 44px;
+  }
 }
 </style>

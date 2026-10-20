@@ -207,6 +207,8 @@ describe('AlertRules.vue', () => {
   })
 
   it('F8：真分页器仍在 wrapper 之外（横滚容器不得把分页一起卷走）', async () => {
+    // 2026-10-21 C-ops：total=0 不再渲染分页器，本用例前提改为"有事件"。
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
     const wrapper = await mountPage()
     const pagination = wrapper.find('.events-pagination')
     expect(pagination.exists(), '分页器不存在，用例前提不成立').toBe(true)
@@ -417,6 +419,8 @@ describe('AlertRules.vue', () => {
   // (api 层的 markAllEventsRead 被调用 / markEventsRead 未被调用), 不是源码字符串。
   it('U9: 「全部标记已读」调 markAllEventsRead, 不发 markEventsRead([])', async () => {
     mockedAlertApi.markAllEventsRead.mockResolvedValue(undefined)
+    // 2026-10-21 C-ops：空列表不再渲染「全部标记已读」，本用例前提改为"有事件"。
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
     const wrapper = await mountPage()
     mockedAlertApi.markAllEventsRead.mockClear()
     mockedAlertApi.markEventsRead.mockClear()
@@ -504,6 +508,8 @@ describe('AlertRules.vue', () => {
   })
 
   it('G1: 翻页时筛选不丢失 (筛选与分页同一次请求下发)', async () => {
+    // 2026-10-21 C-ops：total=0 不再渲染分页器，本用例前提改为"有事件"。
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
     const wrapper = await mountPage()
     await wrapper.find('[data-test="event-filter-state"]').setValue('firing')
     await flushPromises()
@@ -592,6 +598,34 @@ describe('AlertRules.vue', () => {
       expect(alertRulesSource).toContain('传感器名')
       // 反证：不得退回"单一文案"（那就是改前的缺陷）
       expect(alertRulesSource).not.toContain('<template #empty>暂无告警事件</template>')
+    })
+  })
+
+  // ── C-ops 审计回归钉（2026-10-21）────────────────────────────────────────
+  describe('C-ops 空列表与条件行宽度契约', () => {
+    it('total=0 时不渲染分页器与「全部标记已读」；表格本身仍在（空态文案由 #empty 承载）', async () => {
+      mockedAlertApi.listEvents.mockResolvedValue(eventPage([], 0, 1, 20))
+      const wrapper = await mountPage()
+
+      expect(useAlertStore(wrapper.vm.$pinia).eventsTotal).toBe(0)
+      expect(wrapper.find('[data-test="events-pagination"]').exists(), '空列表仍渲染分页器（共 0 条）').toBe(false)
+      expect(wrapper.find('[data-test="mark-read"]').exists(), '空列表仍渲染「全部标记已读」').toBe(false)
+      // 表格不能被本修复藏死：空态说明由 #empty 插槽渲染
+      expect(wrapper.find('[data-test="events-table"]').exists()).toBe(true)
+    })
+
+    it('反向守卫：total>0 时分页器与「全部标记已读」必须回来', async () => {
+      mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
+      const wrapper = await mountPage()
+      expect(wrapper.find('[data-test="events-pagination"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="mark-read"]').exists()).toBe(true)
+    })
+
+    it('「条件」阈值框最小可用宽度：盒宽 ≥176px（内层 input ≈88px ≥ 84px 验收线），不再被压成 0 宽', () => {
+      expect(alertRulesSource).toMatch(/\.cond-row \.el-input-number \{[^}]*min-width: 176px/)
+      expect(alertRulesSource).toMatch(/\.cond-row \.el-select \{[^}]*flex: 0 0 52px/)
+      // 反向守卫：不得退回"无宽度约束"的旧规则（正是 0 宽缺陷的根因）
+      expect(alertRulesSource).not.toMatch(/\.cond-row \{ display: flex; gap: 8px; align-items: center; \}/)
     })
   })
 })

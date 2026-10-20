@@ -66,7 +66,9 @@
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
            本表 8 列，360px 视口下装不下；没有 wrapper 时 el-table 自身 overflow:hidden，
            右侧列不可达也无任何横滑提示（F8）。 -->
-      <div class="mobile-table-wrapper">
+      <!-- 2026-10-21 审计 C-ops P2：与 /notification-channels 同一缺陷 —— EmptyState
+           （「暂无投递记录」）与 el-table 自带「暂无数据」同屏叠加。有页面级空态时整张表不渲染。 -->
+      <div v-if="!pageEmpty" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table v-loading="store.loading" :data="store.items" stripe data-test="nd-table">
         <el-table-column prop="id" label="ID" width="80" />
@@ -115,7 +117,7 @@
       </div>
 
       <EmptyState
-        v-if="!store.loading && store.items.length === 0"
+        v-if="pageEmpty"
         kind="initial"
         icon="Bell"
         data-test="nd-empty"
@@ -182,6 +184,12 @@ const channelId = ref<number | undefined>(undefined)
 const route = useRoute()
 const stateFilter = ref<NotificationDeliveryState | undefined>(undefined)
 const hasFilter = computed(() => channelId.value !== undefined || stateFilter.value !== undefined)
+
+/**
+ * 页面级空态（审计 C-ops P2）：loading 结束后当前页没有记录（含"过滤后无匹配"）⇒
+ * 渲染页面自己的 EmptyState，并**隐藏 el-table**，避免表格自带「暂无数据」与其叠成两个空态。
+ */
+const pageEmpty = computed(() => !store.loading && store.items.length === 0)
 
 /**
  * 通道下拉的数据源。**只用于把 channel_id 显示成人看得懂的名字**：

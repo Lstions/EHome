@@ -32,7 +32,10 @@
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
            本表 9 列合计约 1180px，360px 视口下装不下 —— 没有 wrapper 时 el-table 自身
            overflow:hidden，右侧「操作」列不可达也无任何横滑提示（F8）。 -->
-      <div class="mobile-table-wrapper">
+      <!-- 2026-10-21 审计 C-ops P2：页面已有 EmptyState（「暂无通知通道」+ CTA）时，
+           el-table 自带的「暂无数据」空态仍会渲染 ⇒ 同一屏两个空态叠加（实测表格空态
+           156.5×60 叠在 EmptyState 313×328.8 上方）。有页面级空态时整张表不渲染。 -->
+      <div v-if="!pageEmpty" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table v-loading="store.loading" :data="store.items" stripe data-test="nc-table">
         <el-table-column prop="id" label="ID" width="72" />
@@ -105,7 +108,7 @@
       </div>
 
       <EmptyState
-        v-if="!store.loading && store.items.length === 0"
+        v-if="pageEmpty"
         kind="initial"
         icon="Bell"
         data-test="nc-empty"
@@ -141,7 +144,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElNotification } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
@@ -176,6 +179,13 @@ const PAGE_SIZES = [20, 50, 100, 200]
 const asChannel = (row: unknown) => row as NotificationChannel
 
 const store = useNotificationChannelStore()
+
+/**
+ * 页面级空态（审计 C-ops P2）：loading 结束后一条数据都没有 ⇒ 页面自己渲染 EmptyState，
+ * 此时**不再渲染 el-table**（否则它的「暂无数据」空态与 EmptyState 叠加成两个空态）。
+ * loading 期间仍渲染表格（保持 v-loading 遮罩与既有骨架语义）。
+ */
+const pageEmpty = computed(() => !store.loading && store.items.length === 0)
 
 /**
  * 窄屏取消固定操作列（F26 合同的同款范式）：固定列绘制顺序恒在普通列之上，

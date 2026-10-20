@@ -380,16 +380,31 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
   .log-controls {
-    align-items: stretch;
-  }
-
-  .log-controls {
+    align-items: center;
     gap: 12px;
   }
 
+  /* A-nodes P2（2026-10-21）：393px 下「级别」被挤成竖排两行（实测 26.2×40）。
+     根因：组宽 flex-basis 140px < 级别组最小内容 28+8+120=156px，
+     而 .control-label 是 flex 子项（默认可收缩）⇒ 中文被逐字换行。
+     改法（只影响窄屏）：label 不换行、不参与收缩；下拉显式 120px 基准；
+     组宽改为按内容（auto）+ 让 .log-controls 的 flex-wrap 决定换行 ——
+     放不下时整组换行，而不是把 2 个字压成 2 行。桌面规则一字不改。 */
+  .control-label {
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
   .control-group {
-    flex: 1 1 140px;
+    flex: 1 1 auto;
+    min-width: 0;
     justify-content: space-between;
+    gap: 8px;
+  }
+
+  .level-select {
+    flex: 0 0 120px;
+    width: 120px;
   }
 }
 </style>

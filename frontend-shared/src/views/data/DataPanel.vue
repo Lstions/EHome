@@ -115,15 +115,39 @@
       <template #header>
         <span>历史数据趋势</span>
       </template>
-      <div style="min-height: 350px;">
-        <LineChart
-          v-if="chartSeries.length > 0"
-          :series="chartSeries"
-          :realtime="realtimeEnabled"
-          title="历史数据趋势"
-          height="350px"
-        />
-        <el-empty v-else description="暂无趋势数据" />
+      <!-- P0：趋势序列是**异步**构建的（historical-batch 生产实测挂起 38s+，超时后回退
+           还要 ~10–30s）。改前 chartSeries 未就绪时直接渲染 el-empty「暂无趋势数据」
+           —— 有数据却报"暂无"的假空态。现在：加载中 → 骨架；失败 → 错误态 + 重试；
+           只有确实没有可绘制的数值时才显示空态。 -->
+      <div class="chart-area">
+        <el-skeleton v-if="chartLoading" :rows="6" animated data-testid="chart-skeleton" />
+        <template v-else>
+          <EmptyState
+            v-if="chartFailed"
+            kind="error"
+            :icon="WarningFilled"
+            title="趋势数据加载失败"
+            description="获取历史趋势数据失败，可重试；若持续失败可缩小时间范围后再查询。"
+            :quick-actions="[{ label: '重试', type: 'primary', handler: retryChart }]"
+            data-testid="chart-error"
+          />
+          <template v-else-if="visibleChartSeries.length > 0">
+            <!-- 393：多指标 4 轴 + 20 条图例在 303px 画布里读不出（审计实测）→ 移动端
+                 单指标 + 紧凑高度；卡片头已有标题，不再给 canvas 传 title（去重复标题）。 -->
+            <div v-if="isMobile" class="mobile-chart-head">
+              <el-select v-model="mobileMetric" data-testid="chart-metric" style="width: 100%;">
+                <el-option v-for="item in chartMetricOptions" :key="item.code" :label="item.label" :value="item.code" />
+              </el-select>
+              <p class="mobile-chart-hint">移动端一次显示 1 个指标；全部指标请在桌面查看。</p>
+            </div>
+            <LineChart
+              :series="visibleChartSeries"
+              :realtime="realtimeEnabled"
+              :height="chartHeight"
+            />
+          </template>
+          <el-empty v-else description="该时间范围内暂无可绘制的数值趋势" />
+        </template>
       </div>
     </el-card>
 
@@ -160,7 +184,6 @@
         <LineChart
           v-if="compareSeries.length > 0"
           :series="compareSeries"
-          title="多设备对比"
           height="300px"
         />
       </div>
@@ -170,7 +193,7 @@
     <EmptyState
       v-if="!queryForm.deviceId"
       kind="initial"
-      icon="Cpu"
+      :icon="Cpu"
       title="选择设备后查看数据"
       description="选择设备和时间范围后，可查看历史趋势与实时数据。"
       :quick-actions="[
@@ -197,10 +220,62 @@
         <EmptyState
           v-if="!historyData || historyData.length === 0"
           kind="empty"
-          icon="DataAnalysis"
+          :icon="DataAnalysis"
           title="该时间范围内暂无数据"
           description="可调整时间范围，或确认设备已完成采集与同步。"
         />
+        <!-- P0（B-data 审计）：393 下「数据」列只有 80px 宽，而 formatData 把整行约
+             638 字符的全量 K/V 串塞进去 ⇒ 逐字换行、单行高 2041px、20 行整页 42689px，
+             分页器在 4 万像素外不可用。窄屏改为「摘要 3~4 个关键指标 + 查看完整数据」
+             卡片列表：不 ellipsis 丢数据，完整 K/V 全量放进详情弹层。 -->
+        <div v-else-if="isMobile" data-testid="data-card-list" class="data-card-list">
+          <!-- 分页在两个位置都可见：卡片列表会占多屏，顶部再放一条精简分页器，避免
+               "翻页要滚到底"（审计要求：分页必须可见可点）。 -->
+          <el-pagination
+            v-if="total > pageSize"
+            v-model:current-page="currentPage"
+            v-model:page-size="pageSize"
+            :total="total"
+            :pager-count="5"
+            layout="prev, pager, next"
+            class="data-card-pagination"
+            data-testid="data-pagination-top"
+            @current-change="fetchData"
+          />
+          <div v-for="(row, rowIndex) in historyData" :key="row.id ?? rowIndex" class="data-card">
+            <div class="data-card-head">
+              <span class="data-card-time">{{ rowTimeText(row) }}</span>
+              <el-tag
+                v-if="row.error_code && row.error_code > 0"
+                :type="getErrorInfo(row.error_code).type"
+                size="small"
+              >
+                {{ getErrorInfo(row.error_code).label }}
+              </el-tag>
+              <span v-else class="data-card-ok">正常</span>
+            </div>
+            <div class="data-card-metrics">
+              <span v-for="metric in summarizeRow(row)" :key="metric.key" class="data-card-metric">
+                <span class="metric-label">{{ metric.label }}</span>
+                <span class="metric-value">{{ metric.value }}<i v-if="metric.unit" class="metric-unit">{{ metric.unit }}</i></span>
+              </span>
+              <span v-if="summarizeRow(row).length === 0" class="data-card-metric muted">无可解析数值</span>
+            </div>
+            <div class="data-card-foot">
+              <span class="data-card-raw">原始数据：{{ rowRawText(row) }}</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                data-testid="row-expand"
+                @click="openRowDetail(row)"
+              >
+                查看完整数据
+              </el-button>
+            </div>
+          </div>
+        </div>
+
         <div v-else class="mobile-table-wrapper">
           <p class="mobile-table-hint">左右滑动查看完整历史数据</p>
           <el-table :data="historyData" stripe>
@@ -252,6 +327,38 @@
         />
       </template>
     </el-card>
+
+    <!-- 移动端「查看完整数据」弹层：完整 K/V 全量展示，不丢任何指标（P0 配套）。 -->
+    <el-dialog
+      v-model="rowDetailVisible"
+      title="单条数据完整内容"
+      align-center
+      width="92%"
+      data-testid="row-detail-dialog"
+    >
+      <div class="row-detail">
+        <div class="row-detail-meta">
+          <span>采集时间：{{ rowTimeText(rowDetailRow) }}</span>
+          <span>原始数据：{{ rowRawText(rowDetailRow) }}</span>
+        </div>
+        <!-- F8：弹层内 4 列表最小宽 400px > 393 弹窗可视宽，必须自带横滚容器 + 提示。 -->
+        <div class="mobile-table-wrapper">
+          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+          <el-table :data="rowDetailEntries(rowDetailRow)" size="small" max-height="420" data-testid="row-detail-table">
+            <el-table-column prop="label" label="指标" min-width="110" show-overflow-tooltip />
+            <el-table-column prop="key" label="标识" min-width="110" show-overflow-tooltip />
+            <el-table-column prop="value" label="值" width="110" align="right" />
+            <el-table-column prop="unit" label="单位" width="70" align="center" />
+          </el-table>
+        </div>
+        <p v-if="rowDetailEntries(rowDetailRow).length === 0" class="row-detail-empty">
+          该条数据无法解析出指标（原始帧见上）。
+        </p>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="rowDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -419,10 +526,11 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Download, Connection, DataAnalysis, DocumentChecked, Timer, Cpu } from '@element-plus/icons-vue'
+import { Download, Connection, DataAnalysis, DocumentChecked, Timer, Cpu, WarningFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import LineChart from '@/components/charts/LineChart.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import client from '@/api/client'
@@ -435,6 +543,24 @@ import { UNKNOWN } from '@/utils/format'
 
 const router = useRouter()
 const route = useRoute()
+
+/**
+ * 窄屏（<768px）分支：历史数据表 → 「摘要 + 查看完整数据」卡片；趋势图 → 单指标 + 紧凑高度。
+ * 断点与 theme.css 一致（useResponsive 的 isMobile = width < 768）。
+ */
+const { isMobile } = useResponsive()
+
+// ── 趋势图异步态（P0：historical-batch 生产实测挂起 38s+，超时回退还需 10–30s）──
+const chartLoading = ref(false)
+const chartFailed = ref(false)
+/** 只允许最后一次构建写回状态（快速连续查询时防旧请求回写）。 */
+let chartLoadToken = 0
+/** 移动端趋势图当前查看的指标（单指标，避免 4 轴 + 20 图例挤在 303px 画布里）。 */
+const mobileMetric = ref('')
+
+// ── 移动端「查看完整数据」详情弹层 ──
+const rowDetailVisible = ref(false)
+const rowDetailRow = ref<Record<string, any> | null>(null)
 
 /** A5：`?range=` 的合法取值，与模板里四个 el-option（1h/24h/7d/30d）逐字一致 —— 改模板须同步改这里。 */
 const TIME_RANGE_VALUES = ['1h', '24h', '7d', '30d'] as const
@@ -507,6 +633,19 @@ function unwrapList<T>(res: unknown): T[] {
   return []
 }
 
+/**
+ * 「最新」统计卡的指标优先级：改前取 availableCategories 的**字母序前 3**（BMS 上是
+ * cell_voltage_1/10/11，三张卡都是 3.27V，等于没有信息量）。这里按业务优先级排序后取前 3。
+ */
+const STAT_METRIC_PRIORITY = [
+  'total_voltage', 'current', 'rsoc', 'remaining_capacity', 'temperature_1',
+  'power', 'cell_voltage_max', 'cell_voltage_min', 'total_power', 'frequency',
+]
+function statRank(code: string): number {
+  const index = STAT_METRIC_PRIORITY.indexOf(code)
+  return index < 0 ? STAT_METRIC_PRIORITY.length : index
+}
+
 const dynamicStats = computed(() => {
   const latest = [...historyData.value]
     .sort((a, b) => String(b.timestamp || b.created_at || b.collected_at || '').localeCompare(String(a.timestamp || a.created_at || a.collected_at || '')))[0]
@@ -515,7 +654,9 @@ const dynamicStats = computed(() => {
   // 统计卡是**数值指标**视图：用 numbers（纯数值）而不是 values（可能含字符串），
   // 否则 hardware_version="V19" 会被当成 0 计入并污染统计。
   const source = parseRowData(latest).numbers ?? {}
-  return availableCategories.value
+  return [...availableCategories.value]
+    // 业务优先级排序（稳定排序：未列出的指标保持后端原顺序），不再按字母序取前 3。
+    .sort((a, b) => statRank(a.code) - statRank(b.code))
     .map((category) => {
       const value = source[category.code] ?? null
       if (value === null) return null
@@ -552,7 +693,11 @@ const calculateStats = () => {
   }
 
   const diffMin = Math.floor((times[times.length - 1] - times[0]) / 60000)
-  if (diffMin < 60) {
+  // P2（审计实测：本页 20 条跨 19s 却显示「0分钟」，像没采到数据）：
+  // 不足 1 分钟统一走本页已有的「< 1分钟」写法，不显示 0。
+  if (diffMin < 1) {
+    latestStats.duration = '< 1分钟'
+  } else if (diffMin < 60) {
     latestStats.duration = `${diffMin}分钟`
   } else if (diffMin < 1440) {
     latestStats.duration = `${Math.floor(diffMin / 60)}小时${diffMin % 60}分钟`
@@ -690,9 +835,37 @@ const fetchData = async () => {
   }
 }
 
+/**
+ * 小工具：把并发压到 limit（趋势图回退请求专用，见下方注释）。
+ * 不用 p-limit 之类新依赖，保持零新增包。
+ */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  const run = async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await worker(items[index])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
+  return results
+}
+
 const buildChartSeries = async () => {
+  // P0：趋势序列是**异步**构建的。改前 chartSeries 未就绪就渲染 el-empty「暂无趋势数据」，
+  // 而生产实测 historical-batch 挂起 38s+、超时回退还要 10–30s ⇒ 有数据却报"暂无"。
+  // 这里显式建模 chartLoading / chartFailed，并用请求令牌防止旧构建写回。
+  const token = ++chartLoadToken
+  chartLoading.value = true
+  chartFailed.value = false
+  /** 逐个类别回退时统计"请求本身失败"的条数：全失败且无序列 ⇒ 真失败（错误态）。 */
+  let fallbackFailures = 0
   if (historyData.value.length === 0) {
     chartSeries.value = []
+    chartLoading.value = false
+    syncMobileMetric()
     return
   }
 
@@ -734,7 +907,10 @@ const buildChartSeries = async () => {
 
     try {
       const batchRes = await client.get<unknown, MeasurementBatch[]>('/api/v1/unified-data/historical-batch', {
-        params: batchParams
+        params: batchParams,
+        // 生产实测该端点会挂起（>38s 无响应）：给独立短超时，尽快转入逐个回退，
+        // 避免整页趋势图长时间停在骨架（P0 配套；不影响全局 axios timeout）。
+        timeout: 8000,
       })
       // 批量 API 返回格式: [{category: "temperature", data: [{...}]}, ...]
       const batchResults = unwrapList<MeasurementBatch>(batchRes)
@@ -767,21 +943,27 @@ const buildChartSeries = async () => {
         throw new Error('batch API returned no data, falling back')
       }
     } catch {
-      // Fallback: 批量 API 失败时逐个请求 + max_points=500
-      const fallbackPromises = categoryNames.map(cat =>
-        client.get<unknown, MeasurementPoint[]>('/api/v1/unified-data/historical', {
-          params: {
-            device_pk: queryForm.deviceId,
-            category: cat,
-            start_time: startTime.toISOString(),
-            end_time: endTime.toISOString(),
-            max_points: 500
-          }
-        }).then(res => ({ cat, data: unwrapList<MeasurementPoint>(res) }))
-          .catch(() => ({ cat, data: [] as MeasurementPoint[] }))
-      )
-
-      const fallbackResults = await Promise.all(fallbackPromises)
+      // Fallback: 批量 API 失败时逐个请求 + max_points=500。
+      // ⚠ 并发必须限流：浏览器同域只有 ~6 条 HTTP/1.1 连接，31 个回退请求全并行时，
+      //   挂起的那几条会吃满连接池 ⇒ 用户点翻页发出的 /edge-devices/:id/data 请求被排队，
+      //   实测点击分页后 8s 内一个请求都没发出去（页面一直骨架）。限 4 并发给交互请求留 2 条。
+      const fallbackResults = await mapWithConcurrency(categoryNames, 4, async (cat) => {
+        try {
+          const res = await client.get<unknown, MeasurementPoint[]>('/api/v1/unified-data/historical', {
+            params: {
+              device_pk: queryForm.deviceId,
+              category: cat,
+              start_time: startTime.toISOString(),
+              end_time: endTime.toISOString(),
+              max_points: 500
+            }
+          })
+          return { cat, data: unwrapList<MeasurementPoint>(res) }
+        } catch {
+          fallbackFailures += 1
+          return { cat, data: [] as MeasurementPoint[] }
+        }
+      })
       for (const r of fallbackResults) {
         if (r.data && r.data.length > 0) {
           const filteredData = r.data
@@ -807,6 +989,10 @@ const buildChartSeries = async () => {
     }
 
     chartSeries.value = series
+    // 所有类别请求都失败且没有任何序列 ⇒ 真失败；若请求成功但数据为空 ⇒ 真空数据（非错误）。
+    chartFailed.value = series.length === 0
+      && categoryNames.length > 0
+      && fallbackFailures === categoryNames.length
   } catch (error) {
     logger.error('获取趋势数据失败', { error: String(error) })
     // Fallback: 从 data_json 提取数值字段（与表格/统计卡同一解析入口）
@@ -829,10 +1015,126 @@ const buildChartSeries = async () => {
             value: parseRowData(item).numbers?.[key] ?? null,
           }))
       }))
+      chartFailed.value = false
     } else {
       chartSeries.value = []
+      chartFailed.value = true
+    }
+  } finally {
+    if (token === chartLoadToken) {
+      chartLoading.value = false
+      syncMobileMetric()
     }
   }
+}
+
+// ── 移动端趋势图：单指标 + 紧凑高度 ──
+// P1（B-data 审计）：393 的 303px 画布里 4 根 Y 轴 + 20 条图例不可读（轴标签重叠、
+// 图例被折叠成 1/20）；移动端改为单指标 + height 220（LineChart 的紧凑模式阈值 ≤220）。
+const CHART_METRIC_PRIORITY = [
+  'total_voltage', 'current', 'rsoc', 'remaining_capacity', 'temperature_1',
+  'power', 'cell_voltage_max', 'cell_voltage_min',
+]
+
+const chartMetricOptions = computed(() => {
+  const rank = (code: string) => {
+    const index = CHART_METRIC_PRIORITY.indexOf(code)
+    return index < 0 ? CHART_METRIC_PRIORITY.length : index
+  }
+  // 关键指标排前面（否则下拉第一屏全是 cell_voltage_1/10/11… 字母序噪声）。
+  return [...chartSeries.value]
+    .sort((a, b) => rank(String(a.category)) - rank(String(b.category)))
+    .map((item) => ({
+      code: String(item.category || ''),
+      label: item.unit ? `${item.name} (${item.unit})` : String(item.name || item.category || ''),
+    }))
+})
+
+const visibleChartSeries = computed(() => {
+  if (!isMobile.value) return chartSeries.value
+  const chosen = chartSeries.value.find(item => String(item.category) === mobileMetric.value)
+  return chosen ? [chosen] : []
+})
+
+const chartHeight = computed(() => (isMobile.value ? '220px' : '350px'))
+
+function pickDefaultMetric(series: Array<{ category?: unknown }>): string {
+  for (const code of CHART_METRIC_PRIORITY) {
+    if (series.some(item => String(item.category) === code)) return code
+  }
+  const first = series[0]
+  return first ? String(first.category ?? '') : ''
+}
+
+/** 让移动端选中项始终落在当前 series 上（换设备/时间范围后自动回到优先指标）。 */
+function syncMobileMetric() {
+  if (mobileMetric.value && chartSeries.value.some(item => String(item.category) === mobileMetric.value)) return
+  mobileMetric.value = pickDefaultMetric(chartSeries.value)
+}
+
+function retryChart() {
+  void buildChartSeries()
+}
+
+// ── 移动端历史数据「摘要 3~4 个关键指标 + 查看完整数据」──
+// P0（B-data 审计）：393 下「数据」列 80px 装 638 字符 ⇒ 单行 2041px、整页 42689px。
+// 摘要只挑业务优先级高的指标；完整 K/V 全量（不 ellipsis 丢数据）放进详情弹层。
+const SUMMARY_METRIC_PRIORITY = CHART_METRIC_PRIORITY
+
+function metricUnit(code: string): string {
+  const category = availableCategories.value.find(item => item.code === code)
+  return category?.unit || sensorUnitMap[code] || ''
+}
+
+function formatMetricValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
+}
+
+interface RowSummaryMetric { key: string; label: string; value: string; unit: string }
+function summarizeRow(row: Record<string, any>): RowSummaryMetric[] {
+  const numbers = parseRowData(row).numbers
+  if (!numbers) return []
+  const rank = (code: string) => {
+    const index = SUMMARY_METRIC_PRIORITY.indexOf(code)
+    return index < 0 ? SUMMARY_METRIC_PRIORITY.length : index
+  }
+  return Object.keys(numbers)
+    .sort((a, b) => rank(a) - rank(b))
+    .slice(0, 4)
+    .map(code => ({
+      key: code,
+      label: sensorNameMap[code] || code,
+      value: formatMetricValue(numbers[code]),
+      unit: metricUnit(code),
+    }))
+}
+
+function rowTimeText(row: Record<string, any> | null): string {
+  if (!row) return UNKNOWN
+  const time = row.timestamp || row.created_at || row.collected_at
+  return time ? formatTime(time) : UNKNOWN
+}
+
+function rowRawText(row: Record<string, any> | null): string {
+  const rawHex = row ? parseRowData(row).rawHex : null
+  return rawHex ? formatRawData(rawHex) : UNKNOWN
+}
+
+interface RowDetailEntry { key: string; label: string; value: string; unit: string }
+function rowDetailEntries(row: Record<string, any> | null): RowDetailEntry[] {
+  const values = row ? parseRowData(row).values : null
+  if (!values) return []
+  return Object.entries(values).map(([key, raw]) => ({
+    key,
+    label: sensorNameMap[key] || key,
+    value: String(raw ?? UNKNOWN),
+    unit: metricUnit(key),
+  }))
+}
+
+function openRowDetail(row: Record<string, any>) {
+  rowDetailRow.value = row
+  rowDetailVisible.value = true
 }
 
 // 实时数据处理
@@ -1283,5 +1585,132 @@ onUnmounted(() => {
   .stat-card :deep(.el-card__body) {
     padding: 16px;
   }
+}
+
+.chart-area {
+  min-height: 350px;
+}
+
+/* 移动端趋势图：单指标选择器 + 说明（P1：4 轴 + 20 图例在 303px 画布读不出） */
+.mobile-chart-head {
+  margin-bottom: 8px;
+}
+
+.mobile-chart-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 移动端历史数据卡片：摘要 3~4 个关键指标 + 「查看完整数据」（P0：80px 数据列不可用） */
+.data-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.data-card-pagination {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.data-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--el-bg-color);
+}
+
+.data-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.data-card-time {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.data-card-ok {
+  color: var(--el-color-success);
+  font-size: 12px;
+}
+
+.data-card-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin-top: 10px;
+}
+
+.data-card-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.metric-label {
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-value {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.metric-unit {
+  margin-left: 2px;
+  font-style: normal;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+.data-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.data-card-raw {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-card-list .muted {
+  color: var(--el-text-color-placeholder);
+}
+
+.row-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.row-detail-empty {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
 }
 </style>

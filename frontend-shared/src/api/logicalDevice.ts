@@ -95,13 +95,24 @@ export const logicalDeviceApi = {
   // 服务端分页: page/page_size 与全站一致 (默认 1/20)。改前本方法不传任何分页参数,
   // 后端全量返回 1003 条, 页面一次性渲染 1003 行 / 28541 个 DOM 元素且无分页控件 (D2-02)。
   // 返回结构保持既有的 {items,total}, 仅纯增量读取 page/page_size 回显。
-  async list(params?: LogicalDeviceListParams): Promise<LogicalDeviceListResponse> {
+  //
+  // options.timeout —— 只放宽**本请求**的超时，不动全局 axios timeout。
+  // 生产实测（2026-10-21，B-data 审计）：该端点在 16 个逻辑设备时稳定 42.3–42.4s
+  // （列表富化段逐设备串行估算），而全局 timeout=10s ⇒ 页面永远拿不到数据、
+  // 渲染成「暂无逻辑设备」假空态。调用方传 60000 兜住；后端提速后此参数可删。
+  async list(
+    params?: LogicalDeviceListParams,
+    options?: { timeout?: number },
+  ): Promise<LogicalDeviceListResponse> {
     const response = await client.get<unknown, ApiEnvelope<{
       items?: LogicalDeviceItem[]
       total?: number
       page?: number
       page_size?: number
-    }>>('/api/v1/logical-devices', { params })
+    }>>('/api/v1/logical-devices', {
+      params,
+      ...(options?.timeout != null ? { timeout: options.timeout } : {}),
+    })
     const data = response.data
     const items: LogicalDeviceItem[] = Array.isArray(data?.items) ? data.items : []
     return {

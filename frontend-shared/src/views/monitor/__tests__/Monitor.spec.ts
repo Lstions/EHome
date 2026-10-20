@@ -830,3 +830,58 @@ describe('Monitor.vue', () => {
     setIntervalSpy.mockRestore()
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════
+// C-ops 全站 UI 审计修复契约（2026-10-21）
+// ═══════════════════════════════════════════════════════════════════════
+describe('Monitor.vue C-ops 修复契约（控制面口径 / KPI 图标避让 / 窄屏页头）', () => {
+  it('P1：「操作失败」是累计计数，不再按待处置条件标红；红字只留给计入「需关注」的条件项', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    const metrics = wrapper.findAll('.control-metric')
+    const failed = metrics.find(m => m.text().includes('操作失败'))
+    expect(failed, '「操作失败」读数缺失，断言会假绿').toBeTruthy()
+    expect(failed!.classes(), '累计失败仍被当成待处置条件标红').not.toContain('attention')
+    // 夹具：unresolved_unknown=1 + capability_stale_nodes=1 ⇒ 恰好 2 个条件项标红
+    expect(wrapper.findAll('.control-metric.attention')).toHaveLength(2)
+    expect(wrapper.find('[data-test="monitor-control-alert"]').text()).toContain('2 项')
+    // 口径说明必须可追溯：tooltip 文案 + 计算属性只累加三个待处置条件
+    const src = readFileSync('src/views/monitor/Monitor.vue', 'utf8')
+    expect(src).toContain('累计计数')
+    expect(src).toMatch(/controlAttention = computed\(\(\) =>\s*\(metrics\.value\?\.control\?\.unresolved_unknown/)
+  })
+
+  it('P2：KPI 装饰图标不再压字（文字层在上 + 内容区预留图标位，桌面 52px / 窄屏 40px）', async () => {
+    const css = await compiledScopedCss('src/views/monitor/Monitor.vue')
+    expect(css, 'KPI 内容区未预留图标位（桌面 52px）').toMatch(/\.stat-content\[data-v-narrow\] \{[^}]*padding-right: 52px/)
+    expect(css, '装饰图标未置底（会绘在文字之上）').toMatch(/\.stat-card \.stat-icon\[data-v-narrow\] \{[^}]*z-index: 0/)
+    expect(css).toMatch(/\.stat-card \.stat-icon\[data-v-narrow\] \{[^}]*pointer-events: none/)
+    expect(css, '窄屏未预留 40px 图标位（36px 图标 + right 12px）').toContain('padding-right: 40px')
+  })
+
+  it('P2 窄屏 390：操作区占满页头一行（width:100% + 横向一行），不再按 max-content 收缩', async () => {
+    const css = await compiledScopedCss('src/views/monitor/Monitor.vue')
+    const w = newNarrowWindow(390)
+    const style = w.document.createElement('style')
+    style.textContent = css
+    w.document.head.appendChild(style)
+    const make = (cls: string, parent: Element) => {
+      const el = w.document.createElement('div')
+      el.className = cls
+      el.setAttribute('data-v-narrow', '')
+      parent.appendChild(el)
+      return el
+    }
+    const root = make('monitor-container', w.document.body)
+    const header = make('page-header', root)
+    const right = make('page-header-right', header)
+    const toolbar = make('toolbar-actions', right)
+    const cs = (el: Element) => w.getComputedStyle(el)
+    expect(w.matchMedia('(max-width: 768px)').matches).toBe(true)
+    expect(cs(toolbar).width, '操作区仍按 max-content 收缩（右侧留白 200px）').toBe('100%')
+    expect(cs(toolbar).flexDirection, '≤480 仍纵向堆叠（每控件各占一行）').toBe('row')
+    // 既有契约不得被本修复改掉：PageHeader 第二行仍右对齐
+    expect(cs(right).justifyContent).toBe('flex-end')
+  })
+})
