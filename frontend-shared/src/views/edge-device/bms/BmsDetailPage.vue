@@ -153,7 +153,7 @@
           </p>
 
           <p class="card-footnote">
-            着色规则：<b>导通</b>用成功色、<b>关断</b>用中性色 —— 关断是正常工况，不是故障；只有「保护已触发」才用告警色。
+            <b>关断</b>是正常工况而非故障，因此用中性色；只有「保护已触发」才显示告警色。
           </p>
         </div>
 
@@ -176,7 +176,12 @@
                原来正常态只给一行摘要 + 「展开明细」按钮，要用户多点一次才能看到
                12 位明细；而这页的主要用途就是核对保护位，默认藏起来反而妨碍阅读。
                现在 12 项明细恒定可见（见下方 .protect-grid），少一层交互。 -->
-          <div v-if="!activeProtections.length" class="protect-compact" role="status">
+          <div
+            v-if="!activeProtections.length"
+            class="protect-compact"
+            :class="{ 'is-all-normal': hasProtectionData }"
+            role="status"
+          >
             <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
             <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据' }}</span>
           </div>
@@ -232,9 +237,9 @@
             <span class="lg"><i class="swatch swatch-normal"></i>正常</span>
             <span class="lg"><i class="swatch swatch-high"></i>偏高 &gt; 3.600V</span>
             <span class="lg"><i class="swatch swatch-danger"></i>偏低 &lt; 3.000V</span>
-            <span class="cell-thresholds">参考线 3.000V / 3.600V（沿用旧页 BmsCellVoltageChart）</span>
+            <span class="cell-thresholds">参考线 3.000V / 3.600V</span>
           </div>
-          <p class="card-footnote">复用旧 BMS 页柱状图口径：Y 轴自适应、上下限虚线标注、容器变窄时只保留越限与最高/最低标签，精确值可悬停查看。</p>
+          <p class="card-footnote">点击柱体可查看精确值。</p>
         </div>
       </section>
 
@@ -255,7 +260,7 @@
             </div>
             <div v-if="!temps.length" class="stream-empty">暂无温度数据</div>
           </div>
-          <p class="card-footnote">判定：&gt;45℃ 偏高（告警）· &gt;60℃ 过高（危险）。正常温区用成功色，不用危险色。</p>
+          <p class="card-footnote">&gt;45℃ 偏高 · &gt;60℃ 过高</p>
         </div>
       </section>
 
@@ -304,8 +309,7 @@
 
           <p v-if="snapshotError" class="card-footnote txt-danger">最新快照加载失败：{{ snapshotError }}</p>
           <p class="card-footnote">
-            数据来自设备 WebSocket 上报（新的在前）。验证方式：点「高频注入」让列表每秒新增 1 条（本地压测行，非设备数据）
-            → 用鼠标/触控<b>向上滚</b>，列表应停在原处、新数据只累积计数而不把视口拉回；点「回到最新」或滚回底部即恢复跟随。
+            数据来自设备实时上报（新的在前）。向上滚动即暂停跟随，新数据只累积计数；滚回底部或点「回到最新」恢复。
           </p>
         </div>
 
@@ -2184,8 +2188,15 @@ onUnmounted(() => {
    不要 3 列挤爆。 */
 @media (max-width: 1100px) {
   .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
-  /* 保护项在 1100 以下单列：2 列时 820/1024 会把「前端 IC 错误」截断 18~19px */
-  .protect-grid { grid-template-columns: 1fr; }
+  /*
+    保护项在 1100 以下：2 列（原来是无条件单列）。
+
+    原来单列的原因：2 列时 820/1024 会把「前端 IC 错误」截断 18~19px。
+    但那是**旧实现只给 name 一段固定宽度 + nowrap 省略号**导致的。
+    现在 name 允许折行（见下），2 列不会截断，且比单列省一半高度。
+    3 列留给手机（≤768px，见该断点）。
+  */
+  .protect-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
 }
 
@@ -2315,8 +2326,105 @@ onUnmounted(() => {
     单列断点从 768 提到 1100（复审：820px 与 1024px 下 2 列仍截「前端 IC 错误」
     18~19px）——1100px 以下统一单列，宽度充裕后再回 2 列。
   */
-  .protect-grid { grid-template-columns: 1fr; }
-  .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
+  /*
+    ══════════ 保护状态：3 列紧凑网格（670px → 目标 ≤250px）══════════
+
+    现状问题（实测 393px）：单列布局，12 项 × 44px 触控高 = 670px，
+    占 0.77 屏；每项内部「名称 + 正常标签 + bitN」三段横排，
+    而右侧还有大片空白（卡片 321px 但内容只用到 295px）。
+
+    关键决策：**bitN 在移动端隐藏，名称必须保留**。
+    理由：bitN 是给工程师对寄存器用的次要信息，名称才是用户判断"哪项保护"的依据；
+    用户此前明确批评"短路保护被截成短路…"。两者冲突时保名称、舍 bitN。
+    桌面端 bitN 保留（空间够）。
+
+    3 列而非 2 列：实测每格 ~103px 恰好放得下 4 字名称（12px 字号），
+    2 列会浪费宽度、1 列就是现状。
+  */
+  .protect-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .protect-item {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    padding: 4px 3px;
+    /* 名称 15 + gap 1 + 标签 16 + 上下内距 8 = 40px，仍高于 WCAG 的 24px 下限 */
+    min-height: 40px;
+  }
+  .protect-name {
+    /* 名称必须完整可读：允许折行，不用省略号 */
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    text-align: center;
+    font-size: 12px;
+    line-height: 15px;
+    flex: none;
+    width: 100%;
+  }
+  /* bitN 收起（移动端）；桌面端仍显示 */
+  .protect-bit { display: none; }
+  /* 「正常/已触发」标签收紧，不再单独占一行高度 */
+  .protect-item :deep(.el-tag) {
+    height: 16px;
+    line-height: 14px;
+    padding: 0 4px;
+    font-size: 11px;
+  }
+
+  /*
+    移动端把「12 项保护均未触发（bit0 – bit11 全 0）」这行摘要收掉 30px。
+
+    为什么可以收：卡片头已有「全部正常」绿标签 + protection_status = 0x00 徽章，
+    这句是同义重复，而它正是超出 250px 目标的那部分。
+
+    ⚠ 只收「全正常」这一种（.is-all-normal），**「暂无 protection_status 数据」
+      必须保留** —— 那是"采不到数据"的重要提示，藏掉等于让用户以为一切正常，
+      属 fail-open。有保护触发时走另一分支，也不受影响。
+  */
+  .protect-compact.is-all-normal { display: none; }
+
+  /*
+    卡片头压缩 47 → ~28px：
+    393px 下「保护状态 + 全部正常标签 + protection_status = 0x00 徽章」放不下，
+    徽章被挤到第二行（monospace 长串换行占 20px）。
+
+    ⚠ 隐藏的是**徽章**不是标签：
+      · 「全部正常 / N 项保护已触发 / 暂无数据」标签保留（这是用户要看的结论）；
+      · `protection_status = 0x00` 是给工程师对寄存器用的原始值，
+        移动端属于"开发者文案"（用户明确批评过这类内容），且完整值在
+        protectionBits 的 12 格里已逐位体现。桌面端保留。
+  */
+  .protect-card .card-head { margin-bottom: 6px; }
+  .protect-card .card-head .mono-badge { display: none; }
+  .protect-card .card-head { min-height: 0; padding-bottom: 0; }
+
+  /*
+    ══════════ MOS 直控：364px → 目标 ≤200px ══════════
+
+    移动端收起三段**说明性长文本**，保留全部操作元素（2 个开关 + 状态标签）：
+      ① .card-note（"充电/放电回路通断的软件策略 set_mos_policy。开关即时下发…"4 行）
+         —— 解释机制，用户点一下开关就能理解，属"首次阅读才有价值"的内容；
+      ② .card-footnote（"关断是正常工况而非故障…"）
+         —— 解释配色决策，同理；
+      ③ mono-badge（fet_status = 0x03）—— 原始寄存器值，工程师用，同保护卡处置。
+
+    ⚠ 不收起：mos-name（充电/放电 MOS）、状态标签（导通/关断）、
+      mos-desc（允许充电/允许放电）、开关本身、错误 alert、不可控提示。
+      这些是操作与状态，一个都不能少。
+  */
+  .mos-card .card-note,
+  .mos-card .card-footnote,
+  .mos-card .card-head .mono-badge { display: none; }
+  .mos-card .card-head { margin-bottom: 8px; }
+  .mos-row { padding: 8px 0; }
+  .mos-icon { width: 28px; height: 28px; }
+  .mos-name { font-size: 14px; }
+  .mos-desc { font-size: 11px; }
 
   /* ── 实时流：横向溢出治理（实测 el-main scrollWidth 432 > clientWidth 382） ──
      根因：.stream-row { min-width: 420px } 在 354px 容器里硬撑，把整页撑出横向滚动条。
