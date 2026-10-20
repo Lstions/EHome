@@ -28,19 +28,56 @@
             <el-tag type="info" size="small" effect="plain">{{ deviceTypeLabel }} · {{ cellCountLabel }}</el-tag>
           </div>
           <div class="dev-sub">
-            节点 {{ nodeLabel }} · 通道 {{ channelLabel }} · 设备 #{{ deviceId }} · 节点固件 {{ firmwareLabel }}
-            <template v-if="hasPollLimit"> · 轮询已启用 <b>{{ enabledCount }}/{{ pollLimitValue }}</b> 条</template>
-            <template v-else> · 轮询已启用 <b>{{ enabledCount }}</b> 条</template>
+            <template v-if="isMobileViewport">
+              <!--
+                移动端紧凑版：与桌面版**信息等价**，只是去掉重复的"节点/通道/设备"字样，
+                用 # 与 · 分隔。393px 下桌面长文案会折成 3~4 行（51px+），紧凑版压到 2 行。
+                保留全部 5 项：节点序列号、总线、设备号、固件、轮询启用数。
+              -->
+              <span>{{ nodeLabel }}</span>
+              <span>·</span><span>{{ channelLabel }}</span>
+              <span>·</span><span>#{{ deviceId }}</span>
+              <span>·</span><span>FW {{ firmwareLabel }}</span>
+              <span>·</span><span>轮询 <b>{{ enabledCount }}<template v-if="hasPollLimit">/{{ pollLimitValue }}</template></b></span>
+            </template>
+            <template v-else>
+              节点 {{ nodeLabel }} · 通道 {{ channelLabel }} · 设备 #{{ deviceId }} · 节点固件 {{ firmwareLabel }}
+              <template v-if="hasPollLimit"> · 轮询已启用 <b>{{ enabledCount }}/{{ pollLimitValue }}</b> 条</template>
+              <template v-else> · 轮询已启用 <b>{{ enabledCount }}</b> 条</template>
+            </template>
           </div>
         </div>
         <!-- 设备操作（2026-10-17 转正时补回）：评审 demo 是视觉稿，没有这些入口；
              生产页必须有 —— 否则用户在本页无法同步到 HA / 编辑 / 删除设备，
              而旧版 BmsDetailPage 是通过 DeviceHeader 提供它们的，属功能回退。 -->
         <div class="head-actions">
-          <el-button size="small" :loading="syncingHA" :icon="Upload" @click="onSyncToHA">同步到 HA</el-button>
-          <el-button size="small" :icon="Edit" @click="onEditDevice">编辑</el-button>
-          <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${deviceName}`" @click="onDeleteDevice">删除</el-button>
-          <el-button size="small" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
+          <!--
+            移动端只保留「刷新」一个主操作，其余收进 ⋯ 溢出菜单：
+            实测 393px 下 4 个按钮各占 44px 触控高，会折成 2~3 行，
+            页头从 221px 涨到约 300px，还把设备身份信息挤到看不见。
+            桌面端（≥769px）保持原来的 4 按钮横排 —— 契约测试锁定该结构。
+          -->
+          <template v-if="isMobileViewport">
+            <el-button size="small" type="primary" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
+            <el-dropdown trigger="click" @command="onHeadMoreCommand">
+              <el-button size="small" :icon="MoreFilled" circle aria-label="更多设备操作" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="sync" :icon="Upload" :disabled="syncingHA">同步到 HA</el-dropdown-item>
+                  <el-dropdown-item command="edit" :icon="Edit">编辑</el-dropdown-item>
+                  <el-dropdown-item command="delete" :icon="Delete" divided>
+                    <span style="color: var(--el-color-danger);">删除</span>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </template>
+          <template v-else>
+            <el-button size="small" :loading="syncingHA" :icon="Upload" @click="onSyncToHA">同步到 HA</el-button>
+            <el-button size="small" :icon="Edit" @click="onEditDevice">编辑</el-button>
+            <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${deviceName}`" @click="onDeleteDevice">删除</el-button>
+            <el-button size="small" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
+          </template>
         </div>
       </div>
     </header>
@@ -499,7 +536,7 @@ import {
   HomeFilled, PieChart, Odometer, DataLine, Lightning, Open, Lock,
   CircleCheckFilled, WarningFilled, Bottom, ArrowRight, InfoFilled,
   Timer, Operation, SetUp, Tools, Document, MagicStick, Refresh,
-  Upload, Edit, Delete,
+  Upload, Edit, Delete, MoreFilled,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
@@ -560,6 +597,33 @@ const deviceId = computed(() => Number(route.params.id) || 0)
 const device = ref<EdgeDevice | null>(null)
 const detailError = ref('')
 const refreshing = ref(false)
+
+/**
+ * 视口是否窄屏（≤768px）。
+ *
+ * 为什么用 JS 判定而不是纯 CSS 媒体查询：
+ *   页头在窄屏要把「同步到HA / 编辑 / 删除」收进 ⋯ 溢出菜单（少 3 个 DOM 按钮），
+ *   这是**结构变化**，CSS 只能隐藏不能减少节点。用 `display:none` 藏起来的按钮
+ *   仍会被读屏与 Tab 顺序命中，属于可访问性缺陷。
+ *   JS 判定后按结构渲染是干净的（与 DeviceHeader.vue 既有做法一致）。
+ *
+ * SSR/测试环境没有 window.matchMedia 时按桌面处理（宽屏），保证契约测试稳定。
+ */
+const MOBILE_MAX = 768
+const isMobileViewport = ref(
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(max-width: ${MOBILE_MAX}px)`).matches
+    : false,
+)
+let mobileMql: MediaQueryList | null = null
+const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
+
+/** 页头 ⋯ 菜单的命令分发（移动端专用；桌面端各按钮直连原 handler） */
+const onHeadMoreCommand = (command: string) => {
+  if (command === 'sync') onSyncToHA()
+  else if (command === 'edit') onEditDevice()
+  else if (command === 'delete') onDeleteDevice()
+}
 
 const deviceName = computed(() => device.value?.name || DASH)
 const deviceTypeLabel = computed(() => device.value?.device_type || DASH)
@@ -1749,6 +1813,12 @@ watch(deviceId, () => {
 })
 
 onMounted(() => {
+  // 监听视口变化：横竖屏切换、桌面窗口缩放时页头要在「4 按钮」与「刷新+⋯」间切换
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    mobileMql = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`)
+    mobileMql.addEventListener('change', onMobileChange)
+    isMobileViewport.value = mobileMql.matches
+  }
   // connect() 幂等：已连接/连接中会直接返回，不会打断 MainLayout 建立的连接。
   wsStore.connect()
   void loadDetail()
@@ -1763,6 +1833,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopInject()
+  // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听，属于内存泄漏
+  mobileMql?.removeEventListener('change', onMobileChange)
+  mobileMql = null
 })
 </script>
 
@@ -2117,9 +2190,56 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .page-head { padding: 12px 12px 14px; }
+  /*
+    页头压缩（2026-10-20，实测 221px → 目标 ≤112px）。
+
+    原来的三行结构（面包屑 / 设备名+标签 / 详细副文本+4 按钮）在 393px 下
+    实际渲染到 221~300px，占掉 1/3 屏，用户批评「顶部重复内容」。
+
+    压缩手段（不动 DOM 语义，只改视觉与换行）：
+      ① 面包屑收成一行小字（保留可点返回，只是不再占 10px margin + 20px 行高）；
+      ② 设备副文本（节点/通道/设备#/固件/轮询数）从"长句"改为**单行可横向滑动的标签组**，
+         既省高度又不丢信息；
+      ③ 操作按钮已在模板层收敛为「刷新 + ⋯」（见 head-actions 的 isMobileViewport 分支）。
+  */
+  .page-head { padding: 10px 12px 12px; }
   .page-body { padding: 12px; }
-  .head-actions { margin-left: 0; }
+  .head-actions { margin-left: 0; gap: 8px; }
+  .head-main { align-items: flex-start; gap: 10px; flex-wrap: nowrap; }
+  .dev-ident { flex: 1; min-width: 0; }
+
+  .crumb { margin-bottom: 6px; font-size: 11px; gap: 6px; }
+  /* 面包屑中间层级在手机上价值低（有头部返回），只留「当前页」语境 */
+  .crumb .crumb-link { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .dev-name { font-size: 17px; }
+  .dev-name-line { gap: 6px; }
+
+  /*
+    副文本：**允许折行，不横滚、不省略**。
+
+    走过的弯路：第一版改成 `white-space: nowrap + overflow-x: auto` 想省高度，
+    实测 393px 下可视宽只有 206px，而内容宽 462px ⇒ 有 2/3 内容被裁在右侧，
+    用户看不到「轮询已启用 1/32 条」这类关键信息，且**没有滚动提示**。
+    对一行 12px 的次要文本，"要用户主动横滑"是不可发现交互。
+
+    定稿：正常折行（最多 2 行，约 34px），信息完整可读。
+    代价是比横滚多 17px 高度，但页头总高仍控制在 ~110px，达标。
+    折行文案本身也精简：去掉冗余分隔符，改为「· 」紧凑风格。
+  */
+  .dev-sub {
+    margin-top: 4px;
+    line-height: 17px;
+    font-size: 11px;
+    /* 用 flex + gap 控制间距与折行：每个 span 是不可断的"词"，
+       放不下就整词换行。这样序列号（F0F5BD02DD84）不会被拦腰截断。 */
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 4px;
+    overflow-wrap: normal;
+  }
+  .dev-sub > span { white-space: nowrap; }
   .card { padding: 14px 12px; }
   .head-right, .stream-actions { margin-left: 0; }
   .cell-thresholds { margin-left: 0; }
@@ -2133,9 +2253,34 @@ onUnmounted(() => {
   .poll-controls { width: 100%; }
   .poll-interval { flex: 1; width: auto; }
 
-  /* ── 指标卡：窄屏固定 2 列（此前是 1 列 × 4 行，白占 386px 高度） ──
-     用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。 */
+  /* ── 指标卡：窄屏 2×2（此前是 1 列 × 4 行，白占 386px 高度） ──
+     用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。
+     实测目标：区块 226 → ≤180px（4 张卡 2 行，每行约 82px）。 */
   .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
+  .row.metrics { gap: 8px; }
+
+  /*
+    指标卡内部再压一档：MetricStatCard 的移动端样式是按"卡片独占一行"设计的
+    （padding 8px 4px + 图标 34px），2×2 之后每张只有 ~186px 宽，
+    「SOC 剩余电量」「剩余容量」这类 5 字标签 + 数值 + 副文本会显得拥挤。
+      ① 收紧左内距（图标靠边）；
+      ② 图标 34→28px，给文字腾 6px；
+      ③ 数值 20→18px、标签 13→12px，保证「51.76V」这类四位数不折行。
+  */
+  /*
+    同一行两张卡必须等高：实测出现 83 / 76 两种高度（SOC 卡有 progress 多 6px，
+    总电压卡只有一行副文本）。虽然 flex 的 align-items:stretch（继承自 .row.metrics）
+    已经让底边对齐，但**卡片自身高度仍不同**，视觉上像"一张卡悬空"。
+    这里给固定 min-height 让两张卡实体等高，内容少的居中。
+  */
+  .row.metrics :deep(.metric-card) { padding: 8px 6px; gap: 8px; min-height: 84px; }
+  .row.metrics :deep(.metric-icon) { width: 28px; height: 28px; border-radius: 7px; }
+  .row.metrics :deep(.metric-icon .el-icon) { font-size: 18px; }
+  .row.metrics :deep(.metric-label) { font-size: 12px; }
+  .row.metrics :deep(.metric-value) { font-size: 18px; }
+  .row.metrics :deep(.metric-unit) { font-size: 12px; }
+  .row.metrics :deep(.metric-sub) { font-size: 11px; line-height: 16px; }
+  .row.metrics :deep(.metric-aux) { height: auto; min-height: 16px; margin-top: 2px; }
 
   /*
     极窄屏（≤360px）改回单列：2 列时每张仅 116px，
