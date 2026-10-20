@@ -139,6 +139,8 @@ const zeroCount = computed(() => bits.value.filter((b) => b.count === 0).length)
 /** 折叠头摘要：区分「没数据」「有数据但全 0」「有触发」，不能把前者说成后者 */
 const summaryText = computed(() => {
   if (errorMsg.value) return ''
+  // 加载中 vs 真无数据必须分开：先写「加载中…」，否则等于对用户谎报「没有数据」
+  if (loading.value) return '加载中…'
   if (!hasData.value) return '暂无保护状态数据'
   return totalCount.value > 0
     ? `近 ${rangeDays.value} 天 ${totalCount.value} 次`

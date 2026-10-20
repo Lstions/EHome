@@ -150,7 +150,10 @@ const buildYAxisList = (theme = getChartTheme()) => {
   return {
     yAxisList: axes.map((axis, i) => ({
       type: 'value' as const,
-      name: axis.unit ? `(${axis.unit})` : '数值',
+      // 紧凑图（窄屏小图，如 160px）不画轴名：ECharts 的 yAxis.name 默认 nameLocation:'end'，
+      // 画在轴顶端 ≈ 图例那一行，实测会与图例文字重叠成「#1 (V)(V)」。单位并不丢，
+      // 图例项已带「#1 (V)」「探头 1 (℃)」后缀。
+      name: isCompactChart.value ? '' : axis.unit ? `(${axis.unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
       offset: i > 1 ? (i - 1) * 60 : 0,
       min: hasCustomRange ? props.yAxisMin : undefined,
@@ -240,6 +243,16 @@ const formatTooltipTime = (ts: string | number) => {
   return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
 }
 
+/**
+ * 是否「紧凑图」：显式高度 ≤220px（窄屏小图）。
+ * 只影响两处排版：轴名要不要画（默认会压住图例）、图例/grid 的上边距。
+ * 桌面大图（280/300/400px）走原分支，像素不变。
+ */
+const isCompactChart = computed(() => {
+  const h = typeof props.height === 'string' ? Number.parseInt(props.height, 10) : Number(props.height)
+  return Number.isFinite(h) && h > 0 && h <= 220
+})
+
 const applyChartOption = () => {
   if (!chartInstance) return
   const theme = getChartTheme()
@@ -303,7 +316,17 @@ const applyChartOption = () => {
         return html
       }
     },
-    legend: multiSeries ? { top: 30, type: 'scroll' as const, textStyle: { color: theme.regular } } : undefined,
+    legend: multiSeries
+      ? {
+        // 紧凑图没有轴名，图例可以贴顶；常规图保持 30（给多轴轴名留位置）
+        top: isCompactChart.value ? 6 : 30,
+        type: 'scroll' as const,
+        textStyle: { color: theme.regular },
+      }
+      : undefined,
+    // ⚠ 这里**不覆盖** grid.top：紧凑图的既有默认值（60px）被其它组件当常量用
+    // （如 TempTrendCard 用 CSS 绝对定位画 45℃ 告警线，按 gridTop=60 换算 y 坐标）。
+    // 本次只解决「轴名压图例」，不动 plot 区域几何。
     grid: { left: '3%', right: multiSeries ? (rightAxisCount > 0 ? `${8 + rightAxisCount * 7}%` : '8%') : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(theme),
     yAxis: yAxisConfig,

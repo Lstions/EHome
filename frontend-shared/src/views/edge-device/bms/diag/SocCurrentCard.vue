@@ -103,6 +103,7 @@ const latestCurrent = computed(() => lastValueOf('电流'))
 /** 折叠头摘要：「SOC 7.0%」—— 电量是这一块最该一眼看到的值 */
 const summaryText = computed(() => {
   if (errorMsg.value) return ''
+  if (loading.value) return '加载中…'
   if (!hasData.value) return '暂无 SOC 数据'
   return latestSoc.value === null ? '' : `SOC ${latestSoc.value.toFixed(1)}%`
 })

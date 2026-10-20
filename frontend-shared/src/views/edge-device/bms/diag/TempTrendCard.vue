@@ -133,6 +133,7 @@ const maxTemp = computed<number | null>(() => {
 /** 折叠头摘要：「当前 xx℃」是这一块最该被先看到的一个数字 */
 const summaryText = computed(() => {
   if (errorMsg.value) return ''
+  if (loading.value) return '加载中…'
   if (!hasData.value) return '暂无温度历史数据'
   return maxTemp.value === null ? '' : `当前 ${maxTemp.value.toFixed(1)}℃`
 })

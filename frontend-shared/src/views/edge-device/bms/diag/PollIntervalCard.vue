@@ -95,6 +95,7 @@ const loadPerSec = computed(() =>
 /** 折叠头摘要：「N 条轮询中」—— 一眼知道有几条在跑 */
 const summaryText = computed(() => {
   if (errorMsg.value) return ''
+  if (loading.value) return '加载中…'
   if (!loaded.value) return ''
   return commands.value.length === 0 ? '暂无轮询指令' : `${enabledCount.value} 条轮询中`
 })
