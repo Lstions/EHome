@@ -336,10 +336,11 @@ jobs:
   # 判红而不是 PASS）；配套 .analysis/narrow-gates.md 的 3 条加固要求：
   #   #1 go list 失败必须红（不是"grep 无命中=通过"）、#8 断言输出含 '=== RUN'、
   #   #10 无 benchmark 必须 FAIL（基线缺失才是 SKIP）。
-  # 当前真实状态（2026-10-21 HEAD，impl-core D3 进行中）：RESULT: FAIL(1) —— 仅因
-  # #10 无 BenchmarkLiteralEval 按"目标不存在必须 FAIL"判红（不是假绿）；其余 8 绿/2 SKIP。
-  # D3 落地后若无基线则为 PASS_WITH_SKIPS(3)；D6 完成后把下面命令加 --strict（SKIP 也算失败），
-  # 不需要改脚本本身。**不要为了变绿而删 #10 或把它降级为 PASS**。
+  # 当前真实状态（2026-10-21 收口，HEAD 见 d1-acceptance §8.7）：RESULT: PASS_WITH_SKIPS(1)
+  # —— 通过 12 条；唯一 SKIP = #9（变异自证 opt-in，--mutation 时真实执行）。
+  # #10a-1a 确定性判据已落地并 PASS，#10a-1b 仅记录（WARN 不阻断），#10a-2 端到端硬判据
+  # 用三次采样降噪（并行负载 load 10+ 下单次/两次会假红，见脚本内注释）。
+  # **不要为了变绿而删任何门禁或把它降级为 PASS/WARN**；#10a-2 若真红必须修实现。
   field-semantics:
     name: Field semantics gates (§12.3)
     runs-on: ubuntu-latest
@@ -359,28 +360,12 @@ jobs:
       - name: Gate self-test (prove gates can go red)
         run: ./scripts/check_field_semantics.sh --self-test
 
-      # 主扫描。退出码语义：0=PASS/PASS_WITH_SKIPS；1=FAIL/FAIL_STRICT_SKIP；2=用法错。
-      #
-      # 已知红：#10a-1a 确定性结构断言——测试尚未落地（见
-      # .analysis/d1-acceptance.md §8.6）。#10a-1b 仅记录不阻断；#10a-2 端到端为硬判据（此处不豁免）。此处只对
-      # "[FAIL] #10a" 这一行做窄豁免（打印 ::warning 不阻断），其余任何 FAIL 仍红。
-      # 移除条件：literal 短路合并、本地 ./scripts/check_field_semantics.sh --only 10a
-      # 变绿后，删除本条件分支，改回直接执行脚本。
+      # 主扫描（**无任何豁免**）。退出码语义：0=PASS/PASS_WITH_SKIPS；1=FAIL；
+      # 2=用法错。原先对 #10a-1a 的窄豁免已删除：确定性测试已落地并 PASS，保留豁免会
+      # 掩盖"以后有人把测试删了"的回归（脚本对"测试未执行"判 FAIL）。
+      # SKIP 仅允许 #9（变异自证 opt-in；--mutation 时真实执行）与 #11 的 DB 不可达。
       - name: Field semantics gates
-        run: |
-          set +e
-          ./scripts/check_field_semantics.sh | tee /tmp/field-gates.log
-          rc=${PIPESTATUS[0]}
-          set -e
-          if [ "$rc" -eq 0 ]; then exit 0; fi
-          fails=$(grep -c '^\[FAIL\]' /tmp/field-gates.log || true)
-          non_10a=$(grep '^\[FAIL\]' /tmp/field-gates.log | grep -vc '#10a-1a ' || true)
-          if [ "$fails" -ge 1 ] && [ "$non_10a" -eq 0 ]; then
-            echo "::warning::门禁 #10a-1a 已知红（TestLiteralPathSkipsProviderAndCompile 未落地）：非阻断；其余门禁无 FAIL。"
-            exit 0
-          fi
-          echo "::error::门禁失败（含非 #10a 项）：$fails 条"
-          exit 1
+        run: ./scripts/check_field_semantics.sh
 
   # ─── Docs: 文档「声称-实现」对账 —— 分类器自校准 ─────────────────
   # 只跑 --selftest：它断言的是「分类器没坏」（全通过=0，任一失败=1）。
