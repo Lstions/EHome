@@ -19,10 +19,12 @@ const sourceCode = source
  * （HistoryChartSection 位置、el-col :md=14/10 双列、RealtimeDataList 直挂），
  * 继续保留会让「旧布局」被当成契约 —— 故按新设计重写，而不是删掉。
  *
- * 新版设计契约（对应用户四条明确诉求 + 既定规范）：
+ * 新版设计契约（对应用户诉求 + 既定规范）：
  *   ① 保护明细默认展开（无折叠）
  *   ② 流式布局：flex + flex-wrap + flex-basis，矮卡不被高卡拉高（align-items:flex-start）
- *   ③ 实时数据流不抢滚动：跟随模式 + overflow-anchor:none
+ *   ③ ~~实时数据流不抢滚动~~ → 2026-10-21 用户要求删除「实时数据流」，
+ *      该条改为**反向契约**：RealtimeDataList / stream 折叠块 / 跟随模式标识不得复活；
+ *      页面级 overflow-anchor:none 仍保留（固定高度图表卡防跳动，与数据流无关）
  *   ④ 轮询指令上限由节点上报（不再硬编码 3 条）
  * 采用 ?raw 源码断言（项目既有模式），锁结构不回归。
  */
@@ -63,10 +65,14 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
     expect(source).toContain('protect-grid')
   })
 
-  it('诉求②：实时数据流不抢滚动（跟随模式 + 回到最新）', () => {
-    expect(source).toContain('跟随最新')
-    expect(source).toContain('已暂停跟随')
-    expect(source).toContain('上滚即暂停')
+  it('诉求②（2026-10-21 撤销）：实时数据流已删除，跟随模式标识不得复活', () => {
+    // 用去注释源码做否定断言：页面注释里写着「数据流已移除」，会对全文断言造成假红。
+    for (const marker of ['跟随最新', '已暂停跟随', '上滚即暂停', 'RealtimeDataList', 'realtimeDataItems']) {
+      expect(sourceCode, '已删除的实时数据流标识复活：' + marker).not.toContain(marker)
+    }
+    expect(sourceCode, 'stream 折叠块不得复活').not.toContain('block-id="stream"')
+    expect(sourceCode).not.toMatch(/\.stream-card\b/)
+    // 页面级滚动锚定仍保留（固定高度图表卡防跳动，与数据流无关）
     expect(source, '必须禁用滚动锚定').toContain('overflow-anchor: none')
   })
 
@@ -88,13 +94,18 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
     expect(source).not.toContain('DEV ·')
   })
 
-  it('必备区块常显：MOS / 保护 / 电芯电压 / 温度 / 实时流 / 轮询 / 受控操作 / 操作历史', () => {
+  it('必备区块常显：MOS / 保护 / 电芯电压 / 温度 / 轮询 / 受控操作 / 操作历史（实时数据流已删除）', () => {
     for (const title of [
       'MOS 直控', '保护状态', '电芯电压分布', '温度探头',
-      '实时数据流', '轮询指令配置', '受控操作', '操作历史',
+      '轮询指令配置', '受控操作', '操作历史',
     ]) {
       expect(source, '缺少区块：' + title).toContain(title)
     }
+    // 反向：2026-10-21 用户要求删除的「实时数据流」不得再作为卡片标题渲染。
+    // 只锚定模板标题节点：脚本里的错误提示文案遗留由页面负责人清理，不在本断言范围。
+    expect(sourceCode, '实时数据流卡标题不得复活').not.toMatch(/class="card-title">\s*实时数据流/)
+    expect(sourceCode, 'RealtimeDataList 组件不得复活').not.toContain('<RealtimeDataList')
+    expect(sourceCode, '轮询间隔分布卡已删除').not.toContain('<PollIntervalCard')
   })
 
   it('电芯电压分布复用旧页图表组件，不重写一套柱状图', () => {
@@ -152,5 +163,49 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
     expect(source).not.toContain('class="crumb-link"')
     expect(source).not.toContain('BMS 设备详情</span>')
     expect(source).toContain("router.push('/edge-device')")
+  })
+})
+
+/**
+ * 2026-10-21 用户要求：BMS 页不再显示「轮询间隔分布」与「实时数据流」两块。
+ *
+ * 删除类改动的契约必须"反过来锁"：只删代码不加反向断言，后续一次重构就能把它悄悄加回来。
+ * 判据一律用**结构化标识**（组件标签 / 折叠 id / 状态键 / CSS 类名），不用中文文案 ——
+ * 注释、历史说明、错误提示里的旧词会造成假红（本文件已有同类教训）。
+ */
+describe('已移除区块的反向契约（轮询间隔分布 / 实时数据流）', () => {
+  it('两个被删区块不得以任何结构化形式复活', () => {
+    for (const marker of [
+      '<RealtimeDataList',
+      'realtimeDataItems',
+      'clearRealtimeData',
+      'block-id="stream"',
+      "collapse.isOpen('stream')",
+      'streamCollapseSummary',
+      '<PollIntervalCard',
+      'block-id="poll-interval"',
+      'diagSummary.poll',
+      'onPollSummary',
+    ]) {
+      expect(sourceCode, '已删除标识复活：' + marker).not.toContain(marker)
+    }
+  })
+
+  it('实时数据流的交互标识与 stream 卡片样式不得复活', () => {
+    for (const marker of ['跟随最新', '已暂停跟随', '上滚即暂停']) {
+      expect(sourceCode, '已删除的交互标识复活：' + marker).not.toContain(marker)
+    }
+    expect(sourceCode, '.stream-card 规则不得复活').not.toMatch(/\.stream-card\b/)
+    expect(sourceCode).not.toMatch(/class="card-title">\s*实时数据流/)
+  })
+
+  it('分母守卫：文件仍是 BMS 详情页，且保留的轮询指令行/区块在场（负向断言不是对空文件成立）', () => {
+    expect(sourceCode).toContain('class="row')
+    expect(sourceCode).toContain('轮询指令配置')
+    // .poll-interval 属于仍保留的「轮询指令配置」行 —— 本次**不**删除，不得反向断言
+    expect(sourceCode).toContain('.poll-interval')
+    for (const kept of ['保护触发历史', '温度趋势', 'SOC 与电流']) {
+      expect(sourceCode, '缺少保留区块：' + kept).toContain(kept)
+    }
   })
 })

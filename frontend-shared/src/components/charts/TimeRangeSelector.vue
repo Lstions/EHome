@@ -110,13 +110,16 @@ const handleChange = () => {
 }
 
 @media (max-width: 768px) {
+  /*
+    2026-10-21 用户反馈「按钮与图表大小对比比例异常大」（窄屏历史数据卡）：
+    改前这里把选择器强制 width:100% + 四段 flex:1 铺满整行 —— 393~659px 下
+    四段各 90~150px、高 40px，比旁边的图还抢眼。
+    现在只保留「等宽」（base 的 grid-auto-columns:1fr，取最宽标签），
+    **不再铺满**卡片宽度；触摸目标仍走下面 40px / 粗指针 44px 的档位。
+  */
   .time-range-selector {
-    width: 100%;
-  }
-  .time-range-selector :deep(.el-radio-group) {
-    display: flex;
-    width: 100%;
-    flex-wrap: nowrap;
+    width: auto;
+    max-width: 100%;
   }
   .time-range-selector :deep(.el-radio-button) {
     flex: 1 1 0;

@@ -2,6 +2,159 @@
   <div ref="chartRef" class="line-chart" :style="{ height: height }"></div>
 </template>
 
+<script lang="ts">
+/**
+ * 图例 / 绘图区顶部布局 —— 纯函数，可单测（2026-10-21 用户反馈「图例压住绘图区与 Y 轴名」）。
+ *
+ * 背景（逆变器「输出」组：6 条序列 5 种单位）：图例固定 top=30、行高约 20px，plain 图例在容器
+ * 宽度用尽时折行；grid.top 原为常量 56（只够 1 行图例 + 轴名），折成 2 行后图例底边 ≈70 > 56
+ * ⇒ 图例压在绘图区与 Y 轴名上（实测底边 ≈66px）。这里把「图例行数 → grid.top」收敛成纯函数：
+ * 行数按「图例标记 + 文字宽度 + itemGap」对可用宽度贪心折行，grid.top = top + 行数×行高 + 间隙，
+ * 且不低于原常量 TOP_RESERVED_PX（单行时与改前逐像素一致）。
+ *
+ * 放独立 <script> 块：<script setup> 不能 export，而该规则必须有单测（见 ChartPlotAlignment.spec.ts）。
+ */
+
+/** 非紧凑图上边距基线（px）：单行图例 + Y 轴名刚好不压不切；改前即此值。 */
+export const TOP_RESERVED_PX = 56
+/** 紧凑图阈值：该档不写 grid.top（ECharts 默认 60，其它组件按 60 换算告警线）。 */
+export const COMPACT_MAX_HEIGHT_PX = 220
+/** ECharts 默认 grid.top（紧凑图不覆盖，仅供测试/调用方参考）。 */
+export const COMPACT_DEFAULT_GRID_TOP_PX = 60
+/** 常规图图例参数（与 applyChartOption 传给 legend 的取值同源）。 */
+export const LEGEND_TOP_PX = 30
+export const LEGEND_ROW_HEIGHT_PX = 20
+export const LEGEND_ITEM_GAP_PX = 10
+/** 图例标记占位（ECharts 默认 itemWidth=25 + 标记与文字间距，按 30 估算）。 */
+export const LEGEND_MARKER_PX = 30
+/** 图例底边与绘图区的最小间隙（px）。 */
+export const LEGEND_GRID_GAP_PX = 6
+/** 图例文字字号（与 legend.textStyle 同源）。 */
+export const LEGEND_FONT_SIZE_PX = 12
+export const LEGEND_FONT_SIZE_COMPACT_PX = 10
+/** 图例容器左右内边距之和（ECharts legend padding 默认 5x2，留 12 作余量）。 */
+const LEGEND_HORIZONTAL_PADDING_PX = 12
+/**
+ * 宽度估算安全系数：字体度量与逐字符估算有 ±5~10% 偏差；宁多算一行，不可少算（少算=图例压图）。
+ * 1.12 的标定依据：逆变器「输出」组 6 条序列 5 种单位在 844px 画布上**实测折成 2 行**
+ * （图例底边 ≈66px 压住绘图区），本估算必须复现该折行；取 1.08 时估出 818px < 832px
+ * 可用宽会误判 1 行（假绿），1.12 约 839px ⇒ 2 行，与实测一致并留字距余量。
+ */
+const WIDTH_SAFETY_FACTOR = 1.12
+
+/** 该高度是否走紧凑图分支（与组件内 isCompactChart 同判据）。 */
+export function isCompactHeight(height?: string | number): boolean {
+  const h = typeof height === "string" ? Number.parseInt(height, 10) : Number(height)
+  // 220 与 COMPACT_MAX_HEIGHT_PX 同值；此处保留字面量是因为既有门禁
+  // （LineChartCompact.spec.ts）按 `h <= 220` 断言该判据存在，避免常量改名即失守。
+  // 二者一致性由 ChartPlotAlignment.spec.ts 的边界用例（220 紧凑 / 221 常规）钉住。
+  return Number.isFinite(h) && (h as number) > 0 && (h as number) <= 220
+}
+
+/** 图例文字宽度估算（px）：全角字符按字号宽、半角按 0.6 字号宽。仅用于判定折行。 */
+export function estimateLegendTextWidth(text: string, fontSize = LEGEND_FONT_SIZE_PX): number {
+  let width = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const fullWidth = code >= 0x2e80 || (code >= 0xff00 && code <= 0xffef)
+    width += fullWidth ? fontSize : fontSize * 0.6
+  }
+  return width
+}
+
+export interface ChartTopLayoutInput {
+  /** 画布宽度（px）；取不到（未挂载/布局前）传 0：退回单行假设。 */
+  canvasWidth: number
+  /** 图例文字（已带单位，如「输出电压 (V)」）。 */
+  items: string[]
+  /** 组件高度（"260px" / 260），用于判定紧凑图。 */
+  height?: string | number
+}
+
+export interface ChartTopLayout {
+  compact: boolean
+  /** 图例容器 top（紧凑图 6 / 常规图 30，与 legend.top 一致） */
+  legendTop: number
+  /** 估算出的图例行数（>=1） */
+  legendRows: number
+  /** 每条图例项估算宽度（px），便于测试核对折行依据 */
+  legendItemWidths: number[]
+  /** 绘图区上边距：常规图 = max(TOP_RESERVED_PX, top + rows×行高 + 间隙)；紧凑图 = 60（不写入 option） */
+  gridTop: number
+}
+
+/**
+ * 计算图例/绘图区顶部布局。
+ *
+ * 折行口径：按图例项宽度贪心铺满一行，放不下就换行（与 ECharts plain legend 一致）。
+ * grid.top：图例底边（legendTop + rows×rowHeight）再留 LEGEND_GRID_GAP_PX，且不低于 TOP_RESERVED_PX
+ * ⇒ 单行图例输出 56，与改前逐像素一致。
+ */
+export function computeChartTopLayout(input: ChartTopLayoutInput): ChartTopLayout {
+  const compact = isCompactHeight(input.height)
+  const legendTop = compact ? 6 : LEGEND_TOP_PX
+  const rowHeight = compact ? 16 : LEGEND_ROW_HEIGHT_PX
+  const itemGap = compact ? 8 : LEGEND_ITEM_GAP_PX
+  const fontSize = compact ? LEGEND_FONT_SIZE_COMPACT_PX : LEGEND_FONT_SIZE_PX
+  const markerWidth = compact ? 15 : LEGEND_MARKER_PX
+  const items = (input.items || []).filter(text => typeof text === "string" && text.length > 0)
+  const legendItemWidths = items.map(text => Math.round((markerWidth + estimateLegendTextWidth(text, fontSize) * WIDTH_SAFETY_FACTOR + itemGap) * 100) / 100)
+
+  const canvasWidth = Number.isFinite(input.canvasWidth) ? Math.max(0, input.canvasWidth) : 0
+  const available = canvasWidth - LEGEND_HORIZONTAL_PADDING_PX
+  // 画布宽度未知（未挂载 / happy-dom）：无法判定折行，退回单行（= 改前行为），不擅自抬高 plot。
+  let legendRows = 1
+  if (canvasWidth > 0 && legendItemWidths.length > 0) {
+    legendRows = 1
+    let used = 0
+    for (const width of legendItemWidths) {
+      if (used === 0) {
+        used = width
+      } else if (used + width <= Math.max(available, width)) {
+        used += width
+      } else {
+        legendRows += 1
+        used = width
+      }
+    }
+  }
+
+  const gridTop = compact
+    ? COMPACT_DEFAULT_GRID_TOP_PX
+    : Math.max(TOP_RESERVED_PX, legendTop + legendRows * rowHeight + LEGEND_GRID_GAP_PX)
+
+  return { compact, legendTop, legendRows, legendItemWidths, gridTop }
+}
+
+export interface YAxisNameInput {
+  compact: boolean
+  /** 轴下标（0 = 左轴） */
+  index: number
+  /** 本轴单位 */
+  unit: string
+  /** 前面各轴的单位（用于「同单位只显示一次」） */
+  priorUnits: string[]
+  /** 总轴数（含左轴）。右轴数 = totalAxes - 1 */
+  totalAxes: number
+}
+
+/**
+ * 该 Y 轴是否显示轴名。
+ *
+ * 规则：
+ *   · 紧凑图：一律不显示（轴名会压住贴顶图例）；
+ *   · 右轴数 >= 2（总轴数 >= 3）：所有轴名清空 —— nameLocation:end 的多个轴名会在顶部互相重叠
+ *     （实测「输出」组 (V)(Hz)(VA)(W)(%) 挤成一团），单位由图例项承担；
+ *   · 右轴数 <= 1 保留原行为：左轴显示，同单位只在第一根轴显示。
+ */
+export function shouldShowYAxisName(input: YAxisNameInput): boolean {
+  if (input.compact) return false
+  if (input.totalAxes >= 3) return false
+  if (input.index > 0 && input.priorUnits.includes(input.unit)) return false
+  return true
+}
+</script>
+
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts/core'
@@ -108,11 +261,8 @@ const MAGNITUDE_SPLIT_RATIO = 10
  * 紧凑图（窄屏小图，高度 ≤220px）再收紧到 2 根：实测 319px 宽 + 4 根轴
  * （每根 offset 60px + containLabel）会把绘图区压到 20~30px，曲线完全读不出。
  * 合并后次要量纲改由 tooltip / 图例读数，绘图区宽度回到可用区间。 */
-/** 非紧凑图固定上边距（px）：给「图例一行 + Y 轴名一行」留位。
- *  用常量而不是交给 ECharts 自动布局 —— 自动 top 会随「轴名个数 + 图例行数」变化，
- *  实测同一屏里单轴分组 plot 高 139px、三轴分组只有 122px（用户反馈「图表长度参差不齐」）。
+/** 上边距基线 TOP_RESERVED_PX 已移到独立 <script> 块（供图表布局纯函数与单测共用）。
  *  取值依据：图例 top:30、行高约 20px（底 ≈50），轴名画在绘图区顶端之上；56px 实测不压不切。 */
-const TOP_RESERVED_PX = 56
 /**
  * 常规图左右下边距（px）。与 TOP_RESERVED_PX 同一目的：让每张图的 plot 区严格同宽同高。
  *
@@ -198,7 +348,20 @@ const buildYAxisList = (theme = getChartTheme()) => {
       // 同单位只在第一根轴显示轴名：实测「发电量」组有 3 根 kWh 轴，
       // 三处 (kWh) 在顶部挤在一起并压住刻度，且信息完全重复。
       // 单位并未丢失 —— 图例项已带 (kWh) 后缀。
+      // 轴名规则：
+      //   · 紧凑图不画（轴名会压住贴顶图例）；
+      //   · 同单位只在第一根轴显示（原有行为，保留字面判据以防回归）；
+      //   · **右轴数 >= 2（总轴数 >= 3）时所有轴名清空** —— 多个 nameLocation:'end' 的轴名
+      //     会在顶部互相重叠（实测「输出」组 (V)(Hz)(VA)(W)(%) 挤成一团），单位由图例项承担。
+      //     该条规则收敛到纯函数 shouldShowYAxisName（可单测，见 ChartPlotAlignment.spec.ts）。
       name: isCompactChart.value || (i > 0 && axes.slice(0, i).some((a) => a.unit === axis.unit))
+        || !shouldShowYAxisName({
+          compact: isCompactChart.value,
+          index: i,
+          unit: axis.unit,
+          priorUnits: axes.slice(0, i).map((a) => a.unit),
+          totalAxes: axes.length,
+        })
         ? ''
         : axis.unit ? `(${axis.unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
@@ -315,10 +478,7 @@ const formatTooltipTime = (ts: string | number) => {
  * 只影响两处排版：轴名要不要画（默认会压住图例）、图例/grid 的上边距。
  * 桌面大图（280/300/400px）走原分支，像素不变。
  */
-const isCompactChart = computed(() => {
-  const h = typeof props.height === 'string' ? Number.parseInt(props.height, 10) : Number(props.height)
-  return Number.isFinite(h) && h > 0 && h <= 220
-})
+const isCompactChart = computed(() => isCompactHeight(props.height))
 
 const applyChartOption = () => {
   if (!chartInstance) return
@@ -335,6 +495,19 @@ const applyChartOption = () => {
     splitLine: { lineStyle: { color: theme.split } },
     axisLabel: { color: theme.regular, formatter: (value: number) => value.toFixed(2) }
   }
+  /*
+   * 图例/绘图区顶部布局（2026-10-21 用户反馈「图例折 2 行后压住绘图区与 Y 轴名」）：
+   * 行数按「每条图例文字宽度（已带单位）+ 标记 + itemGap」对画布宽度贪心折行估算，
+   * grid.top = 图例 top + 行数×行高 + 间隙，且不低于基线 TOP_RESERVED_PX
+   * ⇒ 单行时数值仍为 56（改前像素不变），2 行时抬到 76、3 行 96，图例底边永远在绘图区之上。
+   * 画布宽度取 chartRef.clientWidth；取不到（挂载首帧/无布局环境）时退回单行，不擅自抬高 plot。
+   */
+  const legendItems = (props.series ?? []).map(s => s.name + (s.unit ? ` (${s.unit})` : ''))
+  const topLayout = computeChartTopLayout({
+    canvasWidth: chartRef.value?.clientWidth ?? 0,
+    items: legendItems,
+    height: props.height,
+  })
   const option: EChartsCoreOption = {
     animation: props.realtime ? false : undefined,
     color: theme.palette,
@@ -385,7 +558,9 @@ const applyChartOption = () => {
     },
     legend: multiSeries
       ? {
-        // 紧凑图没有轴名，图例可以贴顶；常规图保持 30（给多轴轴名留位置）
+        // 紧凑图没有轴名，图例可以贴顶；常规图保持 30（给多轴轴名留位置）。
+        // 与 computeChartTopLayout 的 legendTop 同源（该函数返回 6 / LEGEND_TOP_PX=30，
+        // 由 ChartPlotAlignment.spec.ts 断言两者一致，防止这里与布局计算漂移）。
         top: isCompactChart.value ? 6 : 30,
         /*
          * 图例溢出策略（2026-10-20 生产实测后定稿）：
@@ -461,7 +636,9 @@ const applyChartOption = () => {
          * 615 / 688 / 555 / 628 / 723 / 622px，用户看到的就是右端点不在同一竖线。
          * 写死边距后宽度只由 reserveRightAxes（组内最大值）决定 ⇒ 组内完全一致。
          */
-        top: TOP_RESERVED_PX,
+        // 单行图例时即 top: TOP_RESERVED_PX（56，改前像素基线）；多行图例时按实测行数抬升，
+        // 保证图例底边（legendTop + rows×20）永远在绘图区之上（2 行 → 76、3 行 → 96）。
+        top: topLayout.gridTop,
         left: LEFT_RESERVED_PX,
         // 每多一根右轴，ECharts 按 offset 60px 递进摆放，轴标签再占约 45px
         right: normalRightMargin(Math.max(rightAxisCount, props.reserveRightAxes ?? 0)),

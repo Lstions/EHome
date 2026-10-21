@@ -119,22 +119,6 @@
         <InverterEnergyCard :latest-data="latestData" />
       </el-card>
 
-      <!-- Realtime data stream -->
-      <el-card style="margin-top: 20px;" shadow="hover">
-        <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span>实时数据流</span>
-            <el-tag v-if="device?.status === 'online' || device?.status === 'active'" type="success" size="small">实时</el-tag>
-          </div>
-        </template>
-        <RealtimeDataList
-          :items="realtimeDataItems"
-          :auto-scroll="true"
-          :device-type="device?.device_type"
-          @clear="clearRealtimeData"
-        />
-      </el-card>
-
       <!-- History chart -->
       <HistoryChartSection
         ref="historyChartRef"
@@ -172,7 +156,6 @@ import InverterStatusGrid from './InverterStatusGrid.vue'
 import { RUNNING_FLAG_KEYS } from './runningFlags'
 import InverterTempCard from './InverterTempCard.vue'
 import InverterEnergyCard from './InverterEnergyCard.vue'
-import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
@@ -187,7 +170,7 @@ const historyChartRef = ref<InstanceType<typeof HistoryChartSection> | null>(nul
 
 const {
   device, loading, refreshing, syncingHA, wsConnected,
-  latestData, realtimeDataItems, clearRealtimeData,
+  latestData,
   fetchDeviceDetail, fetchLatestData,
   handleRefresh: composableHandleRefresh, handleSyncToHA,
 } = useDeviceData(deviceId, { maxItems: 100, errorPrefix: '获取逆变器详情失败' })
@@ -394,14 +377,6 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
-  /* 实时数据流：桌面列表 569px（约 10 条铺开），窄屏封顶 340px 内部滚动。
-     实时流是「看最新几条」的组件，不该在页面里铺满一屏；
-     与受控操作的历史容器（max-height 320）采用同一处理方式。 */
-  .inverter-detail :deep(.realtime-data-list .plain-list) {
-    max-height: 340px;
-    overflow-y: auto;
-  }
-
   /* 指标卡同排等高：PV/电网无副文本时 83px，电池/负载有副文本 101px —— 同行错位 18px。
      窄屏统一 min-height，缺副文本的卡由自身居中补齐（不隐藏任何信息）。 */
   .inverter-detail :deep(.el-row > .el-col > .metric-card) {

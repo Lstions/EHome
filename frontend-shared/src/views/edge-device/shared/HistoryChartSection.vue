@@ -2,8 +2,8 @@
   <el-card style="margin-top: 20px;" shadow="hover">
     <template #header>
       <!-- hist-header 仅承载窄屏 @media 规则（桌面无任何基础样式 ⇒ 1440 像素不变） -->
-      <div class="hist-header" style="display: flex; justify-content: space-between; align-items: center;">
-        <span>历史数据</span>
+      <div class="hist-header">
+        <span class="hist-title">历史数据</span>
         <div class="header-controls">
           <TimeRangeSelector
             v-model="timeRange"
@@ -12,7 +12,7 @@
           />
           <el-button
             type="primary"
-            style="margin-left: 10px;"
+            class="hist-export"
             @click="handleExportCSV"
             :disabled="historyData.length === 0 && chartSeries.length === 0"
           >
@@ -39,54 +39,44 @@
         正好治上述三个症状；分组切换只换渲染（数据已在 chartSeries 内存里），**不重新发请求**。
         桌面（>768px）保持 7 子图平铺、height=260px，结构与改前完全一致（逐像素契约）。
       -->
-      <!-- 桌面分支：7 子图平铺 -->
-      <div v-if="!isMobileViewport && chartSubGroups.length > 0" class="chart-grid">
-        <div
-          v-for="group in chartSubGroups"
-          :key="group.title"
-          class="chart-sub-section"
-        >
-          <p class="chart-sub-title">{{ group.title }}</p>
-          <LineChart
-            v-if="groupHasData(group)"
-            :series="group.series"
-            :title="''"
-            height="260px"
-            :yAxisMin="group.yAxisMin"
-            :yAxisMax="group.yAxisMax"
-            :reserve-right-axes="maxReserveRightAxes"
-          />
-          <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
-        </div>
-      </div>
-      <!-- 窄屏分支：单图 + 分组下拉（切换分组不触发 fetchHistoryData） -->
+      <!--
+        2026-10-21 用户要求：「逆变器图表下拉框改为 tab 点击切换图表显示，交互效率更高」。
+        改前：桌面把 7 个分组**纵向平铺**（7 × 260px ≈ 1900px，要滚三屏；也正是
+        「图表长度参差不齐」的根源 —— 同屏对比时绘图区必须逐像素相等）；
+        窄屏用一个 el-select 下拉（换组要两步：展开 + 选择）。
+        改后：桌面与窄屏**统一**为「一行分组 tab + 单张图」——
+          · 一次点击切换分组，全部 7 个分组始终可见（窄屏折成两行，不做横向滚动隐藏）；
+          · 同屏只渲染 1 个 echarts 实例（不再为 7 张图各建实例，窄屏省掉 6 份绘制成本）；
+          · 切换只改 activeGroupTitle，**不重新发请求**（数据已在 chartSeries 内存里）。
+      -->
       <div
-        v-else-if="isMobileViewport && chartSubGroups.length > 0"
-        class="hist-mobile"
+        v-if="chartSubGroups.length > 0"
+        class="hist-tabbed"
         :data-group="activeGroupTitle"
         :data-series-count="mobileSeriesCount"
         :data-point-count="mobilePointCount"
       >
-        <div class="hist-group-bar">
-          <el-select
-            v-model="activeGroupTitle"
-            class="hist-group-select"
-            size="small"
-            popper-class="hist-group-dropdown"
-            aria-label="切换历史数据分组"
-            @change="onGroupChange"
-          >
-            <el-option v-for="g in chartSubGroups" :key="g.title" :value="g.title" :label="g.title" />
-          </el-select>
+        <div class="hist-tabs" role="tablist" aria-label="切换历史数据分组">
+          <button
+            v-for="g in chartSubGroups"
+            :key="g.title"
+            type="button"
+            role="tab"
+            class="hist-tab"
+            :class="{ 'is-active': g.title === activeGroupTitle }"
+            :aria-selected="g.title === activeGroupTitle"
+            @click="onGroupSelect(g.title)"
+          >{{ g.title }}</button>
         </div>
-        <div class="hist-mobile-chart">
+        <div class="hist-chart">
           <LineChart
             v-if="activeGroup && groupHasData(activeGroup)"
             :series="activeGroup.series"
             :title="''"
-            height="150px"
+            :height="chartHeightPx"
             :yAxisMin="activeGroup.yAxisMin"
             :yAxisMax="activeGroup.yAxisMax"
+            :reserve-right-axes="maxReserveRightAxes"
           />
           <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
         </div>
@@ -388,27 +378,6 @@ const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
   return groups.map(g => ({ ...g, ...adaptive(g.series) }))
 })
 
-/**
- * 组内**最大右轴数**，供每个 LineChart 预留同样的右边距（2026-10-21）。
- *
- * 背景：LineChart 的右边距原本按本图自己的右轴数算，于是同一页里
- * 「PV输入」1 根右轴（15%）与「输出」3 根右轴（29%）的绘图区宽度不同，
- * 曲线的左右端点不在同一竖线 —— 用户看到的就是「图表长度参差不齐」。
- *
- * 这里按「组内不同单位数」估算轴数：与 LineChart 的分轴规则同口径（同单位且量级
- * 可比才共轴），但**刻意取上限** —— 宁可多留几像素空白，也要保证同页严格对齐。
- * 上限与 LineChart 的 MAX_Y_AXIS=4 对齐（4 根轴 ⇒ 最多 3 根右轴）。
- */
-const LINE_CHART_MAX_Y_AXIS = 4
-const maxReserveRightAxes = computed(() => {
-  let max = 0
-  for (const group of chartSubGroups.value) {
-    const units = new Set(group.series.map(s => s.unit || ''))
-    max = Math.max(max, Math.min(units.size, LINE_CHART_MAX_Y_AXIS) - 1)
-  }
-  return Math.max(0, max)
-})
-
 /** 该分组是否确实有数据点（没有就不渲染 260px 图表，避免大片空白） */
 function groupHasData(group: ChartSubGroupResult): boolean {
   return group.series.some(s => Array.isArray(s.data) && s.data.length > 0)
@@ -421,16 +390,53 @@ function groupHasData(group: ChartSubGroupResult): boolean {
  * 切换只改 activeGroupTitle，不调用 fetchHistoryData ⇒ 不产生新请求。 */
 const activeGroupTitle = ref('')
 const groupTouched = ref(false)
-function onGroupChange() { groupTouched.value = true }
+
+/*
+ * 点击 tab 切换分组（2026-10-21：取代窄屏 el-select 的 onGroupChange）。
+ * 只改 activeGroupTitle —— 不调用 fetchHistoryData，切换零请求、零延迟。
+ */
+function onGroupSelect(title: string) {
+  if (title === activeGroupTitle.value) return
+  activeGroupTitle.value = title
+  groupTouched.value = true
+}
 
 const activeGroup = computed<ChartSubGroupResult | undefined>(
   () => chartSubGroups.value.find(g => g.title === activeGroupTitle.value) ?? chartSubGroups.value[0],
 )
 const mobileSeriesCount = computed(() => activeGroup.value?.series.length ?? 0)
+/**
+ * 单图高度（px 字符串，直接传给 LineChart 的 height）。
+ *   · 桌面 320：平铺时代每张 260px，现在同屏只有一张，给到 320 更易读；
+ *   · 窄屏 200：必须 ≤220 才会进入 LineChart 的 isCompactChart 分支
+ *     （不画轴名/图例贴顶/axisLabel.hideOverlap）—— 窄屏正是靠这三个机制才不糊。
+ */
+const chartHeightPx = computed(() => (isMobileViewport.value ? '200px' : '320px'))
+
 /** 当前分组实际绘制的点数（测试/探针用：>0 才证明横轴真有数据，不是空图） */
 const mobilePointCount = computed(
   () => (activeGroup.value?.series ?? []).reduce((n, s) => n + s.data.length, 0),
 )
+
+/**
+ * 当前分组需要预留的右轴数（2026-10-21，随 tab 化改造调整）。
+ *
+ * 历史：平铺 7 张图时这里取「所有组里最大的右轴数」，让每组预留同样右边距 ——
+ * 目的是让同屏各图 plot 宽严格相等（治「图表长度参差不齐」）。
+ * 现在 tab 一次只显示**一张**图，跨图对齐不再有意义；改为只按当前分组自己的
+ * 不同单位数估算（与 LineChart 的分轴规则同口径），简单分组（如电网 2 个量）
+ * 不再白白空出两根右轴的位置。
+ *
+ * 上限与 LineChart 的 MAX_Y_AXIS=4 对齐（4 根轴 ⇒ 最多 3 根右轴）。
+ * 变量名保持 maxReserveRightAxes 不变（既有 ChartPlotAlignment 契约按此匹配）。
+ */
+const LINE_CHART_MAX_Y_AXIS = 4
+const maxReserveRightAxes = computed(() => {
+  const group = activeGroup.value
+  if (!group) return 0
+  const units = new Set(group.series.map(s => s.unit || ''))
+  return Math.max(0, Math.min(units.size, LINE_CHART_MAX_Y_AXIS) - 1)
+})
 
 watch(
   () => chartSubGroups.value.map(g => `${g.title}:${groupHasData(g) ? 1 : 0}`).join(','),
@@ -610,67 +616,88 @@ onUnmounted(() => {
 .empty-desc { text-align: center; line-height: 1.7; }
 .empty-title { margin: 0; font-size: 14px; color: var(--el-text-color-regular); }
 .empty-hint { margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
-.header-controls { display: flex; align-items: center; }
-.chart-grid { display: flex; flex-direction: column; gap: 16px; }
-.chart-sub-section {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-  padding: 12px;
-  background: var(--el-fill-color-blank);
+/* 空态说明：给出「查了什么范围 + 可能原因」，而不是只说「暂无」 */
+.chart-sub-empty {
+  margin: 0;
+  padding: 18px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color-lighter);
+  border-radius: 6px;
 }
-.chart-sub-title {
-  margin: 0 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
+.empty-desc { text-align: center; line-height: 1.7; }
+.empty-title { margin: 0; font-size: 14px; color: var(--el-text-color-regular); }
+.empty-hint { margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 
-/* ---- 窄屏（≤768px）独有：卡头换行 + 分组下拉 + 单图 150px ----
-   全部写在媒体查询内：>768px 一条都不匹配 ⇒ 桌面结构/像素与改前一致。 */
+/* 卡头：标题左、控件右；放不下时换行（控件尺寸不跟着缩，避免「按钮忽大忽小」） */
+.hist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+}
+.hist-title { font-size: 16px; font-weight: 500; color: var(--el-text-color-primary); }
+.header-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/*
+  分组 tab（2026-10-21 新增，替代「桌面 7 图平铺 / 窄屏 el-select」）。
+  为什么不用 el-tabs：7 个分组在 769~900px 的卡片里会溢出，el-tabs 溢出时用
+  「◀ ▶ 翻页器」把选项藏起来 —— 等于默认隐藏分组；这里是 flex-wrap，**永远全部可见**。
+  交互：role=tablist/tab + aria-selected（读屏可感知当前分组），点击即切换。
+*/
+.hist-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.hist-tab {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0 12px;
+  height: 30px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color .15s, background-color .15s, border-color .15s;
+}
+.hist-tab:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+}
+.hist-tab.is-active {
+  /* 白字落在 primary 实心填充上：必须用主题 token（暗色下是深字），
+     判据见 src/styles/__tests__/FillContrastContract.spec.ts 的对比度合同 */
+  color: var(--text-on-fill);
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  font-weight: 500;
+}
+.hist-tab:focus-visible { outline: 2px solid var(--el-color-primary-light-3); outline-offset: 1px; }
+.hist-chart { width: 100%; }
+
+/* ---- 窄屏（≤768px）：卡内距收紧 + tab 折行（不横向滚动、不隐藏任何分组） ---- */
 @media (max-width: 768px) {
-  /* 卡头：标题与控件分行；display:contents 让「导出CSV」与标题同排右对齐、时间档位独占一行，
-     不再挤成改前那种 109px 高的错位两行（393 实测 headerH=109）。 */
-  .hist-header { flex-wrap: wrap; row-gap: 8px; align-items: center; }
-  .header-controls { display: contents; }
-  /* 时间档位独占一行、四档均分，触摸目标 ≥44px */
-  .hist-header .time-range-selector { order: 2; flex: 1 1 100%; width: 100%; }
-  .hist-header :deep(.el-radio-group) { display: flex; width: 100%; }
-  .hist-header :deep(.el-radio-button) { flex: 1 1 0; }
-  .hist-header :deep(.el-radio-button__inner) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    min-height: 44px;
-    padding: 0 8px;
-    font-size: 13px;
-  }
-  /* 导出CSV：与标题同排右对齐（桌面 inline margin-left:10px 在窄屏收回），触摸目标 ≥44px */
-  .hist-header :deep(.el-button) {
-    order: 1;
-    margin-left: auto !important;
-    min-height: 44px;
-    padding: 0 14px;
-  }
-  /* 分组下拉：整行宽、触摸目标 ≥44px */
-  .hist-group-bar { display: flex; margin-bottom: 8px; }
-  .hist-group-select { width: 100%; }
-  .hist-group-select :deep(.el-select__wrapper) { min-height: 44px; font-size: 14px; }
-  /* 选项/已选文案不得 ellipsis 截断：数值与分组名必须完整可读 */
-  .hist-group-select :deep(.el-select__selected-item) { text-overflow: clip; }
-  :global(.hist-group-dropdown .el-select-dropdown__item) { text-overflow: clip; }
-  :global(.hist-group-dropdown) { max-width: calc(100vw - 24px); }
-  /* 单图容器固定 150px：空态/加载态不撑变卡片高度（数据不隐藏：无数据时就地给文案） */
-  .hist-mobile-chart { height: 150px; }
-  .hist-mobile-chart .chart-sub-empty {
-    height: 100%;
+  .hist-title { font-size: 15px; }
+  .hist-tabs { gap: 4px; margin-bottom: 8px; }
+  .hist-tab { height: 32px; padding: 0 10px; font-size: 12px; }
+  /* 空态占满单图高度，切换分组时不抖卡高 */
+  .hist-chart .chart-sub-empty {
+    height: 200px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0 12px;
     box-sizing: border-box;
   }
-  /* 卡片内距收窄，为单图腾高度（内容/数据一律不变） */
   :deep(.el-card__header) { padding: 12px; }
   :deep(.el-card__body) { padding: 12px; }
 }

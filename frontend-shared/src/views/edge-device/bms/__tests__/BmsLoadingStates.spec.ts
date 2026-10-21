@@ -157,12 +157,25 @@ describe('BmsDetailPage 首屏：四态接入 + 三块卡片加载/错误态（�
     expect(bmsDetailSource).toMatch(/v-else-if="realtimeEmpty"[\s\S]{0,300}?设备暂未上报实时数据/)
   })
 
-  it('同一数据源的电芯电压/温度/实时流在加载中也不再写「暂无数据」', () => {
+  it('同一数据源的电芯电压/温度在加载中也不再写「暂无数据」；实时流已删除', () => {
     expect(bmsDetailSource).toContain("realtimeLoading ? '正在加载单体电压…'")
     expect(bmsDetailSource).toContain("realtimeLoading ? '正在加载温度数据…'")
-    expect(bmsDetailSource).toContain("realtimeLoading ? '正在等待设备实时数据…'")
     // 真·空态文案保留（fail-open：确实没数据时仍明确告知）
     expect(bmsDetailSource).toContain('暂无单体电压数据')
     expect(bmsDetailSource).toContain('暂无温度数据')
+    /*
+     * 2026-10-21 用户要求删除「实时数据流」：原先这里断言
+     * realtimeLoading ? '正在等待设备实时数据…' 是**实时流卡片**的加载文案，
+     * 该卡片随区块一起删除后断言失去对象（继续保留等于要求一个已删区块复活）。
+     * 改为反向契约：结构化标识不得复活；「加载中不写『暂无数据』」的语义
+     * 由上面的电芯电压/温度两条继续覆盖（同一数据源、同一 realtimeLoading 口径）。
+     */
+    const code = bmsDetailSource
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    for (const marker of ['正在等待设备实时数据', 'RealtimeDataList', 'realtimeDataItems', 'block-id="stream"']) {
+      expect(code, '已删除的实时数据流标识复活：' + marker).not.toContain(marker)
+    }
   })
 })

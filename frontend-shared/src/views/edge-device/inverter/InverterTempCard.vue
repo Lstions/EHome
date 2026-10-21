@@ -21,18 +21,32 @@
       <p class="section-title">风扇状态</p>
       <div class="fan-grid">
         <div v-for="fan in fanItems" :key="fan.key" class="fan-item">
+          <!--
+            风扇百分比从进度条里**搬出来**放进 header 右侧（2026-10-21 用户真机反馈）：
+            旧实现 text-inside + stroke-width 14 把 30% 塞在 14px 高的条里，
+            文字正好压在「填充/灰底」交界处，几乎看不清、位置也不对。
+            现在：标签在左；数值 + 状态 tag 在右（数值 18px/600 等宽数字，按档位着色）；
+            进度条只表达比例，不再承载文字。
+          -->
           <div class="fan-header">
             <span class="fan-label">{{ fan.label }}</span>
-            <el-tag :type="fan.running ? 'success' : 'info'" effect="plain" size="small">
-              {{ fan.running ? '运行' : '停止' }}
-            </el-tag>
+            <span class="fan-header-right">
+              <span
+                v-if="fan.speed !== null"
+                class="fan-speed-value"
+                :class="'fan-speed-' + fanSpeedLevel(fan.speed)"
+              >{{ Math.round(fan.speed) }}%</span>
+              <el-tag :type="fan.running ? 'success' : 'info'" effect="plain" size="small">
+                {{ fan.running ? '运行' : '停止' }}
+              </el-tag>
+            </span>
           </div>
           <div class="fan-speed-bar" v-if="fan.speed !== null">
             <el-progress
               :percentage="fan.speed"
-              :color="fan.speed > 80 ? 'var(--color-danger)' : fan.speed > 50 ? 'var(--color-warning)' : 'var(--color-success)'"
-              :stroke-width="14"
-              :text-inside="true"
+              :color="fanSpeedColor(fan.speed)"
+              :stroke-width="8"
+              :show-text="false"
             />
           </div>
         </div>
@@ -120,6 +134,20 @@ const fanItems = computed(() => {
   }
   return fans
 })
+
+/**
+ * 风扇转速档位（数值颜色与进度条填充**共用同一判据**，避免两处阈值漂移）：
+ *   >80 danger / >50 warning / else success（> 判定，非 >=；50/80 走低一档）。
+ */
+function fanSpeedLevel(speed: number): 'danger' | 'warning' | 'success' {
+  if (speed > 80) return 'danger'
+  if (speed > 50) return 'warning'
+  return 'success'
+}
+/** 进度条填充色：沿用本仓语义 token（明暗跟随主题），不写死十六进制 */
+function fanSpeedColor(speed: number): string {
+  return 'var(--color-' + fanSpeedLevel(speed) + ')'
+}
 
 /*
  * 温度分级（2026-10-21 修正）：原实现是 `>40℃ 就告警`，而逆变器正常工作时
@@ -233,6 +261,28 @@ function formatTemp(v: any): string {
   margin-bottom: 8px;
 }
 
+/* header 右侧：转速百分比 + 运行状态 tag（tag 紧随数值之后，不再放条里） */
+.fan-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* 转速百分比：18px/600 等宽数字，按档位着色（语义 token，明暗跟随主题） */
+.fan-speed-value {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.fan-speed-success { color: var(--color-success); }
+.fan-speed-warning { color: var(--color-warning); }
+.fan-speed-danger { color: var(--color-danger); }
+
 .fan-label {
   font-size: 13px;
   font-weight: 500;
@@ -240,6 +290,12 @@ function formatTemp(v: any): string {
 
 .fan-speed-bar {
   margin-top: 4px;
+}
+
+/* 进度条只表达比例（8px 细条、全圆角），文字已移到 header 右侧 */
+.fan-speed-bar :deep(.el-progress-bar__outer),
+.fan-speed-bar :deep(.el-progress-bar__inner) {
+  border-radius: 8px;
 }
 
 /*
@@ -285,7 +341,10 @@ function formatTemp(v: any): string {
     min-height: 38px;
     padding: 6px 10px;
   }
-  .fan-header { flex: 0 0 auto; gap: 6px; margin-bottom: 0; }
+  /* header 仍是「标签左 / 数值+tag 右」：nowrap + 数值不可收缩 ⇒ 窄屏也不会换行或被挤掉 */
+  .fan-header { flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; margin-bottom: 0; }
+  .fan-header-right { gap: 6px; }
+  .fan-speed-value { font-size: 18px; line-height: 18px; }
   .fan-label { font-size: 12px; }
   .fan-speed-bar { flex: 1 1 auto; min-width: 0; margin-top: 0; }
 }

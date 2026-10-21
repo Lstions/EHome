@@ -383,88 +383,8 @@
         <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
       </CollapseBlock>
 
-      <!-- 轮询间隔分布（新增）：把各条指令的毫秒数画成同一条 0~60s 轴上的横条 + 汇总采样负载，
-           回答「谁刷得快、是不是某条把总线刷爆了」。窄屏默认折叠，摘要「N 条轮询中」。 -->
-      <section class="row diag-row">
-        <CollapseBlock
-          block-id="poll-interval"
-          title="轮询间隔分布"
-          :summary="diagSummary.poll"
-          :collapsible="isMobileViewport"
-          :lazy="true"
-          :open="collapse.isOpen('poll-interval')"
-          @toggle="collapse.toggle('poll-interval')"
-        >
-          <div class="card diag-card">
-            <div class="card-head">
-              <span class="card-title">轮询间隔分布</span>
-              <span class="card-hint">各指令间隔与采样负载</span>
-            </div>
-            <PollIntervalCard
-              :device-id="deviceId"
-              :online="deviceOnline"
-              :commands="pollTemplates"
-              :parent-loading="pollTemplatesLoading"
-              @summary="onPollSummary"
-            />
-          </div>
-        </CollapseBlock>
-      </section>
-
       <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
       <section class="row stream-poll">
-        <!-- 诉求② 落点：跟随模式 + 上滚即暂停 + 回到最新 -->
-        <CollapseBlock
-          block-id="stream"
-          title="实时数据流"
-          :summary="streamCollapseSummary"
-          :collapsible="isMobileViewport"
-          :lazy="true"
-          :open="collapse.isOpen('stream')"
-          @toggle="collapse.toggle('stream')"
-        >
-        <div class="card stream-card">
-          <div class="card-head">
-            <span class="card-title">实时数据流</span>
-            <el-tag :type="following ? 'success' : 'warning'" size="small" :effect="following ? 'plain' : 'dark'">
-              {{ following ? '跟随最新' : '已暂停跟随' }}
-            </el-tag>
-            <el-tag v-if="!following && pendingCount" type="primary" size="small">{{ pendingCount }} 条新数据</el-tag>
-            <span class="card-hint">上滚即暂停，不抢滚动</span>
-            <div class="head-right stream-actions">
-              <el-button size="small" :type="injecting ? 'warning' : 'default'" :icon="MagicStick" @click="toggleInject">
-                {{ injecting ? '停止注入' : '高频注入（1 条/秒）' }}
-              </el-button>
-              <el-button size="small" @click="clearStream">清空</el-button>
-            </div>
-          </div>
-
-          <div class="stream-box">
-            <div ref="streamEl" class="stream-scroll" @scroll="onStreamScroll">
-              <div v-for="row in streamRows" :key="row.id" class="stream-row">
-                <span class="s-time">{{ row.time }}</span>
-                <span class="s-item">{{ row.item }}</span>
-                <span class="s-value">{{ row.value }}</span>
-                <span class="s-unit">{{ row.unit }}</span>
-                <span class="s-status" :class="'is-' + row.status">{{ row.statusText }}</span>
-              </div>
-              <div v-if="!streamRows.length" class="stream-empty">{{ realtimeLoading ? '正在等待设备实时数据…' : realtimeError ? '实时数据加载失败（见页面顶部错误条，可重试）' : '暂无实时数据；设备下一次上报后会自动出现在这里' }}</div>
-            </div>
-            <transition name="fade">
-              <button v-if="!following" type="button" class="back-latest" @click="scrollToLatest">
-                <el-icon :size="14"><Bottom /></el-icon>
-                回到最新<span v-if="pendingCount">（{{ pendingCount }} 条）</span>
-              </button>
-            </transition>
-          </div>
-
-          <p v-if="snapshotError" class="card-footnote txt-danger">{{ snapshotErrorText }}</p>
-          <p class="card-footnote">
-            数据来自设备实时上报（新的在前）。向上滚动即暂停跟随，新数据只累积计数；滚回底部或点「回到最新」恢复。
-          </p>
-        </div>
-        </CollapseBlock>
-
         <!-- 诉求③ 落点：轮询指令配置（上限由节点上报，超限点名要禁用哪几条） -->
         <div class="card poll-card">
           <div class="card-head">
@@ -701,13 +621,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   PieChart, Odometer, DataLine, Lightning, Open, Lock,
-  CircleCheckFilled, WarningFilled, Bottom, ArrowRight, InfoFilled,
-  Timer, Operation, SetUp, Tools, Document, MagicStick,
+  CircleCheckFilled, WarningFilled, ArrowRight, InfoFilled,
+  Timer, Operation, SetUp, Tools, Document,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 统一设备页头（逆变器 / BMS / 通用设备三页共用）：身份、标签、面包屑、操作组都由它渲染
@@ -726,7 +646,6 @@ import CollapseBlock from './CollapseBlock.vue'
 import ProtectionHistoryCard from './diag/ProtectionHistoryCard.vue'
 import TempTrendCard from './diag/TempTrendCard.vue'
 import SocCurrentCard from './diag/SocCurrentCard.vue'
-import PollIntervalCard from './diag/PollIntervalCard.vue'
 import { useCollapseState } from '@/composables/useCollapseState'
 // 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
 import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
@@ -754,15 +673,6 @@ function fmt(v: number | null | undefined, digits: number): string {
   return v === null || v === undefined || !Number.isFinite(v) ? DASH : v.toFixed(digits)
 }
 const pad2 = (n: number) => String(n).padStart(2, '0')
-function nowTime(): string {
-  const t = new Date()
-  return pad2(t.getHours()) + ':' + pad2(t.getMinutes()) + ':' + pad2(t.getSeconds())
-}
-function formatClock(iso: string): string {
-  const d = iso ? new Date(iso) : new Date()
-  if (Number.isNaN(d.getTime())) return nowTime()
-  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())
-}
 function formatStamp(iso?: string | null): string {
   if (!iso) return DASH
   const d = new Date(iso)
@@ -782,21 +692,21 @@ const edgeDeviceStore = useEdgeDeviceStore()
 const deviceId = computed(() => Number(route.params.id) || 0)
 /**
  * 诊断类区块的折叠状态，按设备记忆（§3.3 bms-collapse:<deviceId>）。
- * 默认折叠的 7 组：历史趋势（电芯历史+运行趋势）、保护触发历史、温度趋势、SOC 与电流、
- * 轮询间隔分布、实时数据流、操作历史。默认全部收起，所以这里不传任何默认展开项。
+ * 默认折叠的 5 组：历史趋势（电芯历史+运行趋势）、保护触发历史、温度趋势、SOC 与电流、操作历史。
+ * 默认全部收起，所以这里不传任何默认展开项。
+ * （2026-10-21 用户要求移除「轮询间隔分布」与「实时数据流」两块，折叠项随之减少。）
  */
 const collapse = useCollapseState(() => deviceId.value)
 
 /**
- * 新增诊断卡（保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布）的折叠态摘要。
+ * 新增诊断卡（保护触发历史 / 温度趋势 / SOC 与电流）的折叠态摘要。
  * 这些卡自己取数，摘要由它们在数据就绪后 emit('summary') 出来 ——
  * 父页不重复请求同一份历史数据（否则一个区块两次历史请求）。
  */
-const diagSummary = reactive<Record<string, string>>({ protection: '', temp: '', soc: '', poll: '' })
+const diagSummary = reactive<Record<string, string>>({ protection: '', temp: '', soc: '' })
 const onProtectionSummary = (t: string) => { diagSummary.protection = t }
 const onTempSummary = (t: string) => { diagSummary.temp = t }
 const onSocSummary = (t: string) => { diagSummary.soc = t }
-const onPollSummary = (t: string) => { diagSummary.poll = t }
 const device = ref<EdgeDevice | null>(null)
 const detailError = ref('')
 const refreshing = ref(false)
@@ -882,9 +792,7 @@ const wsStore = useWebSocketStore()
  * 改前自建页头没有这个状态位 —— 统一页头后补上，用户一眼能看出数据是否在推。
  */
 const wsConnected = computed(() => wsStore.isConnected)
-const {
-  dataItems, latestData, clear: clearRealtime,
-} = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
+const { dataItems, latestData } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
 
 /** 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。 */
 async function loadLatestSnapshot() {
@@ -935,8 +843,10 @@ const snapshotLoading = ref(false)
 const snapshotErrorText = computed(() => {
   const raw = snapshotError.value
   if (!raw) return ''
-  if (/timeout/i.test(raw)) return '最新快照请求超时（设备数据较多时偶发；实时数据流仍会持续更新）'
-  if (/network|Network Error/i.test(raw)) return '最新快照请求失败：网络不可达（实时数据流仍会持续更新）'
+  // 2026-10-21：「实时数据流」列表已按用户要求移除，但 WS 实时通道仍在 ——
+  // 文案不能再承诺「数据流仍会更新」（页面已无该列表），改为「通过实时连接更新数据」。
+  if (/timeout/i.test(raw)) return '最新快照请求超时（设备数据较多时偶发；页面仍会通过实时连接更新数据）'
+  if (/network|Network Error/i.test(raw)) return '最新快照请求失败：网络不可达（页面仍会通过实时连接更新数据）'
   return '最新快照加载失败：' + raw
 })
 
@@ -1036,7 +946,6 @@ const remainingCapacity = computed(() => {
   if (soc.value !== null && nominalCapacity.value !== null) return (soc.value / 100) * nominalCapacity.value
   return null
 })
-const cycleCount = computed(() => num(latestData.value?.cycle_count))
 const currentDisplay = computed(() => num(latestData.value?.current))
 const currentHint = computed(() => {
   const c = currentDisplay.value
@@ -1125,14 +1034,6 @@ watch(() => latestData.value?.fet_status, (live) => {
 const effectiveFet = computed(() => verifiedFet.value ?? (hasFetStatus.value ? fetStatus.value : null))
 const chargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 1) !== 0)
 const dischargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 2) !== 0)
-function fetTextOf(fet: number): string {
-  const c = (fet & 1) !== 0
-  const d = (fet & 2) !== 0
-  if (c && d) return '充放导通'
-  if (c) return '仅充电导通'
-  if (d) return '仅放电导通'
-  return '全部关断'
-}
 const canControlMos = computed(() => hasFetStatus.value && deviceOnline.value)
 
 const mosRows = computed(() => [
@@ -1256,167 +1157,6 @@ function protectionActive(bit: number): boolean {
   return (protectionStatus.value & (1 << bit)) !== 0
 }
 
-// ════════════ 诉求②：实时数据流（跟随模式，不抢滚动） ════════════
-interface StreamRow {
-  id: string
-  time: string
-  item: string
-  value: string
-  unit: string
-  status: 'normal' | 'warning' | 'danger'
-  statusText: string
-}
-const MAX_STREAM_ROWS = 300
-const streamRows = ref<StreamRow[]>([])
-const streamEl = ref<HTMLElement | null>(null)
-const following = ref(true)
-const pendingCount = ref(0)
-const injecting = ref(false)
-let streamSeq = 0
-let injectTimer: ReturnType<typeof setInterval> | null = null
-const seenItemIds = new Set<string>()
-
-function appendRows(rows: StreamRow[]) {
-  streamRows.value.push(...rows)
-  if (streamRows.value.length > MAX_STREAM_ROWS) {
-    streamRows.value.splice(0, streamRows.value.length - MAX_STREAM_ROWS)
-  }
-  if (following.value) {
-    // 只在「跟随中」才动 scrollTop —— 暂停时绝不触碰视口（这正是旧页面的缺陷）。
-    void nextTick(() => {
-      const el = streamEl.value
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  } else {
-    pendingCount.value += rows.length
-  }
-}
-
-function onStreamScroll() {
-  const el = streamEl.value
-  if (!el) return
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 32
-  following.value = nearBottom
-  if (nearBottom) pendingCount.value = 0
-}
-
-function scrollToLatest() {
-  following.value = true
-  pendingCount.value = 0
-  void nextTick(() => {
-    const el = streamEl.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
-}
-
-function clearStream() {
-  // 需求：清空走 composable 的 clear()。
-  clearRealtime()
-  seenItemIds.clear()
-  streamRows.value = []
-  pendingCount.value = 0
-  following.value = true
-  // clear() 会同时清空 latestData（指标卡会短暂空白），这里立即用最新快照补回。
-  void loadLatestSnapshot()
-}
-
-const LEVEL_TO_STATUS: Record<'success' | 'warning' | 'danger', StreamRow['status']> = {
-  success: 'normal', warning: 'warning', danger: 'danger',
-}
-
-/** 把一条真实上报（DataItem）摊平成数据流行；只展示有真实值且对现场有意义的字段。 */
-function rowsForItem(item: DataItem): StreamRow[] {
-  const d = item.data ?? {}
-  const t = formatClock(item.timestamp)
-  const rows: StreamRow[] = []
-  const push = (label: string, value: string, unit: string, status: StreamRow['status'], statusText: string) => {
-    streamSeq++
-    rows.push({ id: 's' + streamSeq, time: t, item: label, value, unit, status, statusText })
-  }
-  const tv = num(d.total_voltage)
-  if (tv !== null) push('总电压', tv.toFixed(2), 'V', 'normal', '正常')
-  const cur = num(d.current)
-  if (cur !== null) push('电流', cur.toFixed(2), 'A', 'normal', cur < 0 ? '放电' : cur > 0 ? '充电' : '待机')
-  const s = num(d.rsoc ?? d.soc)
-  if (s !== null) push('SOC', s.toFixed(1), '%', 'normal', '正常')
-  const fet = num(d.fet_status)
-  if (fet !== null) push('MOS 状态', '0x' + hexOf(fet), '', 'normal', fetTextOf(fet))
-  const ps = num(d.protection_status)
-  if (ps !== null && ps > 0) {
-    push('保护状态', '0x' + hexOf(ps), '', 'danger', protectionSummary(ps))
-  }
-  const itemCells: number[] = []
-  for (let i = 1; i <= 32; i++) {
-    const v = num(d['cell_voltage_' + i] ?? d['cell_v_' + i])
-    if (v !== null) itemCells.push(v)
-  }
-  if (itemCells.length) {
-    const mx = Math.max(...itemCells)
-    const mn = Math.min(...itemCells)
-    push('单体最高 #' + (itemCells.indexOf(mx) + 1), mx.toFixed(3), 'V', mx > 3.6 ? 'danger' : 'normal', mx > 3.6 ? '越限' : '正常')
-    push('单体最低 #' + (itemCells.indexOf(mn) + 1), mn.toFixed(3), 'V', mn < 2.5 ? 'danger' : 'normal', mn < 2.5 ? '越限' : '正常')
-  }
-  for (let i = 1; i <= 4; i++) {
-    const v = num(d['temp_' + i] ?? d['temperature_' + i])
-    if (v !== null) push('温度 探头' + i, v.toFixed(1), '℃', LEVEL_TO_STATUS[tempLevel(v)], tempText(v))
-  }
-  return rows
-}
-
-function protectionSummary(mask: number): string {
-  let n = 0
-  for (let b = 0; b < 12; b++) if ((mask & (1 << b)) !== 0) n++
-  return n + ' 项触发'
-}
-
-function syncStreamFromItems(items: DataItem[]) {
-  if (!items.length) return
-  const unseen = items.filter((it) => !seenItemIds.has(it.id))
-  if (!unseen.length) return
-  for (const it of unseen) seenItemIds.add(it.id)
-  // dataItems 新的在前；按时间正序追加，保证「最新的在底部」。
-  const rows: StreamRow[] = []
-  for (const it of [...unseen].reverse()) rows.push(...rowsForItem(it))
-  if (rows.length) appendRows(rows)
-}
-watch(dataItems, (items) => syncStreamFromItems(items))
-
-/** 「高频注入」：本地压测行，每秒推 1 条，用于人工验证滚动不被抢（不代表设备数据）。 */
-function injectOne() {
-  const t = nowTime()
-  const slot = streamSeq % 4
-  let row: Omit<StreamRow, 'id' | 'time'>
-  if (slot === 0 && cells.value.length) {
-    const c = cells.value[Math.floor(Math.random() * cells.value.length)]
-    row = { item: '单体电压 #' + c.index, value: c.voltage.toFixed(3), unit: 'V', status: c.voltage > 3.6 ? 'danger' : 'normal', statusText: c.voltage > 3.6 ? '越限' : '正常' }
-  } else if (slot === 1 && temps.value.length) {
-    const tp = temps.value[Math.floor(Math.random() * temps.value.length)]
-    row = { item: '温度 探头' + tp.index, value: tp.value.toFixed(1), unit: '℃', status: LEVEL_TO_STATUS[tp.level], statusText: tp.text }
-  } else if (slot === 2 && remainingCapacity.value !== null) {
-    row = { item: '剩余容量', value: remainingCapacity.value.toFixed(2), unit: 'Ah', status: 'normal', statusText: '正常' }
-  } else {
-    row = { item: '循环次数', value: cycleCount.value !== null ? String(cycleCount.value) : DASH, unit: '次', status: 'normal', statusText: '正常' }
-  }
-  streamSeq++
-  appendRows([{ id: 'i' + streamSeq, time: t, ...row }])
-}
-
-function toggleInject() {
-  if (injecting.value) {
-    stopInject()
-    return
-  }
-  injecting.value = true
-  injectTimer = setInterval(injectOne, 1000)
-}
-function stopInject() {
-  if (injectTimer) {
-    clearInterval(injectTimer)
-    injectTimer = null
-  }
-  injecting.value = false
-}
-
 // ════════════ 诉求③：轮询指令配置（上限由节点上报） ════════════
 interface PollCommand { id: string; name: string; desc: string; interval: number; defaultInterval: number }
 const pollCommands = ref<PollCommand[]>([])
@@ -1425,15 +1165,6 @@ const pollSaveState = ref<'idle' | 'saving' | 'synced'>('idle')
 const pollError = ref('')
 const pollLoadError = ref('')
 const pollBusy = computed(() => pollSaveState.value === 'saving')
-/**
- * 「轮询间隔分布」卡的原始取数结果（契约 §2.5）。
- * 页面是唯一取数入口：loadPollCommands 只调一次 getCommandIntervals，
- * 原始返回下发给 PollIntervalCard（它按 schedulable 自行过滤），消除 R7 实测的 commands ×2。
- */
-const pollTemplates = ref<CommandTemplateWithInterval[] | null>(null)
-/** 页面是否正在取 commands（传给 PollIntervalCard 做去重协作：等待父页而不是再发一次） */
-const pollTemplatesLoading = ref(true)
-
 const isPollEnabled = (c: PollCommand) => c.interval > 0
 const enabledCount = computed(() => pollCommands.value.filter(isPollEnabled).length)
 /** 上限来自设备详情（后端随 GET /edge-devices/:id 下发），缺失时不显示任何上限提示。 */
@@ -1472,14 +1203,9 @@ const pollHint = computed(() => {
 async function loadPollCommands() {
   pollLoadError.value = ''
   pollError.value = ''
-  // 新的一轮取数开始：先清空下发给 PollIntervalCard 的原始数据，并标记「已有人负责取数」
-  pollTemplates.value = null
-  pollTemplatesLoading.value = true
   try {
     const cmds = await edgeDeviceApi.getCommandIntervals(deviceId.value)
     const all = Array.isArray(cmds) ? cmds : []
-    // 原始返回下发给 PollIntervalCard（不再让它自己取一次）；页面仍是唯一取数入口
-    pollTemplates.value = all
     pollCommands.value = all.filter((c: CommandTemplateWithInterval) => c.schedulable).map((c: CommandTemplateWithInterval) => ({
       id: c.id,
       name: c.name,
@@ -1491,11 +1217,7 @@ async function loadPollCommands() {
     pollSaveState.value = 'idle'
   } catch (e) {
     pollCommands.value = []
-    // 保持 null（未取到）⇒ PollIntervalCard 会回退自取数并展示自己的失败态 + 重试；
-    // 本卡「轮询指令配置」的失败提示（pollLoadError + 重试）照旧。
     pollLoadError.value = extractErrorMessage(e, '轮询指令加载失败')
-  } finally {
-    pollTemplatesLoading.value = false
   }
 }
 
@@ -1982,7 +1704,6 @@ const chartsCollapseSummary = computed(() => {
   if (totalVoltage.value !== null) parts.push('总电压 ' + totalVoltage.value.toFixed(2) + 'V')
   return parts.join(' · ')
 })
-const streamCollapseSummary = computed(() => '实时 · ' + streamRows.value.length + ' 条')
 const historyCollapseSummary = computed(() => '最近 ' + historyRows.value.length + ' 条')
 
 function resultTag(r: HistoryResult): TagType {
@@ -2010,11 +1731,6 @@ async function loadOperations() {
 
 // ════════════ 刷新 / 生命周期 ════════════
 function resetDeviceScopedState() {
-  stopInject()
-  streamRows.value = []
-  seenItemIds.clear()
-  pendingCount.value = 0
-  following.value = true
   snapshotError.value = ''
   snapshotLoading.value = false
   startFirstDataGrace()
@@ -2155,14 +1871,9 @@ onMounted(() => {
   void loadPollCommands()
   void loadLatestSnapshot()
   void loadOperations()
-  void nextTick(() => {
-    const el = streamEl.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
 })
 
 onUnmounted(() => {
-  stopInject()
   // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听，属于内存泄漏
   mobileMql?.removeEventListener('change', onMobileChange)
   mobileMql = null
@@ -2260,8 +1971,7 @@ onUnmounted(() => {
 /* 需要撑满剩余高度的内容区（列表/网格）显式声明，未声明者按内容高度、自然留白 */
 .row > .card > .op-groups,
 .row > .card > .poll-list,
-.row > .card > .history-list,
-.row > .card > .stream-box { flex: 1 1 auto; min-height: 0; }
+.row > .card > .history-list { flex: 1 1 auto; min-height: 0; }
 
 /*
   四个指标卡：等权重自动折行。
@@ -2280,8 +1990,9 @@ onUnmounted(() => {
 .cell-chart-row > .cell-card  { flex: 1 1 100%; }   /* 图表卡独占一行 */
 .diag-row > .card            { flex: 1 1 100%; }   /* 新增诊断卡同样独占一行（图表宽度优先） */
 .temp-row > .temp-card         { flex: 1 1 100%; }   /* 与 .op-groups 同宽，内部 auto-fill 决定列数 */
-.stream-poll > .stream-card   { flex-basis: 520px; min-width: 380px; }
-.stream-poll > .poll-card     { flex-basis: 380px; min-width: 340px; }
+/* 2026-10-21：该行原为「实时数据流 + 轮询指令配置」并排，数据流移除后
+   轮询配置独占整行（若仍沿用 380px 基准，宽屏下会被压成一条窄条）。 */
+.stream-poll > .poll-card     { flex: 1 1 100%; min-width: 0; }
 .ops-history > .ops-card      { flex-basis: 600px; min-width: 400px; }
 .ops-history > .history-card  { flex-basis: 320px; min-width: 300px; }
 
@@ -2383,48 +2094,8 @@ onUnmounted(() => {
 .temp-value.is-warning { color: var(--el-color-warning); }
 .temp-value.is-danger { color: var(--el-color-danger); }
 
-/* ══════════ 实时数据流 ══════════ */
-.stream-actions { gap: 8px; }
-.stream-box { position: relative; }
-.stream-scroll {
-  height: 320px; overflow: auto;
-  /* 列表行 churn 不得影响任何祖先滚动位置（见 .bms-detail-page 的同类说明）。
-     锚点若落在本列表内，行被 MAX_STREAM_ROWS 裁剪时锚点会消失，
-     浏览器随即重选锚点并调整**外层**滚动位置 ⇒ 整页跳到列表处。 */
-  overflow-anchor: none;
-  border: 1px solid var(--el-border-color-lighter); border-radius: var(--radius-sm);
-  background: var(--el-fill-color-lighter);
-}
-.stream-row {
-  display: grid; grid-template-columns: 76px minmax(120px, 1fr) 84px 40px 64px;
-  gap: 8px; align-items: center; padding: 6px 12px; min-width: 420px;
-  border-bottom: 1px solid var(--el-border-color-lighter); font-size: 12px;
-}
-.stream-row:last-child { border-bottom: none; }
-.s-time { font-family: 'SF Mono', Consolas, Monaco, monospace; color: var(--el-text-color-secondary); }
-.s-item { color: var(--el-text-color-regular); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.s-value { font-variant-numeric: tabular-nums; text-align: right; color: var(--el-text-color-primary); font-weight: 600; }
-.s-unit { color: var(--el-text-color-secondary); }
-.s-status { text-align: right; }
-.s-status.is-normal { color: var(--el-color-success); }
-.s-status.is-warning { color: var(--el-color-warning); }
-.s-status.is-danger { color: var(--el-color-danger); }
+/* 实时数据流区块已按用户要求移除（2026-10-21）；.stream-empty 仍被其它空态复用 */
 .stream-empty { padding: 40px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
-.back-latest {
-  position: absolute; right: 14px; bottom: 14px; z-index: 2;
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 14px; border: 1px solid var(--el-color-primary); border-radius: 999px;
-  /* 白字保留是有依据的（FillContrastContract 要求就近说明）：
-     底色 --el-color-primary 亮暗同值 #1f5ad8，**两端都是深色填充**，白字实测 5.98:1。
-     不用 --text-on-fill：该 token 暗色下取 #1a1a1a（为"提亮后的 success/warning/danger
-     浅底"设计），落在深蓝上只有 2.91 —— theme.css 亦明写它不适用于 primary 家族。 */
-  background: var(--el-color-primary); color: #fff; font-size: 12px; cursor: pointer;
-  box-shadow: var(--shadow-md);
-}
-.back-latest:hover { background: var(--el-color-primary-light-3); }
-.fade-enter-active, .fade-leave-active { transition: opacity 0.18s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
-
 /* ══════════ 轮询配置 ══════════ */
 .poll-list { display: flex; flex-direction: column; }
 .poll-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--el-border-color-lighter); flex-wrap: wrap; }
@@ -2499,7 +2170,6 @@ onUnmounted(() => {
    让"大小卡并排"更早变成堆叠。 */
 @media (max-width: 1200px) {
   .mos-protect > .protect-card,
-  .stream-poll > .stream-card,
   .ops-history > .ops-card { flex-basis: 420px; }
 }
 /* 平板/窄桌面（769~1100）：指标卡固定 2 列。
@@ -2540,10 +2210,9 @@ onUnmounted(() => {
   .bms-sub > span { white-space: nowrap; }
 
   .card { padding: 14px 12px; }
-  .head-right, .stream-actions { margin-left: 0; }
+  .head-right { margin-left: 0; }
   /* 折叠头已经写了区块名，展开后卡片自己的标题就是重复内容（用户点名「顶部重复内容」）：
      窄屏隐藏这两个标题文本（卡片头的标签/按钮全部保留，不会被一起藏掉）。 */
-  .stream-card > .card-head > .card-title,
   .history-card > .card-head > .card-title { display: none; }
 
   /* ── 电芯电压分布：477 → ≈200px ──
@@ -2582,7 +2251,7 @@ onUnmounted(() => {
   .temp-card > .card-footnote { font-size: 10px; margin-top: 6px; }
   .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
-  .mos-switch, .op-group-head, .back-latest { min-height: 44px; }
+  .mos-switch, .op-group-head { min-height: 44px; }
   /* ── 受控操作：折叠分层后默认 1280 → ~370px ──
      ① 卡头那句「状态文案：已发送 → 执行中 → …」是状态机词表，窄屏要占 4 行 55px；
         每条操作执行后就地显示圆点+状态词，失败还有红色原因条，所以移动端只留标题+计数；
@@ -2692,7 +2361,7 @@ onUnmounted(() => {
   }
 
   /* ── 硬 min-width 在窄屏必须清零 ──
-     根因（实测）：.ops-card { min-width: 400px }、.stream-card { min-width: 380px }
+     根因（实测）：.ops-card { min-width: 400px }、.poll-card { min-width: 340px }
      等在 318px 的容器里**不能收缩**（min-width 是硬底线），于是卡片宽 400、
      整页 el-main scrollWidth 432 > clientWidth 382，页面可以横向拖动。
      桌面端这些 min-width 用于保证"卡片不会被压到不可读"，窄屏已经是单列堆叠，
@@ -2700,7 +2369,6 @@ onUnmounted(() => {
   .row > .card,
   .mos-protect > .mos-card,
   .mos-protect > .protect-card,
-  .stream-poll > .stream-card,
   .stream-poll > .poll-card,
   .ops-history > .ops-card,
   .ops-history > .history-card {
@@ -2815,35 +2483,9 @@ onUnmounted(() => {
   .mos-name { font-size: 14px; }
   .mos-desc { font-size: 11px; }
 
-  /* ── 实时流：横向溢出治理（实测 el-main scrollWidth 432 > clientWidth 382） ──
-     根因：.stream-row { min-width: 420px } 在 354px 容器里硬撑，把整页撑出横向滚动条。
-     窄屏改为**两行网格**（上行 时间+项目，下行 值+单位+状态）：
-       · 不删任何字段（单位/状态都是有效信息）；
-       · 不设 min-width ⇒ 不再溢出；
-       · 单行高度只增加约 16px，比重排整页代价低得多。
-     grid-template-areas 让读屏顺序与视觉顺序保持一致。 */
-  .stream-row {
-    /* 列宽必须固定（不能用 auto）：auto 列每行独立计算宽度，
-       实测单位列 left 在 286/283.3/270/空列 0 之间抖动 3~16px，
-       整列看起来是锯齿。固定 40px 后各行对齐（复审 N5）。 */
-    grid-template-columns: 58px minmax(0, 1fr) 68px 34px 46px;
-    grid-template-areas:
-      "time item  item  item  item"
-      "time value unit  unit  status";
-    min-width: 0;
-    row-gap: 2px;
-    padding: 8px 10px;
-  }
-  .stream-row .s-value { text-align: right; }
-  .stream-row .s-time   { grid-area: time; align-self: start; }
-  .stream-row .s-item   { grid-area: item; }
-  .stream-row .s-value  { grid-area: value; text-align: left; }
-  .stream-row .s-unit   { grid-area: unit; }
-  .stream-row .s-status { grid-area: status; }
-  .stream-scroll { overflow-x: hidden; }
 }
 @media (pointer: coarse) {
-  .mos-switch, .op-group-head, .back-latest { min-height: 44px; }
+  .mos-switch, .op-group-head { min-height: 44px; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
 }
 </style>

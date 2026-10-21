@@ -287,10 +287,28 @@ onUnmounted(() => {
 .dh-main {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 12px 12px;
   min-width: 0;
+  /*
+    ⚠ 必须允许换行（2026-10-21 真机截图复现）：
+    之前 .dh-main 是单行 flex，而 .dh-actions 是 flex:0 0 auto（内容宽 547px 且不收缩），
+    于是「窄桌面」（769~1024）一旦放不下，被压的是 .dh-ident —— 实测 ident 宽度
+    261 → 181 → 125 → 81 → 41 → 0px，设备名与副标题被压成「一列一个字」
+    （用户截图：inverter 竖排 8 行、节点/通道信息竖排 40+ 行），页头 75px → 897px。
+    放不下时应该让**操作组**整体换到第二行，而不是压身份信息。
+  */
+  flex-wrap: wrap;
 }
-.dh-ident { min-width: 0; flex: 1 1 auto; }
+.dh-ident {
+  /*
+    360px 是「名称 + 2 个标签一行放得下」的实测下界（本页 39 + 151 + 8 ≈ 198，
+    取 360 是为了兼容更长的设备名与 BMS 的 3 个标签）。
+    用 min-width 而不是 flex-basis：flex-basis 只影响初始尺寸，仍会被 shrink 压到 0；
+    min-width 是硬下限 ⇒ 只有当 .dh-ident + .dh-actions 都放不下时 flex 才换行。
+  */
+  min-width: min(360px, 100%);
+  flex: 1 1 auto;
+}
 .dh-name-line {
   display: flex;
   align-items: center;
@@ -335,7 +353,13 @@ onUnmounted(() => {
   gap: 12px;
   flex-wrap: wrap;
   justify-content: flex-end;
-  flex: 0 0 auto;
+  /*
+    换行后独占一行时右对齐（与改前同边）；min-width:0 + max-width:100% 保证在
+    769~800 这种「比操作组自身还窄」的视口下由操作组**内部**换行，而不是溢出页头盒。
+  */
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 .dh-more {
   width: 36px;

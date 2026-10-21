@@ -10,6 +10,13 @@ import InverterStatusGrid from '../InverterStatusGrid.vue'
 import InverterMpptCard from '../InverterMpptCard.vue'
 import InverterTempCard from '../InverterTempCard.vue'
 import InverterEnergyCard from '../InverterEnergyCard.vue'
+import inverterDetailSource from '../InverterDetailPage.vue?raw'
+
+/** 去掉注释后的页面源码：**否定断言必须基于它**（注释里写「已移除实时数据流」不应判红）。 */
+const inverterDetailCode = inverterDetailSource
+  .replace(/<!--[\s\S]*?-->/g, '')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 
 interface DeviceDataMockState {
   device: Ref<Record<string, any> | null>
@@ -18,14 +25,12 @@ interface DeviceDataMockState {
   syncingHA: Ref<boolean>
   wsConnected: Ref<boolean>
   latestData: Ref<Record<string, any> | null>
-  realtimeDataItems: Ref<unknown[]>
 }
 
 const hoisted = vi.hoisted(() => ({
   routerBack: vi.fn(),
   fetchDeviceDetail: vi.fn(),
   fetchLatestData: vi.fn(),
-  clearRealtimeData: vi.fn(),
   handleRefresh: vi.fn(),
   handleSyncToHA: vi.fn(),
   state: null as unknown as DeviceDataMockState,
@@ -45,14 +50,12 @@ vi.mock('@/composables/useDeviceData', async () => {
     syncingHA: ref<boolean>(false),
     wsConnected: ref<boolean>(true),
     latestData: ref<Record<string, any> | null>(null),
-    realtimeDataItems: ref<unknown[]>([]),
   }
   return {
     useDeviceData: () => ({
       ...hoisted.state,
       fetchDeviceDetail: hoisted.fetchDeviceDetail,
       fetchLatestData: hoisted.fetchLatestData,
-      clearRealtimeData: hoisted.clearRealtimeData,
       handleRefresh: hoisted.handleRefresh,
       handleSyncToHA: hoisted.handleSyncToHA,
     }),
@@ -111,7 +114,6 @@ describe('InverterDetailPage', () => {
     hoisted.state.syncingHA.value = false
     hoisted.state.wsConnected.value = true
     hoisted.state.latestData.value = null
-    hoisted.state.realtimeDataItems.value = []
   })
 
   it('renders a skeleton while loading without a device', () => {
@@ -173,7 +175,10 @@ describe('InverterDetailPage', () => {
     expect(wrapper.findComponent(InverterTempCard).props('latestData')).toEqual(hoisted.state.latestData.value)
     expect(wrapper.findComponent(InverterEnergyCard).props('latestData')).toEqual(hoisted.state.latestData.value)
 
-    expect(wrapper.findAll('.el-tag').some(t => t.text() === '实时')).toBe(true)
+    // 2026-10-21 用户要求删除「实时数据流」：页面不再渲染 RealtimeDataList。
+    // 保留 RealtimeDataList stub 作为**探测器** —— 若后续重构重新挂载该组件，
+    // .realtime-stub 会立刻出现，这条反向断言变红。
+    expect(wrapper.find('.realtime-stub').exists(), '实时数据流组件已按用户要求删除，不得复活').toBe(false)
     expect(wrapper.text()).not.toContain('条告警')
   })
 
@@ -182,7 +187,7 @@ describe('InverterDetailPage', () => {
     hoisted.state.latestData.value = { alarm_overload: 1, alarm_battery_low: 3, fault_code: 2 }
     const wrapper = mount(InverterDetailPage, { global: globalOptions })
     expect(wrapper.text()).toContain('3条告警')
-    expect(wrapper.findAll('.el-tag').some(t => t.text() === '实时')).toBe(false)
+    expect(wrapper.find('.realtime-stub').exists()).toBe(false)
 
     hoisted.state.latestData.value = { alarm_overload: 0, fault_code: 0 }
     const clean = mount(InverterDetailPage, { global: globalOptions })
@@ -254,6 +259,20 @@ describe('InverterDetailPage', () => {
     expect(wrapper.findComponent(InverterPowerFlow).props('pvPower')).toBe(0)
     expect(wrapper.findComponent(InverterMpptCard).props('data')).toBeNull()
     expect(wrapper.text()).not.toContain('条告警')
+  })
+
+  /**
+   * 2026-10-21 用户要求：逆变器详情页不再显示「实时数据流」。
+   * 反向契约用结构化标识（组件名 / composable 字段 / 状态数组），不用中文文案。
+   * 保留的区块做分母守卫 —— 否则「没有实时流」可能只是文件被误删空。
+   */
+  it('2026-10-21：实时数据流已删除，源码不得再出现实时流组件/状态/文案', () => {
+    for (const marker of ['RealtimeDataList', 'realtimeDataItems', 'clearRealtimeData', '实时数据流']) {
+      expect(inverterDetailCode, '已删除标识复活：' + marker).not.toContain(marker)
+    }
+    for (const title of ['功率流向', '状态与告警', 'MPPT通道', '温度与风扇', '发电量统计']) {
+      expect(inverterDetailCode, '缺少保留区块：' + title).toContain(title)
+    }
   })
 
   it('wires header events to router and composable actions, and loads data on mount', async () => {

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import InverterTempCard from '../InverterTempCard.vue'
+// 契约测试：直接读 SFC 源码字符串（项目惯例，happy-dom 不注入 scoped style 到 DOM）
+import source from '../InverterTempCard.vue?raw'
 
 /**
  * 本仓 el-progress 全局 stub 不保留 color 属性，这里用一个本地 stub
@@ -9,13 +11,14 @@ import InverterTempCard from '../InverterTempCard.vue'
  */
 const ProgressStub = defineComponent({
   name: 'ElProgress',
+  // text-inside / show-text **故意不声明为 props**：未声明属性会透传到根元素，
+  // 这样测试能直接断言「旧 text-inside 写法已删除」「show-text=false」。
   props: {
     percentage: Number,
     color: [String, Array, Function],
     strokeWidth: Number,
-    textInside: Boolean,
   },
-  template: '<div class="el-progress" :data-percentage="percentage" :data-color="typeof color === \'string\' ? color : \'fn\'" />',
+  template: '<div class="el-progress" :data-percentage="percentage" :data-color="typeof color === \'string\' ? color : \'fn\'" :data-stroke-width="strokeWidth" />',
 })
 
 function mountCard(latestData: Record<string, any> | null) {
@@ -64,14 +67,21 @@ describe('InverterTempCard', () => {
     expect(items[1].classes()).toContain('temp-normal')
   })
 
-  it('renders fan status and speed progress', () => {
+  it('renders fan status, speed percentage in header and bar without text', () => {
     const wrapper = mountCard({ fan1_speed: 60, fan1_status: 1, fan2_speed: 30, fan2_status: 1 })
     expect(wrapper.find('.fan-section').exists()).toBe(true)
     const fans = wrapper.findAll('.fan-item')
     expect(fans).toHaveLength(2)
     expect(fans[0].find('.fan-label').text()).toBe('风扇1')
     expect(fans[0].find('.el-tag').text()).toBe('运行')
+    // 百分比在 header 右侧（标签左、数值右、状态 tag 紧随），18px 醒目数值
+    expect(fans[0].find('.fan-header .fan-header-right .fan-speed-value').text()).toBe('60%')
+    expect(fans[1].find('.fan-header .fan-header-right .fan-speed-value').text()).toBe('30%')
+    // 进度条只表达比例：percentage 仍透传、8px 细条、无文字
     expect(fans[0].find('.el-progress').attributes('data-percentage')).toBe('60')
+    expect(fans[0].find('.el-progress').attributes('data-stroke-width')).toBe('8')
+    expect(fans[0].find('.el-progress').attributes('text-inside')).toBeUndefined()
+    expect(fans[0].find('.el-progress').attributes('show-text')).toBe('false')
     expect(fans[1].find('.el-progress').attributes('data-percentage')).toBe('30')
   })
 
@@ -147,3 +157,80 @@ describe('InverterTempCard', () => {
     expect(fromOther.find('.el-empty').exists()).toBe(true)
   })
 })
+
+describe('InverterTempCard 风扇转速百分比（2026-10-21 用户真机反馈）', () => {
+  /**
+   * 缺陷：旧实现把 30% 塞进 text-inside + stroke-width 14 的进度条里，
+   * 文字正好压在「填充/灰底」交界处，灰底上几乎看不清、位置也不对。
+   * 修法：数值搬到 fan-header 右侧（标签左 / 数值右 / 状态 tag 紧随），
+   * 18px/600/等宽数字并沿用原档位配色；进度条去掉文字、细化到 8px 只表达比例。
+   */
+  it('百分比在 fan-header 右侧，与运行状态 tag 相邻（标签左 / 数值+tag 右）', () => {
+    const wrapper = mountCard({ fan1_speed: 30, fan1_status: 1 })
+    const header = wrapper.find('.fan-item .fan-header')
+    expect(header.exists()).toBe(true)
+    const right = header.find('.fan-header-right')
+    expect(right.exists()).toBe(true)
+    expect(right.find('.fan-speed-value').text()).toBe('30%')
+    expect(right.find('.el-tag').text()).toBe('运行')
+    // 标签是 header 的第一个元素（左侧），数值+tag 在右侧组
+    expect(header.element.firstElementChild?.className).toContain('fan-label')
+  })
+
+  it('数值按档位着色，与进度条填充同一判据（>80 danger / >50 warning / else success）', () => {
+    const classesFor = (speed: number) => mountCard({ fan1_speed: speed }).find('.fan-speed-value').classes()
+    expect(classesFor(30)).toContain('fan-speed-success')
+    expect(classesFor(60)).toContain('fan-speed-warning')
+    expect(classesFor(90)).toContain('fan-speed-danger')
+    // 边界：恰好 50 / 80 走低一档（> 判定，非 >=）
+    expect(classesFor(50)).toContain('fan-speed-success')
+    expect(classesFor(80)).toContain('fan-speed-warning')
+    // 反向：档位 class 只能命中一个（防止多色叠加）
+    for (const speed of [30, 60, 90]) {
+      const hit = classesFor(speed).filter((c) => c.startsWith('fan-speed-') && c !== 'fan-speed-value')
+      expect(hit).toHaveLength(1)
+    }
+  })
+
+  it('无转速时只有状态 tag、不渲染百分比/进度条（fanItems 数据契约不变）', () => {
+    const wrapper = mountCard({ fan1_status: 1, fan2_status: 0 })
+    expect(wrapper.findAll('.fan-item')).toHaveLength(2)
+    expect(wrapper.findAll('.fan-speed-value')).toHaveLength(0)
+    expect(wrapper.findAll('.fan-speed-bar')).toHaveLength(0)
+    expect(wrapper.findAll('.fan-header-right .el-tag').map((t) => t.text())).toEqual(['运行', '停止'])
+  })
+
+  it('源码契约：删除 text-inside，progress 8px 细条不承载文字', () => {
+    // 去注释后断言：模板注释里会写「旧实现是 text-inside…」解释缺陷原因，
+    // 直接对全文断言 not.toContain 会把「说明为什么删掉」误判成「还在用」。
+    const code = source
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(code).not.toContain('text-inside')
+    expect(source).not.toMatch(/:stroke-width="14"/)
+    expect(source).toContain(':stroke-width="8"')
+    expect(source).toContain(':show-text="false"')
+    expect(source).toContain("'fan-speed-' + fanSpeedLevel(fan.speed)")
+  })
+
+  it('源码契约：数值 18px / 600 / tabular-nums，三档颜色都走语义 token', () => {
+    expect(source).toMatch(/\.fan-speed-value \{[\s\S]{0,320}?font-size:\s*18px;/)
+    expect(source).toMatch(/\.fan-speed-value \{[\s\S]{0,320}?font-weight:\s*600;/)
+    expect(source).toMatch(/\.fan-speed-value \{[\s\S]{0,320}?font-variant-numeric:\s*tabular-nums;/)
+    expect(source).toContain('.fan-speed-success { color: var(--color-success); }')
+    expect(source).toContain('.fan-speed-warning { color: var(--color-warning); }')
+    expect(source).toContain('.fan-speed-danger { color: var(--color-danger); }')
+  })
+
+  it('窄屏行式契约不破坏：fan-item 仍是 row、进度条 flex:1、百分比 nowrap 不换行', () => {
+    const mobile = source.slice(source.indexOf('@media (max-width: 768px)'))
+    expect(mobile).toMatch(/\.fan-item \{[\s\S]{0,160}?flex-direction:\s*row;/)
+    expect(mobile).toMatch(/\.fan-speed-bar \{ flex: 1 1 auto; min-width: 0;/)
+    expect(mobile).toMatch(/\.fan-header \{[^}]*flex-wrap:\s*nowrap;/)
+    expect(mobile).toContain('.fan-speed-value { font-size: 18px; line-height: 18px; }')
+    // 进度条是 header 的**兄弟**（不在 header 内部），窄屏才能 flex:1 占右侧
+    const template = source.slice(0, source.indexOf('<script'))
+    expect(template.indexOf('class="fan-header"')).toBeLessThan(template.indexOf('class="fan-speed-bar"'))
+  })
+})
+
