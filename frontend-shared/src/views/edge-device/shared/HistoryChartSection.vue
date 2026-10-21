@@ -107,7 +107,11 @@
           <div class="empty-desc">
             <p class="empty-title">当前时间范围内暂无历史数据</p>
             <p class="empty-hint">已查询：{{ timeRangeLabel }}（{{ queryScopeHint }}）</p>
-            <p class="empty-hint">可能原因：设备刚接入尚未上报、该类型数据未被采集，或所选时间范围无数据。</p>
+            <!-- 离线优先：设备离线时「换时间范围」是无效排查方向，必须先把原因说准。 -->
+            <p v-if="props.online === 'offline'" class="empty-hint is-offline">
+              设备当前离线，历史数据需由设备上报后才有 —— 请先确认节点与通道在线，恢复后数据会自动补齐。
+            </p>
+            <p v-else class="empty-hint">可能原因：设备刚接入尚未上报、该类型数据未被采集，或所选时间范围无数据。</p>
           </div>
         </template>
       </el-empty>
@@ -134,6 +138,16 @@ const props = defineProps<{
   deviceId: number
   deviceType: string
   deviceTypeText: string
+  /**
+   * 设备在线状态：离线设备的「暂无历史数据」根本原因通常不是时间范围，
+   * 而是设备没上报。2026-10-21 独立复核指出空态文案未区分离线，
+   * 会把用户引向「换时间范围」这种无效排查。
+   *
+   * 用三态字符串而不是 boolean：Vue 对 Boolean 类型 prop 在缺省时会 cast 成 false，
+   * 直传 boolean 时「未知」与「离线」无法区分（实测未传 online 也走进离线分支，
+   * 让 14 个既有空态测试全部误红）。
+   */
+  online?: 'online' | 'offline' | 'unknown'
 }>()
 
 /* ---- 视口判定（≤768px 走窄屏「单图 + 分组下拉」）----

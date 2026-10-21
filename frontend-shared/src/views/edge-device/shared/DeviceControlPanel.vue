@@ -41,14 +41,22 @@
             </div>
             <!--
               窄屏 .op-desc 被 -webkit-line-clamp:2 裁剪（受控操作有 9 项，不裁会到 1080px）。
-              裁剪本身是设计取舍，但**必须能取到完整文本**：2026-10-21 独立复核实测
+              裁剪是设计取舍，但**必须能取到完整文本**：2026-10-21 独立复核实测
               5 条说明 ch=30 vs sh=45~90 被硬裁且无 title/tooltip ⇒ 信息永久丢失。
-              这里补 title（桌面悬停原生提示）+ aria-label（读屏可读全文）。
+              提供三条路径：① title（桌面悬停原生提示）② 点击说明展开/收起（触屏可达，
+              .stop 防止误触发「开始执行」）③ 展开后自然换行完整显示。
+              ⚠ 不再声称 aria-label：无 role 的 div 上 aria-label 会被多数读屏忽略，
+              写了等于假修复（复核员核对 DOM 时也确认 .op-desc[aria-label] 数量为 0）。
             -->
             <div
               v-if="action.definition.description"
               class="op-desc"
+              :class="{ 'is-expanded': expandedDesc.has(action.definition.id) }"
               :title="action.definition.description"
+              role="button"
+              tabindex="0"
+              @click.stop="toggleDesc(action.definition.id)"
+              @keydown.enter.space.prevent.stop="toggleDesc(action.definition.id)"
             >{{ action.definition.description }}</div>
           </div>
         </div>
@@ -190,6 +198,17 @@ function riskBadge(action: ActionDefinition): { type: 'danger' | 'warning'; labe
   }
 }
 function actionIcon(action: ActionDefinition) { return action.semantics === 'reset' ? RefreshLeft : action.semantics === 'read' ? View : action.semantics === 'set' ? EditPen : Operation }
+/**
+ * 窄屏说明展开态（触屏读全文的路径；桌面有 title 但触屏没有 hover）。
+ * 只影响 CSS（去掉 line-clamp），不改数据、不影响执行流程。
+ */
+const expandedDesc = ref<Set<string>>(new Set())
+function toggleDesc(id: string) {
+  const next = new Set(expandedDesc.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedDesc.value = next
+}
 function begin(action: ActionDefinition) { selectedAction.value = action; const fields = Object.keys(action.input_schema?.properties ?? {}); if (fields.length === 0) { prepare({}); return }; formVisible.value = true }
 async function submitSelected(params: Record<string, unknown>) { formVisible.value = false; prepare(params) }
 function prepare(params: Record<string, unknown>) { if (!selectedAction.value) return; selectedParams.value = params; selectedKey.value = newIdempotencyKey(); if (requiresConfirmation(selectedAction.value)) { confirmationVisible.value = true; return }; void submit(selectedAction.value.id, params) }
@@ -225,7 +244,7 @@ watch(() => props.deviceId, () => { expandedHistory.value = false; load() }); on
    而左列实时数据卡仅 688px ⇒ 左侧 6630px 空白。
    封顶 420px（约 6~7 条）让左右两列高度接近；超出部分在容器内滚动，
    历史数据一条不丢（审计线索不能截断，见模板注释）。 */
-<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.stale-guidance{margin-bottom:12px}.stale-detail{margin:4px 0;font-size:12px;line-height:1.6}.guidance-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7}.guidance-list li{margin-bottom:4px}.guidance-action{color:var(--el-text-color-secondary)}.guidance-raw{display:block;color:var(--el-text-color-placeholder);font-size:11px;overflow-wrap:anywhere}.stale-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.stale-hint{font-size:12px;color:var(--el-text-color-secondary)}.ops-sub{margin:0 0 10px;font-size:12px;color:var(--el-text-color-secondary)}.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:8px;cursor:pointer;transition:border-color .15s,box-shadow .15s}.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--el-box-shadow-light)}.op-item:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:1px}.op-item.busy{opacity:.6;pointer-events:none}.op-icon{flex-shrink:0;margin-top:2px;color:var(--el-color-primary)}.op-text{min-width:0}.op-name{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--el-text-color-primary)}.op-desc{margin-top:4px;font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}
+<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.stale-guidance{margin-bottom:12px}.stale-detail{margin:4px 0;font-size:12px;line-height:1.6}.guidance-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7}.guidance-list li{margin-bottom:4px}.guidance-action{color:var(--el-text-color-secondary)}.guidance-raw{display:block;color:var(--el-text-color-placeholder);font-size:11px;overflow-wrap:anywhere}.stale-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.stale-hint{font-size:12px;color:var(--el-text-color-secondary)}.ops-sub{margin:0 0 10px;font-size:12px;color:var(--el-text-color-secondary)}.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:8px;cursor:pointer;transition:border-color .15s,box-shadow .15s}.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--el-box-shadow-light)}.op-item:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:1px}.op-item.busy{opacity:.6;pointer-events:none}.op-icon{flex-shrink:0;margin-top:2px;color:var(--el-color-primary)}.op-text{min-width:0}.op-name{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--el-text-color-primary)}.op-desc{margin-top:4px;font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere;cursor:pointer}.op-desc.is-expanded{color:var(--el-text-color-primary)}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}
 /* 2026-10-15 布局修复：历史容器封顶 + 内部滚动。
    改前无上限直铺，实测 32 条 = 4508px，把 .bottom-row 撑到 7318px，
    而左列实时数据卡仅 688px ⇒ 左侧 6630px 空白。
@@ -244,6 +263,8 @@ watch(() => props.deviceId, () => { expandedHistory.value = false; load() }); on
   .op-icon{display:none}
   .op-name{font-size:12px;flex-wrap:wrap;gap:4px;word-break:keep-all}
   .op-desc{margin-top:0;font-size:11px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  /* 点一下说明展开全文（触屏没有 hover，title 不可达）：去掉行数限制。 */
+  .op-desc.is-expanded{-webkit-line-clamp:unset;display:block;overflow:visible}
   .ops-sub{margin-bottom:6px;font-size:11px}
   .history-scroll{max-height:320px}
 }

@@ -64,9 +64,17 @@
 
     <!-- 移动：主操作独占一行（不做 flex 挤压，任何宽度都不掉行/不缩小） -->
     <div v-if="isMobile" class="dh-mobile-actions">
-      <el-tag v-if="wsConnected" type="success" size="small" effect="plain" class="dh-conn-tag dh-conn-mobile">
+      <el-tag
+        v-if="wsConnected"
+        type="success"
+        size="small"
+        effect="plain"
+        class="dh-conn-tag dh-conn-mobile"
+        title="实时连接"
+        aria-label="实时连接"
+      >
         <el-icon :size="12"><Connection /></el-icon>
-        <span>实时连接</span>
+        <span class="dh-conn-text">实时连接</span>
       </el-tag>
       <el-button
         v-if="showRefresh"
@@ -411,6 +419,21 @@ onUnmounted(() => {
     height: 36px;
   }
   .dh-sub { margin-top: 4px; }
+}
+
+/*
+  超窄屏（≤360px，如 320 的 iPhone SE / 老安卓）：操作行只有 240px 内容宽，
+  「实时连接」文字版标签(86px) + 刷新(113px) + ⋯(44px) + 间距(16px) = 259px ⇒ 溢出 19px，
+  ⋯ 右边界越出页头盒 3px（2026-10-21 独立复核实测）。
+  这里把标签收成图标（34px）保留绿色连接状态，文字走 title/aria-label —— 不换行、不加高。
+*/
+@media (max-width: 360px) {
+  .dh-conn-mobile {
+    padding: 0 6px;
+  }
+  .dh-conn-mobile .dh-conn-text {
+    display: none;
+  }
 }
 
 /* 粗指针（含触屏笔记本）：⋯ 与刷新按钮升到 44px 触摸目标 */

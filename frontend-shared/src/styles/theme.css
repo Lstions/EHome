@@ -1366,6 +1366,22 @@ a.device-link {
   --el-color-danger-light-9: #f8e8e8 !important;  /* 5.45（EP 默认 #fef0f0 = 2.61） */
   --el-color-error-light-9: #f8e8e8 !important;
   --el-color-info-light-9: #eff0f1 !important;    /* 5.08 */
+
+  /*
+    语义**基色**同样必须 !important（2026-10-21 独立复核暴露）：
+    上方 :root 块里 --el-color-success: var(--color-success) 是 0,1,0 特异性，
+    与 EP index.css 的 :root 打平；**谁后加载谁赢**。
+    实测：dev（EP CSS 后加载）里 --el-color-success = #67c23a（EP 默认），
+    生产（本文件后加载）= #147a3a（项目 token）—— 同一份源码两套颜色，
+    于是 dev 上所有 el-tag 文字对比度只有 1.96~2.7，而生产是 4.7~5.1。
+    后果比数值更严重：**任何在 dev 做的对比度审计都失真**（复核员正是据此误报了 6 页 tag 低对比度）。
+    这里与 -light-9 同一套做法（显式选择器 + !important），使 dev/prod 一致。 */
+  --el-color-primary: var(--color-primary) !important;
+  --el-color-success: var(--color-success) !important;
+  --el-color-warning: var(--color-warning) !important;
+  --el-color-danger: var(--color-danger) !important;
+  --el-color-error: var(--color-danger) !important;
+  --el-color-info: var(--color-info) !important;
 }
 
 /* ============================================

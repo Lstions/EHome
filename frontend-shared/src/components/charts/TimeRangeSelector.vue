@@ -73,10 +73,23 @@ const handleChange = () => {
   min-width: 0;
 }
 
+/*
+  四段**等宽**（任意视口）：EP 的 radio-button 是按内容宽度排的，
+  实测 1440 下 1小时/24小时/7天/自定义 = 57/64/44/63px —— 长短不齐看起来像没对齐，
+  这也正是用户反馈「时间样式不对」的一部分。
+  改用 grid-auto-columns:1fr：所有列强制等宽（取最宽标签），桌面不拉伸铺满、窄屏再由下方规则铺成整行。
+*/
+.time-range-selector :deep(.el-radio-group) {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+}
+
 .time-range-selector :deep(.el-radio-button__inner) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 100%;
   min-height: 36px;
   padding: 0 12px;
   font-size: 13px;

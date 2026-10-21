@@ -50,6 +50,7 @@
         :device-id="deviceId"
         :device-type="device.device_type"
         :device-type-text="deviceTypeText"
+        :online="device ? ((device.status === 'online' || device.status === 'active') ? 'online' : 'offline') : 'unknown'"
       />
     </template>
   </div>
