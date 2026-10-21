@@ -28,6 +28,7 @@
 | `go test ./internal/automation/ ./internal/alert/ -race -count=1` | ok 4.862s / 1.833s（22:57） |
 | `EHOME_TEST_DB=postgres EHOME_DB_*=127.0.0.1:5432/ehome_test go test ./internal/automation/ ./internal/alert/ -race -count=1` | **ok 62.987s / 1.817s**（23:10，全包 PG） |
 | `go test ./internal/automation/ -run TestPGY -v`（PG） | Y1a 0.91s / Y2a 0.86s / Y5a 0.85s 全 PASS（22:47） |
+| **终态复跑**（impl-core 提交 selector 优化后，HEAD `f9956c95`；两包工作树 clean） | SQLite+race：ok 10.346s / 1.989s；**PG+race：ok 65.408s / 2.410s**（23:46，EXIT=0） |
 
 新增测试文件：`automation/selector_test.go`、`automation/planner_selector_recheck_test.go`、
 `automation/f5_residue_test.go`、`automation/pg_y_cascade_test.go`、`alert/selector_test.go`、
