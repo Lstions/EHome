@@ -1,0 +1,9 @@
+# 门禁 9 变异清单：id<TAB>文件glob<TAB>正则<TAB>替换<TAB>测试 -run 模式
+# 说明：脚本对每个变异的执行序列是 apply -> go test -> expect 非零 -> restore -> md5 核对。
+#       目标未命中（grep 不到 pattern）记 SKIP(missing)，绝不假绿；未捕获记 NOT_CAUGHT（FAIL）。
+# 维护：impl-core 落地 selector.go/eval.go 后据实际符号更新本文件（先跑 --only 9 --mutation 验证）。
+# 注意：sed 使用基础正则；pattern 里避免 / 与制表符。
+default_aggregate_any_to_all	internal/sensorfield/selector.go	AggAny	AggAll	^TestSelector
+partial_frame_unbound_removed	internal/sensorfield/eval.go	reasonPartialFrame	reasonEmptyFrame	^Test(eval|Eval)
+empty_set_unbound_removed	internal/sensorfield/eval.go	reasonEmptyFrame	reasonPartialFrame	^Test(eval|Eval)
+family_not_numeric_suffix	internal/sensorfield/selector.go	KindFamily	KindLiteral	^TestSelector

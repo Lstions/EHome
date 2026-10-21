@@ -330,6 +330,41 @@ jobs:
       - name: Run host tests
         run: ctest --test-dir "${{ runner.temp }}/host-tests" --output-on-failure
 
+  # ─── 数据字段解析层：方案 §12.3 门禁 1..11（D6）──────────────────
+  # 为什么单独一个 job：门禁分层失败要能一眼定位（同 docs-claims-audit 的理由）。
+  # 反假绿由脚本自身保证（--self-test 对合成输入断言"会红"；主扫描对"目标不存在"
+  # 判红而不是 PASS）；配套 .analysis/narrow-gates.md 的 3 条加固要求：
+  #   #1 go list 失败必须红（不是"grep 无命中=通过"）、#8 断言输出含 '=== RUN'、
+  #   #10 无 benchmark 必须 FAIL（基线缺失才是 SKIP）。
+  # 当前真实状态（2026-10-21 HEAD，impl-core D3 进行中）：RESULT: FAIL(1) —— 仅因
+  # #10 无 BenchmarkLiteralEval 按"目标不存在必须 FAIL"判红（不是假绿）；其余 8 绿/2 SKIP。
+  # D3 落地后若无基线则为 PASS_WITH_SKIPS(3)；D6 完成后把下面命令加 --strict（SKIP 也算失败），
+  # 不需要改脚本本身。**不要为了变绿而删 #10 或把它降级为 PASS**。
+  field-semantics:
+    name: Field semantics gates (§12.3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      # 自证：门禁必须能在坏输入上变红（幽灵声明/非法产出名/无 RUN 行/无 bench/
+      # 严格模式 SKIP）。它不依赖 DB 与网络，失败即说明判据被削弱，必须先修。
+      - name: Gate self-test (prove gates can go red)
+        run: ./scripts/check_field_semantics.sh --self-test
+
+      # 主扫描。退出码语义：0=PASS/PASS_WITH_SKIPS；1=FAIL/FAIL_STRICT_SKIP；
+      # 2=用法错。当前 SKIP 项在日志中逐条列出（D3 未落地、bench 基线缺失、
+      # DB 不可达的回滚盘点），不会被静默吞掉。
+      - name: Field semantics gates
+        run: ./scripts/check_field_semantics.sh
+
   # ─── Docs: 文档「声称-实现」对账 —— 分类器自校准 ─────────────────
   # 只跑 --selftest：它断言的是「分类器没坏」（全通过=0，任一失败=1）。
   # 默认扫描模式总是退出 0（清单需人工复核，命中数不是门禁判据）；
@@ -349,7 +384,7 @@ jobs:
     name: CI Summary
     if: always()
     runs-on: ubuntu-latest
-    needs: [backend, backend-integration, backend-scenarios, frontend, firmware]
+    needs: [backend, backend-integration, backend-scenarios, frontend, firmware, field-semantics]
     steps:
       - name: Check results
         run: |
@@ -358,11 +393,13 @@ jobs:
           echo "Scenarios:     ${{ needs.backend-scenarios.result }}"
           echo "Frontend:      ${{ needs.frontend.result }}"
           echo "Firmware:      ${{ needs.firmware.result }}"
+          echo "Field gates:   ${{ needs.field-semantics.result }}"
           if [ "${{ needs.backend.result }}" = "failure" ] || \
              [ "${{ needs.backend-integration.result }}" = "failure" ] || \
              [ "${{ needs.backend-scenarios.result }}" = "failure" ] || \
              [ "${{ needs.frontend.result }}" = "failure" ] || \
-             [ "${{ needs.firmware.result }}" = "failure" ]; then
+             [ "${{ needs.firmware.result }}" = "failure" ] || \
+             [ "${{ needs.field-semantics.result }}" = "failure" ]; then
             echo "::error::One or more CI jobs failed"
             exit 1
           fi

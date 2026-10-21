@@ -59,6 +59,11 @@ const (
 	DomainSCNE Domain = "SCNE" // 真实业务剧本（光照/光伏-BMS/雨量/无人值守）
 	DomainAUDT Domain = "AUDT" // 审计与可观测（结果码/回链/触发值/指标）
 	DomainNTFY Domain = "NTFY" // 通知送达（级别来源/未读/去重）
+
+	// ── 数据字段解析层专项（方案 §13.3 SIM-FIELD-001..008）──
+	// 新增域而不是把 8 个场景塞进既有域：本域守护的是"选择器契约"这一条语义轴，
+	// 与其他域的断言对象不同（见 sim/FIELD 设计）。
+	DomainFIELD Domain = "FIELD" // 数据字段解析层（selector/聚合/别名/派生）
 )
 
 // KnownDomains 是门禁使用的合法域集合。
@@ -67,6 +72,7 @@ var KnownDomains = []Domain{
 	DomainDS, DomainAUTO, DomainALERT, DomainCMD, DomainOTA, DomainRT, DomainERR,
 	DomainTRIG, DomainCOND, DomainWIND, DomainDBLN, DomainCNFM, DomainACTN,
 	DomainMANU, DomainCRUD, DomainSCNE, DomainAUDT, DomainNTFY,
+	DomainFIELD,
 }
 
 // IsKnownDomain 报告域是否在冻结的取值集合之内。
