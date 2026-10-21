@@ -17,6 +17,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -51,10 +52,16 @@ type compiledPlan struct {
 type planCache struct {
 	mu    sync.RWMutex
 	plans map[ruleKey]compiledPlan
+
+	resolvedSeen atomic.Pointer[sync.Map] // map[uint]struct{}
+	firedSeen    atomic.Pointer[sync.Map] // map[uint]struct{}
 }
 
 func newPlanCache() *planCache {
-	return &planCache{plans: make(map[ruleKey]compiledPlan)}
+	c := &planCache{plans: make(map[ruleKey]compiledPlan)}
+	c.resolvedSeen.Store(&sync.Map{})
+	c.firedSeen.Store(&sync.Map{})
+	return c
 }
 
 func (c *planCache) reset() {
@@ -64,6 +71,32 @@ func (c *planCache) reset() {
 	c.mu.Lock()
 	c.plans = make(map[ruleKey]compiledPlan)
 	c.mu.Unlock()
+	c.resolvedSeen.Store(&sync.Map{})
+	c.firedSeen.Store(&sync.Map{})
+}
+
+func (c *planCache) markResolvedSeen(ruleID uint) bool {
+	if c == nil {
+		return true
+	}
+	seen := c.resolvedSeen.Load()
+	if seen == nil {
+		return true
+	}
+	_, loaded := seen.LoadOrStore(ruleID, struct{}{})
+	return !loaded
+}
+
+func (c *planCache) markFiredSeen(ruleID uint) bool {
+	if c == nil {
+		return true
+	}
+	seen := c.firedSeen.Load()
+	if seen == nil {
+		return true
+	}
+	_, loaded := seen.LoadOrStore(ruleID, struct{}{})
+	return !loaded
 }
 
 func (c *planCache) get(key ruleKey) (compiledPlan, bool) {
@@ -120,26 +153,54 @@ func selectorHash(selector string) uint64 {
 // isSpecialSelector 报告 selector 是否属于特殊形态（family/semantic/virtual）。
 // 与 automation 同源实现（各自持有副本，避免 alert→automation 依赖）。
 func isSpecialSelector(selector string) bool {
-	s := strings.TrimSpace(selector)
+	// 性能契约（#10a 裁决 (a)）：零分配、单遍字节扫描；文法与历史实现逐字节等价。
+	s := selector
+	for len(s) > 0 {
+		c := s[0]
+		if c != 32 && c != 9 && c != 10 && c != 13 {
+			break
+		}
+		s = s[1:]
+	}
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if c != 32 && c != 9 && c != 10 && c != 13 {
+			break
+		}
+		s = s[:len(s)-1]
+	}
 	if s == "" {
 		return false
 	}
-	if strings.HasPrefix(s, "@") || strings.HasPrefix(s, "virtual:") {
+	if s[0] == 64 {
 		return true
 	}
-	star := strings.Index(s, "_*")
-	if star <= 0 {
-		return false
-	}
-	prefix := s[:star]
-	rest := s[star+2:]
-	if !validFamilyPrefix(prefix) {
-		return false
-	}
-	if rest == "" {
+	if len(s) >= 8 && s[:8] == "virtual:" {
 		return true
 	}
-	return strings.HasPrefix(rest, ":") && !strings.Contains(rest[1:], ":")
+	for i := 1; i < len(s); i++ {
+		if s[i] != 42 || s[i-1] != 95 {
+			continue
+		}
+		prefix := s[:i-1]
+		if !validFamilyPrefix(prefix) {
+			return false
+		}
+		rest := s[i+1:]
+		if rest == "" {
+			return true
+		}
+		if rest[0] != 58 {
+			return false
+		}
+		for j := 1; j < len(rest); j++ {
+			if rest[j] == 58 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func validFamilyPrefix(prefix string) bool {
@@ -171,31 +232,44 @@ func toReadings(fields []parser.Field) []sensorfield.Reading {
 // evalSelector 是告警单字段求值入口（literal 路径与历史 matchField 逐字节等价）。
 func (e *Evaluator) evalSelector(rule models.AlertRule, deviceID uint, fields []parser.Field, at time.Time) (bool, bool, float64) {
 	selector := rule.SensorName
-	special := isSpecialSelector(selector)
-	provider := e.planProviderSnapshot()
-	if provider == nil {
-		if special {
-			e.logUnresolved(rule, at, "field_resolver_not_configured", selector)
-			return false, false, 0
+	// 内联形态快判（与 isSpecialSelector 等价）。
+	special := false
+	if selector != "" {
+		c := selector[0]
+		switch {
+		case c == 64:
+			special = true
+		case len(selector) >= 8 && selector[:8] == "virtual:":
+			special = true
+		case c == 32 || c == 9 || c == 10 || c == 13:
+			special = isSpecialSelector(selector)
+		default:
+			for i := 0; i < len(selector); i++ {
+				if selector[i] == 42 {
+					special = isSpecialSelector(selector)
+					break
+				}
+			}
 		}
+	}
+	// G-6 literal/legacy 快路径：与历史 matchField+compare 逐字节等价，
+	// 不触碰 provider/编译缓存/统计。
+	if !special {
 		value, found := matchField(fields, selector)
 		if !found {
 			return false, false, 0
 		}
 		return true, compare(rule.Comparator, value, rule.Threshold), value
 	}
-
+	provider := e.planProviderSnapshot()
+	if provider == nil {
+		e.logUnresolved(rule, at, "field_resolver_not_configured", selector)
+		return false, false, 0
+	}
 	plan, err := e.compileSelector(rule.ID, deviceID, selector)
 	if err != nil {
-		if special {
-			e.logUnresolved(rule, at, "compile_failed:"+sensorfield.ErrorCode(err), selector)
-			return false, false, 0
-		}
-		value, found := matchField(fields, selector)
-		if !found {
-			return false, false, 0
-		}
-		return true, compare(rule.Comparator, value, rule.Threshold), value
+		e.logUnresolved(rule, at, "compile_failed:"+sensorfield.ErrorCode(err), selector)
+		return false, false, 0
 	}
 	if plan.Kind() == sensorfield.KindLiteral {
 		e.markRuleResolved(rule.ID)
@@ -265,6 +339,9 @@ func (e *Evaluator) ruleStatLocked(ruleID uint) *ruleStat {
 }
 
 func (e *Evaluator) markRuleResolved(ruleID uint) {
+	if !e.plans.markResolvedSeen(ruleID) {
+		return
+	}
 	e.statsMu.Lock()
 	stat := e.ruleStatLocked(ruleID)
 	first := stat.hasSpecial && !stat.resolved
@@ -276,6 +353,9 @@ func (e *Evaluator) markRuleResolved(ruleID uint) {
 }
 
 func (e *Evaluator) markRuleFired(ruleID uint) {
+	if !e.plans.markFiredSeen(ruleID) {
+		return
+	}
 	e.statsMu.Lock()
 	stat := e.ruleStatLocked(ruleID)
 	first := stat.hasSpecial && !stat.fired
@@ -301,6 +381,8 @@ func (e *Evaluator) rebuildRuleStats(rules map[uint]models.AlertRule) {
 	e.ruleStats = next
 	e.statsMu.Unlock()
 	e.refreshRuleGauges()
+	// LoadRules 期预编译特殊 selector（literal 不编译；#10a 裁决 (b)）。
+	e.precompileSpecialPlans()
 }
 
 // refreshRuleGauges 覆盖式 Set（指标由 sensorfield 定义，禁止重复定义）。
@@ -322,4 +404,37 @@ func (e *Evaluator) refreshRuleGauges() {
 	e.statsMu.Unlock()
 	sensorfield.RuleNeverResolved.WithLabelValues("alert").Set(float64(neverResolved))
 	sensorfield.RuleNeverFired.WithLabelValues("alert").Set(float64(neverFired))
+}
+
+func (e *Evaluator) precompileSpecialPlans() {
+	provider := e.planProviderSnapshot()
+	if provider == nil {
+		return
+	}
+	e.mu.RLock()
+	rules := make([]models.AlertRule, 0, len(e.rules))
+	for _, rule := range e.rules {
+		rules = append(rules, rule)
+	}
+	e.mu.RUnlock()
+	for _, rule := range rules {
+		selector := rule.SensorName
+		if !isSpecialSelector(selector) {
+			continue
+		}
+		hash := selectorHash(selector)
+		key := ruleKey{ruleID: rule.ID, slot: 0, deviceID: rule.TargetID}
+		if entry, ok := e.plans.get(key); ok && entry.selectorHash == hash {
+			if planEpoch := sensorfield.PlanEpoch(entry.plan); planEpoch == 0 || planEpoch == provider.Epoch() {
+				continue
+			}
+		}
+		plan, err := provider.Compile(rule.TargetID, selector)
+		if err != nil {
+			logger.Warn("alert: precompile special selector failed; will retry lazily at evaluation",
+				"rule_id", rule.ID, "target_id", rule.TargetID, "selector", selector, "error", err)
+			continue
+		}
+		e.plans.put(key, hash, plan)
+	}
 }

@@ -178,6 +178,10 @@ func (e *Evaluator) compileSelector(ruleID uint, slot uint8, deviceID uint, sele
 	return plan, nil
 }
 
+// planProviderSnapshotHook 仅供测试注入（nil = 生产）：用于确定性断言 literal
+// 快路径不触碰 provider 快照（#10a-1a 判决性单测）。生产路径恒为 nil，分支不执行。
+var planProviderSnapshotHook atomic.Pointer[atomic.Int64]
+
 // selectorHash 是 selector 字符串的稳定哈希（FNV-1a 64）。
 func selectorHash(selector string) uint64 {
 	h := fnv.New64a()

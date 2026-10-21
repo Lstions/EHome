@@ -432,6 +432,9 @@ func (e *Evaluator) SetPlanProvider(p PlanProvider) {
 
 // planProviderSnapshot 读 planProvider（Evaluate 会在多 shard 并发调用）。
 func (e *Evaluator) planProviderSnapshot() PlanProvider {
+	if c := planProviderSnapshotHook.Load(); c != nil { // 测试注入计数；生产恒 nil
+		c.Add(1)
+	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.planProvider

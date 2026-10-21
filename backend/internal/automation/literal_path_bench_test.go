@@ -171,3 +171,67 @@ func BenchmarkMarkRuleResolved(b *testing.B) {
 		ev.markRuleResolved(1)
 	}
 }
+
+// panicProvider 是"调用即测试失败"的 PlanProvider：用于**证明** literal 快路径
+// 完全不触碰 provider（编译/缓存/开关）。若 evalSelector 的 literal 分支状态泄漏到
+// provider 分支，本基准会直接 panic。（单一职责：只做证据，不参与生产。）
+type panicProvider struct{}
+
+func (panicProvider) Compile(uint, string) (sensorfield.Plan, error) {
+	panic("literal fast path must not call Compile")
+}
+func (panicProvider) Enabled() bool { return true }
+func (panicProvider) Epoch() uint64 { return 1 }
+
+// BenchmarkAutomationLiteralPathNoProviderTouch 证明 literal 路径不触碰 provider：
+// 注入 panicProvider 仍必须正常返回（否则 panic）。
+func BenchmarkAutomationLiteralPathNoProviderTouch(b *testing.B) {
+	ev := newLiteralBenchEvaluator(panicProvider{})
+	frame := literalBenchFrame()
+	rule := literalBenchRule()
+	at := time.Now()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ok, satisfied, _ := ev.evalSelector(rule.ID, 0, 1, "rsoc", "gt", 30, frame, at)
+		if !ok || !satisfied {
+			b.Fatalf("literal broken: ok=%v satisfied=%v", ok, satisfied)
+		}
+	}
+}
+
+// BenchmarkAutomationLiteralPathNoProviderNoRuleStruct 是"参数最小化"对照：
+// 与生产函数不同，只传 selector/comparator/threshold/frame，用于量化
+// (ruleID, slot, deviceID, at) 与函数返回三元组的调用约定开销。
+func BenchmarkAutomationLiteralPathNoProviderNoRuleStruct(b *testing.B) {
+	frame := literalBenchFrame()
+	selector, comparator, threshold := "rsoc", "gt", 30.0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v, found := matchField(frame, selector)
+		if !found || !compare(comparator, v, threshold) {
+			b.Fatal("broken")
+		}
+	}
+}
+
+// BenchmarkEvaluateFrameBaseline 是 #10a-2 的对照基线：同一 Evaluate 入口、
+// 同一帧/规则集合，但**不注入解析层**（planProvider=nil）——即 main 基线行为
+// （纯字面量走历史 matchField/compare）。判据：当前/基线 ≤ 1.05。
+//
+// 为什么这是公平对照：短路后 literal 路径与注入与否无关，两者的差异仅来自
+// "是否多一层 isSpecialSelector 形态判定"（每 selector 一次扫描），这正是
+// 集成层对生产求值链路的**全部**新增成本。
+func BenchmarkEvaluateFrameBaseline(b *testing.B) {
+	ev := evaluateFrameBenchEvaluator()
+	ev.SetPlanProvider(nil) // main 行为：无解析层
+	frame := evaluateFrameBenchFrame()
+	at := time.Now()
+	ev.Evaluate(1, frame, at)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ev.Evaluate(1, frame, at)
+	}
+}
