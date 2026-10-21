@@ -1,5 +1,5 @@
 <template>
-  <div class="time-range-selector" :class="{ 'is-dense': dense }">
+  <div class="time-range-selector">
     <el-radio-group v-model="timeRange" size="small" @change="handleChange">
       <el-radio-button value="1h">1小时</el-radio-button>
       <el-radio-button value="24h">24小时</el-radio-button>
@@ -28,14 +28,9 @@ import { computed } from 'vue'
 const props = withDefaults(defineProps<{
   modelValue: string
   customRange: [string, string] | null
-  /**
-   * 紧凑档：用于卡片头右上角（如 BMS 运行趋势/电芯历史），桌面把分段按钮压到 24px
-   * 与相邻 small 按钮同高；窄屏/粗指针仍升回 44px 触摸目标。
-   */
-  dense?: boolean
   /** 是否提供「自定义」区间（仪表盘只有 1h/24h/7d，传 false） */
   showCustom?: boolean
-}>(), { dense: false, showCustom: true })
+}>(), { showCustom: true })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -88,12 +83,14 @@ const handleChange = () => {
   line-height: 1;
 }
 
-/* 紧凑档（卡片头右上角）：与相邻 small 按钮同高，避免一高一矮 */
-.time-range-selector.is-dense :deep(.el-radio-button__inner) {
-  min-height: 24px;
-  padding: 0 11px;
-  font-size: 12px;
-}
+/*
+  关于「紧凑档」：**已废除**（2026-10-21 独立复核）。
+  原 dense 档把卡片头里的分段按钮压到 24px/12px，与同页主控件 36px/13px 并存 ——
+  这正是用户反馈「大小也不对」的同源问题：同一控件出现两种尺寸。
+  复核实测更严重：dense 的特异性 0,3,0 压过窄屏/粗指针规则（0,2,0），
+  真实手机（pointer:coarse, 393px）上触摸目标只有 24px，很难点中。
+  现在全站只有一档尺寸：桌面 36px / 窄屏 40px / 粗指针 44px，字号恒 13px。
+*/
 
 .custom-date-picker {
   width: 340px;

@@ -39,7 +39,17 @@
               <span>{{ action.definition.name }}</span>
               <el-tag v-if="riskBadge(action.definition)" :type="riskBadge(action.definition)!.type" size="small" effect="plain">{{ riskBadge(action.definition)!.label }}</el-tag>
             </div>
-            <div v-if="action.definition.description" class="op-desc">{{ action.definition.description }}</div>
+            <!--
+              窄屏 .op-desc 被 -webkit-line-clamp:2 裁剪（受控操作有 9 项，不裁会到 1080px）。
+              裁剪本身是设计取舍，但**必须能取到完整文本**：2026-10-21 独立复核实测
+              5 条说明 ch=30 vs sh=45~90 被硬裁且无 title/tooltip ⇒ 信息永久丢失。
+              这里补 title（桌面悬停原生提示）+ aria-label（读屏可读全文）。
+            -->
+            <div
+              v-if="action.definition.description"
+              class="op-desc"
+              :title="action.definition.description"
+            >{{ action.definition.description }}</div>
           </div>
         </div>
       </div>

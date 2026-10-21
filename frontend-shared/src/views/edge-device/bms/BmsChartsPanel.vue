@@ -33,7 +33,7 @@
           </div>
         </el-popover>
         <span class="head-right">
-          <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" dense @change="onCellRange" />
+          <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" @change="onCellRange" />
         </span>
       </div>
       <div v-if="cellLoading" class="chart-state">正在加载历史数据…</div>
@@ -76,7 +76,7 @@
         <span class="card-hint">按量纲分组（总电压 / 单体电压 / 电流 / 电池状态 / 温度），状态量未纳入</span>
         <span class="head-right">
           <el-button v-if="metricError" size="small" text type="primary" class="retry-btn" @click="fetchMetrics">重试</el-button>
-          <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" dense @change="onMetricRange" />
+          <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
         </span>
       </div>
       <!-- 桌面契约：恒定 5 个分组槽位，组数不随数据到达而变，页面高度稳定
@@ -385,7 +385,7 @@ defineExpose({ fetchCells, fetchMetrics })
 .card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
 .card-hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* 时间范围分段控件：尺寸/居中/触摸目标统一由 TimeRangeSelector 组件负责（dense 档），
+/* 时间范围分段控件：尺寸/居中/触摸目标统一由 TimeRangeSelector 组件负责（全站单一档），
    本页不再 :deep 覆盖 —— 2026-10-21 统一：各页面各自覆盖导致同一控件三处不同高。 */
 /* 固定高度：内容变化不得撑变页面高度（本页依赖 overflow-anchor:none 防跳动） */
 .chart-box { height: 280px; }

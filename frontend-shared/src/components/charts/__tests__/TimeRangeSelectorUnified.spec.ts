@@ -44,20 +44,28 @@ describe('TimeRangeSelector 样式统一', () => {
   })
 })
 
-describe('TimeRangeSelector 两种档位', () => {
-  it('dense 档用于卡片头（与相邻 small 按钮同高 24px）', () => {
-    expect(source).toContain('dense?: boolean')
-    expect(source).toMatch(/\.is-dense[^{]*\.el-radio-button__inner[^}]*min-height:\s*24px|is-dense :deep\(\.el-radio-button__inner\)|is-dense[\s\S]{0,120}min-height:\s*24px/)
+describe('TimeRangeSelector 档位', () => {
+  /**
+   * 曾有过 dense 紧凑档（卡片头 24px/12px）。2026-10-21 独立复核否决并已删除：
+   *  ① 同一页面主控件 36px/13px 与卡片头 24px/12px 并存 = 用户反馈「大小也不对」的同源问题；
+   *  ② dense 的选择器特异性 0,3,0 压过窄屏/粗指针规则（0,2,0），真实手机 393px
+   *     （pointer:coarse）下触摸目标只有 24px（复核实测 52.7×24），低于项目 36px 档，很难点中。
+   * 现在全站单档：桌面 36px / 窄屏 40px / 粗指针 44px，字号恒 13px。
+   */
+  it('不再存在 dense 紧凑档（避免同页两种尺寸 + 手机触摸目标被压到 24px）', () => {
+    expect(source).not.toContain('dense?: boolean')
+    expect(source).not.toContain('is-dense')
+    expect(chartsPanelSrc).not.toMatch(/<TimeRangeSelector[^>]*\sdense/)
+  })
+
+  it('BMS 图表卡不再本地覆盖分段按钮样式（各页各自覆盖是「同一控件三处不同高」的根因）', () => {
+    expect(chartsPanelSrc).toContain('<TimeRangeSelector')
+    expect(chartsPanelSrc).not.toMatch(/:deep\(\.el-radio-button__inner\)/)
   })
 
   it('showCustom=false 时不渲染「自定义」档（仪表盘只有固定档）', () => {
     expect(source).toMatch(/<el-radio-button v-if="showCustom" value="custom">/)
     expect(source).toContain('showCustom?: boolean')
-  })
-
-  it('BMS 图表卡用 dense 档且不再本地覆盖分段按钮样式（覆盖是「三处不同高」的根因）', () => {
-    expect(chartsPanelSrc).toMatch(/<TimeRangeSelector[\s\S]{0,200}?dense/)
-    expect(chartsPanelSrc).not.toMatch(/:deep\(\.el-radio-button__inner\)/)
   })
 
   it('仪表盘趋势卡复用同一组件（不自写 el-radio-group）', () => {

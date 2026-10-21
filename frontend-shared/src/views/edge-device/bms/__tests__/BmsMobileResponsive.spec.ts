@@ -180,7 +180,14 @@ describe('DeviceHeader mobile overflow dropdown (P1-5, 2026-10-21 统一页头�
   it('用 useResponsive isMobile 切换「桌面完整操作组 / 窄屏 ⋯ 菜单」，刷新始终可见', () => {
     expect(deviceHeaderSource).toContain("import { useResponsive } from '@/composables/useResponsive'")
     expect(deviceHeaderSource).toContain('const { isMobile } = useResponsive()')
-    expect(deviceHeaderSource).toMatch(/<el-dropdown v-else-if="showMoreMenu"[\s\S]*?popper-class="device-header-more-popover"/)
+    // 2026-10-21: dropdown 从「身份行右侧」移到「操作行」。原位置把身份行挤到 152px（320 视口），
+    // BMS 的 2 个标签与副文本各折 2 行、页头从 103px 涨到 202px。意图不变：仍只在窄屏渲染。
+    expect(deviceHeaderSource).toMatch(/<el-dropdown v-if="showMoreMenu"[\s\S]*?popper-class="device-header-more-popover"/)
+    const actStart = deviceHeaderSource.indexOf('<div v-if="isMobile" class="dh-mobile-actions">')
+    expect(actStart).toBeGreaterThan(-1)
+    const mobileActions = deviceHeaderSource.slice(actStart, deviceHeaderSource.indexOf('</div>', actStart))
+    expect(mobileActions).toContain('device-header-more-popover')
+
     expect(deviceHeaderSource).toContain('MoreFilled')
   })
 

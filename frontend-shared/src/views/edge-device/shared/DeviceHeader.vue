@@ -60,19 +60,6 @@
         <el-button v-if="showDelete" type="danger" text :icon="Delete" :aria-label="`删除 ${title}`" @click="onDelete">删除</el-button>
       </div>
 
-      <!-- 移动：溢出菜单（编辑 / 同步 / 删除） -->
-      <el-dropdown v-else-if="showMoreMenu" trigger="click" popper-class="device-header-more-popover" @command="handleMoreCommand">
-        <el-button class="dh-more" :icon="MoreFilled" circle aria-label="更多设备操作" />
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item v-if="showEdit" command="edit" :icon="Edit">编辑</el-dropdown-item>
-            <el-dropdown-item v-if="showSync" command="syncToHA" :icon="Upload" :disabled="!canOperate">同步到 HA</el-dropdown-item>
-            <el-dropdown-item v-if="showDelete" command="delete" :icon="Delete" divided>
-              <span class="dh-danger">删除</span>
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
     </div>
 
     <!-- 移动：主操作独占一行（不做 flex 挤压，任何宽度都不掉行/不缩小） -->
@@ -89,6 +76,22 @@
         class="dh-refresh"
         @click="$emit('refresh')"
       >刷新数据</el-button>
+      <!-- ⋯ 溢出菜单（编辑 / 同步 / 删除）：放在操作行而非身份行。
+           2026-10-21 独立复核实测：⋯ 占 44+10px 后身份行只剩 152px（320 视口），
+           导致 BMS 的 2 个标签折 2 行、副文本折 2 行，页头从 103px 涨到 202px。
+           移到操作行后身份行拿回 54px，标签与副文本各少折一行。 -->
+      <el-dropdown v-if="showMoreMenu" trigger="click" popper-class="device-header-more-popover" @command="handleMoreCommand">
+        <el-button class="dh-more" :icon="MoreFilled" circle aria-label="更多设备操作" />
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item v-if="showEdit" command="edit" :icon="Edit">编辑</el-dropdown-item>
+            <el-dropdown-item v-if="showSync" command="syncToHA" :icon="Upload" :disabled="!canOperate">同步到 HA</el-dropdown-item>
+            <el-dropdown-item v-if="showDelete" command="delete" :icon="Delete" divided>
+              <span class="dh-danger">删除</span>
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <!-- 内置编辑/删除对话框（保留旧行为；BMS 页传 :builtin-dialogs="false" 用自己的对话框） -->

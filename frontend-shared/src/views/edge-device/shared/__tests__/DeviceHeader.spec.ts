@@ -87,7 +87,13 @@ describe('DeviceHeader 窄屏确定性两行 + 桌面完整操作组', () => {
 
 describe('DeviceHeader 移动端 ⋯ 溢出菜单（编辑 / 同步到 HA / 删除）', () => {
   it('三个次级操作收进 dropdown，命令走同一组 handler', () => {
-    expect(source).toMatch(/<el-dropdown v-else-if="showMoreMenu"[\s\S]*?popper-class="device-header-more-popover"/)
+    // dropdown 在操作行（.dh-mobile-actions）内、不在身份行 —— 否则窄屏身份行被挤窄，标签/副文本多折一行
+    expect(source).toMatch(/<el-dropdown v-if="showMoreMenu"[\s\S]*?popper-class="device-header-more-popover"/)
+    const actStart = source.indexOf('<div v-if="isMobile" class="dh-mobile-actions">')
+    expect(actStart).toBeGreaterThan(-1)
+    const mobileActions = source.slice(actStart, source.indexOf('</div>', actStart))
+    expect(mobileActions).toContain('device-header-more-popover')
+    expect(mobileActions).toContain('刷新数据')
     expect(source).toMatch(/<el-dropdown-item v-if="showEdit" command="edit"[\s\S]*?编辑<\/el-dropdown-item>/)
     expect(source).toMatch(/<el-dropdown-item v-if="showSync" command="syncToHA"[\s\S]*?同步到 HA[\s\S]*?<\/el-dropdown-item>/)
     expect(source).toMatch(/<el-dropdown-item v-if="showDelete" command="delete"[\s\S]*?删除[\s\S]*?<\/el-dropdown-item>/)
