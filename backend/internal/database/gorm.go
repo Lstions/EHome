@@ -137,6 +137,13 @@ func AutoMigrate() error {
 		// MigrateAutomationRuleActions (本文件尾部调用) 幂等完成。
 		&models.AutomationRuleAction{},
 
+		// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md v0.2 §4.2/§4.3):
+		// sensor_field_obs 观测投影表 + sensor_field_meta 丰富层。
+		// ⚠ 与 testutil/db.go 的 allModels **两处清单必须同步**（本仓既有纪律）。
+		// 两张表都是新增、无存量迁移；device_id 语义 = EdgeDevice.ID（≠ unified_data.edge_device_id）。
+		&models.SensorFieldObs{},
+		&models.SensorFieldMeta{},
+
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
 		// 如果 struct 尚未定义, 注释掉这两行, 等 struct 改名完成后再启用

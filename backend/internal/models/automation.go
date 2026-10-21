@@ -252,6 +252,17 @@ type AutomationRule struct {
 	// 与"子表为唯一权威"的裁决直接冲突。
 	Actions []AutomationRuleAction `gorm:"-" json:"actions,omitempty"`
 
+	// ── 解析层统计 (设计/数据字段解析层-方案-2026-10-21.md §10, M1 新增列) ──
+	//
+	// 与 AlertRule 同名同义（ResolveCount/MatchCount/LastMatchedAt）:
+	//   ResolveCount  该规则 selector **成功解析**的累计次数；
+	//   MatchCount    解析成功且条件满足的累计次数；
+	//   LastMatchedAt 最近一次条件满足的时刻（nil = 从未满足）。
+	// 写入纪律：由 automation evaluator 每 60s 批量刷，禁止每帧写 DB（§10）。
+	ResolveCount  int64      `gorm:"default:0" json:"resolve_count"`
+	MatchCount    int64      `gorm:"default:0" json:"match_count"`
+	LastMatchedAt *time.Time `json:"last_matched_at,omitempty"`
+
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `gorm:"index" json:"-"` // 软删, 保留历史归因
@@ -271,6 +282,17 @@ type AutomationEvent struct {
 	Result        string    `gorm:"size:32;not null;index" json:"result"`
 	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
 	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
+	// ActionHash 是 pending 事件创建时对「动作集合」做的归一化哈希快照（Y5 TOCTOU 修复）。
+	//
+	// 背景：ConfirmEvent 在人工确认时会**重读 DB 规则**并按当前动作集合执行；
+	// pending 期间动作被修改 ⇒ 会执行用户从未确认过的新动作（安全缺陷）。
+	// 写入本列后，confirm 前重新计算并比对，不一致即拒绝执行（比对逻辑由
+	// automation 包实现；本列只是快照载体，避免 automation_events 无动作证据）。
+	//
+	// 归一化约定（auto-analyst 实现，双方共同遵守）：动作按 (type,target,params)
+	// 排序后 sha256 → 小写十六进制串。空串 = 历史行/非确认路径事件（无快照）。
+	ActionHash string `gorm:"size:64" json:"action_hash,omitempty"`
+
 	// ActionSeq 记录多动作执行中"失败/部分失败发生在第几个动作" (方案 §5.1.4)。
 	//
 	// 为什么可空: 规则级事件 (suppressed_daily_limit / pending_confirm / 纯通知等)

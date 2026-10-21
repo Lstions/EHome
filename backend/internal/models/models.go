@@ -341,7 +341,13 @@ type UnifiedData struct {
 type DataSource struct {
 	ID           uint       `gorm:"primaryKey" json:"id"`
 	DeviceID     uint       `gorm:"not null;index:idx_ds_device_status,priority:1;uniqueIndex:uniq_ds_source,priority:1" json:"device_id"` // LogicalDevice.ID
-	Category     string     `gorm:"size:32;not null;index:idx_ds_device_status,priority:2;uniqueIndex:uniq_ds_source,priority:2" json:"category"`
+	// Category 数据类别（= unified_data.sensor_name 物理名；一期只支持字面量）。
+	//
+	// 列宽 32→64（2026-10-21 DG-05 / 方案 §14.1 M1）：字段解析层 selector 上限 64 字符，
+	// 而本列原先 varchar(32) 会在 33–64 字符值上 **PG 硬报错**（value too long），
+	// 与 alert_rules.sensor_name(64)/automation_rules.trigger_sensor_name(64) 不一致。
+	// 扩宽不可逆但对存量数据零风险（旧值全部 ≤32）。
+	Category     string     `gorm:"size:64;not null;index:idx_ds_device_status,priority:2;uniqueIndex:uniq_ds_source,priority:2" json:"category"`
 	EdgeDeviceID uint       `gorm:"not null;index;uniqueIndex:uniq_ds_source,priority:3" json:"edge_device_id"`
 	SourceType   string     `gorm:"size:20;not null;default:edge_device" json:"source_type"`
 	Name         string     `gorm:"size:64;not null" json:"name"`
@@ -363,7 +369,8 @@ type DataSourceHealth struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	SourceID     uint      `gorm:"not null;index" json:"source_id"`
 	DeviceID     uint      `gorm:"index" json:"device_id"`
-	Category     string    `gorm:"size:32" json:"category"`
+	// Category 与 DataSource.Category 同域同宽（DG-05 列宽统一 64）；只放宽不收紧。
+	Category     string    `gorm:"size:64" json:"category"`
 	Status       string    `gorm:"size:20;not null" json:"status"`
 	Message      string    `gorm:"size:255" json:"message"`
 	ResponseTime int       `gorm:"default:0" json:"response_time"`
@@ -376,7 +383,8 @@ func (DataSourceHealth) TableName() string { return "data_source_health" }
 type FailoverLog struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	DeviceID     uint      `gorm:"not null;index" json:"device_id"`
-	Category     string    `gorm:"size:32;not null" json:"category"`
+	// Category 与 DataSource.Category 同域同宽（DG-05 列宽统一 64）。
+	Category     string    `gorm:"size:64;not null" json:"category"`
 	FromSourceID uint      `json:"from_source_id"`
 	ToSourceID   uint      `json:"to_source_id"`
 	Reason       string    `gorm:"size:32;not null" json:"reason"`

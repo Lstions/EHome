@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +20,11 @@ type Config struct {
 	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
 	Device         DeviceConfig         `yaml:"device"`
+	// FieldResolver 是"数据字段解析层"配置段（设计/数据字段解析层-方案-2026-10-21.md v0.2 §11）。
+	// ⚠ 本仓**没有配置热加载**（Load 仅在启动时调用一次，无 fsnotify/viper）：
+	// 所有 field_resolver 配置（含 enabled）变更需**重启进程**生效；灰度用
+	// EHOME_FIELD_RESOLVER_ENABLED 环境变量 + 重启（方案 §11 明示，不新增 watcher）。
+	FieldResolver FieldResolverConfig `yaml:"field_resolver"`
 }
 
 // DeviceConfig configures the 3.0 device-facing TCP+TLS listener.
@@ -125,6 +132,120 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
+
+// FieldResolverConfig 是"数据字段解析层"（Field Resolution Layer）的配置段。
+//
+// 权威设计：docs/设计/数据字段解析层-方案-2026-10-21.md v0.2 §11。
+// 生效方式：**改配置必须重启**（本仓无热加载机制，§11 明确不新增 watcher）。
+//
+// 默认值语义：零值字段一律在 FieldResolver() 访问器里回落到下面这些默认值，
+// 因此 YAML 里只写需要偏离默认的键即可。
+const (
+	// DefaultFieldResolverObserveInterval 观测投影落库间隔（方案 §4.2：每 60s 批量 UPSERT）。
+	DefaultFieldResolverObserveInterval = 60 * time.Second
+	// DefaultFieldResolverSnapshotTTL 编译缓存兜底 TTL（方案 §4.1 Config.SnapshotTTL 默认 10m）。
+	DefaultFieldResolverSnapshotTTL = 10 * time.Minute
+	// DefaultFieldResolverMaxSelectorChars 选择器最大字符数（方案 §5.1：64 个 Unicode 字符）。
+	DefaultFieldResolverMaxSelectorChars = 64
+	// DefaultFieldResolverMaxFamilySize 单族展开上限（方案 §5.1/§11）。
+	DefaultFieldResolverMaxFamilySize = 64
+	// DefaultFieldResolverMaxVirtualDepth 派生嵌套深度上限（方案 §6.2：默认 4）。
+	DefaultFieldResolverMaxVirtualDepth = 4
+	// DefaultFieldResolverPreviewMaxSamples 试算取样上限（方案 §8.3：5000 行）。
+	DefaultFieldResolverPreviewMaxSamples = 5000
+	// DefaultFieldResolverNeverResolvedHours never_resolved 判定窗口（方案 §10：单位**小时**）。
+	DefaultFieldResolverNeverResolvedHours = 24
+)
+
+// FieldResolverConfig 对应 YAML 的 field_resolver 段。
+type FieldResolverConfig struct {
+	// Enabled 是 kill switch（默认 false，方案 §11）。关闭并重启后：
+	// 特殊 selector 规则不触发 + 落审计；纯字面量行为不变。**不自动降级为字面量**。
+	Enabled bool `yaml:"enabled"`
+	// AliasesFile 语义别名表路径（方案 §6.1 唯一默认表）。
+	AliasesFile string `yaml:"aliases_file"`
+	// VirtualFile 派生字段定义路径（方案 §6.2）。
+	VirtualFile string `yaml:"virtual_file"`
+	// ObserveInterval 观测投影落库间隔，接受 "60s"/"10m" 这类 Go duration 字面量。
+	ObserveInterval Duration `yaml:"observe_interval"`
+	// SnapshotTTL 编译缓存兜底 TTL。
+	SnapshotTTL Duration `yaml:"snapshot_ttl"`
+	// MaxSelectorChars / MaxFamilySize / MaxVirtualDepth 是解析层硬上限（方案 §5.1/§6.2）。
+	MaxSelectorChars int `yaml:"max_selector_chars"`
+	MaxFamilySize    int `yaml:"max_family_size"`
+	MaxVirtualDepth  int `yaml:"max_virtual_depth"`
+	// PreviewMaxSamples 试算端点（POST /sensor-fields/preview）取数上限（方案 §8.3）。
+	PreviewMaxSamples int `yaml:"preview_max_samples"`
+	// NeverResolvedHours "配错 selector 24h 内被标记" 的判定窗口，单位小时（方案 §10，v0.2 修正）。
+	NeverResolvedHours int `yaml:"never_resolved_hours"`
+}
+
+// FieldResolverSettings 返回补齐默认值后的字段解析层配置。
+//
+// 为什么不把默认值直接写进 defaultConfig：YAML 里显式写 0 与"没写"目前无法区分
+// （yaml.v3 没有指针字段的既有先例），把归一化放在访问器里可以保证任何来源
+// （YAML / env / 测试手工构造）都不会得到 0 值导致除零或"无上限"。
+func (c *Config) FieldResolverSettings() FieldResolverConfig {
+	fr := c.FieldResolver
+	if fr.ObserveInterval.Duration <= 0 {
+		fr.ObserveInterval = Duration{Duration: DefaultFieldResolverObserveInterval}
+	}
+	if fr.SnapshotTTL.Duration <= 0 {
+		fr.SnapshotTTL = Duration{Duration: DefaultFieldResolverSnapshotTTL}
+	}
+	if fr.MaxSelectorChars <= 0 {
+		fr.MaxSelectorChars = DefaultFieldResolverMaxSelectorChars
+	}
+	if fr.MaxFamilySize <= 0 {
+		fr.MaxFamilySize = DefaultFieldResolverMaxFamilySize
+	}
+	if fr.MaxVirtualDepth <= 0 {
+		fr.MaxVirtualDepth = DefaultFieldResolverMaxVirtualDepth
+	}
+	if fr.PreviewMaxSamples <= 0 {
+		fr.PreviewMaxSamples = DefaultFieldResolverPreviewMaxSamples
+	}
+	if fr.NeverResolvedHours <= 0 {
+		fr.NeverResolvedHours = DefaultFieldResolverNeverResolvedHours
+	}
+	return fr
+}
+
+// Duration 是允许 YAML 写 Go duration 字面量（"60s" / "10m"）的配置类型。
+//
+// 为什么自定义而不是 time.Duration：yaml.v3 把 time.Duration 当整数纳秒解析，
+// 设计文档 §11 的样例是 "60s"，直接用 time.Duration 会导致**配置加载失败**
+// （cannot unmarshal !!str into time.Duration）。这里同时兼容整数（按秒解释，
+// 与 read_timeout_sec 等既有字段的直觉一致），避免运维在两种写法上踩坑。
+type Duration struct {
+	time.Duration
+}
+
+// UnmarshalYAML 实现 yaml.Unmarshaler。
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil || value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("config: duration must be a scalar (e.g. \"60s\")")
+	}
+	raw := strings.TrimSpace(value.Value)
+	if raw == "" {
+		return nil
+	}
+	if parsed, err := time.ParseDuration(raw); err == nil {
+		d.Duration = parsed
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		d.Duration = time.Duration(seconds) * time.Second
+		return nil
+	}
+	return fmt.Errorf("config: invalid duration %q (want Go duration like \"60s\" or integer seconds)", raw)
+}
+
+// MarshalYAML 让打印/回写时保持可读字符串。
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.Duration.String(), nil
+}
+
 // DefaultDataRetentionDays is the system-level retention applied to newly
 // created logical devices (方案 v3.3 §4.1). Overridable via the
 // EHOME_DATA_RETENTION_DAYS environment variable (or data_retention.days in
@@ -167,6 +288,20 @@ func defaultConfig() *Config {
 		Ingest:         IngestConfig{ParserShards: DefaultParserShards},
 		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
+		// 字段解析层默认**关闭**（kill switch 默认 off，方案 §11）：
+		// 关闭时特殊 selector 一律拒绝、纯字面量行为与今天逐字节相同。
+		FieldResolver: FieldResolverConfig{
+			Enabled:            false,
+			AliasesFile:        "config/field_aliases.yaml",
+			VirtualFile:        "config/virtual_fields.yaml",
+			ObserveInterval:    Duration{Duration: DefaultFieldResolverObserveInterval},
+			SnapshotTTL:        Duration{Duration: DefaultFieldResolverSnapshotTTL},
+			MaxSelectorChars:   DefaultFieldResolverMaxSelectorChars,
+			MaxFamilySize:      DefaultFieldResolverMaxFamilySize,
+			MaxVirtualDepth:    DefaultFieldResolverMaxVirtualDepth,
+			PreviewMaxSamples:  DefaultFieldResolverPreviewMaxSamples,
+			NeverResolvedHours: DefaultFieldResolverNeverResolvedHours,
+		},
 	}
 }
 
@@ -266,7 +401,60 @@ func overrideWithEnv(cfg *Config) {
 			cfg.Ingest.ParserShards = n
 		}
 	}
+	// 数据字段解析层 (§11: 灰度/回滚靠 env + 重启, 本仓无热加载)。
+	//
+	// 为什么每个标量都留 env 覆盖：kill switch 必须在**不改镜像内 YAML**的前提下
+	// 可切换（回滚预案 §14.3 要求"关闭开关并重启"即可生效），而灰度环境往往
+	// 只有 env 注入能力（docker/k8s）。布尔与时长解析失败时**保持原值**，
+	// 与本文件既有 env 覆盖的静默容错口径一致。
+	if v := getEnv("EHOME_FIELD_RESOLVER_ENABLED", ""); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.FieldResolver.Enabled = enabled
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_ALIASES_FILE", ""); v != "" {
+		cfg.FieldResolver.AliasesFile = v
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_VIRTUAL_FILE", ""); v != "" {
+		cfg.FieldResolver.VirtualFile = v
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_OBSERVE_INTERVAL", ""); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			cfg.FieldResolver.ObserveInterval = Duration{Duration: d}
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_SNAPSHOT_TTL", ""); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			cfg.FieldResolver.SnapshotTTL = Duration{Duration: d}
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_SELECTOR_CHARS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FieldResolver.MaxSelectorChars = n
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_FAMILY_SIZE", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FieldResolver.MaxFamilySize = n
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_VIRTUAL_DEPTH", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FieldResolver.MaxVirtualDepth = n
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_PREVIEW_MAX_SAMPLES", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FieldResolver.PreviewMaxSamples = n
+		}
+	}
+	if v := getEnv("EHOME_FIELD_RESOLVER_NEVER_RESOLVED_HOURS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FieldResolver.NeverResolvedHours = n
+		}
+	}
 }
+
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {

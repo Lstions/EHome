@@ -86,6 +86,9 @@ var allModels = []interface{}{
 	&models.AutomationEvent{},
 	// 多动作子表 (方案 §3.2.3 M1 / §5.1.1; 与生产 AutoMigrate 列表同步)
 	&models.AutomationRuleAction{},
+	// 数据字段解析层 (方案 v0.2 §4.2/§4.3; 与生产 AutoMigrate 列表同步)
+	&models.SensorFieldObs{},
+	&models.SensorFieldMeta{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

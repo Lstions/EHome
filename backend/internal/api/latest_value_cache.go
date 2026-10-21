@@ -81,6 +81,30 @@ func LatestValues(deviceID uint) []models.UnifiedData {
 	return out
 }
 
+// LatestValueBySensor 返回该设备**某个物理量**的最新缓存值（存在性由 ok 表达）。
+//
+// 与 LatestValue / LatestValues 的关系（均为新增，不改旧签名，方案 §9.2 修改点 #5）：
+//   - LatestValue(deviceID)          = 该设备"最后写入"的单值（F4 条件复核依赖此语义）
+//   - LatestValues(deviceID)         = 该设备全部物理量（/overview、设备列表用）
+//   - LatestValueBySensor(deviceID, sensorName) = 精确到物理名的最新值
+//
+// 用途：数据字段解析层的 planner F4 复核（task-8）在 selector 解析到具体物理名后，
+// 需要按 (设备, 物理名) 取最新值；family/@semantic 的多个命中字段由调用方逐个查。
+// 语义与缓存命中路径一致：key = (EdgeDevice.ID, sensor_name)，命中返回该条记录。
+func LatestValueBySensor(deviceID uint, sensorName string) (models.UnifiedData, bool) {
+	if deviceID == 0 || sensorName == "" {
+		return models.UnifiedData{}, false
+	}
+	globalLatestValueCache.mu.RLock()
+	defer globalLatestValueCache.mu.RUnlock()
+	byDevice, ok := globalLatestValueCache.entries[deviceID]
+	if !ok {
+		return models.UnifiedData{}, false
+	}
+	rec, ok := byDevice[sensorName]
+	return rec, ok
+}
+
 // resetLatestValueCacheForTest 清空缓存（仅测试用）。
 // 包级缓存会跨用例串味，测试必须能重置。
 func resetLatestValueCacheForTest() {
