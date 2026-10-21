@@ -118,9 +118,9 @@ type Plan interface {
 
 // Observation 是一次观测计数（供 Flush 批量落库）。
 type Observation struct {
-	DeviceID uint      `json:"device_id"`
-	Name     string    `json:"sensor_name"`
-	Unit     string    `json:"unit"`
+	DeviceID  uint      `json:"device_id"`
+	Name      string    `json:"sensor_name"`
+	Unit      string    `json:"unit"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Samples   int64     `json:"samples"`
