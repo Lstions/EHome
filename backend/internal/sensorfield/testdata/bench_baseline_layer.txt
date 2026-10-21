@@ -4,15 +4,15 @@
 # 为什么不是 main：main d406dc2d 上不存在 sensorfield/selector 集成，无法在 main 录基线。
 # 局限（诚实边界）：本机（AMD Ryzen 5 5600）与并行负载下录制，单次波动大；
 #   ±5% 阈值受机器/负载影响，是 D1 门槛的近似判据，不是发布级 SLA。
-# commit: 57a6b4f8 (style(field-resolver): gofmt 对齐（空行/字段列宽，无语义变化）)
-# date: 2026-10-21T22:49:30+08:00
+# commit: 7363e17a (docs(design): #10a 判据最终版——确定性结构断言替代噪声基准)
+# date: 2026-10-21T23:25:54+08:00
 # recorded_by: scripts/check_field_semantics.sh --record-bench-baseline
 goos: linux
 goarch: amd64
 pkg: ehome/backend/internal/sensorfield
 cpu: AMD Ryzen 5 5600 6-Core Processor              
-BenchmarkLiteralEval-12    	52284004	         3.826 ns/op	       0 B/op	       0 allocs/op
-BenchmarkLiteralEval-12    	58869441	         4.044 ns/op	       0 B/op	       0 allocs/op
-BenchmarkLiteralEval-12    	64460955	         3.851 ns/op	       0 B/op	       0 allocs/op
-BenchmarkLiteralEval-12    	61700907	         3.926 ns/op	       0 B/op	       0 allocs/op
-BenchmarkLiteralEval-12    	64739356	         3.790 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiteralEval-12    	56438198	         3.767 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiteralEval-12    	53685366	         3.901 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiteralEval-12    	48665470	         5.975 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiteralEval-12    	66090722	         4.020 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLiteralEval-12    	64395922	         3.655 ns/op	       0 B/op	       0 allocs/op
