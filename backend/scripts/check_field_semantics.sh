@@ -47,6 +47,7 @@ if ! command -v "$GO" >/dev/null 2>&1 && [ ! -x "$GO" ]; then
 fi
 BENCH_BASELINE_PROD="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline_prod.txt"
 BENCH_BASELINE_LAYER="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline_layer.txt"
+BENCH_BASELINE_E2E="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline_e2e.txt"
 MUTATION_MANIFEST="$BACKEND_DIR/scripts/field_semantics_mutations.tsv"
 
 STRICT=0
@@ -459,11 +460,18 @@ bench_ratio_verdict() {
   if awk -v p="$prod" -v b="$base" 'BEGIN{exit (p <= b*1.05) ? 0 : 1}'; then echo pass; else echo fail; fi
 }
 
+# bench_abs_delta_verdict <prod_ns> <base_ns> <budget_ns>：绝对预算判据（Lead 2026-10-21 裁决 10a-①）。
+#   空值 -> skip；prod-base <= budget -> pass；否则 fail。
+bench_abs_delta_verdict() {
+  local prod="$1" base="$2" budget="$3"
+  if [ -z "$prod" ] || [ -z "$base" ] || [ -z "$budget" ]; then echo skip; return 0; fi
+  if awk -v p="$prod" -v b="$base" -v d="$budget" 'BEGIN{exit (p-b <= d) ? 0 : 1}'; then echo pass; else echo fail; fi
+}
+
 gate10a() {
+  # 红线 9（方案 §12.2/§13.5，Lead 裁决）：literal 生产路径不得为统一入口付税。
+  echo "  口径：literal 生产路径不得为统一入口付税（红线 9）"
   echo "  口径：$BENCH_WORDING"
-  # 硬判据 = 同一次 run 内「生产链 literal 路径」/「本包内的 main matchField 基线克隆」<= 1.05。
-  # 为什么用比值而不是文件基线：#10a 的参照物是 main d406dc2d 的 matchField，而 main 无集成层
-  # 无法录基线；两个 bench 在同一台机器/同一 run 内跑，比值去掉机器与负载因素，是可复核的硬判据。
   local prod="" base="" pkg="" label=""
   if bench_pair_exists ./internal/automation BenchmarkAutomationLiteralPath BenchmarkAutomationLiteralPathBaseline; then
     prod=BenchmarkAutomationLiteralPath; base=BenchmarkAutomationLiteralPathBaseline
@@ -473,41 +481,63 @@ gate10a() {
     pkg=./internal/alert; label=alert
   fi
   if [ -z "$prod" ]; then
-    record_skip 10a "生产链 literal 性能（硬判据）" "SKIP(benchmark-missing)：未找到成对的 BenchmarkAutomationLiteralPath(+Baseline) 或 BenchmarkAlertLiteralPath(+Baseline)；硬判据未生效，必须可见"
+    record_skip 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "SKIP(benchmark-missing)：未找到成对 Benchmark{Automation,Alert}LiteralPath(+Baseline)；判据未生效，必须可见"
+  else
+    local raw="$tmp_dir/bench10a.txt"
+    if ! run_in_backend "$raw" "$tmp_dir/bench.err" "$GO" test "$pkg" -run '^$' \
+        -bench "^$prod$|^$base$" -benchmem -count=5 -benchtime=200ms; then
+      record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$pkg]"
+    else
+      local prod_med base_med delta allocs v
+      prod_med=$(bench_median_ns "$raw" "$prod")
+      base_med=$(bench_median_ns "$raw" "$base")
+      allocs=$(bench_alloc_nonzero "$raw" "$prod")
+      delta=$(awk -v p="$prod_med" -v b="$base_med" 'BEGIN{ if (p!="" && b!="") printf "%.2f", p-b; else print "" }')
+      v=$(bench_abs_delta_verdict "$prod_med" "$base_med" 3.0)
+      if [ "$RECORD_BENCH" -eq 1 ]; then
+        record_pass 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "当前 prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns（预算 3ns）[$pkg]"
+      elif [ "$v" = "pass" ] && [ "$allocs" -eq 0 ]; then
+        record_pass 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns ≤3ns 且 0 alloc [$pkg]"
+      elif [ "$v" = "fail" ]; then
+        record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns > 3ns [$pkg]（红线 9：literal 不得为统一入口付税）"
+      elif [ "$allocs" -ne 0 ]; then
+        record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "alloc 非0 行数="$allocs"（判据要求 0 alloc）[$pkg]"
+      else
+        record_skip 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "SKIP(unusable)：无法解析 ns/op（prod="$prod_med" base="$base_med"）[$pkg]"
+      fi
+    fi
+  fi
+  # ② 端到端：BenchmarkEvaluateFrame（一帧多字段、含 literal 规则）相对基线 ≤ +5%。
+  # 缺 bench 时必须 SKIP 并打印 SKIP(e2e-bench-missing)，不得 PASS（Lead 裁决）。
+  local e2e="" e2epkg=""
+  for cand in ./internal/automation ./internal/sensorfield ./internal/alert ./cmd/server; do
+    e2e=$(bench_resolve_name "$cand" BenchmarkEvaluateFrame)
+    if [ -n "$e2e" ]; then e2epkg="$cand"; break; fi
+  done
+  if [ -z "$e2e" ]; then
+    record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%）" "SKIP(e2e-bench-missing)：BenchmarkEvaluateFrame 未落地（需一帧多字段、含 literal 规则）；端到端判据未生效，不得视为通过"
     return
   fi
-  local raw="$tmp_dir/bench10a.txt"
-  if ! run_in_backend "$raw" "$tmp_dir/bench.err" "$GO" test "$pkg" -run '^$' \
-      -bench "^$prod$|^$base$" -benchmem -count=5 -benchtime=200ms; then
-    record_fail 10a "生产链 literal 性能（硬判据）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$pkg]"
+  local eraw="$tmp_dir/bench10a-e2e.txt"
+  if ! run_in_backend "$eraw" "$tmp_dir/bench.err" "$GO" test "$e2epkg" -run '^$' \
+      -bench "^$e2e$" -benchmem -count=5 -benchtime=200ms; then
+    record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$e2epkg]"
     return
   fi
-  local prod_med base_med ratio
-  prod_med=$(bench_median_ns "$raw" "$prod")
-  base_med=$(bench_median_ns "$raw" "$base")
-  ratio=$(awk -v p="$prod_med" -v b="$base_med" 'BEGIN{ if (b>0) printf "%.2fx", p/b; else print "n/a" }')
   if [ "$RECORD_BENCH" -eq 1 ]; then
-    mkdir -p "$(dirname "$BENCH_BASELINE_PROD")"
-    local c sv
-    c=$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
-    sv=$(cd "$REPO_DIR" && git log -1 --format=%s "$c" 2>/dev/null || echo unknown)
-    {
-      echo "# ===== 10a 参考记录（REFERENCE RECORD，非判据来源）====="
-      echo "# 硬判据：同 run 内 $prod / $base <= 1.05（机器无关）。本文件只是历史记录，不参与 PASS/FAIL。"
-      echo "# 口径：$BENCH_WORDING"
-      echo "# commit: $c ($sv)"
-      echo "# date: $(date -Is)"
-      grep -E '^(Benchmark|goos|goarch|pkg|cpu)' "$raw"
-    } > "$BENCH_BASELINE_PROD"
-    record_pass 10a "生产链 literal 性能（硬判据）" "已记录参考 $BENCH_BASELINE_PROD；当前比值 = $ratio [pkg=$pkg]"
+    if bench_record "$BENCH_BASELINE_E2E" "$e2epkg" "$e2e" "端到端求值基线（10a-②，参考记录）" "一帧多字段含 literal 规则；相对基线 ≤+5%（参考基线非 main 基线）"; then
+      record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%）" "已记录参考基线 $BENCH_BASELINE_E2E [$e2e]"
+    else
+      record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "录制基线失败"
+    fi
     return
   fi
-  local v
-  v=$(bench_ratio_verdict "$prod_med" "$base_med")
-  case "$v" in
-    pass) record_pass 10a "生产链 literal 性能（硬判据）" "prod "$prod_med"ns / main基线 "$base_med"ns = "$ratio" <= 1.05 [pkg=$pkg]" ;;
-    fail) record_fail 10a "生产链 literal 性能（硬判据）" "prod "$prod_med"ns / main基线 "$base_med"ns = "$ratio" > 1.05 [pkg=$pkg]（G-6 判据：字面量必须走 legacy 快路径）" ;;
-    *) record_skip 10a "生产链 literal 性能（硬判据）" "SKIP(prod-baseline-unusable)：无法解析 ns/op（prod="$prod_med" base="$base_med"）[pkg=$pkg]" ;;
+  local ev
+  ev=$(bench_compare "$e2e" "$BENCH_BASELINE_E2E" "$eraw")
+  case "$ev" in
+    pass) record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%）" "相对参考基线 ≤ +5%（bench=$e2e pkg=$e2epkg）" ;;
+    fail) record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "相对参考基线退化 > +5%（bench=$e2e pkg=$e2epkg）" ;;
+    *) record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%）" "SKIP(e2e-baseline-missing)：$BENCH_BASELINE_E2E 不存在或不可解析；用 --record-bench-baseline 录参考基线" ;;
   esac
 }
 gate10b() {
@@ -696,6 +726,32 @@ self_test() {
     echo "SELFTEST PASS: 无 benchmark ⇒ #10 FAIL（判据未被放宽）"
   fi
   # #10a 比值判据（Lead 裁决的核心）：生产链/基线克隆 同 run 比值 ≤1.05 才 PASS。
+  # #10a-① 绝对预算（Lead 裁决）：新增开销 ≤3ns；超限必红。
+  if [ "$(bench_abs_delta_verdict 4.0 1.2 3.0)" != "pass" ]; then
+    echo "SELFTEST FAIL: 新增 2.8ns 应判 pass（预算 3ns）"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a-① 绝对预算：新增 2.8ns ≤3ns ⇒ pass"
+  fi
+  if [ "$(bench_abs_delta_verdict 4.5 1.2 3.0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 新增 3.3ns 应判 fail（超 3ns 预算）"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a-① 绝对预算：新增 3.3ns >3ns ⇒ fail（能抓住付税回归）"
+  fi
+  if [ "$(bench_abs_delta_verdict 12.5 1.2 3.0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 当前实现形态 11.3ns 新增应判 fail"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a-① 绝对预算：当前形态新增 11.3ns ⇒ fail（实测 12.5ns vs 1.2ns）"
+  fi
+  # #10a-② 端到端超限必红（比值判据复用）。
+  if [ "$(bench_ratio_verdict 1.10 1.0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 端到端 +10% 应判 fail"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a-② 端到端：+10% ⇒ fail（>+5% 即红）"
+  fi
   if [ "$(bench_ratio_verdict 1.05 1.0)" != "pass" ]; then
     echo "SELFTEST FAIL: 比值 1.05x 边界应判 pass（1.05/1.0 <= 1.05），实得 $(bench_ratio_verdict 1.05 1.0)"
     failures=$((failures + 1))

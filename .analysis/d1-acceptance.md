@@ -345,8 +345,9 @@ export PATH=<repo>/.tools/gotool/bin:$PATH GOCACHE=/tmp/eh-wt-cache
 [PASS] #7 派生无环 — 执行 38 个用例
 [PASS] #8 语法表驱动 — 执行 40 个用例，全部通过
 [SKIP] #9 变异自证 — 默认不执行（--mutation 实跑：捕获 4/4，restore md5 一致）
-[FAIL] #10a 生产链 literal 性能（硬判据） — prod 56.59ns / main基线 0.9145ns = 61.88x > 1.05
-[PASS] #10b 新层抽象成本（观测） — median 3.678ns ≤10ns 且 0 alloc
+[FAIL] #10a-1 生产链 literal 新增开销（绝对预算 ≤3ns） — prod 12.09ns - main基线 1.152ns = 新增 10.94ns > 3ns
+[SKIP] #10a-2 端到端求值开销（相对基线 ≤+5%） — SKIP(e2e-bench-missing)：BenchmarkEvaluateFrame 未落地（不得视为通过）
+[PASS] #10b 新层抽象成本（观测） — median 3.709ns ≤10ns 且 0 alloc
 [PASS] #11 回滚盘点 — 生产库四类来源 NON_LITERAL=0
 RESULT: FAIL(1) — 未通过项只有 #10a（与 §5 的独立实测一致：57.1ns vs 0.91ns）
 ```
@@ -358,11 +359,12 @@ RESULT: FAIL(1) — 未通过项只有 #10a（与 §5 的独立实测一致：57
 
 | 项 | 判据 | 基线来源 | 机器相关性 |
 |---|---|---|---|
-| #10a 生产链（硬） | **同一次 run 内** `BenchmarkAutomationLiteralPath / BenchmarkAutomationLiteralPathBaseline ≤ 1.05` | 基线 clone 就在 automation 包内（与 main d406dc2d 的 matchField/compare 逐字节相同） | **无**（同机同 run 比值） |
+| #10a-1 生产链（硬，绝对预算） | **同一次 run 内** `prod − main基线克隆 ≤ 3ns` 且 0 alloc | 基线 clone 就在 automation 包内（与 main d406dc2d 的 matchField/compare 逐字节相同） | **无**（同机同 run 差值） |
+| #10a-2 端到端（硬，缺 bench 即 SKIP） | `BenchmarkEvaluateFrame`（一帧多字段、含 literal 规则）相对参考基线 ≤ +5% | 参考基线 `testdata/bench_baseline_e2e.txt`（**尚未产生**：bench 未落地） | 中（文件基线，需同机重录） |
 | #10b 新层成本（观测） | `BenchmarkLiteralEval` 中位 ≤10ns 且 0 alloc，否则 WARN 不阻断 | 绝对值阈值（方案 §13.5） | 弱（10ns 阈值留足余量） |
 
-**为什么 #10a 不用文件基线**：main `d406dc2d` 上没有 `sensorfield`/集成层，**无法在 main 上录制基线**（这是 Lead 已知前提）。
-若把文件基线录在当前 HEAD（含回归）再比较，会得到"相对 0% 退化"的假绿。故硬判据改为**同 run 比值**：参照物是包内的 main 基线克隆，
+**为什么 #10a-1 不用文件基线**：main `d406dc2d` 上没有 `sensorfield`/集成层，**无法在 main 上录制基线**（Lead 已知前提）。
+若把文件基线录在当前 HEAD（含回归）再比较，会得到"相对 0% 退化"的假绿。故 10a-1 用**同 run 差值/绝对预算**：参照物是包内的 main 基线克隆，
 机器与负载因素在比式中抵消。`backend/internal/sensorfield/testdata/bench_baseline_prod.txt` 与 `bench_baseline_layer.txt` 仅是
 **参考记录（history）**，文件头已写明"非判据来源/非 main 基线"，不参与 PASS/FAIL。
 
@@ -381,3 +383,20 @@ RESULT: FAIL(1) — 未通过项只有 #10a（与 §5 的独立实测一致：57
 2. `#11` 回滚盘点依赖运行中的 PostgreSQL（`ehome-postgres`）；CI 无 DB 时返回 77 ⇒ `SKIP(db-unavailable)`，不假绿。
 3. `#10a` 的"main 基线"是包内逐字节克隆，不是 main 上的真实二进制——它证明的是**同一算法在两条路径上的成本差**，这正是 G-6 判据要的语义。
 4. CI 的 `field-semantics` job 对 `[FAIL] #10a` 做**窄豁免**（打印 `::warning`、不阻断），其余任何 FAIL 仍红；移除条件写在 workflow 注释里（短路落地后改回直接执行）。
+### 8.6 判据演进（Lead 2026-10-21 二次裁决）与修后实测
+
+**为什么改**：main 基线是 1ns 级，"≤+5%" 只有 0.05ns 预算，任何包装层都会红，门禁失去信号意义。
+故 #10a 改为 ①**绝对预算**：单次 literal 求值新增 ≤3ns 且 0 alloc；②**端到端**：`BenchmarkEvaluateFrame` 相对基线 ≤+5%。
+本次已按此实现并复跑（`#10a-1` / `#10a-2` 两行输出），缺 e2e bench 时打印 `SKIP(e2e-bench-missing)`，不得 PASS。
+
+| 时点 | 生产链 literal 实测 | 相对 main 基线（约 1.15ns） | 对 3ns 预算 |
+|---|---|---|---|
+| de71ab40 **修前**（无条件注入 provider） | **58.6ns** | +5700% | 超预算 ~18× |
+| de71ab40 **修后**（PlanProvider 按 enabled 条件注入） | **12.09ns** | +951% | 仍超预算 ~3.6×（新增 10.94ns） |
+| 字节级短路 + LoadRules 预编译（impl-core 进行中） | 待测 | 待测 | 目标 ≤3ns |
+
+**当前判定**：#10a-1 **FAIL**（12.09ns，新增 10.94ns > 3ns）。这不是脚本问题，是集成实现仍在为 literal 付统一入口税；
+修复方向（impl-core 实施中）：字节级 short-circuit（`isSpecialSelector` 前先按首字节/长度快速判定）与 LoadRules 期预编译，避免每帧每规则走 provider+编译缓存+统计置位。
+
+**测量噪声（诚实边界）**：本机与多名 teammate 并行构建时，基线克隆偶被抬到 3.0ns（正常 1.15ns），单次跑出的"新增"会偏小；
+脚本用 `-count=5` 取中位数、并在同一次 run 内测 prod 与基线，但仍受负载影响。复跑时请先确认机器空闲，或看多轮结果范围而非单点。
