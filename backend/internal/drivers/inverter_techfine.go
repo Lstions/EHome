@@ -221,6 +221,9 @@ func (d *TechfineInverterDriver) GetSensorDefinitions() []SensorData {
 		{Name: "pv1_voltage", Unit: "V"},
 		{Name: "pv1_current", Unit: "A"},
 		{Name: "pv1_power", Unit: "W"},
+		// PV2 是可选硬件（协议 V0.5 的 HPVB 独立一节）。这里按**能力级**声明：
+		// 换一台带两路 PV 的机型即可产出；PV1-only 机型（如本机 node
+		// F0F5BD02DD84）永远不会出现这些传感器，前端按「字段不存在」处理即可。
 		{Name: "pv2_voltage", Unit: "V"},
 		{Name: "pv2_current", Unit: "A"},
 		{Name: "pv2_power", Unit: "W"},
@@ -829,7 +832,12 @@ func (d *TechfineInverterDriver) parsePV(fields []string, prefix string) ([]Sens
 //	· 实测：[5] 取 50/100 只出现在状态位串前两位为 "11"（风扇运转）时。
 //
 // 修正后 8 字段形状产出 5 温度 + 2 风扇转速 + 2 风扇状态 = 9 个传感器；
-// pv2_temp/dc_rectifier_temp 只由旧机型 11 字段形状产出。
+// pv2_temp/dc_rectifier_temp 只由 11 字段布局产出（协议 V0.5 的完整形状是
+// AAA..EEE 5 温度 + FFF/GGG 2 风扇转速 + 状态位 + PV2 温度 + DC 整流温度）。
+//
+// 本机是 PV1-only 机型，固定返回 8 字段 —— 即「5 温度 + 2 转速 + 状态串」，
+// 后两位（PV2 温度 / DC 整流温度）根本没出现，与硬件事实一致（机器只有一路 PV）。
+// 旧实现把 FFF/GGG 当成 pv2_temp/dc_rectifier_temp，等于凭空造出两个不存在的温度位。
 //
 // ## 为什么仍然保留 11 字段分支
 //

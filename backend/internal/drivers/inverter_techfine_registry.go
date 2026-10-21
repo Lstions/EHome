@@ -104,7 +104,13 @@ var techfineCommands = []techfineCommand{
 	},
 	{
 		ID: "read_pv2", Name: "读取 PV2 信息", Wire: "HPVB\r",
-		Description: "PV2 电压、电流与功率",
+		// PV2 是**可选硬件**：协议 V0.5 把 HPVB 列为独立一节（该文档第 51 行），
+		// 但很多机型只有一路 PV 输入。本机（node F0F5BD02DD84 / device 15）即 PV1-only：
+		// 2026-10-18 15:29 ~ 10-19 12:54 期间 read_pv2 曾轮询，7,708 条应答**全部为 0**
+		// （电压/电流/功率），随后用户把该命令 interval 设为 0。
+		// 关键是设备对这些帧**有应答**（不是超时）⇒ HPVB 命令本身有效，只是没有第二路 PV。
+		// 因此保留该能力（换一台带 PV2 的机型即可用），但默认不轮询。
+		Description: "PV2 电压、电流与功率（可选硬件；PV1-only 机型恒为 0）",
 		Parser:      func(d *TechfineInverterDriver, f []string) ([]SensorData, error) { return d.parsePV(f, "pv2") },
 		MinSensors:  3,
 		Family:      []string{"pv2_"},
@@ -114,7 +120,12 @@ var techfineCommands = []techfineCommand{
 		Description: "温度、风扇转速与状态",
 		Parser:      (*TechfineInverterDriver).parseHTEMP,
 		// 真机 8 字段形状产出 5 温度 + 2 风扇转速 + 2 风扇状态 = 9；
-		// 旧机型 11 字段形状产出 11。下界取 9。
+		// 11 字段布局产出 11（多出 PV2 温度与 DC 整流温度）。下界取 9。
+		//
+		// 注：协议 V0.5 的 HTEMP 摘要只列「PV/逆变/升压/变压器温度、风扇状态」，
+		// 并没有 pv2_temp / dc_rectifier_temp 这两个名字 —— 它们是 11 字段布局里
+		// 第 9/10 位的**候选语义**，且 PV2 本身是可选硬件（本机 PV1-only）。
+		// 本机应答固定 8 字段 ⇒ 这两个传感器在本机永远不会出现。
 		MinSensors: 9,
 		Family: []string{
 			"pv_temp", "inverter_temp", "boost_temp", "transformer_temp",
