@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,62 @@ func TestSetupFieldResolver_MissingFileFailsClosed(t *testing.T) {
 	}}
 	if _, err := setupFieldResolver(db, cfg, drivers.NewRegistry()); err == nil {
 		t.Fatalf("missing aliases file with enabled=true must fail closed")
+	}
+}
+
+// TestFieldResolverWiringGate 是"接线不得被静默删除"的源码级门禁（本仓既有范式，见
+// notify_wiring_gate_test.go）。它防的是**无意重构**，不证明运行时成功（运行时由
+// api 契约测试 + 集成测试覆盖）。
+//
+// 断言 main.go 中同时存在以下接线（逐条都是"引擎孤儿化"的真实风险点）：
+//  1. setupFieldResolver(...)            Registry 被构造
+//  2. SetLatestSinkFn(func(...)          观测采集点包装既有注入点（databus 零改动）
+//  3. fieldResolver.registry.Observe(    观测真的被调用
+//  4. api.SetFieldSelectorResolver(      保存期校验拿到控制面
+//  5. SetLatestValueBySensorFn / SetLatestValuesFn / SetPlanProvider  automation 四处注入
+//  6. alertEvaluator.SetPlanProvider(    告警求值接入
+func TestFieldResolverWiringGate(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	src := string(raw)
+	required := []string{
+		"setupFieldResolver(db, cfg, driverRegistry)",
+		"nodeMgr.SetLatestSinkFn(func(record models.UnifiedData)",
+		"fieldResolver.registry.Observe(record.DeviceID, record.SensorName, record.Unit, record.Timestamp)",
+		"api.SetFieldSelectorResolver(fieldResolver.registry)",
+		"automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)",
+		"automationPlanner.SetLatestValuesFn(api.LatestValues)",
+		"automationPlanner.SetPlanProvider(fieldResolver.registry)",
+		"automationEvaluator.SetPlanProvider(fieldResolver.registry)",
+		"alertEvaluator.SetPlanProvider(fieldResolver.registry)",
+		"api.SetupRoutes(",
+		"fieldResolver.registry",
+	}
+	for _, want := range required {
+		if !strings.Contains(src, want) {
+			t.Errorf("main.go 缺少字段解析层接线片段（接线被删除或重命名）: %q", want)
+		}
+	}
+
+	// 反向断言：观测不能在 databus 内实现（红线 1：databus 零 import）。
+	databusDir := filepath.Join("..", "..", "internal", "databus")
+	entries, err := os.ReadDir(databusDir)
+	if err != nil {
+		t.Fatalf("read databus dir: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(databusDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		if strings.Contains(string(body), "sensorfield") {
+			t.Errorf("internal/databus/%s 引用了 sensorfield（违反方案 §3.3 红线 1：数据面零依赖）", entry.Name())
+		}
 	}
 }
 
