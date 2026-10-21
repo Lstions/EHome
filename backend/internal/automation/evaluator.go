@@ -116,6 +116,24 @@ type Evaluator struct {
 	// 故"保守不触发"与锚点恢复配合后不会漏触发真实事件。
 	firstSunTick bool
 
+	// planProvider 是数据字段解析层（sensorfield）控制面（设计 §7.2）。
+	// nil = 未接线：字面量继续走历史 matchField（G-6 逐字节等价），特殊形态
+	// fail-closed（不触发 + 审计）。由 main.go 经 SetPlanProvider 注入。
+	planProvider PlanProvider
+
+	// plans 是编译产物旁路缓存，key=(ruleID,slot,deviceID)（不挂 rule 结构体，
+	// 防 models→sensorfield 包环；见 selector.go 文件头裁决）。
+	plans *planCache
+
+	// auditMu/unresolvedAudit 是"无法求值"审计的 5 分钟节流表
+	// （key: ruleID + selectorHash，窄复核要求按 selector 维度去重）。
+	auditMu         sync.Mutex
+	unresolvedAudit map[unresolvedKey]time.Time
+	// statsMu/ruleStats 是 ehome_rule_never_resolved / _never_fired 的进程内口径
+	// （快照持久列由 impl-wiring 的 models 批次提供；本批语义一致）。
+	statsMu   sync.Mutex
+	ruleStats map[uint]*ruleStat
+
 	stopCh chan struct{}
 	once   sync.Once
 }
@@ -133,6 +151,9 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 		sunCache:         sun.NewCache(),
 		sunLocationAudit: make(map[uint]string),
 		firstSunTick:     true,
+		plans:            newPlanCache(),
+		unresolvedAudit:  make(map[unresolvedKey]time.Time),
+		ruleStats:        make(map[uint]*ruleStat),
 		stopCh:           make(chan struct{}),
 	}
 	e.LoadRules()
@@ -267,9 +288,37 @@ func (e *Evaluator) LoadRules() {
 	e.mu.Lock()
 	prev := e.rules
 	e.rules = next
+	// ── 求值状态清理（分载体，窄复核 R2-followup 2026-10-21）──
+	//
+	// sensor_threshold 的窗口样本存的是"旧配置下算出的 satisfied 布尔"
+	// （sample{at,satisfied}，无原始值 ⇒ 无法重算），因此触发语义（阈值/比较符/
+	// duration/条件/selector/绑定设备/触发类型）任一变化都必须清窗口，否则：
+	//   ① 改阈值/比较符 ⇒ 旧 satisfied 继续生效（漏触发/误触发）；
+	//   ② 缩短 DurationSec ⇒ 凭旧样本立即满足（隐含误触发）；
+	//   ③ 改绑定设备 ⇒ **窗口不按设备分区**，A 的连续满足 + B 的单条满足可凑出
+	//      触发（真误触发，窄复核 F1#⑤）；
+	//   ④ conditions_json 变化 ⇒ 样本来自旧条件门控（求解器条件不满足就不写窗口）；
+	//   ⑤ selector 变化 ⇒ satisfied 来自旧物理量；
+	//   ⑥ TriggerType 切换 ⇒ 旧窗口在切回时会复活。
+	//
+	// ⚠ 载体必须独立：sameWindowStateFields 服务的是 time_window/sun 的
+	// windowStates/sunStates；把传感器字段塞进去会因无关字段漂移误清边沿态
+	// （A-17 同类风险）。故这里用独立比较器 sameSensorTriggerState。
+	//
+	// 级联（F3 裁决）：**triggered（冷却锚）保留**。清它等于绕过 CooldownSec
+	// 重复下发真实设备动作；保留后行为是"冷却到期后重新积累 DurationSec"（安全方向）。
+	// 白名单**排除** UpdatedAt/Name/CooldownSec/MaxDailyExec/动作集合：它们是簿记
+	// 字段（last_triggered_at 也会 bump UpdatedAt），纳入会导致 30s 兜底刷新每 30s
+	// 清一次窗口 ⇒ DurationSec 永不满足（A-17 教训的镜像，漏触发方向）。
 	for id := range e.windows {
-		if _, ok := next[id]; !ok {
+		old, wasPresent := prev[id]
+		nextRule, stillPresent := next[id]
+		if !stillPresent || !wasPresent || !sameSensorTriggerState(old, nextRule) {
 			delete(e.windows, id)
+		}
+	}
+	for id := range e.triggered {
+		if _, ok := next[id]; !ok {
 			delete(e.triggered, id)
 		}
 	}
@@ -290,6 +339,35 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	e.mu.Unlock()
+	// 设计 §7.2：LoadRules/Invalidate 后清空编译产物（selector/epoch 变化惰性重编译）。
+	// 兜底刷新每 30s 一次，重编译是纯内存操作（零 DB），热路径仍靠缓存。
+	e.plans.reset()
+	// 规则级指标口径随规则集合重建（保留仍存在规则的"已解析/已触发"进度）。
+	e.rebuildRuleStats(next)
+	// 清理已删除规则的审计节流条目，避免 map 无界增长。
+	e.auditMu.Lock()
+	for key := range e.unresolvedAudit {
+		if _, ok := next[key.ruleID]; !ok {
+			delete(e.unresolvedAudit, key)
+		}
+	}
+	e.auditMu.Unlock()
+}
+
+// sameSensorTriggerState 是 sensor_threshold 求值状态的**内容白名单**（窄复核 R2）。
+//
+// 只含"决定 satisfied 布尔是否有意义"的字段；排除一切簿记字段
+// （UpdatedAt / Name / CooldownSec / MaxDailyExec / 动作集合 / last_triggered_at）。
+// TriggerEdgeDeviceID 必须在列：窗口按 ruleID 存、不按设备分区（F1#⑤ 真误触发）。
+// TriggerType 必须在列：类型切换后旧窗口不得在切回时复活。
+func sameSensorTriggerState(prev, next models.AutomationRule) bool {
+	return prev.TriggerType == next.TriggerType &&
+		prev.TriggerSensorName == next.TriggerSensorName &&
+		prev.TriggerComparator == next.TriggerComparator &&
+		prev.TriggerThreshold == next.TriggerThreshold &&
+		prev.TriggerDurationSec == next.TriggerDurationSec &&
+		prev.TriggerEdgeDeviceID == next.TriggerEdgeDeviceID &&
+		prev.ConditionsJSON == next.ConditionsJSON
 }
 
 // sameWindowStateFields 是"影响窗口/日出日落判定"的字段**白名单**比较 (A-17)。
@@ -338,6 +416,25 @@ func strPtrEq(a, b *string) bool {
 // Invalidate CRUD 写路径直接失效重载缓存。
 func (e *Evaluator) Invalidate() {
 	e.LoadRules()
+}
+
+// SetPlanProvider 注入数据字段解析层控制面（设计 §7.2 / §9.2#1/#2）。
+//
+// nil 是**显式支持的合法状态**：既有测试与未接线部署不注入时，求值继续走历史
+// matchField（G-6：纯字面量行为逐字节不变）；特殊形态在没有解析层时无法求值，
+// 按 fail-closed 不触发并落审计（不猜测、不降级为字面量，设计 §11）。
+func (e *Evaluator) SetPlanProvider(p PlanProvider) {
+	e.mu.Lock()
+	e.planProvider = p
+	e.mu.Unlock()
+	e.plans.reset()
+}
+
+// planProviderSnapshot 读 planProvider（Evaluate 会在多 shard 并发调用）。
+func (e *Evaluator) planProviderSnapshot() PlanProvider {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.planProvider
 }
 
 // Start 启动兜底刷新 goroutine (30s 周期, 仅作保险)。
@@ -770,7 +867,7 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	}
 
 	for i := range matched {
-		e.evalRule(matched[i], fields, at)
+		e.evalRule(matched[i], target, fields, at)
 	}
 }
 
@@ -792,10 +889,16 @@ func (e *Evaluator) resolveLogicalID(edgeDeviceID uint) uint {
 }
 
 // evalRule 单规则状态机: armed → triggered (连续满足 DurationSec) → 冷却到期回 armed。
-func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, at time.Time) {
-	value, ok := matchField(fields, rule.TriggerSensorName)
-	if !ok {
-		return // 本批无该传感器字段, 不影响窗口
+//
+// deviceID 是本次上报的**边缘设备 ID**（Evaluate 入参），用于解析层 plan 的
+// (device, selector) 编译 —— 不能用 rule.TriggerEdgeDeviceID（规则可能绑逻辑设备）。
+func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields []parser.Field, at time.Time) {
+	// trigger 求值走解析层（literal 路径内部与 matchField 逐字节等价）。
+	// ok=false（本批无该字段 / unbound / kill switch）⇒ 不更新窗口、不触发。
+	triggerOK, satisfied, value := e.evalSelector(rule, 0, deviceID,
+		rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, fields, at)
+	if !triggerOK {
+		return
 	}
 
 	// 附加条件全部 AND 求值 (fail-closed: 非法 JSON 直接判不触发)。
@@ -804,14 +907,14 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 		logger.Warn("automation: invalid conditions_json", "rule_id", rule.ID, "error", err)
 		return
 	}
-	for _, c := range conds {
-		cv, ok := matchField(fields, c.SensorName)
-		if !ok || !compare(c.Comparator, cv, c.Threshold) {
-			return // 任一条件不满足 (含字段缺失) 则不触发
+	for i, c := range conds {
+		condOK, condSatisfied, _ := e.evalSelector(rule, uint8(i+1), deviceID,
+			c.SensorName, c.Comparator, c.Threshold, fields, at)
+		if !condOK || !condSatisfied {
+			return // 任一条件无法判定/不满足 则不触发（混合规则整条 fail-closed）
 		}
 	}
 
-	satisfied := compare(rule.TriggerComparator, value, rule.TriggerThreshold)
 	cooldown := cooldownFor(rule) // 0 = 不冷却 (cooldownFor 是唯一判定处)
 
 	e.mu.Lock()
@@ -841,7 +944,10 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 	e.triggered[rule.ID] = at
 	e.mu.Unlock()
 
+	e.markRuleFired(rule.ID)
 	if e.handler != nil {
+		// Value 语义：literal 为原始上报值（与今天一致）；特殊 selector 为
+		// predicate 参与比较的值（family/reducer 的语义值），仅用于展示/审计。
 		e.handler.HandleTrigger(TriggerEvent{Rule: rule, Value: value, At: at})
 	}
 }
