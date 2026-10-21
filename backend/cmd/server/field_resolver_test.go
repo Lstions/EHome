@@ -88,6 +88,9 @@ func TestFieldResolverWiringGate(t *testing.T) {
 		"api.SetFieldSelectorResolver(fieldResolver.registry)",
 		"automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)",
 		"automationPlanner.SetLatestValuesFn(api.LatestValues)",
+		// provider 必须**受开关保护**注入：无条件注入会让 enabled=false 的纯字面量
+		// 求值多付 ~58ns/次（impl-core 基准实测），故断言门闩存在。
+		"if fieldResolver.registry.Enabled() {",
 		"automationPlanner.SetPlanProvider(fieldResolver.registry)",
 		"automationEvaluator.SetPlanProvider(fieldResolver.registry)",
 		"alertEvaluator.SetPlanProvider(fieldResolver.registry)",

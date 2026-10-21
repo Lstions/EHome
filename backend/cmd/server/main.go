@@ -332,9 +332,15 @@ func main() {
 	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的
 	// 用户价值来源 —— 无人值守时把告警推到微信/QQ。
 	alertEvaluator.SetNotifier(notifyDispatcher)
-	// 数据字段解析层控制面注入 (方案 §9.2#3): 告警求值同样按 selector 编译；
-	// 未接入时纯字面量行为不变（PlanProvider 接口的最小方法集由 *sensorfield.Registry 满足）。
-	alertEvaluator.SetPlanProvider(fieldResolver.registry)
+	// 数据字段解析层控制面注入 (方案 §9.2#3): 告警求值同样按 selector 编译。
+	//
+	// ⚠ **仅当开关打开时注入**（lead 2026-10-21 性能裁决）：provider 为 nil 时
+	// evaluator/alert 走 legacy 逐字节兼容路径（纯字面量直接 matchField，不付
+	// 编译缓存查找/谓词求值的固定开销）。无条件注入会让 enabled=false 的纯字面量
+	// 求值多付 ~58ns/次（基线 1ns，+5700%，impl-core 基准实测）。
+	if fieldResolver.registry.Enabled() {
+		alertEvaluator.SetPlanProvider(fieldResolver.registry)
+	}
 	nodeMgr.SetAlertEvaluator(alertEvaluator)
 	go alertEvaluator.Start()
 	defer alertEvaluator.Stop()
@@ -399,11 +405,13 @@ func main() {
 	//   family/@semantic/virtual → 最新一帧多槽值（复核输入需要整帧）。
 	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
 	automationPlanner.SetLatestValuesFn(api.LatestValues)
-	automationPlanner.SetPlanProvider(fieldResolver.registry)
 	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
-	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物；
-	// 纯字面量走快速路径（与历史 matchField 逐字节等价）。
-	automationEvaluator.SetPlanProvider(fieldResolver.registry)
+	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物。
+	// 与 alert 同理：**仅 enabled=true 时注入**，否则保持 legacy 快速路径（见上方说明）。
+	if fieldResolver.registry.Enabled() {
+		automationEvaluator.SetPlanProvider(fieldResolver.registry)
+		automationPlanner.SetPlanProvider(fieldResolver.registry)
+	}
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
