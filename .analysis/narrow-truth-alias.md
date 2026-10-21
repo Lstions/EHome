@@ -294,3 +294,17 @@ expected_reason    // unbound 原因的枚举常量（partial_frame/empty_family
 4. 动态族：`jiabaida_parse.go:265-268/302/374-377/388-391`。
 5. simulation/ConfigParser 的 `soc`：`scene.go:135-145/253-270/760/855/979/1383` 与规则 `:866/880/1007`。
 6. 矩阵与别名校验脚本：只读 python（未落盘、未改仓库），逻辑见 §2.1/§5.2；可在 CI 里以 Go 表驱动复现。
+
+---
+
+## 9. 复核基线说明与并发上游变更（v0.3 工作树）
+
+- 本复核针对 **v0.2**（commit `9354408a`，848 行）执行；复核期间 worktree 出现了**未提交的 v0.3 修订**（`§7.2 / §7.2.1 / §7.2.2 / §20`，见 `git diff`）。
+- **逐字核对：§5.3 定义 1–4 与 §6.1 别名表在 v0.3 工作树中未变** ⇒ 本文 §2–§6 的全部结论（Q1–Q4、48/216 未闭合、别名两缺陷）**仍然适用**，不因 v0.3 作废。
+- v0.3 §7.2.2 新增 `EvalPredicate/CmpOp/Verdict`，部分缓解 G5（Value/Reason 有了承载结构），但：
+  1. 第 423 行仍写 "`family all：∀（空集 false；缺员/未知成员 ⇒ unbound）`"——把 §5.3 定义 3 "空集全部 unbound" 的**矛盾复制进新契约说明**（Q1 未解决）；
+  2. 同段第 424 行 "`Plan.Eval 对 family any/all 返回 unbound`" 与第 423 行 "all 空集 false" **在同一 bullet list 内直接冲突**（同一 v0.3 新增段落自相矛盾）；
+  3. `EvalPredicate(p, frame, op, threshold)` **无 F_known / value_type 入参** ⇒ G6（Plan 必须编译期嵌入 known 快照）与 Q2（非数值类型来源）仍未定义；
+  4. any/all 的 `Verdict.Value` 语义仍未定义（G5 只给了字段，没规定填什么）。
+- 建议 lead 把 §20 的 `N-3/N-4`（本文件）回填为本文 §6 的 Q1–Q4，并在 v0.3 的 §5.3/§7.2.2 一并修掉空集矛盾。
+
