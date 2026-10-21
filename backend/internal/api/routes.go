@@ -14,6 +14,7 @@ import (
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/notify"
 	"ehome/backend/internal/ota"
+	"ehome/backend/internal/sensorfield"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/metrics"
@@ -50,6 +51,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// option 注入 (main.go), 供 POST /notification-channels/:id/test 真发一条测试消息。
 	// 与 datasourceSvc 同规矩: 未注入时 /test 显式 503, 而不是 nil 解引用 panic。
 	var notifyDispatcher *notify.Dispatcher
+	// fieldResolver 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md §8):
+	// 经 *sensorfield.Registry option 注入 (main.go); 未注入时四条 /sensor-fields
+	// 路由注册显式 503 占位，保持路由存在且不 nil 解引用 panic。
+	var fieldResolver *sensorfield.Registry
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
@@ -68,6 +73,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			datasourceSvc = value
 		case *notify.Dispatcher:
 			notifyDispatcher = value
+		case *sensorfield.Registry:
+			fieldResolver = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -167,6 +174,11 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc)
 			registerFailoverLogRoutes(v1, datasourceSvc)
 		}
+
+		// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md §8.1–§8.4):
+		// /sensor-fields、/resolve、/preview、/schema 四条只读+试算端点。
+		// 未注入 resolver 时注册 503 占位（测试/API-only 部署路径）。
+		registerSensorFieldRoutes(v1, db, fieldResolver)
 
 		// Vendor + DeviceModel + DeviceCategory CRUD
 		registerVendorRoutes(v1, db)

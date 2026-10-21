@@ -237,6 +237,23 @@ func main() {
 	registerSimulationDriverTypes(driverRegistry)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
+	// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md v0.3 §3.3/§4.2/§9.2#10):
+	// 构造 Registry → 注入声明/别名/派生 → 冷加载投影表 → 启动 projector。
+	//
+	// 时序要求（写死，改动前先读方案）：
+	//   - 必须在 database.AutoMigrate 之后（冷加载要读 sensor_field_obs/meta）；
+	//   - 必须先于下面 nodemgr.SetLatestSinkFn 的包装（观测采集点要引用同一 registry）；
+	//   - 必须先于 alert/automation 求值器构造（SetPlanProvider 注入同一实例）。
+	// fail-closed：配置无效（别名冲突/死候选/派生环）时 setupFieldResolver 返回 error，
+	// 这里 Fatal 拒绝启动（方案 §12.1）；投影表读失败只降级"仅声明"。
+	fieldResolver, err := setupFieldResolver(db, cfg, driverRegistry)
+	if err != nil {
+		logger.Fatalf("Field resolver startup failed (fail-closed): %v", err)
+	}
+	fieldResolverCtx, fieldResolverStop := context.WithCancel(context.Background())
+	defer fieldResolverStop()
+	go fieldResolver.projector.Run(fieldResolverCtx)
+
 	// 数据生命周期 P4 收尾 (方案 v3.3 §2.4-2/§七-3): 尽力回填
 	// config_templates.edge_device_id 归属。依赖 driverRegistry 已就绪
 	// (WriteData 匹配需 driver CommandTemplates); 幂等, 失败仅告警不阻断
@@ -277,7 +294,14 @@ func main() {
 	}
 	defer devTransport.stop()
 
-	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
+	// 数据字段解析层观测采集点（方案 §3.3 红线 1 + 评审 B1 的处置）：
+	// **包装既有注入点**，internal/databus 零改动、零 import。每条已入库记录：
+	// 既有行为（更新最新值缓存）+ 新增纯内存观测计数（sync.Map + atomic，无锁无 DB）。
+	// device_id 口径 = UnifiedData.DeviceID = EdgeDevice.ID（禁用 edge_device_id，DS-14）。
+	nodeMgr.SetLatestSinkFn(func(record models.UnifiedData) {
+		api.SetLatestValue(record)
+		fieldResolver.registry.Observe(record.DeviceID, record.SensorName, record.Unit, record.Timestamp)
+	})
 	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
 	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
 	//
@@ -305,6 +329,9 @@ func main() {
 	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的
 	// 用户价值来源 —— 无人值守时把告警推到微信/QQ。
 	alertEvaluator.SetNotifier(notifyDispatcher)
+	// 数据字段解析层控制面注入 (方案 §9.2#3): 告警求值同样按 selector 编译；
+	// 未接入时纯字面量行为不变（PlanProvider 接口的最小方法集由 *sensorfield.Registry 满足）。
+	alertEvaluator.SetPlanProvider(fieldResolver.registry)
 	nodeMgr.SetAlertEvaluator(alertEvaluator)
 	go alertEvaluator.Start()
 	defer alertEvaluator.Stop()
@@ -365,6 +392,9 @@ func main() {
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)
 	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
+	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物；
+	// 纯字面量走快速路径（与历史 matchField 逐字节等价）。
+	automationEvaluator.SetPlanProvider(fieldResolver.registry)
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
@@ -505,7 +535,7 @@ func main() {
 	// notifyDispatcher 一并交给 API 层: POST /notification-channels/:id/test 要用它真发
 	// 一条测试消息 (D-1 步骤 4)。传的是**同一个实例** —— 否则"测试按钮"与真实通知
 	// 走两套客户端/两套 SSRF 判定的风险, 且测试通过不代表线上通道可用。
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, fieldResolver.registry, api.ControlPolicy{
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
 
