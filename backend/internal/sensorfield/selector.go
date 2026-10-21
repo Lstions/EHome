@@ -13,6 +13,9 @@ const (
 	defaultMaxFamilySize    = 64
 	defaultMaxVirtualDepth  = 4
 	defaultSnapshotTTL      = 10 * time.Minute
+
+	// defaultPreviewMaxSamples 是 /preview 试算的默认采样上限（方案 §8.3/§11）。
+	defaultPreviewMaxSamples = 5000
 )
 
 // maxCompileCacheEntries 是编译缓存条目上限（防无界增长；规则/选择器组合数远小于此）。
@@ -31,6 +34,9 @@ func defaultConfig(cfg Config) Config {
 	}
 	if cfg.SnapshotTTL <= 0 {
 		cfg.SnapshotTTL = defaultSnapshotTTL
+	}
+	if cfg.PreviewMaxSamples <= 0 {
+		cfg.PreviewMaxSamples = defaultPreviewMaxSamples
 	}
 	return cfg
 }

@@ -161,4 +161,6 @@ type Config struct {
 	MaxVirtualDepth int `yaml:"max_virtual_depth"`
 	// SnapshotTTL 编译缓存兜底 TTL（默认 10m）。
 	SnapshotTTL time.Duration `yaml:"-"`
+	// PreviewMaxSamples 是 /sensor-fields/preview 试算采样上限（默认 5000，方案 §8.3/§11）。
+	PreviewMaxSamples int `yaml:"preview_max_samples"`
 }
