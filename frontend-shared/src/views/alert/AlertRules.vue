@@ -8,12 +8,14 @@
         <span class="card-title">规则<el-tag v-if="store.rules.length" size="small" class="count-tag">{{ store.rules.length }}</el-tag></span>
         <el-button type="primary" :icon="Plus" data-test="create-rule" @click="openCreate">创建规则</el-button>
       </div>
-      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
-           本表 8 列合计 900px（名称 140 / 目标 120 / 传感器 120 / 阈值 140 /
-           持续 80 / 级别 90 / 启用 80 / 操作 130），360px 视口下表格盒 280px。
-           窄屏下「操作」列已取消 fixed（见该列上方注释），改为随表横滚，
-           否则 130px 固定列（占 46.4%）会盖住行内 el-switch。 -->
-      <div class="mobile-table-wrapper">
+      <!--
+        2026-10-21 第二轮截图精读（P1 信息损失）：393 下这张 8 列表格自然宽 900px，
+        视口内只剩「名称 + 目标 + 传感器」三列，名称/传感器被 show-overflow-tooltip 截断
+        （「电池过压告警（…」「cell_voltage_max」）—— 触屏无 hover，tooltip 不可达。
+        修法：窄屏（≤768px）改**卡片列表**（名称全显示 + 级别徽标 + 目标/传感器/阈值/持续
+        + 启用开关 + 编辑/删除）；桌面（>768px）表格与固定列逐像素不变。 -->
+      <!-- 桌面：宽表（结构 / 固定列 / 横滑提示与改前一致） -->
+      <div v-if="!isMobile" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.rules" v-loading="store.rulesLoading" data-test="rules-table">
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
@@ -67,6 +69,50 @@
         </el-table-column>
         <template #empty>暂无规则，点击右上角创建</template>
       </el-table>
+      </div>
+      <!-- 窄屏：规则卡片列表（桌面 8 列的信息全部保留，无省略号截断） -->
+      <div v-else class="rule-cards" data-test="rules-cards">
+        <p v-if="store.rulesLoading" class="cards-empty">正在加载规则…</p>
+        <template v-else>
+          <article v-for="row in store.rules" :key="row.id" class="rule-card" data-test="rule-card">
+            <div class="rule-card__head">
+              <h3 class="rule-card__name">{{ asRule(row).name }}</h3>
+              <el-switch
+                :model-value="row.enabled"
+                :aria-label="`${asRule(row).name} 启用`"
+                data-test="rule-enabled"
+                @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
+              />
+            </div>
+            <div class="rule-card__badges">
+              <el-tag :type="levelTag(row.level)" size="small">{{ levelText(row.level) }}</el-tag>
+              <span class="rule-card__state">{{ row.enabled ? '已启用' : '已停用' }}</span>
+            </div>
+            <dl class="rule-card__meta">
+              <div>
+                <dt>目标</dt>
+                <dd class="mono">{{ row.target_type === 'edge_device' ? '边缘设备' : '逻辑设备' }} #{{ row.target_id }}</dd>
+              </div>
+              <div>
+                <dt>传感器</dt>
+                <dd class="mono">{{ row.sensor_name }}</dd>
+              </div>
+              <div>
+                <dt>阈值条件</dt>
+                <dd class="mono">{{ comparatorText(row.comparator) }} {{ row.threshold }}</dd>
+              </div>
+              <div>
+                <dt>持续</dt>
+                <dd>{{ row.duration_sec > 0 ? `${row.duration_sec}s` : '立即' }}</dd>
+              </div>
+            </dl>
+            <div class="rule-card__ops">
+              <el-button type="primary" size="small" plain @click="openEdit(asRule(row))">编辑</el-button>
+              <el-button type="danger" size="small" plain @click="onDelete(asRule(row))">删除</el-button>
+            </div>
+          </article>
+          <p v-if="store.rules.length === 0" class="cards-empty">暂无规则，点击右上角创建</p>
+        </template>
       </div>
     </section>
 
@@ -122,10 +168,14 @@
           @change="onFilterChange"
         />
       </div>
-      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
-           本表 5 列合计 650px（状态 100 / 规则 120 / 值 110 / 触发时间 160 /
-           恢复时间 160），390px 视口下表格盒 310px ⇒ 「恢复时间」整列落在盒外。 -->
-      <div class="mobile-table-wrapper">
+      <!--
+        2026-10-21 第二轮截图精读（P1）：393 下这张 5 列表格自然宽 650px，视口内只剩
+        「状态 + 规则 + 值」三列，「触发时间 / 恢复时间」两列整列落在盒外 —— 时间是
+        告警事件最关键的定位信息，却要横滑才能看到。
+        修法：窄屏（≤768px）改**卡片列表**（状态 + 规则名 + 值 + 触发时间 + 恢复时间全显）；
+        桌面（>768px）表格与横滑提示逐像素不变。 -->
+      <!-- 桌面：宽表（结构与改前一致） -->
+      <div v-if="!isMobile" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.events" v-loading="store.eventsLoading" data-test="events-table">
         <el-table-column label="状态" width="100">
@@ -154,12 +204,53 @@
             <p>{{ store.rules.length === 0 ? '尚未创建告警规则' : '暂无告警事件' }}</p>
             <p class="table-empty-hint">
               {{ store.rules.length === 0
-                ? '在「告警规则」表中创建规则后，条件触发的事件会出现在这里。'
+                ? (isMobile
+                  ? '在上方「告警规则」中创建规则后，条件触发的事件会出现在这里。'
+                  : '在「告警规则」表中创建规则后，条件触发的事件会出现在这里。')
                 : '规则已就绪但尚未触发：确认目标设备在线、且传感器名与设备实际上报的类别一致。' }}
             </p>
           </div>
         </template>
       </el-table>
+      </div>
+      <!-- 窄屏：告警事件卡片列表（状态 / 规则名 / 值 / 触发时间 / 恢复时间全显） -->
+      <div v-else class="event-cards" data-test="events-cards">
+        <p v-if="store.eventsLoading" class="cards-empty">正在加载告警事件…</p>
+        <template v-else>
+          <article v-for="row in store.events" :key="row.id" class="event-card" data-test="event-card">
+            <div class="event-card__head">
+              <el-tag :type="row.state === 'firing' ? 'danger' : 'success'" size="small">
+                {{ row.state === 'firing' ? '触发中' : '已恢复' }}
+              </el-tag>
+              <span class="event-card__rule" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</span>
+            </div>
+            <dl class="event-card__meta">
+              <div>
+                <dt>值</dt>
+                <dd class="mono">{{ formatValue(row.value) }}</dd>
+              </div>
+              <div>
+                <dt>触发时间</dt>
+                <dd>{{ formatTime(row.fired_at) }}</dd>
+              </div>
+              <div>
+                <dt>恢复时间</dt>
+                <dd>{{ formatTime(row.resolved_at) }}</dd>
+              </div>
+            </dl>
+          </article>
+          <!-- F3：与表格 #empty 相同的"没配规则 / 没触发"区分口径 -->
+          <div v-if="store.events.length === 0" class="cards-empty">
+            <p>{{ store.rules.length === 0 ? '尚未创建告警规则' : '暂无告警事件' }}</p>
+            <p class="cards-empty__hint">
+              {{ store.rules.length === 0
+                ? (isMobile
+                  ? '在上方「告警规则」中创建规则后，条件触发的事件会出现在这里。'
+                  : '在「告警规则」表中创建规则后，条件触发的事件会出现在这里。')
+                : '规则已就绪但尚未触发：确认目标设备在线、且传感器名与设备实际上报的类别一致。' }}
+            </p>
+          </div>
+        </template>
       </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表绑 store 的全量数组 —— 后端 Limit(500) 静默截断, 前端
@@ -614,4 +705,61 @@ onMounted(async () => {
 .table-empty { color: var(--el-text-color-secondary); }
 .table-empty p { margin: 0; }
 .table-empty-hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
+
+/* ---- 窄屏卡片列表（2026-10-21 第二轮：393 宽表只剩 3 列 + 名称/传感器被省略号截断）----
+   卡片长度不受列宽限制：名称/传感器名一律换行全显，不用 ellipsis 隐藏数据。
+   视觉语言与 /automation 规则卡片、Dashboard .latest-card 保持一致
+   （浅描边 + 8px 圆角 + 双列 meta），不引入新视觉。 */
+@media (max-width: 768px) {
+  .rule-cards, .event-cards { display: flex; flex-direction: column; gap: 10px; }
+  .rule-card, .event-card {
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: var(--radius-md, 8px);
+    padding: 10px 12px;
+    background: var(--el-bg-color);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rule-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .rule-card__name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .rule-card__head :deep(.el-switch) { flex: 0 0 auto; min-height: 44px; }
+  .rule-card__badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .rule-card__state { font-size: 12px; color: var(--el-text-color-secondary); }
+  .rule-card__meta, .event-card__meta { display: flex; flex-direction: column; gap: 4px; margin: 0; min-width: 0; }
+  .rule-card__meta > div, .event-card__meta > div { display: flex; gap: 8px; font-size: 13px; line-height: 1.5; min-width: 0; }
+  .rule-card__meta dt, .event-card__meta dt { flex: 0 0 auto; color: var(--el-text-color-secondary); }
+  .rule-card__meta dd, .event-card__meta dd { margin: 0; min-width: 0; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+  .rule-card__ops { display: flex; flex-wrap: wrap; gap: 8px; }
+  .rule-card__ops :deep(.el-button) { margin-left: 0; min-height: 44px; padding-left: 14px; padding-right: 14px; }
+  .event-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .event-card__rule {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+  }
+  /* 空态 / 加载态必须可见且有解释（卡片列表不渲染表格 #empty 插槽） */
+  .cards-empty {
+    margin: 0;
+    padding: 16px 8px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--el-text-color-secondary);
+  }
+  .cards-empty p { margin: 0; }
+  .cards-empty__hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
+}
 </style>

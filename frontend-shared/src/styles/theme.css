@@ -1456,3 +1456,35 @@ html.dark .el-pagination.is-background .el-pager li.is-active,
 .dark-theme .el-pagination.is-background .el-pager li.is-active {
   color: #ffffff !important;
 }
+/* ---- 对话框高度兜底（2026-10-21 真机实测缺陷）----
+   现象：/automation「创建规则」对话框 640×926px，在 1440×851 与 1440×900 下**超出视口**
+   （bottom 1054/1061 > vh），且 body 不可滚 ⇒ 底部「保存 / 取消」按钮用户点不到。
+   根因：项目内 el-dialog 只约束了宽度（下方 max-width:92vw），没有约束高度；
+   EP 默认也不给 dialog 高度上限（它只按内容撑开）。
+   修法：给 dialog 加视口高度上限 + 纵向 flex，header/footer 不收缩、body 内部滚动。
+   这样任意内容长度的对话框都保证：不超视口、按钮常驻可达。 */
+.el-dialog {
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+.el-dialog__header,
+.el-dialog__footer {
+  flex: 0 0 auto;
+}
+.el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}/* 高度上限仍不够：EP 给 .el-dialog 默认 margin-top:15vh，819+128=947 依然溢出。
+   把遮罩层改成 flex 居中、dialog 的纵向 margin 收敛到 16px，高度上限才真正生效。
+   （只改定位与间距，不改任何尺寸/配色；桌面与窄屏都受益） */
+.el-overlay-dialog {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.el-dialog {
+  margin: 16px auto !important;
+}

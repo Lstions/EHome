@@ -145,13 +145,17 @@
         <el-card shadow="hover">
           <template #header>
             <div class="trend-card-header">
+              <!-- 类别已由右侧下拉显示，卡头只写时间档，避免同一屏出现两次「总电压」 -->
               <span>{{ trendRangeLabel }}趋势</span>
               <div class="trend-controls">
-                <el-radio-group v-model="trendRange" size="small" @change="fetchTrendData">
-                  <el-radio-button value="1h">1小时</el-radio-button>
-                  <el-radio-button value="24h">24小时</el-radio-button>
-                  <el-radio-button value="7d">7天</el-radio-button>
-                </el-radio-group>
+                <!-- 统一时间档控件（2026-10-21）：不再各页各写一套 el-radio-group，
+                     否则同一控件在仪表盘/BMS/逆变器三处字号与高度都不同。仪表盘只有固定档，无「自定义」。 -->
+                <TimeRangeSelector
+                  v-model="trendRange"
+                  :custom-range="null"
+                  :show-custom="false"
+                  @change="fetchTrendData"
+                />
                 <el-select v-model="trendCategory" size="small" class="trend-category-select" @change="selectedTrendByUser = true">
                   <el-option
                     v-for="cat in availableTrendCategories"
@@ -165,10 +169,12 @@
           </template>
           <el-skeleton v-if="trendLoading" :rows="4" animated />
           <div v-else style="min-height: 240px;">
+            <!-- 2026-10-21：不再给 LineChart 传 canvas 内标题 ——
+                 卡片头已写「最近 24 小时趋势」+ 类别下拉已显示当前类别，
+                 图内再画一个 20px 大标题既重复又挤掉 60px 绘图区（真机截图实测）。 -->
             <LineChart
               v-if="trendSeries.length > 0"
               :series="trendSeries"
-              :title="`${trendCategoryName}趋势`"
               height="300px"
             />
             <EmptyState
@@ -384,6 +390,7 @@ import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
 import { useResponsive } from '@/composables/useResponsive'
+import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 
 const router = useRouter()
 const { isMobile } = useResponsive()
@@ -433,9 +440,7 @@ const trendRangeLabel = computed(() => {
   const map: Record<string, string> = { '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天' }
   return map[trendRange.value] || ''
 })
-const trendCategoryName = computed(() => {
-  return sensorNameMap[trendCategory.value] || trendCategory.value
-})
+
 
 // 传感器映射已提取到 utils/sensor.ts (S6 fix)
 
@@ -491,7 +496,15 @@ watch(availableTrendCategories, (list) => {
   if (selectedTrendByUser.value || list.length === 0) return
   const realKeys = seenCategoryKeys.value
   if (realKeys.has(trendCategory.value)) return
-  const first = list.find((c) => realKeys.has(c.value))
+  // 优先连续物理量：真实数据里第一个有值的键常常是 alarm_*（0/1 状态位），
+  // 画出来是一条贴底的直线，看起来像「没数据」。按业务优先级挑一个连续量作默认。
+  const preferred = [
+    'total_voltage', 'battery_voltage', 'soc', 'rsoc', 'current',
+    'output_active_power', 'grid_voltage', 'pv_power', 'temperature_1', 'temperature',
+  ].find((k) => realKeys.has(k))
+  const first = preferred
+    ? { value: preferred }
+    : list.find((c) => realKeys.has(c.value))
   if (first) {
     trendCategory.value = first.value
     void fetchTrendData()
@@ -1127,6 +1140,12 @@ onUnmounted(() => {
     width: 100%;
     flex-direction: column;
     align-items: stretch;
+    gap: 8px;
+  }
+  /* 窄屏类别下拉铺满整行（旧规则固定 140px，与上方整行的时间档左右不对齐） */
+  .trend-controls .trend-category-select,
+  .trend-controls :deep(.el-select) {
+    width: 100%;
   }
 
   .trend-controls :deep(.el-radio-group) {

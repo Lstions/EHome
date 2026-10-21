@@ -231,20 +231,28 @@ describe('F26 窄屏固定列不得遮挡数据列 — 操作列固定语义', (
     ).toEqual(cols.map(() => '180'))
   })
 
-  it('automation @390px：操作列必须取消 fixed —— F26 的直接修复点', async () => {
+  /**
+   * 2026-10-21 第二轮升级（判据随结构升级，理由见报告）：
+   * 上一轮 F26 对 /automation 的修复是「窄屏取消 fixed」，但 2026-10-21 用注入数据在真浏览器
+   * 复测发现：窄屏 393px 下 7 列规则表只剩 2 列、8 列事件表右侧 100px 固定「操作」列仍压住
+   * 「规则」列文字（td 192~312 被覆盖 59px）—— 取消 fixed 只解决了**控件可点**，
+   * 没解决**信息可读**。第二轮改为：**窄屏根本不渲染表格，改用卡片列表**；
+   * 桌面（>768px）表格、fixed="right"、列宽全部逐像素不变。
+   * ⇒ 窄屏不再存在任何 el-table-column（固定列遮挡的产生条件从根上消失），
+   *   故本用例的判据从「窄屏 fixed=false」升级为「窄屏渲染卡片列表、不渲染固定列表格」。
+   *   桌面 fixed 断言（上一条用例）原样保留。
+   */
+  it('automation @390px：窄屏渲染卡片列表、不渲染表格（固定列遮挡条件消失）', async () => {
     const wrapper = await mountPage('automation', 390)
-    for (const c of operationColumns(wrapper, '180')) {
-      expect(
-        isUnfixed(c.fixed),
-        '窄屏操作列仍是固定列（fixed=' + String(c.fixed) + '）：粘性列绘制顺序恒在普通列之上，' +
-          '会整列盖住行内「启用」开关 —— 真浏览器实测 elementFromPoint 自身 0/48、命中固定列 48/48'
-      ).toBe(true)
-      expect(c.width, '窄屏只是取消固定，列宽不得变化（否则会改变桌面密度）').toBe('180')
-    }
-    // 对照：事件表操作列（100px）保持固定，且它经实测不遮挡（fixedW 100 << 表格盒 280/310）
-    for (const c of operationColumns(wrapper, '100')) {
-      expect(c.fixed, '事件表操作列在窄屏仍应保持 fixed="right"（实测不遮挡，无需改动）').toBe('right')
-    }
+    // 卡片化后窄屏不挂载表格 ⇒ el-table-column 实例为 0 是**预期结果**（不是分母失效）
+    expect(
+      wrapper.findAllComponents(ColumnProbe).length,
+      '窄屏仍挂载了 el-table-column：卡片化未生效，固定列遮挡仍有产生条件'
+    ).toBe(0)
+    expect(wrapper.find('[data-test="rules-table"]').exists(), '窄屏仍渲染规则表格').toBe(false)
+    expect(wrapper.find('[data-test="events-table"]').exists(), '窄屏仍渲染触发历史表格').toBe(false)
+    expect(wrapper.find('[data-test="rules-cards"]').exists(), '窄屏缺少规则卡片列表').toBe(true)
+    expect(wrapper.find('[data-test="events-cards"]').exists(), '窄屏缺少事件卡片列表').toBe(true)
   })
 
   it('data-sources @1440px：操作列仍 fixed="right" 且宽 330px', async () => {
@@ -314,8 +322,8 @@ describe('F26 窄屏固定列不得遮挡数据列 — 操作列固定语义', (
       expect(opCols.length, name + ' 找不到「操作」列，断言会假绿').toBeGreaterThan(0)
 
       // 需要响应式取消固定的操作列：宽 180（automation 规则表）/ 330（data-sources）。
-      // 宽 100 的是 automation 事件表操作列 —— 实测不遮挡（fixedW 100 << 表格盒 280/310，
-      // 「确认执行」按钮中心恒落在粘性区外，48/48 命中自身），保持静态 fixed。
+      // 宽 100 的是 automation 事件表操作列 —— 卡片化后它只在桌面渲染（窄屏整表不渲染），
+      // 桌面 fixed 语义保持，故仍为静态 fixed="right"。
       const needReactive = opCols.filter((c) => /width="(180|330)"/.test(c))
       const staticKept = opCols.filter((c) => !/width="(180|330)"/.test(c))
 

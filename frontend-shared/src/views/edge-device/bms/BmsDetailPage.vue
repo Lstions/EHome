@@ -8,79 +8,51 @@
     · 四条用户诉求（保护明细默认展开 / 流式布局 / 实时流不抢滚动 / 轮询上限）的落点见各区段注释。
   -->
   <div class="bms-detail-page">
-    <!-- 页头：设备身份（真实详情） -->
-    <header class="page-head">
-      <!-- 面包屑的「边缘设备管理」可点击返回列表（旧版由 DeviceHeader 的返回按钮提供；
-           本页改为面包屑承载，但必须真的能点 —— .crumb-link 有 cursor:pointer 样式，
-           若无 @click 就是**假可点**，比没有更糟）。 -->
-      <div class="crumb">
-        <el-icon :size="14"><HomeFilled /></el-icon>
-        <span class="sep">/</span>
-        <button type="button" class="crumb-link" @click="goBackToList">边缘设备管理</button>
-        <span class="sep">/</span>
-        <span class="crumb-current">BMS 设备详情</span>
-      </div>
-      <div class="head-main">
-        <div class="dev-ident">
-          <div class="dev-name-line">
-            <h1 class="dev-name">{{ deviceName }}</h1>
-            <el-tag :type="statusTag.type" size="small" effect="plain">{{ statusTag.text }}</el-tag>
-            <el-tag type="info" size="small" effect="plain">{{ deviceTypeLabel }} · {{ cellCountLabel }}</el-tag>
-          </div>
-          <div class="dev-sub">
-            <template v-if="isMobileViewport">
-              <!--
-                移动端紧凑版：与桌面版**信息等价**，只是去掉重复的"节点/通道/设备"字样，
-                用 # 与 · 分隔。393px 下桌面长文案会折成 3~4 行（51px+），紧凑版压到 2 行。
-                保留全部 5 项：节点序列号、总线、设备号、固件、轮询启用数。
-              -->
-              <span>{{ nodeLabel }}</span>
-              <span>·</span><span>{{ channelLabel }}</span>
-              <span>·</span><span>#{{ deviceId }}</span>
-              <span>·</span><span>FW {{ firmwareLabel }}</span>
-              <span>·</span><span>轮询 <b>{{ enabledCount }}<template v-if="hasPollLimit">/{{ pollLimitValue }}</template></b></span>
-            </template>
-            <template v-else>
-              节点 {{ nodeLabel }} · 通道 {{ channelLabel }} · 设备 #{{ deviceId }} · 节点固件 {{ firmwareLabel }}
-              <template v-if="hasPollLimit"> · 轮询已启用 <b>{{ enabledCount }}/{{ pollLimitValue }}</b> 条</template>
-              <template v-else> · 轮询已启用 <b>{{ enabledCount }}</b> 条</template>
-            </template>
-          </div>
-        </div>
-        <!-- 设备操作（2026-10-17 转正时补回）：评审 demo 是视觉稿，没有这些入口；
-             生产页必须有 —— 否则用户在本页无法同步到 HA / 编辑 / 删除设备，
-             而旧版 BmsDetailPage 是通过 DeviceHeader 提供它们的，属功能回退。 -->
-        <div class="head-actions">
-          <!--
-            移动端只保留「刷新」一个主操作，其余收进 ⋯ 溢出菜单：
-            实测 393px 下 4 个按钮各占 44px 触控高，会折成 2~3 行，
-            页头从 221px 涨到约 300px，还把设备身份信息挤到看不见。
-            桌面端（≥769px）保持原来的 4 按钮横排 —— 契约测试锁定该结构。
-          -->
-          <template v-if="isMobileViewport">
-            <el-button size="small" type="primary" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
-            <el-dropdown trigger="click" @command="onHeadMoreCommand">
-              <el-button size="small" :icon="MoreFilled" circle aria-label="更多设备操作" />
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="sync" :icon="Upload" :disabled="syncingHA">同步到 HA</el-dropdown-item>
-                  <el-dropdown-item command="edit" :icon="Edit">编辑</el-dropdown-item>
-                  <el-dropdown-item command="delete" :icon="Delete" divided>
-                    <span style="color: var(--el-color-danger);">删除</span>
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-          <template v-else>
-            <el-button size="small" :loading="syncingHA" :icon="Upload" @click="onSyncToHA">同步到 HA</el-button>
-            <el-button size="small" :icon="Edit" @click="onEditDevice">编辑</el-button>
-            <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${deviceName}`" @click="onDeleteDevice">删除</el-button>
-            <el-button size="small" :icon="Refresh" :loading="refreshing" @click="refreshAll">刷新</el-button>
-          </template>
-        </div>
-      </div>
-    </header>
+    <!--
+      页头：统一共享组件 DeviceHeader（2026-10-21 接入，用户诉求「边缘设备顶部
+      实时连接/刷新数据那里统一一个组件」）。BMS 不再自建 <header class="page-head">：
+      返回按钮 / 名称 / 状态标签 / 面包屑 / 操作组全部由共享组件渲染，与逆变器页、
+      通用设备页同款 —— 窄屏确定性两行（行1 返回+名称+⋯；行2 刷新独占整行），
+      桌面单行完整操作组；同时补上「实时连接」状态标签（WS 已连接时显示）。
+
+      · builtin-dialogs=false：编辑/删除继续用本页自己的弹窗
+        （BMS 删除要选择历史数据处理方式，共享内置对话框没有这段）；
+      · #subtitle 插槽：保留本页「节点/通道/设备号/固件/轮询数」的窄屏紧凑版与桌面长文案；
+      · 事件直连本页既有 handler（goBackToList / onSyncToHA / refreshAll /
+        onEditDevice / onDeleteDevice），行为与改前一致。
+    -->
+    <DeviceHeader
+      :device="device"
+      :ws-connected="wsConnected"
+      :syncing-h-a="syncingHA"
+      :refreshing="refreshing"
+      :title="deviceName"
+      :tags="headerTags"
+      :breadcrumb="headerBreadcrumb"
+      :builtin-dialogs="false"
+      @back="goBackToList"
+      @sync-to-h-a="onSyncToHA"
+      @refresh="refreshAll"
+      @edit="onEditDevice"
+      @delete="onDeleteDevice"
+    >
+      <template #subtitle>
+        <!-- 窄屏紧凑版：与桌面版信息等价（节点序列号/总线/设备号/固件/轮询启用数），
+             用 # 与 · 分隔；每个 span 是不可断的「词」，放不下整词换行。 -->
+        <span v-if="isMobileViewport" class="bms-sub">
+          <span>{{ nodeLabel }}</span>
+          <span>·</span><span>{{ channelLabel }}</span>
+          <span>·</span><span>#{{ deviceId }}</span>
+          <span>·</span><span>FW {{ firmwareLabel }}</span>
+          <span>·</span><span>轮询 <b>{{ enabledCount }}<template v-if="hasPollLimit">/{{ pollLimitValue }}</template></b></span>
+        </span>
+        <template v-else>
+          节点 {{ nodeLabel }} · 通道 {{ channelLabel }} · 设备 #{{ deviceId }} · 节点固件 {{ firmwareLabel }}
+          <template v-if="hasPollLimit"> · 轮询已启用 <b>{{ enabledCount }}/{{ pollLimitValue }}</b> 条</template>
+          <template v-else> · 轮询已启用 <b>{{ enabledCount }}</b> 条</template>
+        </template>
+      </template>
+    </DeviceHeader>
 
     <main class="page-body">
       <!-- 设备详情加载失败：常驻页面，不随 toast 消失 -->
@@ -670,12 +642,13 @@ import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from
 import type { Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  HomeFilled, PieChart, Odometer, DataLine, Lightning, Open, Lock,
+  PieChart, Odometer, DataLine, Lightning, Open, Lock,
   CircleCheckFilled, WarningFilled, Bottom, ArrowRight, InfoFilled,
-  Timer, Operation, SetUp, Tools, Document, MagicStick, Refresh,
-  Upload, Edit, Delete, MoreFilled,
+  Timer, Operation, SetUp, Tools, Document, MagicStick,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
+// 统一设备页头（逆变器 / BMS / 通用设备三页共用）：身份、标签、面包屑、操作组都由它渲染
+import DeviceHeader from '@/views/edge-device/shared/DeviceHeader.vue'
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
@@ -778,13 +751,6 @@ const isMobileViewport = ref(
 let mobileMql: MediaQueryList | null = null
 const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
 
-/** 页头 ⋯ 菜单的命令分发（移动端专用；桌面端各按钮直连原 handler） */
-const onHeadMoreCommand = (command: string) => {
-  if (command === 'sync') onSyncToHA()
-  else if (command === 'edit') onEditDevice()
-  else if (command === 'delete') onDeleteDevice()
-}
-
 const deviceName = computed(() => device.value?.name || DASH)
 const deviceTypeLabel = computed(() => device.value?.device_type || DASH)
 const firmwareLabel = computed(() => device.value?.node?.firmware_version || DASH)
@@ -828,6 +794,11 @@ const REALTIME_MAX_ITEMS = 200
 // 本页是独立 DEV 路由（不在 MainLayout 之下，而 WS 连接由 MainLayout 建立）。
 // 不在这里补一次 connect()，useRealtimeData 就永远收不到推送 —— 实时流会只剩快照兜底。
 const wsStore = useWebSocketStore()
+/**
+ * 页头「实时连接」标签：与逆变器页/通用设备页同一口径（WS 已连接才显示）。
+ * 改前自建页头没有这个状态位 —— 统一页头后补上，用户一眼能看出数据是否在推。
+ */
+const wsConnected = computed(() => wsStore.isConnected)
 const {
   dataItems, latestData, clear: clearRealtime,
 } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
@@ -892,6 +863,20 @@ const cellCount = computed(() => {
   return highest
 })
 const cellCountLabel = computed(() => (cellCount.value > 0 ? cellCount.value + 'S' : DASH))
+
+/**
+ * 页头状态标签（在线/离线 … + 设备类型 · 串数）。
+ * 文案与改前自建页头**逐字一致**（契约测试锁定），只是渲染交给 DeviceHeader。
+ */
+const headerTags = computed<Array<{ text: string; type: TagType; effect: 'plain' }>>(() => [
+  { text: statusTag.value.text, type: statusTag.value.type, effect: 'plain' },
+  { text: deviceTypeLabel.value + ' · ' + cellCountLabel.value, type: 'info', effect: 'plain' },
+])
+/** 页头面包屑：首段可点（DeviceHeader 用原生 button + router.push 承载，不是假可点） */
+const headerBreadcrumb: Array<{ text: string; to?: string }> = [
+  { text: '边缘设备管理', to: '/edge-device' },
+  { text: 'BMS 设备详情' },
+]
 
 interface CellVoltage { index: number; voltage: number }
 const cells = computed<CellVoltage[]>(() => {
@@ -2081,44 +2066,7 @@ onUnmounted(() => {
   font-size: 13px;
   padding-bottom: 24px;
 }
-.page-head {
-  background: var(--el-bg-color);
-  border-bottom: 1px solid var(--el-border-color);
-  padding: 12px 24px 16px;
-}
-.crumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  margin-bottom: 10px;
-}
-/* 这里是个原生 <button>（为了可点 + 键盘可达），但**必须把 UA 样式清零**：
-   否则桌面/手机都会出现 2px outset 黑边 + 灰底 + Arial 13.33px 的「老式按钮」，
-   与同排 11/12px 的面包屑文字完全不是一套（2026-10-20 视觉评审实测）。 */
-.crumb-link {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 0;
-  background: none;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-.crumb-link:hover { color: var(--el-color-primary); }
-.crumb-link:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; border-radius: 2px; }
-.crumb-current { color: var(--el-text-color-primary); }
-.sep { color: var(--el-border-color); }
-.head-main { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
-.dev-ident { min-width: 0; }
-.dev-name-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dev-name { margin: 0; font-size: 18px; font-weight: 600; color: var(--el-text-color-primary); }
-.dev-sub { margin-top: 6px; font-size: 12px; color: var(--el-text-color-secondary); }
-.dev-sub b { color: var(--el-text-color-primary); }
-.head-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* 页头已改由共享 DeviceHeader 渲染（2026-10-21），本页不再维护 .page-head、.crumb、.dev-*、.head-* 样式 */
 
 /* 流式：不再用 1480px 上限把内容钉在中间，宽度自适应可用空间 */
 .page-body { max-width: 100%; margin: 0 auto; padding: 16px 24px; }
@@ -2420,56 +2368,23 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
   /*
-    页头压缩（2026-10-20，实测 221px → 目标 ≤112px）。
-
-    原来的三行结构（面包屑 / 设备名+标签 / 详细副文本+4 按钮）在 393px 下
-    实际渲染到 221~300px，占掉 1/3 屏，用户批评「顶部重复内容」。
-
-    压缩手段（不动 DOM 语义，只改视觉与换行）：
-      ① 面包屑收成一行小字（保留可点返回，只是不再占 10px margin + 20px 行高）；
-      ② 设备副文本（节点/通道/设备#/固件/轮询数）从"长句"改为**单行可横向滑动的标签组**，
-         既省高度又不丢信息；
-      ③ 操作按钮已在模板层收敛为「刷新 + ⋯」（见 head-actions 的 isMobileViewport 分支）。
+    页头（2026-10-21 起由共享 DeviceHeader 渲染）：本页不再维护页头视觉，
+    窄屏两行布局与操作组全部在 DeviceHeader 内。这里只保留一处本页专属样式 ——
+    副文本插槽的紧凑折行，与改前 .dev-sub 的窄屏规则**等价**：
+    每个 span 是不可断的「词」，放不下就整词换行（序列号 F0F5BD02DD84 不会被拦腰截断），
+    信息完整可读，不横滚也不省略。
   */
-  .page-head { padding: 10px 12px 12px; }
   .page-body { padding: 12px; }
-  .head-actions { margin-left: 0; gap: 8px; }
-  .head-main { align-items: flex-start; gap: 10px; flex-wrap: nowrap; }
-  .dev-ident { flex: 1; min-width: 0; }
-
-  .crumb { margin-bottom: 6px; font-size: 11px; gap: 6px; }
-  /* 面包屑层级文案**不截断**（「边缘设备管理」7 个字必须完整可读）：
-     热区用上下 padding 撑到 ~36px，再用负 margin 抵消，视觉高度不变、头部仍是 ≤120px。 */
-  .crumb .crumb-link { padding: 8px 0; margin: -8px 0; }
-
-  .dev-name { font-size: 17px; }
-  .dev-name-line { gap: 6px; }
-
-  /*
-    副文本：**允许折行，不横滚、不省略**。
-
-    走过的弯路：第一版改成 `white-space: nowrap + overflow-x: auto` 想省高度，
-    实测 393px 下可视宽只有 206px，而内容宽 462px ⇒ 有 2/3 内容被裁在右侧，
-    用户看不到「轮询已启用 1/32 条」这类关键信息，且**没有滚动提示**。
-    对一行 12px 的次要文本，"要用户主动横滑"是不可发现交互。
-
-    定稿：正常折行（最多 2 行，约 34px），信息完整可读。
-    代价是比横滚多 17px 高度，但页头总高仍控制在 ~110px，达标。
-    折行文案本身也精简：去掉冗余分隔符，改为「· 」紧凑风格。
-  */
-  .dev-sub {
-    margin-top: 4px;
-    line-height: 17px;
-    font-size: 11px;
-    /* 用 flex + gap 控制间距与折行：每个 span 是不可断的"词"，
-       放不下就整词换行。这样序列号（F0F5BD02DD84）不会被拦腰截断。 */
+  .bms-sub {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     gap: 0 4px;
-    overflow-wrap: normal;
+    font-size: 11px;
+    line-height: 17px;
   }
-  .dev-sub > span { white-space: nowrap; }
+  .bms-sub > span { white-space: nowrap; }
+
   .card { padding: 14px 12px; }
   .head-right, .stream-actions { margin-left: 0; }
   /* 折叠头已经写了区块名，展开后卡片自己的标题就是重复内容（用户点名「顶部重复内容」）：

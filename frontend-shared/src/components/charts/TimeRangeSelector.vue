@@ -1,10 +1,10 @@
 <template>
-  <div class="time-range-selector">
+  <div class="time-range-selector" :class="{ 'is-dense': dense }">
     <el-radio-group v-model="timeRange" size="small" @change="handleChange">
       <el-radio-button value="1h">1小时</el-radio-button>
       <el-radio-button value="24h">24小时</el-radio-button>
       <el-radio-button value="7d">7天</el-radio-button>
-      <el-radio-button value="custom">自定义</el-radio-button>
+      <el-radio-button v-if="showCustom" value="custom">自定义</el-radio-button>
     </el-radio-group>
     <el-date-picker
       v-if="timeRange === 'custom'"
@@ -25,10 +25,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: string
   customRange: [string, string] | null
-}>()
+  /**
+   * 紧凑档：用于卡片头右上角（如 BMS 运行趋势/电芯历史），桌面把分段按钮压到 24px
+   * 与相邻 small 按钮同高；窄屏/粗指针仍升回 44px 触摸目标。
+   */
+  dense?: boolean
+  /** 是否提供「自定义」区间（仪表盘只有 1h/24h/7d，传 false） */
+  showCustom?: boolean
+}>(), { dense: false, showCustom: true })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -52,6 +59,17 @@ const handleChange = () => {
 </script>
 
 <style scoped>
+/*
+  时间档选择器（1小时 / 24小时 / 7天 / 自定义）统一样式。
+
+  2026-10-21 用户真机反馈「时间样式不对、文字没居中、大小也不对」，实测根因：
+    ① 全局 theme.css 给 .el-radio-button__inner 抬了 min-height:36px（触摸目标），
+       但没改 display/line-height ⇒ 盒子被撑高、文字仍贴上沿（看起来没居中）；
+    ② 调用处（BMS 图表卡）又各自 :deep 覆盖成 24px ⇒ 同一控件在不同卡片不同高；
+    ③ 窄屏 flex:1 1 auto 让四段按内容分配（实测 53/59/41/58px）⇒ 长短不齐像没对齐；
+    ④ 字号 12px 与相邻正文 13px 不一致，看起来「大小不对」。
+  在组件内一次性收口：inline-flex 垂直居中 + 统一 13px + 窄屏四段等宽 + 触摸 44px。
+*/
 .time-range-selector {
   display: flex;
   align-items: center;
@@ -60,21 +78,55 @@ const handleChange = () => {
   min-width: 0;
 }
 
+.time-range-selector :deep(.el-radio-button__inner) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* 紧凑档（卡片头右上角）：与相邻 small 按钮同高，避免一高一矮 */
+.time-range-selector.is-dense :deep(.el-radio-button__inner) {
+  min-height: 24px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
 .custom-date-picker {
   width: 340px;
 }
 
-@media (max-width: 480px) {
-  .time-range-selector :deep(.el-radio-group) {
-    display: flex;
-    flex-wrap: wrap;
+@media (max-width: 768px) {
+  .time-range-selector {
     width: 100%;
   }
+  .time-range-selector :deep(.el-radio-group) {
+    display: flex;
+    width: 100%;
+    flex-wrap: nowrap;
+  }
   .time-range-selector :deep(.el-radio-button) {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .time-range-selector :deep(.el-radio-button__inner) {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 4px;
+    font-size: 13px;
+    white-space: nowrap;
   }
   .custom-date-picker {
     width: 100% !important;
+  }
+}
+
+@media (pointer: coarse) {
+  .time-range-selector :deep(.el-radio-button__inner) {
+    min-height: 44px;
   }
 }
 </style>

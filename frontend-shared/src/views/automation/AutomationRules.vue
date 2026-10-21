@@ -11,8 +11,16 @@
         <span class="card-title">规则<el-tag v-if="rules.length" size="small" class="count-tag">{{ rules.length }}</el-tag></span>
         <el-button type="primary" :icon="Plus" data-test="create-rule" @click="openCreate">创建规则</el-button>
       </div>
-      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
-      <div class="mobile-table-wrapper">
+      <!--
+        2026-10-21 第二轮截图精读（P1 信息损失）：393 下这张 7 列表格自然宽 970px，
+        视口内只剩「名称 + 触发器」两列，且名称被 show-overflow-tooltip 截成
+        「客厅高温自动开…」—— 触屏没有 hover，tooltip 不可达，横滑也只是多看一列。
+        修法：窄屏（≤768px）改**卡片列表**（名称全显示 + 触发器类型徽标 + 触发条件/动作摘要
+        + 冷却/熔断 + 启用开关 + 操作按钮，顶部虚线之外无信息损失）；桌面（>768px）表格
+        与固定列逐像素不变。
+      -->
+      <!-- 桌面：宽表（结构 / 固定列 / 横滑提示与改前一致） -->
+      <div v-if="!isMobile" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="rules" v-loading="rulesLoading" data-test="rules-table">
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
@@ -85,6 +93,53 @@
         <template #empty>暂无规则，点击右上角创建</template>
       </el-table>
       </div>
+      <!-- 窄屏：规则卡片列表（每张卡承载桌面 7 列的全部信息，无省略号截断） -->
+      <div v-else class="rule-cards" data-test="rules-cards">
+        <p v-if="rulesLoading" class="cards-empty">正在加载规则…</p>
+        <template v-else>
+        <article v-for="row in rules" :key="row.id" class="rule-card" data-test="rule-card">
+          <div class="rule-card__head">
+            <h3 class="rule-card__name">{{ asRule(row).name }}</h3>
+            <el-switch
+              :model-value="row.enabled"
+              :aria-label="`${asRule(row).name} 启用`"
+              data-test="rule-enabled"
+              @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
+            />
+          </div>
+          <div class="rule-card__badges">
+            <el-tag size="small" class="trigger-type-tag">{{ triggerTypeText(row.trigger_type) }}</el-tag>
+            <el-tag size="small" :type="row.action_type === 'device_action' ? 'warning' : 'info'">
+              {{ row.action_type === 'device_action' ? '设备动作' : '通知' }} ×{{ ruleActions(asRule(row)).length }}
+            </el-tag>
+            <el-tag v-if="ruleRiskCount(asRule(row))" type="danger" size="small" data-test="rule-risk-count">
+              <span aria-hidden="true">⚠</span> 含 {{ ruleRiskCount(asRule(row)) }} 个风险动作
+            </el-tag>
+            <el-tag v-if="row.require_confirmed" type="warning" size="small">需确认</el-tag>
+          </div>
+          <dl class="rule-card__meta">
+            <div>
+              <dt>触发条件</dt>
+              <dd class="mono">{{ triggerSummary(asRule(row)) }}</dd>
+            </div>
+            <div>
+              <dt>动作</dt>
+              <dd class="mono">{{ actionSummary(asRule(row)) }}</dd>
+            </div>
+            <div>
+              <dt>冷却/熔断</dt>
+              <dd class="mono">{{ row.cooldown_sec }}s / {{ row.max_daily_exec === 0 ? '不限' : row.max_daily_exec }}</dd>
+            </div>
+          </dl>
+          <div class="rule-card__ops">
+            <el-button type="warning" size="small" plain :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
+            <el-button type="primary" size="small" plain @click="openEdit(asRule(row))">编辑</el-button>
+            <el-button type="danger" size="small" plain @click="onDelete(asRule(row))">删除</el-button>
+          </div>
+        </article>
+        <p v-if="rules.length === 0" class="cards-empty">暂无规则，点击右上角创建</p>
+        </template>
+      </div>
     </section>
 
     <!-- 触发历史 -->
@@ -101,8 +156,16 @@
           <el-button link size="small" data-test="refresh-events" @click="fetchEvents">刷新</el-button>
         </div>
       </div>
-      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
-      <div class="mobile-table-wrapper">
+      <!--
+        2026-10-21 第二轮截图精读（P1 遮挡）：393 下 910px 自然宽的 8 列表格里，右侧
+        fixed="right" 的「操作」列（100px，占视口 31%）压住「规则」列文字
+        （实测 td 192~312 被固定列覆盖 59px、「结果」覆盖 41px）；上一轮无数据时把它判为
+        待确认 P2，本轮用注入数据复测确认确有遮挡 + 横滑信息损失。
+        修法：窄屏（≤768px）改**卡片列表**（时间 + 规则名 + 结果 + 触发值/来源/命令 ID/详情 +
+        待确认操作），不再渲染表格、不再存在固定列；桌面（>768px）表格与 fixed 逐像素不变。
+      -->
+      <!-- 桌面：宽表（结构 / fixed 操作列 / 横滑提示与改前一致） -->
+      <div v-if="!isMobile" class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="events" v-loading="eventsLoading" data-test="events-table">
         <el-table-column label="时间" min-width="160">
@@ -170,6 +233,50 @@
           </div>
         </template>
       </el-table>
+      </div>
+      <!-- 窄屏：触发事件卡片列表（时间 / 规则名 / 结果 / 触发值 / 来源 / 命令 ID / 详情 / 待确认操作） -->
+      <div v-else class="event-cards" data-test="events-cards">
+        <p v-if="eventsLoading" class="cards-empty">正在加载触发事件…</p>
+        <template v-else>
+          <article v-for="row in events" :key="row.id" class="event-card" data-test="event-card">
+            <div class="event-card__head">
+              <el-tag :type="resultTagType(row.result)" size="small">{{ resultText(row.result) }}</el-tag>
+              <span class="mono event-card__time">{{ formatTime(row.triggered_at) }}</span>
+              <el-tag v-if="row.trigger_source === 'manual'" type="warning" size="small">手动</el-tag>
+              <span v-else class="event-card__source">自动</span>
+            </div>
+            <p class="event-card__rule" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</p>
+            <dl class="event-card__meta">
+              <div>
+                <dt>触发值</dt>
+                <dd class="mono">{{ row.trigger_value !== undefined ? formatValue(row.trigger_value) : '-' }}</dd>
+              </div>
+              <div v-if="row.command_id">
+                <dt>命令 ID</dt>
+                <dd class="mono event-card__cmd">
+                  <span class="event-card__cmd-id">{{ row.command_id }}</span>
+                  <el-button link type="primary" size="small" @click="goCommand(row.command_id)">查看</el-button>
+                </dd>
+              </div>
+              <div v-if="row.detail">
+                <dt>详情</dt>
+                <dd>{{ row.detail }}</dd>
+              </div>
+            </dl>
+            <div v-if="row.result === 'pending_confirm'" class="event-card__ops">
+              <el-button type="warning" size="small" plain data-test="confirm-event" @click="onConfirmEvent(asEvent(row))">确认执行</el-button>
+            </div>
+          </article>
+          <!-- F3：卡片列表沿用与表格 #empty 完全相同的"没配策略 / 没触发"区分口径 -->
+          <div v-if="events.length === 0" class="cards-empty">
+            <p>{{ rules.length === 0 ? '尚未创建自动化策略' : '暂无触发事件' }}</p>
+            <p class="cards-empty__hint">
+              {{ rules.length === 0
+                ? '在上方「自动化策略」中创建规则后，命中的事件会出现在这里。'
+                : '策略已就绪但尚未产生事件：确认条件可达，并留意冷却期（cooldown）与日熔断会抑制触发。' }}
+            </p>
+          </div>
+        </template>
       </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表一次性渲染后端 Limit(500) 的全部行 (实测 502 行/11902 节点,
@@ -836,7 +943,8 @@ function openEdit(rule: AutomationRule) {
     actions: ruleActions(rule).map((a, index) => ({
       uid: index + 1,
       action_type: a.action_type === 'notification' ? 'notification' : 'device_action',
-      action_device_id: a.action_device_id ?? 0,
+      // undefined（而不是 0）= 「未选择」：0 会回显成设备 0，见 actionList.ActionDraft 注释
+      action_device_id: a.action_device_id,
       action_id: a.action_id ?? '',
       action_params_json: a.action_params_json ?? '',
       action_level: (a.action_level as ActionDraft['action_level']) ?? 'warning',
@@ -890,7 +998,9 @@ function moveCard(uid: number, delta: number) {
 function onCardTypeChange(action: ActionDraft) {
   // 与既有单动作版的 onActionTypeChange 同口径：切到通知即清掉设备动作专属字段。
   if (action.action_type === 'notification') {
-    action.action_device_id = 0
+    // undefined = 未选择（el-select 显示「请选择」）。不能写 0：0 会被当成有效值
+    // 回显成「0」，看起来像选中了编号 0 的设备。
+    action.action_device_id = undefined
     action.action_id = ''
     action.action_params_json = ''
   } else {
@@ -1855,6 +1965,66 @@ onUnmounted(() => {
   .action-meta { grid-template-columns: 1fr; }
   .sun-location__fields { grid-template-columns: 1fr; }
   .ack-hint { margin-left: 0; }
+
+  /* ---- 窄屏卡片列表（2026-10-21 第二轮：393 宽表只剩 2 列 + 名称被省略号截断）----
+     卡片长度不受列宽限制：名称/详情/命令 ID 一律换行全显，不用 ellipsis 隐藏数据。
+     视觉语言沿用 Dashboard .latest-card / DataPanel .data-card（浅描边 + 8px 圆角 + 双列 meta）。 */
+  .rule-cards, .event-cards { display: flex; flex-direction: column; gap: 10px; }
+  .rule-card, .event-card {
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: var(--radius-md, 8px);
+    padding: 10px 12px;
+    background: var(--el-bg-color);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rule-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  /* 卡片标题：完整名称换行显示（被修掉的正是「客厅高温自动开…」这类省略号截断） */
+  .rule-card__name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .rule-card__head :deep(.el-switch) { flex: 0 0 auto; min-height: 44px; }
+  .rule-card__badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rule-card__meta, .event-card__meta { display: flex; flex-direction: column; gap: 4px; margin: 0; min-width: 0; }
+  .rule-card__meta > div, .event-card__meta > div { display: flex; gap: 8px; font-size: 13px; line-height: 1.5; min-width: 0; }
+  .rule-card__meta dt, .event-card__meta dt { flex: 0 0 auto; color: var(--el-text-color-secondary); }
+  .rule-card__meta dd, .event-card__meta dd { margin: 0; min-width: 0; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+  .rule-card__ops, .event-card__ops { display: flex; flex-wrap: wrap; gap: 8px; }
+  .rule-card__ops :deep(.el-button), .event-card__ops :deep(.el-button) { margin-left: 0; min-height: 44px; padding-left: 14px; padding-right: 14px; }
+  .event-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .event-card__time { font-size: 13px; color: var(--el-text-color-regular); }
+  .event-card__source { font-size: 12px; color: var(--el-text-color-secondary); }
+  .event-card__rule {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--el-text-color-primary);
+    overflow-wrap: anywhere;
+  }
+  .event-card__meta dd:last-child, .event-card__cmd { overflow-wrap: anywhere; }
+  .event-card__cmd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .event-card__cmd-id { word-break: break-all; }
+  .event-card__cmd :deep(.el-button) { margin-left: 0; min-height: 44px; }
+  /* 空态/加载态必须可见且有解释（卡片列表下不渲染表格 #empty 插槽） */
+  .cards-empty {
+    margin: 0;
+    padding: 16px 8px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--el-text-color-secondary);
+  }
+  .cards-empty p { margin: 0; }
+  .cards-empty__hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
 }
 
 /* ============================================================================
@@ -1874,7 +2044,17 @@ onUnmounted(() => {
   .action-meta > div { flex-direction: column; gap: 0; align-items: stretch; }
   .risk-item__meta > div { flex-direction: column; gap: 0; }
   .risk-item__meta dt { flex: none; }
-  /* 弹窗改为底部抽屉：满宽、贴底、顶部圆角、内容区独立滚动。 */
+  /* 弹窗改为底部抽屉：满宽、贴底、顶部圆角、内容区独立滚动。
+     ⚠ 2026-10-21 实测：只把 .el-dialog 的 margin 归零是**不够**的 —— 外层
+     .el-overlay-dialog 计算样式是 display:block（不是 flex），于是 92vh 高的弹窗
+     顶对齐：dialog y=0 / bottom=783，视口 851 时底部留下 68px 灰带、顶部圆角出现在
+     屏幕最上方 —— 视觉上是个"顶抽屉"。把 overlay 容器本身改为 flex 且底部对齐，
+     抽屉才真正贴底（改后 dialog bottom=851）。 */
+  :deep(.el-overlay-dialog) {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
   :deep(.el-dialog) {
     width: 100% !important;
     max-width: 100% !important;

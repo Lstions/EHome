@@ -61,6 +61,29 @@ describe('F-2 多动作列表', () => {
 })
 
 /**
+ * F-11 门禁：新建动作卡的目标设备初值**不得是 0**。
+ *
+ * 2026-10-21 实测（/automation 创建规则抽屉 393）：动作卡「目标设备」下拉显示「0」——
+ * el-select 把 0 当成有效值直接回显（与 trigger_edge_device_id / alert target_id
+ * 同一类缺陷，那两处已改 undefined）。0 会让用户以为选中了编号 0 的设备。
+ * 反向验证：把 emptyAction 的 action_device_id 改回 0 → 本用例必红。
+ */
+describe('F-11 新建动作卡的目标设备初值', () => {
+  it('emptyAction 不带数字设备初值（0 会被 el-select 回显成「0」，undefined 才显示「请选择」）', () => {
+    const draft = emptyAction(1)
+    expect(draft.action_device_id).toBeUndefined()
+    // 反向护栏：显式排除 0（这正是被修掉的错误初值）
+    expect(draft.action_device_id).not.toBe(0)
+  })
+
+  it('未选设备的 device_action 提交时 action_device_id 为 undefined（不伪造设备 0）', () => {
+    const seq = toSequencedActions([emptyAction(1)])
+    expect(seq[0].action_type).toBe('device_action')
+    expect(seq[0].action_device_id).toBeUndefined()
+  })
+})
+
+/**
  * F-3 门禁：风险徽标**非仅靠颜色**（图标 + 文字），且判定源是后端下发的 2 级契约。
  *
  * 反向验证（方案 §8 F-3）：把 label 改成空串 → 本文件必红；把判定改回 4 级 risk

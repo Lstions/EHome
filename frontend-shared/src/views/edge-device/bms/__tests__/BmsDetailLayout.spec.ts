@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest'
 import source from '@/views/edge-device/bms/BmsDetailPage.vue?raw'
 
 /**
+ * 去掉注释后的源码：**否定断言必须基于它**。
+ * 本文件既有教训（见「保护明细默认展开」用例）：源码注释里写着「已删除 xxx」时，
+ * 直接对全文断言 not.toContain 会把「解释为什么删掉」误判成「还在用」。
+ */
+const sourceCode = source
+  .replace(/<!--[\s\S]*?-->/g, '')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+/**
  * BMS 详情页布局契约（2026-10-17 重写）。
  *
  * 本页由评审 demo 转正（原 /dev/bms-demo2），替换了 2026-08-17 那版
@@ -94,21 +104,49 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
 
   /**
    * 设备级操作不得因换版而丢失（2026-10-17 转正时确实丢过一次）。
-   * 旧版通过 DeviceHeader 提供 返回/同步到HA/编辑/删除；
-   * 重设计版改用自建页头，必须把同样的能力补齐 —— 视觉稿（demo）没有这些入口，
-   * 直接照搬 demo 会造成静默功能回退。
+   * 2026-10-21 契约更新：页头改为统一共享组件 DeviceHeader，操作入口**不再由本页渲染按钮**，
+   * 而是以事件接到本页既有 handler —— 因此断言从「源码里出现操作文字」改为
+   * 「DeviceHeader 接入点齐全 + 指向的 handler/弹窗真实存在」。
+   * 否则「统一组件」过程中把设备操作接丢，会变成静默功能回退而且测试全绿。
    */
-  it('页头保留设备级操作：同步到 HA / 编辑 / 删除 / 刷新', () => {
-    for (const label of ['同步到 HA', '编辑', '删除', '刷新']) {
-      expect(source, '页头缺少操作：' + label).toContain(label)
+  it('页头接入统一 DeviceHeader，设备级操作经事件连回本页既有 handler', () => {
+    expect(source).toContain('<DeviceHeader')
+    expect(source).toMatch(/<DeviceHeader[\s\S]*?:builtin-dialogs="false"/)
+    // 五类操作事件缺一不可（返回 / 同步HA / 刷新 / 编辑 / 删除）
+    for (const evt of [
+      '@back="goBackToList"',
+      '@sync-to-h-a="onSyncToHA"',
+      '@refresh="refreshAll"',
+      '@edit="onEditDevice"',
+      '@delete="onDeleteDevice"',
+    ]) {
+      expect(source, 'DeviceHeader 缺少事件接入：' + evt).toContain(evt)
     }
-    // 编辑与删除必须真的有对话框承载，不能只是按钮
+    // 事件指向的 handler 必须真实存在（不是接到空函数）
+    for (const fn of [
+      'function goBackToList(',
+      'async function onSyncToHA(',
+      'async function refreshAll(',
+      'function onEditDevice(',
+      'function onDeleteDevice(',
+    ]) {
+      expect(source, '缺少 handler：' + fn).toContain(fn)
+    }
+    // 编辑与删除必须真的有对话框承载；共享组件内置弹窗关闭（BMS 用自己的删除弹窗选数据处理方式）
     expect(source).toContain('editVisible')
     expect(source).toContain('DeviceDeleteDialog')
   })
 
-  it('面包屑「边缘设备管理」是真按钮且可返回列表（不是 cursor:pointer 的假可点）', () => {
-    expect(source).toMatch(/<button[^>]*class="crumb-link"[^>]*@click="goBackToList"/)
-    expect(source).toContain('router.push(\'/edge-device\')')
+  it('页头不再自建 <header class="page-head">，面包屑数据交给共享组件渲染', () => {
+    // 统一组件后本页不许再维护页头 DOM/CSS（否则两套页头并存、样式互相顶）
+    // 用去注释源码断言：模板注释里就写着「不再自建 <header class="page-head">」
+    expect(sourceCode).not.toContain('class="page-head"')
+    expect(sourceCode).not.toMatch(/\.page-head\s*\{/)
+    expect(sourceCode).not.toContain('class="crumb-link"')
+    expect(sourceCode).not.toContain('onHeadMoreCommand')
+    // 面包屑首段必须是「真实可回列表」的数据（to 交给 DeviceHeader 用 router.push 承载）
+    expect(source).toContain(':breadcrumb="headerBreadcrumb"')
+    expect(source).toMatch(/headerBreadcrumb[\s\S]{0,200}?text:\s*'边缘设备管理'[\s\S]{0,80}?to:\s*'\/edge-device'/)
+    expect(source).toContain("router.push('/edge-device')")
   })
 })

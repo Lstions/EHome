@@ -92,6 +92,26 @@ vi.mock('element-plus', async importOriginal => {
   }
 })
 
+/**
+ * 2026-10-21 第二轮：窄屏改卡片列表后，模板按 useResponsive().isMobile 走结构分支。
+ * 这里直接驱动模块级共享 ref（与 AlertRules.spec / FixedColumnOcclusion.spec 同法），
+ * 默认 1440/桌面 —— 既有 55 条用例的语义完全不变。
+ */
+const { viewportWidth, isMobileRef } = vi.hoisted(() => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { ref } = require('vue') as typeof import('vue')
+  return { viewportWidth: ref(1440), isMobileRef: ref(false) }
+})
+vi.mock('@/composables/useResponsive', () => ({
+  BREAKPOINTS: { xs: 480, sm: 640, md: 768, lg: 1024, xl: 1280, '2xl': 1536 },
+  useResponsive: () => ({
+    width: viewportWidth,
+    isMobile: isMobileRef,
+    isTablet: { value: false },
+    isDesktop: { value: true },
+  }),
+}))
+
 const mockedAutomationApi = vi.mocked(automationApi)
 const mockedEdgeApi = vi.mocked(edgeDeviceApi)
 const mockedOperationApi = vi.mocked(deviceOperationApi)
@@ -159,6 +179,9 @@ const deviceActionsFixture = [
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  // 每个用例从桌面视口起步，避免上一条窄屏用例污染后续断言
+  viewportWidth.value = 1440
+  isMobileRef.value = false
   mockedAutomationApi.listRules.mockResolvedValue([ruleFixture])
   mockedAutomationApi.listEvents.mockResolvedValue(eventPage([eventFixture]))
   mockedEdgeApi.getList.mockResolvedValue({ total: 1, items: [{ id: 10, name: 'ESP32-01' } as never] })
@@ -1236,6 +1259,70 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     it('「条件」阈值框盒宽 ≥176px（内层 input ≥84px），不再横向溢出弹窗', () => {
       expect(source).toMatch(/\.cond-row \.el-input-number \{[^}]*min-width: 176px/)
       expect(source).toMatch(/\.cond-row \{[^}]*flex-wrap: wrap/)
+    })
+  })
+
+  // ── 2026-10-21 第二轮截图精读新增回归钉（/automation 与 /alerts 审计）──────
+  describe('第二轮审计：底部抽屉贴底 / 窄屏长文本不截断', () => {
+    it('≤480 底部抽屉真正贴底：overlay 容器改 flex + align-items:flex-end', async () => {
+      // 实测（393）：只归零 .el-dialog 的 margin 时，外层 .el-overlay-dialog 是
+      // display:block ⇒ 92vh 弹窗顶对齐，dialog y=0/bottom=783，底部留 68px 灰带、
+      // 顶部圆角出现在屏幕最上方 —— 不是"底部抽屉"。必须把容器本身改成 flex 底部对齐。
+      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      expect(css, '缺 .el-overlay-dialog 的 flex 底部对齐：底部抽屉会顶对齐').toMatch(
+        /\.el-overlay-dialog[^{]*\{[^}]*display:\s*flex/,
+      )
+      // 反向护栏：把 align-items 声明删掉后同一正则必须匹配不到（证明它测的是真实声明）
+      expect(css).toMatch(/\.el-overlay-dialog[^{]*\{[^}]*align-items:\s*flex-end/)
+      expect(css.replace(/align-items:\s*flex-end/g, '')).not.toMatch(
+        /\.el-overlay-dialog[^{]*\{[^}]*align-items:\s*flex-end/,
+      )
+    })
+
+    it('窄屏卡片列表：完整名称 + 桌面各列信息 + 行内控件全部保留（不拿信息/功能换整洁）', async () => {
+      viewportWidth.value = 393
+      isMobileRef.value = true
+      const wrapper = await mountPage()
+      const cards = wrapper.findAll('[data-test="rule-card"]')
+      expect(cards.length, '窄屏缺少规则卡片').toBe(1)
+      const txt = cards[0].text()
+      expect(txt, '被修掉的正是「高温…」省略号截断').toContain('高温开窗')
+      expect(txt, '触发器类型徽标').toContain('传感器阈值')
+      expect(txt, '触发条件摘要').toContain('temperature > 30')
+      expect(txt, '冷却/熔断').toContain('300s / 10')
+      expect(txt, '确认制').toContain('需确认')
+      expect(cards[0].findAll('[data-test="rule-enabled"]').length, '启用开关').toBe(1)
+      expect(cards[0].findAll('[data-test="trigger-rule"]').length, '触发按钮').toBe(1)
+    })
+
+    it('窄屏事件卡片：时间/规则名/结果/触发值/详情/待确认操作齐全', async () => {
+      viewportWidth.value = 393
+      isMobileRef.value = true
+      const wrapper = await mountPage()
+      const cards = wrapper.findAll('[data-test="event-card"]')
+      expect(cards.length, '窄屏缺少事件卡片').toBe(1)
+      const txt = cards[0].text()
+      expect(txt).toContain('高温开窗')
+      expect(txt).toContain('待确认')
+      expect(txt).toContain('31.5')
+      expect(txt).toContain('高温触发，等待确认')
+      expect(cards[0].findAll('[data-test="confirm-event"]').length, '待确认事件的「确认执行」入口').toBe(1)
+    })
+
+    it('桌面：仍渲染表格、不渲染卡片列表（>768px 结构不变）', async () => {
+      const wrapper = await mountPage()
+      expect(wrapper.find('[data-test="rules-table"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="events-table"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="rules-cards"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="events-cards"]').exists()).toBe(false)
+    })
+
+    it('源码契约：两处表格包在 v-if="!isMobile" 里，卡片列表是 v-else 分支（否则窄屏会同时出现表格+卡片）', () => {
+      expect(source.match(/v-if="!isMobile" class="mobile-table-wrapper"/g)?.length).toBe(2)
+      expect(source).toMatch(/v-else class="rule-cards"/)
+      expect(source).toMatch(/v-else class="event-cards"/)
+      expect(source).toContain('data-test="rules-cards"')
+      expect(source).toContain('data-test="events-cards"')
     })
   })
 })

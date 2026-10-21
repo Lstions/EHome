@@ -33,7 +33,7 @@
           </div>
         </el-popover>
         <span class="head-right">
-          <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" @change="onCellRange" />
+          <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" dense @change="onCellRange" />
         </span>
       </div>
       <div v-if="cellLoading" class="chart-state">正在加载历史数据…</div>
@@ -76,7 +76,7 @@
         <span class="card-hint">按量纲分组（总电压 / 单体电压 / 电流 / 电池状态 / 温度），状态量未纳入</span>
         <span class="head-right">
           <el-button v-if="metricError" size="small" text type="primary" class="retry-btn" @click="fetchMetrics">重试</el-button>
-          <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
+          <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" dense @change="onMetricRange" />
         </span>
       </div>
       <!-- 桌面契约：恒定 5 个分组槽位，组数不随数据到达而变，页面高度稳定
@@ -385,20 +385,8 @@ defineExpose({ fetchCells, fetchMetrics })
 .card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
 .card-hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* 时间范围分段控件（TimeRangeSelector）对齐卡片右上角其它 el-button size=small。
-   全局 theme.css 给 `.el-radio-button__inner { min-height:36px }`（触摸目标），副作用：
-   ① min-height 把盒子撑高、文字却仍贴上沿（看起来没居中）；② 36px 比其它右上角 small 按钮(24px)大一号。
-   这里在**本组件作用域内**收回 small 档并用 flex 垂直居中——不改全局 theme.css、不改共享组件；
-   窄屏 / 粗指针仍升到 44px，与页面其它控件一致。 */
-.head-right :deep(.el-radio-button__inner) {
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 11px;
-  font-size: 12px;
-  line-height: 1;
-}
+/* 时间范围分段控件：尺寸/居中/触摸目标统一由 TimeRangeSelector 组件负责（dense 档），
+   本页不再 :deep 覆盖 —— 2026-10-21 统一：各页面各自覆盖导致同一控件三处不同高。 */
 /* 固定高度：内容变化不得撑变页面高度（本页依赖 overflow-anchor:none 防跳动） */
 .chart-box { height: 280px; }
 .chart-state { height: 280px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 13px; }
@@ -494,10 +482,6 @@ defineExpose({ fetchCells, fetchMetrics })
   .cell-picker-trigger { min-height: 44px; }
   .cell-picker-pop :deep(.el-checkbox) { min-height: 36px; }
   .cell-picker-pop :deep(.el-checkbox__label) { font-size: 13px; }
-  .head-right :deep(.el-radio-button__inner) { min-height: 44px; padding: 0 12px; }
-}
-@media (pointer: coarse) {
-  /* 粗指针（触屏笔记本在 1440px 也走这一支）：恢复 44px 触摸目标 */
-  .head-right :deep(.el-radio-button__inner) { min-height: 44px; padding: 0 12px; }
+  /* 时间档控件的窄屏 40px / 粗指针 44px 触摸目标由 TimeRangeSelector 组件自身保证 */
 }
 </style>

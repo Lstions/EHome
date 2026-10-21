@@ -17,7 +17,8 @@ import deviceHeaderSource from '@/views/edge-device/shared/DeviceHeader.vue?raw'
  *  3) 温度探头/MOS 状态 el-col 恒 2 列挤压 → 补 :xs="24" 断点，≤768px 单列
  *  4) DeviceInfoCard 移动端 label 列 92px 拆字 → minmax(max-content, 106px) + nowrap
  *  5) DeviceHeader 移动端 4 按钮挤压标题 → 编辑/同步到HA/删除 收进 el-dropdown 溢出下拉，
- *     保留「刷新数据」主按钮
+ *     保留「刷新数据」主按钮（2026-10-21 统一页头后：窄屏确定性两行 —— 行1 返回+名称+⋯，
+ *     行2 刷新独占整行；桌面单行完整操作组。断言按新结构更新，意图不变）
  */
 
 // ---------- 轻量复现 BmsCellVoltageChart 容器宽度降级判定逻辑 ----------
@@ -175,35 +176,38 @@ describe('DeviceInfoCard mobile label column (P1-4)', () => {
   })
 })
 
-describe('DeviceHeader mobile overflow dropdown (P1-5)', () => {
-  it('uses useResponsive isMobile to switch between full action row and overflow dropdown', () => {
+describe('DeviceHeader mobile overflow dropdown (P1-5, 2026-10-21 统一页头后)', () => {
+  it('用 useResponsive isMobile 切换「桌面完整操作组 / 窄屏 ⋯ 菜单」，刷新始终可见', () => {
     expect(deviceHeaderSource).toContain("import { useResponsive } from '@/composables/useResponsive'")
     expect(deviceHeaderSource).toContain('const { isMobile } = useResponsive()')
-    expect(deviceHeaderSource).toMatch(/<el-dropdown v-if="isMobile"[\s\S]*?popper-class="device-header-more-popover"/)
+    expect(deviceHeaderSource).toMatch(/<el-dropdown v-else-if="showMoreMenu"[\s\S]*?popper-class="device-header-more-popover"/)
     expect(deviceHeaderSource).toContain('MoreFilled')
   })
 
-  it('moves 编辑/同步到HA/删除 into the dropdown menu on mobile', () => {
-    expect(deviceHeaderSource).toMatch(/<el-dropdown-item command="edit"[\s\S]*?编辑<\/el-dropdown-item>/)
-    expect(deviceHeaderSource).toMatch(/<el-dropdown-item command="syncToHA"[\s\S]*?同步到HA[\s\S]*?<\/el-dropdown-item>/)
-    expect(deviceHeaderSource).toMatch(/<el-dropdown-item command="delete"[\s\S]*?删除[\s\S]*?<\/el-dropdown-item>/)
+  it('把 编辑/同步到 HA/删除 收进 ⋯ 菜单，窄屏只留刷新主按钮', () => {
+    expect(deviceHeaderSource).toMatch(/<el-dropdown-item v-if="showEdit" command="edit"[\s\S]*?编辑<\/el-dropdown-item>/)
+    expect(deviceHeaderSource).toMatch(/<el-dropdown-item v-if="showSync" command="syncToHA"[\s\S]*?同步到 HA[\s\S]*?<\/el-dropdown-item>/)
+    expect(deviceHeaderSource).toMatch(/<el-dropdown-item v-if="showDelete" command="delete"[\s\S]*?删除[\s\S]*?<\/el-dropdown-item>/)
     // 刷新数据是移动端保留的主按钮，不进下拉
-    expect(deviceHeaderSource.match(/<el-dropdown-item command="refresh"/g)).toBeNull()
+    expect(deviceHeaderSource.match(/<el-dropdown-item[^>]*command="refresh"/g)).toBeNull()
   })
 
-  it('keeps desktop full action row and the always-visible refresh button', () => {
-    expect(deviceHeaderSource).toContain('<template v-if="!isMobile">')
-    expect(deviceHeaderSource).toContain('type="primary" :icon="Refresh"')
-    // 刷新按钮不在 !isMobile 分支内，移动端仍可见
-    const desktopGroup = deviceHeaderSource.match(/<template v-if="!isMobile">[\s\S]*?<\/template>/)?.[0] ?? ''
-    expect(desktopGroup).not.toContain('刷新数据')
+  it('保留桌面完整操作组；刷新在窄屏独占第二行、桌面在操作组内（两种结构都不能丢）', () => {
+    expect(deviceHeaderSource).toMatch(/<div v-if="!isMobile" class="dh-actions">[\s\S]*?type="primary" :icon="Refresh"/)
+    expect(deviceHeaderSource).toMatch(/<div v-if="isMobile" class="dh-mobile-actions">[\s\S]*?class="dh-refresh"/)
+    // 窄屏主操作固定 36px 档（粗指针 44px），不再被 flex 压成 28px
+    expect(deviceHeaderSource).toMatch(/\.dh-refresh \{[\s\S]{0,300}?height: 36px;/)
+    expect(deviceHeaderSource).toMatch(/@media \(pointer: coarse\)[\s\S]*?\.dh-refresh \{ min-height: 44px; \}/)
   })
 
-  it('routes dropdown commands to the same edit/sync/delete handlers', () => {
+  it('dropdown 命令与桌面按钮走同一组 handler（编辑/同步/删除语义一致）', () => {
     expect(deviceHeaderSource).toContain('function handleMoreCommand(command: string)')
-    expect(deviceHeaderSource).toContain("if (command === 'edit') editDialogVisible.value = true")
-    expect(deviceHeaderSource).toContain("else if (command === 'syncToHA') emit('syncToHA')")
-    expect(deviceHeaderSource).toContain("else if (command === 'delete') deleteDialogVisible.value = true")
+    expect(deviceHeaderSource).toMatch(/if \(command === 'edit'\) onEdit\(\)/)
+    expect(deviceHeaderSource).toMatch(/else if \(command === 'syncToHA'\) emit\('syncToHA'\)/)
+    expect(deviceHeaderSource).toMatch(/else if \(command === 'delete'\) onDelete\(\)/)
+    // BMS 传 builtin-dialogs=false：编辑/删除必须 emit 给父页，否则按钮点了没反应
+    expect(deviceHeaderSource).toMatch(/else emit\('edit'\)/)
+    expect(deviceHeaderSource).toMatch(/else emit\('delete'\)/)
   })
 
   it('limits the dropdown popper width via a global popper-class (popover 不受 92vw .el-dialog 兜底)', () => {
@@ -211,6 +215,7 @@ describe('DeviceHeader mobile overflow dropdown (P1-5)', () => {
     expect(deviceHeaderSource).toMatch(/:global\(\.device-header-more-popover\)\s*\{[^}]*max-width:\s*calc\(100vw - 24px\)[^}]*\}/)
   })
 })
+
 describe('BmsDetailPage 轮询指令行窄屏重排（762 → 522px）', () => {
   it('桌面仍是 flex 单段布局，窄屏才改成 2×2 网格（区域名 ctl 跨两行）', () => {
     // 桌面规则必须原样保留：一旦被网格规则顶掉，1440 下输入框会掉到第二行

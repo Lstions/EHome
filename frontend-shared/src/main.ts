@@ -1,8 +1,15 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import 'element-plus/theme-chalk/dark/css-vars.css'
-// ElMessageBox 通过 JS API 调用时，按需引入不会自动加载其 CSS，需手动导入
+// ElMessageBox / ElMessage 通过 JS API 调用时，按需引入（unplugin-vue-components）
+// 不会自动加载其 CSS，必须手动导入：
+//   · el-message-box.css —— 确认框
+//   · el-message.css    —— 轻提示（2026-10-21 实测：缺失时 .el-message 计算样式为
+//     position:static，被追加到 body 末尾 ⇒ 渲染在视口下方（rect.y=851/900，body 因
+//     弹窗 scroll-lock 不可滚），**所有 ElMessage 提示用户都看不到** —— 校验失败、
+//     保存成功等反馈全部静默。属于全局缺陷，根因在入口，故在此修。）
 import 'element-plus/theme-chalk/el-message-box.css'
+import 'element-plus/theme-chalk/el-message.css'
 import './styles/theme.css'
 import router from './router'
 import App from './App.vue'

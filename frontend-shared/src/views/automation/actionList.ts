@@ -16,7 +16,15 @@ export interface ActionDraft {
   /** 前端稳定标识 (仅用于 v-for key 与勾选状态, 不落库) */
   uid: number
   action_type: 'device_action' | 'notification'
-  action_device_id: number
+  /**
+   * 目标设备 id。
+   *
+   * ⚠ 必须可为 undefined：el-select 把 0 当成**有效值**直接回显成「0」，
+   * 新建动作卡时用户会以为已经选中了编号 0 的设备（2026-10-21 实测 /automation
+   * 创建规则抽屉「目标设备」下拉显示 0）。只有 undefined 才显示 placeholder。
+   * 与 trigger_edge_device_id / alert target_id 是同一类缺陷，同口径修。
+   */
+  action_device_id?: number
   action_id: string
   action_params_json: string
   action_level: 'info' | 'warning' | 'critical'
@@ -33,7 +41,9 @@ export interface SequencedAction {
 }
 
 export function emptyAction(uid: number): ActionDraft {
-  return { uid, action_type: 'device_action', action_device_id: 0, action_id: '', action_params_json: '', action_level: 'warning' }
+  // 不写 action_device_id: 0 —— 见 ActionDraft.action_device_id 注释：0 会被
+  // el-select 回显成「0」，而 undefined 才显示「请选择」。
+  return { uid, action_type: 'device_action', action_id: '', action_params_json: '', action_level: 'warning' }
 }
 
 /**

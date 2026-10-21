@@ -380,35 +380,52 @@ describe('AlertRules.vue', () => {
     expect(cols.find(c => c.label === '操作')!.fixed).toBe('right')
   })
 
-  it('F29 窄屏 360/390：规则表操作列不再 fixed（消除对「启用」开关的遮挡）', async () => {
+  /**
+   * 2026-10-21 第二轮截图精读（P1 信息损失）：
+   * 上一轮 F29 只做到「窄屏取消 fixed」，但 8 列表格在 393px 视口下仍只剩 3 列、
+   * 名称/传感器被 show-overflow-tooltip 省略号截断（触屏无 hover，tooltip 不可达）。
+   * 本轮改为：**窄屏根本不渲染表格，改渲染卡片列表**（名称全显示 + 级别 + 目标/传感器/
+   * 阈值/持续 + 启用开关 + 编辑/删除）；桌面（>768px）表格 + 固定列语义逐像素不变。
+   * ⇒ 窄屏不再有"固定列遮挡"这一产生条件，F29 的判据随结构升级为「卡片化」。
+   */
+  it('F29 窄屏 360/390：规则表改渲染卡片列表（不再渲染表格/固定列，信息不丢）', async () => {
     viewportWidth.value = 360
     isMobileRef.value = true
     const wrapper = await mountWithSlotTable()
 
-    const cols = columnsOf(wrapper, 'rules-table')
-    const op = cols.find(c => c.label === '操作')
-    expect(op, '规则表缺少「操作」列').toBeTruthy()
-    expect(op!.fixed, '窄屏下「操作」列仍被标记为固定列，会继续遮住行内控件').toBe('false')
-    // 整表不允许残留任何 fixed 列（遮挡的充要条件）
-    expect(cols.filter(c => c.fixed !== '' && c.fixed !== 'false').map(c => c.label)).toEqual([])
-    // 列宽不得被本修复改动（F26 已实测否决收窄列宽路线）
-    expect(op!.width, '窄屏下「操作」列宽被本修复改动，违反任务书第 3 条').toBe('130')
-    // 开关仍然真实渲染在行内（不是被删掉换绿）
-    expect(wrapper.findAll('[data-test="rule-enabled"]').length).toBeGreaterThan(0)
+    expect(wrapper.find('[data-test="rules-table"]').exists(), '窄屏仍渲染规则表格').toBe(false)
+    expect(wrapper.find('[data-test="rules-cards"]').exists(), '窄屏缺少规则卡片列表').toBe(true)
+    const cards = wrapper.findAll('[data-test="rule-card"]')
+    expect(cards.length, '窄屏缺少规则卡片').toBeGreaterThan(0)
+    // 桌面 8 列的信息全部保留（不是把功能/信息删掉换绿）
+    const txt = cards[0].text()
+    expect(txt).toContain('电池过压')
+    expect(txt).toContain('cell_voltage_1')
+    expect(txt).toContain('> 4.2')
+    expect(txt).toContain('警告')
+    expect(wrapper.findAll('[data-test="rule-enabled"]').length, '启用开关').toBeGreaterThan(0)
   })
 
-  it('F29 事件表 5 列本来就没有 fixed 列，不得被本修复波及', async () => {
-    for (const mobile of [false, true]) {
-      viewportWidth.value = mobile ? 360 : 1440
-      isMobileRef.value = mobile
-      const wrapper = await mountWithSlotTable()
-      const cols = columnsOf(wrapper, 'events-table')
-      expect(cols, '事件表列数不为 5，用例前提不成立').toHaveLength(5)
-      expect(
-        cols.filter(c => c.fixed !== '').map(c => c.label),
-        `事件表在 ${mobile ? '窄屏' : '桌面'} 下出现了 fixed 列`,
-      ).toEqual([])
-    }
+  it('F29 事件表：桌面 5 列本来就没有 fixed 列；窄屏改卡片列表（不渲染表格）', async () => {
+    // 有事件才能断言卡片内容（beforeEach 默认空事件列表，卡片分支会落在空态）
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 1, 1, 20))
+    // 桌面：5 列、无 fixed（原契约不变）
+    viewportWidth.value = 1440
+    isMobileRef.value = false
+    const desktop = await mountWithSlotTable()
+    const cols = columnsOf(desktop, 'events-table')
+    expect(cols, '事件表列数不为 5，用例前提不成立').toHaveLength(5)
+    expect(cols.filter(c => c.fixed !== '').map(c => c.label), '桌面事件表出现了 fixed 列').toEqual([])
+
+    // 窄屏：表格不渲染，卡片列表承载全部 5 列信息
+    viewportWidth.value = 360
+    isMobileRef.value = true
+    const mobile = await mountWithSlotTable()
+    expect(mobile.find('[data-test="events-table"]').exists(), '窄屏仍渲染事件表格').toBe(false)
+    expect(mobile.find('[data-test="events-cards"]').exists(), '窄屏缺少事件卡片列表').toBe(true)
+    const card = mobile.find('[data-test="event-card"]')
+    expect(card.exists(), '窄屏缺少事件卡片').toBe(true)
+    expect(card.text(), '时间列信息').toContain('2026')
   })
 
   // ─── U9: 「全部标记已读」必须发 {all:true}, 不得再发空 ids ──────────────────
@@ -626,6 +643,47 @@ describe('AlertRules.vue', () => {
       expect(alertRulesSource).toMatch(/\.cond-row \.el-select \{[^}]*flex: 0 0 52px/)
       // 反向守卫：不得退回"无宽度约束"的旧规则（正是 0 宽缺陷的根因）
       expect(alertRulesSource).not.toMatch(/\.cond-row \{ display: flex; gap: 8px; align-items: center; \}/)
+    })
+
+    // 2026-10-21 第二轮截图精读（P1 信息损失）：
+    // 实测（393，注入夹具）：8 列规则表只剩 3 列可见，规则名「电池过压告警（单体电压上限）」
+    // 220px 被 138px 单元格截断（「电池过压告警（…」）、传感器名 132px 被 118px 截断
+    // （「cell_vc」「temper」）—— 触屏无 hover，tooltip 不可达。事件表 5 列时「触发/恢复时间」
+    // 整列在盒外。故窄屏改**卡片列表**、桌面表格逐像素不变。
+    it('窄屏卡片列表：完整名称/传感器/时间全显示，且不渲染表格（不拿信息换整洁）', async () => {
+      viewportWidth.value = 393
+      isMobileRef.value = true
+      const wrapper = await mountPage()
+
+      expect(wrapper.find('[data-test="rules-table"]').exists(), '窄屏仍渲染规则表格').toBe(false)
+      expect(wrapper.find('[data-test="events-table"]').exists(), '窄屏仍渲染事件表格').toBe(false)
+      expect(wrapper.find('[data-test="rules-cards"]').exists(), '窄屏缺少规则卡片列表').toBe(true)
+      expect(wrapper.find('[data-test="events-cards"]').exists(), '窄屏缺少事件卡片列表').toBe(true)
+
+      const ruleCard = wrapper.find('[data-test="rule-card"]')
+      expect(ruleCard.exists()).toBe(true)
+      const ruleTxt = ruleCard.text()
+      expect(ruleTxt, '被修掉的正是「电池过压…」省略号截断').toContain('电池过压')
+      expect(ruleTxt).toContain('cell_voltage_1')
+      expect(ruleTxt).toContain('> 4.2')
+      expect(ruleTxt).toContain('警告')
+    })
+
+    it('桌面：仍渲染两张表格、不渲染卡片列表（>768px 结构不变）', async () => {
+      const wrapper = await mountPage()
+      expect(wrapper.find('[data-test="rules-table"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="events-table"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="rules-cards"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="events-cards"]').exists()).toBe(false)
+    })
+
+    it('源码契约：表格在 v-if="!isMobile" 分支、卡片在 v-else 分支', () => {
+      expect(alertRulesSource.match(/v-if="!isMobile" class="mobile-table-wrapper"/g)?.length).toBe(2)
+      expect(alertRulesSource).toMatch(/v-else class="rule-cards"/)
+      expect(alertRulesSource).toMatch(/v-else class="event-cards"/)
+      // 反证守卫：卡片容器必须带 data-test 钩子，否则上面的 DOM 断言会假绿
+      expect(alertRulesSource).toContain('data-test="rules-cards"')
+      expect(alertRulesSource).toContain('data-test="events-cards"')
     })
   })
 })
