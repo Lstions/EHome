@@ -382,9 +382,20 @@ func techfineSplitFields(raw []byte) ([]string, error) {
 // 未登记的命令（未来新增字面量、命令字节被改）才回落到 ParseData 的形状判定；
 // 而 ParseData 本身也 fail-closed，不会产出「猜出来的」假数据。
 func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteData string) ([]SensorData, error) {
-	cmd, ok := techfineCommandByWire(commandWriteData)
+	wire := strings.TrimSpace(commandWriteData)
+	if wire == "" {
+		// 没有上下文（诊断/测试路径）：交给形状判定，认不出会报错。
+		return d.ParseData(raw)
+	}
+	cmd, ok := techfineCommandByWire(wire)
 	if !ok {
-		// 兼容兜底：未知命令按形状判定。形状判定认不出会报错，不静默。
+		// 非法 hex：命令上下文本身是坏的，不能当成"没有上下文"静默继续 ——
+		// 那会让一个传错参数的调用方得到"解析成功"的假象。
+		if _, decErr := hex.DecodeString(wire); decErr != nil {
+			return nil, fmt.Errorf("techfine: invalid command write data %q: %w", commandWriteData, decErr)
+		}
+		// 合法 hex 但未登记的命令（未来新增/字面量被改）：回落形状判定。
+		// 形状判定 fail-closed，不会产出猜出来的数据。
 		return d.ParseData(raw)
 	}
 	fields, err := techfineSplitFields(raw)
@@ -584,6 +595,14 @@ func (d *TechfineInverterDriver) parseHOP(fields []string) ([]SensorData, error)
 	if len(fields) < 8 {
 		return nil, fmt.Errorf("techfine HOP: need >=8 fields, got %d", len(fields))
 	}
+	// 形状绑定（2026-10-21 复核发现）：HOP 的第 8 位是电感电流（带小数）、
+	// 功率位是 4+ 定宽数字。不校验的话 read_output 会接受全部市电帧
+	// （实测 10,787/10,787），把 280V 线电压读成输出电压、把损失电压读成功率。
+	if !techfineLooksLikeHOP(fields) {
+		return nil, fmt.Errorf("techfine HOP: frame does not match the output-response shape "+
+			"(fields[7]=%q, fields[2]=%q) — 该帧不是输出应答，拒绝按 HOP 位置解读",
+			safeField(fields, 7), safeField(fields, 2))
+	}
 
 	voltage, err := strconv.ParseFloat(fields[0], 64)
 	if err != nil {
@@ -731,6 +750,13 @@ func (d *TechfineInverterDriver) parseHBAT(fields []string) ([]SensorData, error
 func (d *TechfineInverterDriver) parsePV(fields []string, prefix string) ([]SensorData, error) {
 	if len(fields) < 3 {
 		return nil, fmt.Errorf("techfine PV: need >=3 fields, got %d", len(fields))
+	}
+	// 形状绑定（2026-10-21 复核发现）：不加校验时 read_pv1/read_pv2 会接受
+	// 全部输出帧（实测 10,787/10,787），把输出电流 49.9A 读成 pv1_current。
+	if !techfineLooksLikePV(fields) {
+		return nil, fmt.Errorf("techfine PV: frame does not match the PV-response shape "+
+			"(%d fields, fields[3]=%q) — 该帧不是 PV 应答，拒绝按 pv1/pv2 位置解读",
+			len(fields), safeField(fields, 3))
 	}
 
 	voltage, err := strconv.ParseFloat(fields[0], 64)
@@ -934,6 +960,16 @@ func (d *TechfineInverterDriver) parseHGEN(fields []string) ([]SensorData, error
 	if len(fields) < 6 {
 		return nil, fmt.Errorf("techfine HGEN: need >=6 fields, got %d", len(fields))
 	}
+	// 形状绑定（2026-10-21 复核发现）：HGEN 的第 2 位是 HH:MM。
+	//
+	// 不加这条，parseHGEN 会成为**万能接收器**：任何 >=6 字段、且 [2..5] 能解析
+	// 成数字的帧都会被读成"日/月/年/总发电量"。交叉命令矩阵实测：read_energy
+	// 接受全部 70,115 帧 —— 温度帧当能量会得到 daily=28/monthly=31/... kWh，
+	// 全是"看起来合理"的假数据，与 2026-10-19 的电池污染同型。
+	if !strings.Contains(fields[1], ":") {
+		return nil, fmt.Errorf("techfine HGEN: field 1 %q is not an HH:MM timestamp — "+
+			"该帧不是发电量应答（错配帧比缺失更难排查）", fields[1])
+	}
 
 	daily, err := parseRequiredFloat(fields, 2, "daily_energy")
 	if err != nil {
@@ -1107,7 +1143,9 @@ func (d *TechfineInverterDriver) parseHIMSG1(fields []string) ([]SensorData, err
 	}
 	// 形状绑定（2026-10-21）：第 2 位必须是 8 位整数日期（YYYYMMDD）。
 	// 不加这条，市电帧（f[1]="49.9"）也会被当成版本应答。
-	if len(fields[1]) != 8 || !isAllDigits(fields[1]) {
+	// 判据与本注册表里 HIMSG1 的形状规则**必须一致**：8 位纯数字、且不能是全 0/1
+	// （HBMS1 的二进制状态串 "10010000" 也是 8 位数字，会被误读成日期）。
+	if len(fields[1]) != 8 || !isAllDigits(fields[1]) || isAllBinary(fields[1]) {
 		return nil, fmt.Errorf("techfine HIMSG1: date field %q is not an 8-digit YYYYMMDD — "+
 			"该帧不是版本应答（错配帧比缺失更难排查）", fields[1])
 	}
@@ -1193,6 +1231,14 @@ func (d *TechfineInverterDriver) parseHEEP1(fields []string) ([]SensorData, erro
 // ============================================================================
 // Helpers
 // ============================================================================
+
+// safeField 安全取第 i 个字段，越界返回空串（只用于构造错误信息）。
+func safeField(fields []string, i int) string {
+	if i < 0 || i >= len(fields) {
+		return ""
+	}
+	return fields[i]
+}
 
 // parseRequiredFloat 解析 fields[i] 为 float64，失败**报错而不是返回 0**。
 //

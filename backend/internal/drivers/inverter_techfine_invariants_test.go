@@ -394,44 +394,200 @@ func TestTechfineCrossCommandFramesAreRejected(t *testing.T) {
 // 它凭什么会失败：任何一个 parser 对某个数值位退化成 0 兜底（或干脆不校验），
 // 对应命令那一行就会变红。
 func TestTechfineMalformedNumericFieldIsRejected(t *testing.T) {
-	cases := []struct {
-		cmd string
-		idx int // 要破坏的字段下标（必须是该命令真正会被解析的数值位）
-	}{
-		{"read_status", 0},      // fault_code（Atoi）
-		{"read_grid", 0},        // grid_voltage
-		{"read_output", 0},      // output_voltage
-		{"read_battery", 1},     // battery_voltage
-		{"read_pv1", 0},         // pv1_voltage
-		{"read_pv2", 0},         // pv2_voltage
-		{"read_temperature", 0}, // pv_temp
-		{"read_energy", 2},      // daily_energy
-		{"read_bms", 3},         // discharge voltage limit
-		{"read_eeprom", 1},      // max charge current
-		{"read_version", 0},     // software_version
+	// 复核变异 M9 发现：此前每个命令只破坏**一个**下标，而 read_output 破坏的是
+	// idx0、read_battery 破坏的是 idx1 —— 两者都走 strconv 直连，不经过
+	// parseRequiredFloat，于是"把 parseHOP 的 apparent_power 改成 0 兜底"能存活。
+	// 现在按"每个真正被解析的数值位"逐一破坏（共 43 个组合）。
+	parsedIndices := map[string][]int{
+		"read_status":      {0},             // fault_code（Atoi）
+		"read_grid":        {0, 1},          // 电压、频率
+		"read_output":      {0, 1, 2, 3, 4}, // 电压/频率/视在功率/有功功率/负载
+		"read_battery":     {1, 2, 3, 4, 5}, // 电压/容量/充电流/放电流/BUS 电压
+		"read_pv1":         {0, 1, 2},       // 电压/电流/功率
+		"read_pv2":         {0, 1, 2},
+		"read_temperature": {0, 1, 2, 3, 4, 5, 6}, // 5 温度 + 2 风扇转速
+		"read_energy":      {2, 3, 4, 5},          // 日/月/年/总
+		"read_bms":         {3, 4, 5, 6, 7, 8, 9}, // 限制值/SOC/电流/温度原始值
+		"read_eeprom":      {0, 1, 7, 8},          // 机型码/充电限流/输出电压/频率标志
+		"read_version":     {0, 1},                // 版本号/日期
 	}
 	d := &TechfineInverterDriver{}
-	for _, c := range cases {
-		cmd, ok := techfineCommandByID[c.cmd]
+	checked := 0
+	for cmdID, indices := range parsedIndices {
+		cmd, ok := techfineCommandByID[cmdID]
 		if !ok {
-			t.Fatalf("未知命令 %q", c.cmd)
+			t.Fatalf("未知命令 %q", cmdID)
 		}
-		frame, ok := techfineCanonicalFrames[c.cmd]
-		if !ok {
-			t.Fatalf("%s: 缺少规范夹具", c.cmd)
+		frame := techfineCanonicalFrames[cmdID]
+		base := strings.Fields(strings.TrimRight(strings.TrimPrefix(frame, "("), "\r"))
+		for _, idx := range indices {
+			if idx >= len(base) {
+				t.Fatalf("%s: 夹具只有 %d 个字段，无法破坏第 %d 位", cmdID, len(base), idx)
+			}
+			f := append([]string(nil), base...)
+			f[idx] = "XX"
+			corrupted := []byte("(" + strings.Join(f, " ") + "\r")
+			wire := hex.EncodeToString([]byte(cmd.Wire))
+			checked++
+			if data, err := d.ParseDataWithCommand(corrupted, wire); err == nil {
+				t.Errorf("%s: 第 %d 位改成 \"XX\" 后必须报错，却返回 %d 个字段 —— "+
+					"静默 0 兜底会把垃圾帧变成 0 读数（假数据比缺失更难排查）: %v",
+					cmdID, idx, len(data), data)
+			}
 		}
-		f := strings.Fields(strings.TrimRight(strings.TrimPrefix(frame, "("), "\r"))
-		if c.idx >= len(f) {
-			t.Fatalf("%s: 夹具只有 %d 个字段，无法破坏第 %d 位", c.cmd, len(f), c.idx)
-		}
-		f[c.idx] = "XX"
-		corrupted := []byte("(" + strings.Join(f, " ") + "\r")
-		wire := hex.EncodeToString([]byte(cmd.Wire))
+	}
+	if checked < 40 {
+		t.Fatalf("只检查了 %d 个数值位，覆盖不足", checked)
+	}
+}
 
-		if data, err := d.ParseDataWithCommand(corrupted, wire); err == nil {
-			t.Errorf("%s: 第 %d 位改成 \"XX\" 后必须报错，却返回 %d 个字段 —— "+
-				"静默 0 兜底会把垃圾帧变成 0 读数（假数据比缺失更难排查）: %v",
-				c.cmd, c.idx, len(data), data)
+// ============================================================================
+// 交叉命令矩阵 —— 替代此前只覆盖 6 对的"过度承诺"用例
+// ============================================================================
+//
+// 2026-10-21 复核发现：之前的 TestTechfineCrossCommandFramesAreRejected 只挑了
+// 6 个组合，但实测存在**系统性 fail-open**：
+//
+//	read_energy 接受全部 70,115 帧（温度帧当能量 → daily=28/monthly=31 kWh）
+//	read_output 接受全部市电帧（280V 线电压当输出电压、损失电压当功率）
+//	read_pv1/2  接受全部输出帧（输出电流 49.9A 当 pv1_current）
+//
+// 根因是 parser 只校验"字段数够不够"，不校验"这是不是我的形状"。
+// 现在 parseHGEN 要求 HH:MM、parseHOP 要求 HOP 谓词、parsePV 要求 PV 谓词。
+// 本用例把"命令 × 形状"的全部组合（11 × 11 = 121）都钉住：
+// **只有该命令本该接受的形状能通过，其余一律必须拒绝。**
+
+// techfineShapeFixtures 是每种真实形状的一条代表帧（生产帧或协议夹具）。
+var techfineShapeFixtures = map[string]string{
+	"HSTS":    "(00 B010000000000 102110021000000000000",
+	"HGRID":   "(213.0 49.9 280 170 65 40 +00000 0000000000000000",
+	"HOP":     "(217.5 50.0 00652 00612 010 030 06200 004.9 00790",
+	"HBAT":    "(04 051.1 069 000 00010 356 110007100000000000000",
+	"PV":      "(230.5 12.4 02577 00000.0 00000 2 205.3 0 0000000",
+	"HTEMP8":  "(041 037 032 033 041 100 100 11000000000000000000",
+	"HTEMP11": "(035 045 040 050 050 060 050 01 01 038 042",
+	"HGEN":    "(261020 11:21 05.766 0177.3 2200.0 000004601.6 000000000000",
+	"HBMS1":   "(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815",
+	"HEEP1":   "(1 060 020 0 0 0 0 230 1 0 0 0 0 0 0 000 000 000 000 230.0 50.0 000.0 O",
+	"HIMSG1":  "(0000.03 20230220 00",
+}
+
+// techfineAllowedShapes 声明每个命令**允许**接受的应答形状。
+var techfineAllowedShapes = map[string][]string{
+	"read_status":      {"HSTS"},
+	"read_grid":        {"HGRID"},
+	"read_output":      {"HOP"},
+	"read_battery":     {"HBAT"},
+	"read_pv1":         {"PV"},
+	"read_pv2":         {"PV"},
+	"read_temperature": {"HTEMP8", "HTEMP11"},
+	"read_energy":      {"HGEN"},
+	"read_bms":         {"HBMS1"},
+	"read_eeprom":      {"HEEP1"},
+	"read_version":     {"HIMSG1"},
+}
+
+func TestTechfineCrossCommandMatrix(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	allowed := make([]string, 0, len(techfineAllowedShapes))
+	for id := range techfineAllowedShapes {
+		allowed = append(allowed, id)
+	}
+	// 注册表里的每个命令都必须在这张矩阵里声明允许形状，否则矩阵会静默漏测。
+	if len(allowed) != len(techfineCommands) {
+		t.Fatalf("矩阵覆盖 %d 个命令，注册表有 %d 个（新增命令必须同时声明允许形状）",
+			len(allowed), len(techfineCommands))
+	}
+
+	checked := 0
+	for cmdID, okShapes := range techfineAllowedShapes {
+		if _, exists := techfineCommandByID[cmdID]; !exists {
+			t.Fatalf("矩阵引用了未登记的命令 %q", cmdID)
 		}
+		for shape, frame := range techfineShapeFixtures {
+			raw := []byte(frame + "\r")
+			data, err := d.VerifyControlAction(cmdID, json.RawMessage("{}"), raw)
+			wantAccept := false
+			for _, s := range okShapes {
+				if s == shape {
+					wantAccept = true
+					break
+				}
+			}
+			checked++
+			switch {
+			case wantAccept && err != nil:
+				t.Errorf("%s 应接受 %s 形状，却被拒绝: %v\n  raw=%s", cmdID, shape, err, frame)
+			case !wantAccept && err == nil:
+				names := make([]string, 0, len(data))
+				for _, sd := range data {
+					names = append(names, fmt.Sprintf("%s=%.1f", sd.Name, sd.Value))
+				}
+				t.Errorf("%s 接受了 %s 形状的帧 —— 命令上下文给错时必须拒绝，否则会把该帧读成假数据: %v\n  raw=%s",
+					cmdID, shape, names, frame)
+			}
+		}
+	}
+	if checked != len(techfineAllowedShapes)*len(techfineShapeFixtures) {
+		t.Fatalf("矩阵只跑了 %d 个组合", checked)
+	}
+}
+
+// ============================================================================
+// fail-closed 守卫的行为用例（复核变异 M7/M8 暴露的缺口）
+// ============================================================================
+
+// TestTechfineHBMS1ShortStatusIsRejected 钉住"状态串不足 8 位必须拒绝"。
+//
+// 复核变异 M7 发现：把 parseHBMS1 的 len(status1)<8 守卫删掉后，**没有用例变红**，
+// 而且真实行为不是"静默降级"而是 **panic: index out of range**（status1[4]）。
+// 这条用例同时证明：拒绝发生在 panic 之前。
+func TestTechfineHBMS1ShortStatusIsRejected(t *testing.T) {
+	short := []string{"01", "1001000", "00000000", "048.0", "054.0", "020", "080", "010.0", "005.0", "29815"}
+	data, err := (&TechfineInverterDriver{}).parseHBMS1(short)
+	if err == nil {
+		t.Fatalf("7 位状态串必须拒绝（不足 8 位无法判定告警），实际返回 %d 个字段", len(data))
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Fatalf("错误信息应指出状态串过短，实际: %v", err)
+	}
+
+	// 反向对照：8 位状态串必须正常解析（防止"一刀切拒绝"）。
+	ok := []string{"01", "10010000", "00000000", "048.0", "054.0", "020", "080", "010.0", "005.0", "29815"}
+	data, err = (&TechfineInverterDriver{}).parseHBMS1(ok)
+	if err != nil {
+		t.Fatalf("8 位状态串应正常解析: %v", err)
+	}
+	if findSensor(data, "bms_comm_ok") == nil {
+		t.Fatalf("应产出 bms_comm_ok，实际 %v", sensorNames(data))
+	}
+}
+
+// TestTechfineHTEMPShortStatusIsRejected 钉住"状态位串不足 2 位必须拒绝"。
+//
+// 复核变异 M8 发现：删掉该守卫后没有用例变红，行为是 fan2_status 静默变成 0
+// —— 即"缺失"被读成"风扇停转"，又一种静默假数据。
+func TestTechfineHTEMPShortStatusIsRejected(t *testing.T) {
+	// 只有 1 位状态串：无法判定 fan2。
+	short := []string{"041", "037", "032", "033", "041", "030", "030", "1"}
+	data, err := (&TechfineInverterDriver{}).parseHTEMP(short)
+	if err == nil {
+		t.Fatalf("1 位状态串必须拒绝（缺失位会变成「风扇停转」），实际返回 %v", sensorNames(data))
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Fatalf("错误信息应指出状态位串过短，实际: %v", err)
+	}
+
+	// 反向对照：2 位状态串必须可解析（"10" → fan1 转、fan2 停）。
+	ok := []string{"041", "037", "032", "033", "041", "030", "030", "10"}
+	data, err = (&TechfineInverterDriver{}).parseHTEMP(ok)
+	if err != nil {
+		t.Fatalf("2 位状态串应可解析: %v", err)
+	}
+	if s := findSensor(data, "fan1_status"); s == nil || s.Value != 1 {
+		t.Fatalf("fan1_status 应为 1，实际 %+v", s)
+	}
+	if s := findSensor(data, "fan2_status"); s == nil || s.Value != 0 {
+		t.Fatalf("fan2_status 应为 0，实际 %+v", s)
 	}
 }

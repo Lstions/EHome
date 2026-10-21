@@ -3,6 +3,7 @@ package drivers
 import (
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -153,14 +154,21 @@ var techfineCommands = []techfineCommand{
 }
 
 var (
-	// techfineCommandByID / ByWireHex 在 init 期建好，解析路径只做一次 map 查找。
+	// techfineCommandByID / ByWireHex / ByWireText 在 init 期建好，解析路径只做查表。
 	techfineCommandByID      map[string]*techfineCommand
 	techfineCommandByWireHex map[string]*techfineCommand
+	// ByWireText 的键是**去掉 CR/空白并大写**的命令字面量（如 "HTEMP"）。
+	// 存在的理由：生产库 config_template.write_data 可能存在历史遗留格式
+	// （缺 CR、尾随空格）。按 hex 精确相等会把它们判成"未知命令"，从而回落到
+	// 形状判定 —— 对 HPV/HPVB 这种同构形状就是直接报错，等于让一条能用的
+	// 模板突然失效。宽容一次解码是安全的：它只做"命令名"匹配，不猜形状。
+	techfineCommandByWireText map[string]*techfineCommand
 )
 
 func init() {
 	techfineCommandByID = make(map[string]*techfineCommand, len(techfineCommands))
 	techfineCommandByWireHex = make(map[string]*techfineCommand, len(techfineCommands))
+	techfineCommandByWireText = make(map[string]*techfineCommand, len(techfineCommands))
 	for i := range techfineCommands {
 		c := &techfineCommands[i]
 		if c.ID == "" || c.Wire == "" || c.Parser == nil || c.MinSensors <= 0 || len(c.Family) == 0 {
@@ -178,13 +186,37 @@ func init() {
 		}
 		techfineCommandByID[c.ID] = c
 		techfineCommandByWireHex[hexWire] = c
+		if cmdText := techfineWireText(c.Wire); cmdText != "" {
+			if _, dup := techfineCommandByWireText[cmdText]; dup {
+				panic("techfine: duplicate wire text for command " + c.ID)
+			}
+			techfineCommandByWireText[cmdText] = c
+		}
 	}
+}
+
+// techfineWireText 把 wire 帧归一成"命令名"（去 CR / 去空白 / 大写）。
+func techfineWireText(wire string) string {
+	return strings.ToUpper(strings.TrimSpace(wire))
 }
 
 // techfineCommandByWire 按**发送帧的十六进制**查命令（与 CommandTemplate.WriteData
 // / ConfigTemplate.WriteData 同一编码）。
+//
+// 两级匹配：
+//  1. 精确 hex（正常路径，零解码开销）；
+//  2. 宽容路径：解成 ASCII 后归一化再匹配命令名 —— 兼容历史上缺 CR/带空格的模板。
 func techfineCommandByWire(writeDataHex string) (*techfineCommand, bool) {
-	cmd, ok := techfineCommandByWireHex[strings.ToLower(strings.TrimSpace(writeDataHex))]
+	key := strings.ToLower(strings.TrimSpace(writeDataHex))
+	if cmd, ok := techfineCommandByWireHex[key]; ok {
+		return cmd, true
+	}
+	// 只有"合法 hex 但不是已知 wire"才继续；非法 hex 由调用方决定语义。
+	raw, err := hex.DecodeString(key)
+	if err != nil {
+		return nil, false
+	}
+	cmd, ok := techfineCommandByWireText[techfineWireText(string(raw))]
 	return cmd, ok
 }
 
@@ -208,8 +240,12 @@ func techfineCommandByWire(writeDataHex string) (*techfineCommand, bool) {
 //   - 走到最后仍没有规则命中 ⇒ 返回错误，**不再有兜底猜测**；
 //   - PV(HPV/HPVB) 形状同构、无法自证 ⇒ 明确返回"需要命令上下文"错误。
 //
-// 这些规则全部在生产 70,115 帧上验证过（见 techfine_production_replay_test.go）：
-// 7 种形状各自只命中一条规则，且分类结果与落库字段 0 处不符。
+// 这些规则的证据分两层，不要混为一谈：
+//
+//	· **离线**：在生产 70,115 帧语料上验证过 —— 7 种真实形状每种恰好命中 1 条规则，
+//	  且规则→落库传感器族 70,115/70,115 正确（脚本见 .analysis/，非 CI 门禁）；
+//	· **CI**：techfine_production_replay_test.go 回放 62 条真实帧夹具，
+//	  形状互斥性由 TestTechfineShapeRulesAreMutuallyExclusive 覆盖 10 种形状。
 type techfineShapeRule struct {
 	Name  string
 	Match func([]string) bool
@@ -232,7 +268,18 @@ var techfineShapeRules = []techfineShapeRule{
 
 	// HEEP1: 15+ 字段，f[0] 是单字符机型码 0-2。
 	{Name: "HEEP1", Command: "read_eeprom", Match: func(f []string) bool {
-		return len(f) >= 15 && len(f[0]) == 1 && f[0] >= "0" && f[0] <= "2"
+		// 机型码位数有两种说法：协议文档写单字符 0-2，驱动里的 dispatch 回归
+		// 测试备注称真机是两位（"01"）。生产没有 read_eeprom 帧可证，因此两种
+		// 都放行 —— 15+ 字段这个特征本身就是 HEEP1 独有的，不会与其它形状撞车。
+		if len(f) < 15 {
+			return false
+		}
+		code := f[0]
+		if len(code) < 1 || len(code) > 2 || !isAllDigits(code) {
+			return false
+		}
+		v, err := strconv.Atoi(code)
+		return err == nil && v >= 0 && v <= 2
 	}},
 
 	// HTEMP(真机 8 字段): (AAA BBB CCC DDD EEE FFF GGG <20 位状态串>)
@@ -310,20 +357,7 @@ var techfineShapeRules = []techfineShapeRule{
 
 	// HPV/HPVB: (AAA.A BB.B CCCCC ...) —— 形状同构，**无法自证是 PV1 还是 PV2**。
 	// Command 留空：ParseData 遇到它会返回"需要命令上下文"，而不是去猜。
-	{Name: "PV", Command: "", Match: func(f []string) bool {
-		if !strings.Contains(f[0], ".") || len(f) < 3 || !isNumericField(f[1]) {
-			return false
-		}
-		// 生产真机 HPV/HPVB 是 9 字段；历史夹具是 3 字段。两者都用各自的
-		// 定宽特征识别，避免把 HGRID/HOP/HIMSG1 也吞进 PV。
-		if len(f) == 3 {
-			return isAllDigits(f[2]) && len(f[2]) >= 4
-		}
-		if len(f) == 9 {
-			return strings.Contains(f[3], ".") && !strings.Contains(f[7], ".")
-		}
-		return false
-	}},
+	{Name: "PV", Command: "", Match: techfineLooksLikePV},
 }
 
 // techfineLooksLikeHOP 判定一帧是否是 HOP（输出）形状。
@@ -336,6 +370,24 @@ func techfineLooksLikeHOP(f []string) bool {
 	return len(f) >= 8 && strings.Contains(f[0], ".") && strings.Contains(f[7], ".") &&
 		isAllDigits(f[2]) && len(f[2]) >= 4 &&
 		isAllDigits(f[3]) && len(f[3]) >= 4
+}
+
+// techfineLooksLikePV 判定一帧是否是 PV（HPV/HPVB）形状。
+//
+// 与形状规则表里的 PV 项共用同一判据：3 字段定宽，或 9 字段且第 4 位带小数
+// （PV 的电流位）而第 8 位不带小数（那才是 HOP 的电感电流）。
+// parser 用它是为了"命令上下文给错也必须失败"——否则 read_pv1 会接受输出帧。
+func techfineLooksLikePV(f []string) bool {
+	if len(f) < 3 || !strings.Contains(f[0], ".") || !isNumericField(f[1]) {
+		return false
+	}
+	if len(f) == 3 {
+		return isAllDigits(f[2]) && len(f[2]) >= 4
+	}
+	if len(f) == 9 {
+		return strings.Contains(f[3], ".") && !strings.Contains(f[7], ".")
+	}
+	return false
 }
 
 // techfineClassifyShape 按顺序返回第一个命中的形状规则。
