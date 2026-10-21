@@ -492,19 +492,24 @@ git rev-parse --short HEAD; git status --porcelain | wc -l
 ./scripts/check_field_semantics.sh
 ```
 
-**最终实测（干净树，HEAD=9baf806e，代码面 dirty=0）**：
+**最终实测（干净树，HEAD=209bdd05，代码面 dirty=0）**：
 
 ```
-HEAD: 9baf806e (dirty files: 0)
-[PASS] #1/#2/#3/#4/#5/#6/#7/#8  ...（见下）
+HEAD: 209bdd05 (dirty files: 0)
+[PASS] #1/#2/#3/#4/#5/#6/#7/#8  ...（逐条见交付消息）
 [SKIP] #9 变异自证 — 默认不执行（--mutation 实跑 4/4 CAUGHT）
 [PASS] #10a-1a literal 路径结构断言（确定性） — TestLiteralPathSkipsProviderAndCompile 真实执行且通过
-[WARN] #10a-1b literal/基线 同 run 比值（仅记录） — 7.46x（并行负载噪声，不判定）
-[PASS] #10a-2 端到端 — 两次采样 784.2ns/768.1ns vs 基线 796.7ns ⇒ 更优比 0.96x ≤ 1.05
-[PASS] #10b 新层抽象成本 — median 3.684ns ≤10ns 且 0 alloc
+[WARN] #10a-1b literal/基线 同 run 比值（仅记录） — 7.51x（并行负载噪声，不判定）
+[PASS] #10a-2 端到端 — 三次采样 795.7/792.6/792.4ns vs 基线 796.7ns ⇒ 最优比 0.99x ≤ 1.05
+[PASS] #10b 新层抽象成本 — median 3.662ns ≤10ns 且 0 alloc
 [PASS] #11 回滚盘点 — NON_LITERAL=0
-RESULT: PASS_WITH_SKIPS(1) — 通过 12 条；唯一 SKIP = #9（变异自证 opt-in） (HEAD=9baf806e)
+RESULT: PASS_WITH_SKIPS(1) — 通过 12 条；唯一 SKIP = #9（变异自证 opt-in） (HEAD=209bdd05)
 ```
+
+**测量噪声与降噪方法（诚实边界）**：本机 load average 10+（5 个 agent 并行）时，端到端单次/两次采样
+中位数可被抬高 6–18%（实测 846–945ns vs 基线 797ns），两次取最优仍会偶发假红（见 commit 209bdd05 前的一次 FAIL）。
+因此 #10a-2 改为**三次独立采样**（每次 `-count=5 -benchtime=1s`）取最优中位数：真回归三次都会抬高，仍会红；
+并行噪声通常只抬高其中一两次。此方法在干净树上连续多次实跑稳定（最优比 0.99–1.02x）。
 
 对比修正前的矛盾结果（HEAD f9956c95, DIRTY=7）：基准类降级为 `SKIP(dirty-worktree)`，不再用别人的中间态判生死。
 
