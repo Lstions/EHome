@@ -361,8 +361,8 @@ jobs:
 
       # 主扫描。退出码语义：0=PASS/PASS_WITH_SKIPS；1=FAIL/FAIL_STRICT_SKIP；2=用法错。
       #
-      # 已知红：#10a-1（生产链 literal 绝对预算）在 D1 集成短路落地前为 12.09ns（见
-      # .analysis/d1-acceptance.md §8.6，修前 58.6ns / 修后 12.09ns，预算 3ns）。此处只对
+      # 已知红：#10a-1a 确定性结构断言——测试尚未落地（见
+      # .analysis/d1-acceptance.md §8.6）。#10a-1b 仅记录不阻断；#10a-2 端到端为硬判据（此处不豁免）。此处只对
       # "[FAIL] #10a" 这一行做窄豁免（打印 ::warning 不阻断），其余任何 FAIL 仍红。
       # 移除条件：literal 短路合并、本地 ./scripts/check_field_semantics.sh --only 10a
       # 变绿后，删除本条件分支，改回直接执行脚本。
@@ -374,9 +374,9 @@ jobs:
           set -e
           if [ "$rc" -eq 0 ]; then exit 0; fi
           fails=$(grep -c '^\[FAIL\]' /tmp/field-gates.log || true)
-          non_10a=$(grep '^\[FAIL\]' /tmp/field-gates.log | grep -vc '#10a-' || true)
+          non_10a=$(grep '^\[FAIL\]' /tmp/field-gates.log | grep -vc '#10a-1a ' || true)
           if [ "$fails" -ge 1 ] && [ "$non_10a" -eq 0 ]; then
-            echo "::warning::门禁 #10a-1 已知红（D1 集成 literal 短路未落地）：非阻断；其余门禁无 FAIL。"
+            echo "::warning::门禁 #10a-1a 已知红（TestLiteralPathSkipsProviderAndCompile 未落地）：非阻断；其余门禁无 FAIL。"
             exit 0
           fi
           echo "::error::门禁失败（含非 #10a 项）：$fails 条"

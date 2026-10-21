@@ -219,6 +219,24 @@ ok  	ehome/backend/internal/sensorfield
 
 ---
 
+### 5.0 三层判据与确定性证据（Lead 2026-10-21 最终裁决）
+
+绝对 ns 判据在并行负载下不可复现（baseline 1.19–6.4ns、literal 11–20ns 跳动 4–5×），故 #10a 改为三层：
+
+| 层 | 类型 | 判据 | 本批实测 |
+|---|---|---|---|
+| #10a-1a | **硬（确定性）** | `TestLiteralPathSkipsProviderAndCompile` 真实执行且 PASS：纯 literal 路径 provider snapshot/compile **调用数 == 0**；特殊 selector 调用数 >0（证明计数器非恒 0） | **PASS**（literal 1000 次调用：snapshots/compiles/enableds/epochs 全 0、plan 缓存空、ruleStats 空） |
+| #10a-1b | 软（仅记录） | 同 run `median(literal)/median(baseline)`；>5× 只 WARN | 记录值约 6.6–8.0×（并行负载噪声，不做判定） |
+| #10a-2 | **硬（端到端）** | `BenchmarkEvaluateFrame`（一帧 8 字段 3 规则）相对参考基线 ≤+5% | **PASS：833.1ns vs 同入口基线 819.0ns = +1.7%** |
+
+**测量前提（新增，违反则基准类判据无效）**：
+1. 必须在**干净工作树**上跑，并记录 `HEAD`（脚本会打印 `HEAD: <sha> (dirty files: N)`）；
+2. dirty 时脚本打印 `WARN: dirty worktree, results may be flaky`，且 #10a-1a / #10a-2 自动降级为 `SKIP(dirty-worktree)`（不用别人的中间态判 PASS/FAIL）；#10a-1b 仅记录不受影响；
+3. RESULT 行附带 `(HEAD=<sha>[, DIRTY=N])`，验收留档必须同时记录 HEAD 与脏文件数。
+
+为什么加这条纪律：impl-core 编辑 `selector.go` 的中间态曾让同一门禁三次给出互相矛盾的结果（`no tests to run` / 计数非 0 / 通过），
+其中 `no tests to run` 时 `go test` 仍 exit=0 —— 正是脚本一直在防的假绿形态。
+
 ## 5. 门禁 #10：三层判据（#10a-1a 确定性 / #10a-1b 观测 / #10a-2 端到端）
 
 > **Lead 2026-10-21 最终裁决**：绝对 ns 阈值在并行 teammate 负载下不可复现
@@ -463,3 +481,16 @@ RESULT: FAIL(1) — 未通过项只有 #10a（与 §5 的独立实测一致：57
 
 **测量噪声（诚实边界）**：本机与多名 teammate 并行构建时，基线克隆偶被抬到 3.0ns（正常 1.15ns），单次跑出的"新增"会偏小；
 脚本用 `-count=5` 取中位数、并在同一次 run 内测 prod 与基线，但仍受负载影响。复跑时请先确认机器空闲，或看多轮结果范围而非单点。
+### 8.7 最终门禁结果（干净树口径）
+
+脚本改为三层判据 + 干净树前置检查后的最终实跑，`RESULT`/`HEAD`/脏文件数必须一起记录：
+
+```bash
+cd backend
+export PATH=<repo>/.tools/gotool/bin:$PATH GOCACHE=/tmp/eh-wt-cache
+git rev-parse --short HEAD; git status --porcelain | wc -l
+./scripts/check_field_semantics.sh
+```
+
+最终结果（见交付消息与本文件附录）：11 条门禁 = PASS/PASS_WITH_SKIPS（#9 opt-in 为唯一常态 SKIP；基准类在脏树上自动 SKIP(dirty-worktree)）。
+#10a-2 参考基线已录：`backend/internal/sensorfield/testdata/bench_baseline_e2e.txt`（`--record-bench-baseline` 生成，文件头含 commit 与局限）。

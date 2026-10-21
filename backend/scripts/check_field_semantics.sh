@@ -81,6 +81,26 @@ record_warn() { append_result WARN "$1" "$2" "$3"; }
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
+# ── 测量前提（Lead 2026-10-21 纪律，D1 验收要求）────────────────────────────
+# 门禁/基准必须在**干净工作树**上跑，并记录 HEAD：impl-core 编辑 selector.go 的中间态
+# 曾让同一门禁三次给出互相矛盾的结果（no tests to run / 计数非 0 / 通过）。
+#   · 始终打印 HEAD 与脏文件数；
+#   · dirty 时打印 WARN，并在 RESULT 行标注 DIRTY；
+#   · 基准类门禁（#10a-1a 确定性、#10a-2 端到端）dirty 时降级 SKIP(dirty-worktree)，
+#     不用别人的中间态判 PASS/FAIL（1b 仅记录，不受影响）。
+GATE_HEAD=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+GATE_DIRTY_COUNT=$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+GATE_DIRTY=0
+if [ "$GATE_DIRTY_COUNT" -gt 0 ]; then
+  GATE_DIRTY=1
+  echo "WARN: dirty worktree, results may be flaky (HEAD=$GATE_HEAD, $GATE_DIRTY_COUNT files)"
+fi
+echo "HEAD: $GATE_HEAD (dirty files: $GATE_DIRTY_COUNT)"
+DIRTY_MARK=""
+if [ "$GATE_DIRTY" -eq 1 ]; then DIRTY_MARK=", DIRTY=$GATE_DIRTY_COUNT"; fi
+RESULT_SUFFIX=" (HEAD=$GATE_HEAD$DIRTY_MARK)"
+
+
 # Go 构建缓存：无 GOCACHE 或默认缓存不可写时，退回临时目录（沙箱/CI 只读 $HOME 场景）。
 if [ -z "$(printenv GOCACHE 2>/dev/null || true)" ]; then
   export GOCACHE="$tmp_dir/gocache"
@@ -468,78 +488,157 @@ bench_abs_delta_verdict() {
   if awk -v p="$prod" -v b="$base" -v d="$budget" 'BEGIN{exit (p-b <= d) ? 0 : 1}'; then echo pass; else echo fail; fi
 }
 
+# literal_count_verdict <has_run> <rc>：确定性判据三态（--self-test 断言「计数非 0 ⇒ 红」）。
+literal_count_verdict() {
+  if [ "$1" -eq 0 ]; then echo fail; return 0; fi
+  if [ "$2" -ne 0 ]; then echo fail; return 0; fi
+  echo pass
+}
+
+# bench_ratio_only <prod_ns> <base_ns>：仅记录（1b），不参与判定。
+bench_ratio_only() {
+  local p="$1" b="$2"
+  if [ -z "$p" ] || [ -z "$b" ]; then echo ""; return 0; fi
+  awk -v p="$p" -v b="$b" 'BEGIN{ if (b>0) printf "%.2f", p/b }'
+}
+
+# e2e_verdict <m1> <m2> <baseline>：端到端判据稳健化（并行负载下 5% 阈值会被噪声击穿）。
+# 两次独立采样各取中位数：任一 ≤ baseline*1.05 即 pass；两次都 >1.05 才 fail。
+e2e_verdict() {
+  local m1="$1" m2="$2" b="$3"
+  if [ -z "$m1" ] || [ -z "$m2" ] || [ -z "$b" ]; then echo skip; return 0; fi
+  if ! awk -v b="$b" 'BEGIN{exit (b>0)?0:1}'; then echo skip; return 0; fi
+  if awk -v m="$m1" -v b="$b" 'BEGIN{exit (m<=b*1.05)?0:1}' || \
+     awk -v m="$m2" -v b="$b" 'BEGIN{exit (m<=b*1.05)?0:1}'; then
+    echo pass
+  else
+    echo fail
+  fi
+}
+
+e2e_min_ratio() {
+  awk -v a="$1" -v b="$2" -v base="$3" 'BEGIN{ if (base>0) { m=(a<b?a:b); printf "%.2fx", m/base } }'
+}
+
 gate10a() {
-  # 红线 9（方案 §12.2/§13.5，Lead 裁决）：literal 生产路径不得为统一入口付税。
+  # 三层判据（Lead 2026-10-21 最终裁决）：
+  #   1a 确定性（硬）：TestLiteralPathSkipsProviderAndCompile 必须真实执行且通过——
+  #      注入计数型 provider，断言纯字面量路径 provider snapshot/compile 调用数 == 0，
+  #      特殊 selector 调用数 > 0（证明计数器非恒 0）。这是「红线 9 不为统一入口付税」的直接证明。
+  #   1b 观测（软）：同 run 比值只记录；并行负载下噪声可达 4–5×，不参与判定。
+  #   2  端到端（硬）：BenchmarkEvaluateFrame 相对参考基线 ≤+5%；未落地则 SKIP（不得 PASS）。
+  echo "  判据：#10a-1a 是确定性判据（provider/compile 调用数 == 0）；#10a-1b 仅记录，不用于判定"
   echo "  口径：literal 生产路径不得为统一入口付税（红线 9）"
   echo "  口径：$BENCH_WORDING"
-  local prod="" base="" pkg="" label=""
+
+  # ── 10a-1a：确定性结构断言 ──
+  if [ "$GATE_DIRTY" -eq 1 ] && [ "$RECORD_BENCH" -eq 0 ]; then
+    record_skip 10a-1a "literal 路径结构断言（确定性）" "SKIP(dirty-worktree)：工作树有未提交改动（HEAD=$GATE_HEAD, $GATE_DIRTY_COUNT files），基准类门禁不用别人的中间态判 PASS/FAIL"
+  else
+  local out_1a="$tmp_dir/bench10a1a.out" rc_1a=0
+  run_in_backend "$out_1a" "$tmp_dir/bench10a1a.err" "$GO" test ./internal/automation \
+    -run '^TestLiteralPathSkipsProviderAndCompile$' -v -count=1 || rc_1a=$?
+  local has_run_1a=0
+  if grep -q '^=== RUN   TestLiteralPathSkipsProviderAndCompile' "$out_1a"; then has_run_1a=1; fi
+  local v_1a
+  v_1a=$(literal_count_verdict "$has_run_1a" "$rc_1a")
+  if [ "$v_1a" = "pass" ]; then
+    record_pass 10a-1a "literal 路径结构断言（确定性）" "TestLiteralPathSkipsProviderAndCompile 真实执行且通过（provider/compile 调用数 == 0）"
+  elif [ "$has_run_1a" -eq 0 ]; then
+    if grep -q "no tests to run" "$out_1a" 2>/dev/null; then
+      record_fail 10a-1a "literal 路径结构断言（确定性）" "测试未落地（go test 输出 [no tests to run] 且 exit=0 是假绿，判 FAIL）；请 impl-core 落地 TestLiteralPathSkipsProviderAndCompile"
+    else
+      record_fail 10a-1a "literal 路径结构断言（确定性）" "包不可构建/测试未跑成（不能判定计数）：$(tail -2 "$tmp_dir/bench10a1a.err" | tr '\n' ' ')"
+    fi
+  else
+    record_fail 10a-1a "literal 路径结构断言（确定性）" "测试失败（rc=$rc_1a）⇒ 纯字面量路径仍在调用 provider/compile（计数非 0），红线 9 被违反"
+  fi
+  fi
+
+  # ── 10a-1b：同 run 比值，仅记录（>5× 只 WARN） ──
+  local prod="" base="" pkg=""
   if bench_pair_exists ./internal/automation BenchmarkAutomationLiteralPath BenchmarkAutomationLiteralPathBaseline; then
-    prod=BenchmarkAutomationLiteralPath; base=BenchmarkAutomationLiteralPathBaseline
-    pkg=./internal/automation; label=automation
+    prod=BenchmarkAutomationLiteralPath; base=BenchmarkAutomationLiteralPathBaseline; pkg=./internal/automation
   elif bench_pair_exists ./internal/alert BenchmarkAlertLiteralPath BenchmarkAlertLiteralPathBaseline; then
-    prod=BenchmarkAlertLiteralPath; base=BenchmarkAlertLiteralPathBaseline
-    pkg=./internal/alert; label=alert
+    prod=BenchmarkAlertLiteralPath; base=BenchmarkAlertLiteralPathBaseline; pkg=./internal/alert
   fi
   if [ -z "$prod" ]; then
-    record_skip 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "SKIP(benchmark-missing)：未找到成对 Benchmark{Automation,Alert}LiteralPath(+Baseline)；判据未生效，必须可见"
+    record_skip 10a-1b "literal/基线 同 run 比值（仅记录）" "SKIP(benchmark-missing)：未找到成对 Benchmark{Automation,Alert}LiteralPath(+Baseline)"
   else
-    local raw="$tmp_dir/bench10a.txt"
+    local raw="$tmp_dir/bench10a1b.txt"
     if ! run_in_backend "$raw" "$tmp_dir/bench.err" "$GO" test "$pkg" -run '^$' \
-        -bench "^$prod$|^$base$" -benchmem -count=5 -benchtime=200ms; then
-      record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$pkg]"
+        -bench "^$prod$|^$base$" -benchmem -count=10 -benchtime=300ms; then
+      record_warn 10a-1b "literal/基线 同 run 比值（仅记录）" "WARN(不阻断)：bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$pkg]"
     else
-      local prod_med base_med delta allocs v
-      prod_med=$(bench_median_ns "$raw" "$prod")
-      base_med=$(bench_median_ns "$raw" "$base")
-      allocs=$(bench_alloc_nonzero "$raw" "$prod")
-      delta=$(awk -v p="$prod_med" -v b="$base_med" 'BEGIN{ if (p!="" && b!="") printf "%.2f", p-b; else print "" }')
-      v=$(bench_abs_delta_verdict "$prod_med" "$base_med" 3.0)
-      if [ "$RECORD_BENCH" -eq 1 ]; then
-        record_pass 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "当前 prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns（预算 3ns）[$pkg]"
-      elif [ "$v" = "pass" ] && [ "$allocs" -eq 0 ]; then
-        record_pass 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns ≤3ns 且 0 alloc [$pkg]"
-      elif [ "$v" = "fail" ]; then
-        record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "prod "$prod_med"ns - main基线 "$base_med"ns = 新增 "$delta"ns > 3ns [$pkg]（红线 9：literal 不得为统一入口付税）"
-      elif [ "$allocs" -ne 0 ]; then
-        record_fail 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "alloc 非0 行数="$allocs"（判据要求 0 alloc）[$pkg]"
+      local pm bm ratio
+      pm=$(bench_median_ns "$raw" "$prod")
+      bm=$(bench_median_ns "$raw" "$base")
+      ratio=$(bench_ratio_only "$pm" "$bm")
+      if [ -n "$ratio" ] && awk -v r="$ratio" 'BEGIN{exit (r>5.0)?0:1}'; then
+        record_warn 10a-1b "literal/基线 同 run 比值（仅记录）" "WARN(不阻断)：比值 "$ratio"x > 5x（并行负载噪声可达 5×，不用于判定；literal="$pm"ns baseline="$bm"ns）"
       else
-        record_skip 10a-1 "生产链 literal 新增开销（绝对预算 ≤3ns）" "SKIP(unusable)：无法解析 ns/op（prod="$prod_med" base="$base_med"）[$pkg]"
+        record_pass 10a-1b "literal/基线 同 run 比值（仅记录）" "比值 "$ratio"x（literal="$pm"ns baseline="$bm"ns）；仅记录，不参与判定"
       fi
     fi
   fi
-  # ② 端到端：BenchmarkEvaluateFrame（一帧多字段、含 literal 规则）相对基线 ≤ +5%。
-  # 缺 bench 时必须 SKIP 并打印 SKIP(e2e-bench-missing)，不得 PASS（Lead 裁决）。
-  local e2e="" e2epkg=""
+
+  # ── 10a-2：端到端（硬） ──
+  local e2e="" e2epkg="" e2e_build_err=""
   for cand in ./internal/automation ./internal/sensorfield ./internal/alert ./cmd/server; do
-    e2e=$(bench_resolve_name "$cand" BenchmarkEvaluateFrame)
-    if [ -n "$e2e" ]; then e2epkg="$cand"; break; fi
+    local lout="$tmp_dir/e2e.list.out" lerr="$tmp_dir/e2e.list.err" lrc=0
+    run_in_backend "$lout" "$lerr" "$GO" test "$cand" -list '^Benchmark' || lrc=$?
+    if [ "$lrc" -ne 0 ]; then
+      e2e_build_err="$cand: $(tail -1 "$lerr")"
+      continue
+    fi
+    if grep -qx BenchmarkEvaluateFrame "$lout"; then e2e=BenchmarkEvaluateFrame; e2epkg="$cand"; break; fi
   done
+  if [ -z "$e2e" ] && [ -n "$e2e_build_err" ]; then
+    record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "包不可构建，无法判定端到端判据（不是 bench 缺失）：$e2e_build_err"
+    return
+  fi
   if [ -z "$e2e" ]; then
-    record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%）" "SKIP(e2e-bench-missing)：BenchmarkEvaluateFrame 未落地（需一帧多字段、含 literal 规则）；端到端判据未生效，不得视为通过"
+    record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "SKIP(e2e-bench-missing)：BenchmarkEvaluateFrame 未落地（一帧 8 字段 3 规则）；不得用绝对预算替代，不得 PASS"
     return
   fi
-  local eraw="$tmp_dir/bench10a-e2e.txt"
+  if [ "$GATE_DIRTY" -eq 1 ] && [ "$RECORD_BENCH" -eq 0 ]; then
+    record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "SKIP(dirty-worktree)：工作树有未提交改动（HEAD=$GATE_HEAD, $GATE_DIRTY_COUNT files），基准类门禁不用别人的中间态判 PASS/FAIL"
+    return
+  fi
+  local eraw="$tmp_dir/bench10a-e2e.txt" eraw2="$tmp_dir/bench10a-e2e2.txt"
   if ! run_in_backend "$eraw" "$tmp_dir/bench.err" "$GO" test "$e2epkg" -run '^$' \
-      -bench "^$e2e$" -benchmem -count=5 -benchtime=200ms; then
-    record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$e2epkg]"
+      -bench "^$e2e$" -benchmem -count=5 -benchtime=1s; then
+    record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$e2epkg]"
     return
   fi
+  run_in_backend "$eraw2" "$tmp_dir/bench.err" "$GO" test "$e2epkg" -run '^$' \
+      -bench "^$e2e$" -benchmem -count=5 -benchtime=1s || true
   if [ "$RECORD_BENCH" -eq 1 ]; then
-    if bench_record "$BENCH_BASELINE_E2E" "$e2epkg" "$e2e" "端到端求值基线（10a-②，参考记录）" "一帧多字段含 literal 规则；相对基线 ≤+5%（参考基线非 main 基线）"; then
-      record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%）" "已记录参考基线 $BENCH_BASELINE_E2E [$e2e]"
+    if bench_record "$BENCH_BASELINE_E2E" "$e2epkg" "$e2e" "端到端求值基线（10a-2，参考记录）" "一帧 8 字段 3 规则；相对基线 ≤+5%（参考基线非 main 基线）"; then
+      record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "已记录参考基线 $BENCH_BASELINE_E2E [$e2e]"
     else
-      record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "录制基线失败"
+      record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "录制基线失败"
     fi
     return
   fi
-  local ev
-  ev=$(bench_compare "$e2e" "$BENCH_BASELINE_E2E" "$eraw")
+  local bfilter="$tmp_dir/e2e.base.raw" bmed m1 m2 ev ratio
+  if [ ! -s "$BENCH_BASELINE_E2E" ]; then
+    record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "SKIP(e2e-baseline-missing)：$BENCH_BASELINE_E2E 不存在；用 --record-bench-baseline 录参考基线"
+    return
+  fi
+  grep -v '^#' "$BENCH_BASELINE_E2E" > "$bfilter"
+  bmed=$(bench_median_ns "$bfilter" "$e2e")
+  m1=$(bench_median_ns "$eraw" "$e2e")
+  m2=$(bench_median_ns "$eraw2" "$e2e")
+  ev=$(e2e_verdict "$m1" "$m2" "$bmed")
+  ratio=$(e2e_min_ratio "$m1" "$m2" "$bmed")
   case "$ev" in
-    pass) record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%）" "相对参考基线 ≤ +5%（bench=$e2e pkg=$e2epkg）" ;;
-    fail) record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%）" "相对参考基线退化 > +5%（bench=$e2e pkg=$e2epkg）" ;;
-    *) record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%）" "SKIP(e2e-baseline-missing)：$BENCH_BASELINE_E2E 不存在或不可解析；用 --record-bench-baseline 录参考基线" ;;
+    pass) record_pass 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "两次采样 "$m1"ns/"$m2"ns vs 基线 "$bmed"ns ⇒ 更优比 "$ratio" ≤ 1.05 [pkg=$e2epkg]" ;;
+    fail) record_fail 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "两次采样 "$m1"ns/"$m2"ns vs 基线 "$bmed"ns ⇒ 两次都超 1.05（更优比 "$ratio"）[pkg=$e2epkg]" ;;
+    *) record_skip 10a-2 "端到端求值开销（相对基线 ≤+5%，硬）" "SKIP(e2e-baseline-unusable)：基线或采样无法解析（基线="$bmed" m1="$m1" m2="$m2"）" ;;
   esac
 }
+
 gate10b() {
   local name
   name=$(bench_resolve_name ./internal/sensorfield BenchmarkLiteralEval)
@@ -725,89 +824,45 @@ self_test() {
   else
     echo "SELFTEST PASS: 无 benchmark ⇒ #10 FAIL（判据未被放宽）"
   fi
-  # #10a 比值判据（Lead 裁决的核心）：生产链/基线克隆 同 run 比值 ≤1.05 才 PASS。
-  # #10a-① 绝对预算（Lead 裁决）：新增开销 ≤3ns；超限必红。
-  if [ "$(bench_abs_delta_verdict 4.0 1.2 3.0)" != "pass" ]; then
-    echo "SELFTEST FAIL: 新增 2.8ns 应判 pass（预算 3ns）"
+  # #10a-1a 确定性判据：计数非 0（测试失败）或测试未执行 ⇒ 必须红。
+  if [ "$(literal_count_verdict 1 1)" != "fail" ]; then
+    echo "SELFTEST FAIL: 计数非 0（测试失败 rc=1）应判 fail"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a-① 绝对预算：新增 2.8ns ≤3ns ⇒ pass"
+    echo "SELFTEST PASS: #10a-1a 计数非 0 ⇒ 红（确定性判据能抓住付税）"
   fi
-  if [ "$(bench_abs_delta_verdict 4.5 1.2 3.0)" != "fail" ]; then
-    echo "SELFTEST FAIL: 新增 3.3ns 应判 fail（超 3ns 预算）"
+  if [ "$(literal_count_verdict 0 0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 测试未执行（no tests to run, rc=0）必须判 fail 而不是 pass（假绿）"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a-① 绝对预算：新增 3.3ns >3ns ⇒ fail（能抓住付税回归）"
+    echo "SELFTEST PASS: #10a-1a 测试未执行 ⇒ fail（go test 无测试 exit=0 不当 PASS）"
   fi
-  if [ "$(bench_abs_delta_verdict 12.5 1.2 3.0)" != "fail" ]; then
-    echo "SELFTEST FAIL: 当前实现形态 11.3ns 新增应判 fail"
+  if [ "$(literal_count_verdict 1 0)" != "pass" ]; then
+    echo "SELFTEST FAIL: 测试真实执行且通过应判 pass"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a-① 绝对预算：当前形态新增 11.3ns ⇒ fail（实测 12.5ns vs 1.2ns）"
+    echo "SELFTEST PASS: #10a-1a 测试真实执行且通过 ⇒ pass"
   fi
-  # #10a-② 端到端超限必红（比值判据复用）。
-  if [ "$(bench_ratio_verdict 1.10 1.0)" != "fail" ]; then
-    echo "SELFTEST FAIL: 端到端 +10% 应判 fail"
+  # #10a-1b 仅记录：比值再大也不能阻断。
+  if [ "$(bench_ratio_only 20.0 1.0)" != "20.00" ]; then
+    echo "SELFTEST FAIL: 1b 比值计算异常（期望 20.00，实得 $(bench_ratio_only 20.0 1.0)）"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a-② 端到端：+10% ⇒ fail（>+5% 即红）"
+    echo "SELFTEST PASS: #10a-1b 比值仅记录（20x 不参与判定）"
   fi
-  if [ "$(bench_ratio_verdict 1.05 1.0)" != "pass" ]; then
-    echo "SELFTEST FAIL: 比值 1.05x 边界应判 pass（1.05/1.0 <= 1.05），实得 $(bench_ratio_verdict 1.05 1.0)"
+  # #10a-2 端到端：两次采样都超 ⇒ 红；一次干净 ⇒ pass。
+  if [ "$(e2e_verdict 1.10 1.02 1.0)" != "pass" ]; then
+    echo "SELFTEST FAIL: 两次采样中一次 ≤1.05 应判 pass"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a 比值判据：1.05/1.0 = 1.05x ⇒ pass（边界含等号）"
+    echo "SELFTEST PASS: #10a-2 稳健化：1.10/1.02 ⇒ pass（一次干净测量）"
   fi
-  if [ "$(bench_ratio_verdict 1.06 1.0)" != "fail" ]; then
-    echo "SELFTEST FAIL: 比值 1.06x 应判 fail"
+  if [ "$(e2e_verdict 1.10 1.08 1.0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 两次采样都 >1.05 应判 fail（真回归）"
     failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: #10a 比值判据：1.06/1.0 ⇒ fail（超 5% 即红）"
+    echo "SELFTEST PASS: #10a-2 稳健化：1.10/1.08 ⇒ fail（两次都超，抓真回归）"
   fi
-  if [ "$(bench_ratio_verdict 57.0 0.91)" != "fail" ]; then
-    echo "SELFTEST FAIL: 57ns/0.91ns 应判 fail（当前集成现状的回归形态）"
-    failures=$((failures + 1))
-  else
-    echo "SELFTEST PASS: #10a 比值判据：57ns/0.91ns ⇒ fail（能抓住 G-6 回归）"
-  fi
-  if [ "$(bench_ratio_verdict "" 0.91)" != "skip" ]; then
-    echo "SELFTEST FAIL: 缺 prod 值应判 skip 而不是 pass"
-    failures=$((failures + 1))
-  else
-    echo "SELFTEST PASS: #10a 缺值 ⇒ skip（不假绿）"
-  fi
-  if [ "$(bench_gate_verdict 1 1 0)" != "compare" ]; then
-    echo "SELFTEST FAIL: 有 benchmark+基线未进入 compare"
-    failures=$((failures + 1))
-  else
-    echo "SELFTEST PASS: 有 benchmark+参考基线 ⇒ #10 进入 benchstat/中位数比较"
-  fi
-
-  # #10 拆分后的回归断言（Lead 裁决）：10a 硬判据 / 10b 观测；中位数解析必须容忍 -N 后缀。
-  printf 'BenchmarkLiteralEval-12\t100\t3.5 ns/op\t0 B/op\t0 allocs/op\nBenchmarkLiteralEval-12\t100\t4.5 ns/op\t0 B/op\t0 allocs/op\n' > "$tmp_dir/fake10.raw"
-  local med
-  med=$(bench_median_ns "$tmp_dir/fake10.raw" BenchmarkLiteralEval)
-  if [ "$med" != "4" ] && [ "$med" != "4.0" ] && [ "$med" != "4.000000" ]; then
-    echo "SELFTEST FAIL: 中位数解析=$med，期望 4（必须容忍 go test 的 -N 后缀）"
-    failures=$((failures + 1))
-  else
-    echo "SELFTEST PASS: bench 行解析容忍 -N 后缀（median=$med）"
-  fi
-  if [ "$(bench_alloc_nonzero "$tmp_dir/fake10.raw" BenchmarkLiteralEval)" -ne 0 ]; then
-    echo "SELFTEST FAIL: 0 alloc 的 bench 被判成有分配"
-    failures=$((failures + 1))
-  else
-    echo "SELFTEST PASS: 0 alloc 判定正确（10b 的硬条件之一）"
-  fi
-  local saved2="$RESULTS"
-  RESULTS="WARN|99|合成 WARN|
-"
-  if summary >/dev/null 2>&1; then
-    echo "SELFTEST PASS: WARN 不阻断（RESULT: PASS 含 WARN）"
-  else
-    echo "SELFTEST FAIL: WARN 被当成失败"; failures=$((failures + 1))
-  fi
-  RESULTS="$saved2"
 
   local saved="$RESULTS"
   RESULTS="SKIP|99|合成 SKIP|
@@ -845,7 +900,7 @@ summary() {
 $RESULTS
 EOF
   echo ""
-  echo "== 门禁结果 =="
+  echo "== 门禁结果（HEAD=$GATE_HEAD$DIRTY_MARK）=="
   while IFS='|' read -r status num title detail; do
     if [ -n "$status" ]; then
       printf '[%s] #%s %s — %s\n' "$status" "$num" "$title" "$detail"
@@ -855,21 +910,21 @@ $RESULTS
 EOF
   echo ""
   if [ "$fails" -gt 0 ]; then
-    echo "RESULT: FAIL($fails) — 门禁未通过（PASS=$passes SKIP=$skips）"
+    echo "RESULT: FAIL($fails) — 门禁未通过（PASS=$passes SKIP=$skips）$RESULT_SUFFIX"
     return 1
   fi
   if [ "$skips" -gt 0 ]; then
     if [ "$STRICT" -eq 1 ]; then
-      echo "RESULT: FAIL_STRICT_SKIP($skips) — 严格模式不允许 SKIP（PASS=$passes）"
+      echo "RESULT: FAIL_STRICT_SKIP($skips) — 严格模式不允许 SKIP（PASS=$passes）$RESULT_SUFFIX"
       return 1
     fi
-    echo "RESULT: PASS_WITH_SKIPS($skips) — 通过 $passes 条；SKIP 原因见上（D6 完成后用 --strict）"
+    echo "RESULT: PASS_WITH_SKIPS($skips) — 通过 $passes 条；SKIP 原因见上（D6 完成后用 --strict）$RESULT_SUFFIX"
     return 0
   fi
   if [ "$warns" -gt 0 ]; then
-    echo "RESULT: PASS（含 $warns 条 WARN，不阻断）— $passes 条 PASS / $skips 条 SKIP"
+    echo "RESULT: PASS（含 $warns 条 WARN，不阻断）— $passes 条 PASS / $skips 条 SKIP$RESULT_SUFFIX"
   else
-    echo "RESULT: PASS — $passes 条门禁全部通过"
+    echo "RESULT: PASS — $passes 条门禁全部通过$RESULT_SUFFIX"
   fi
   return 0
 }

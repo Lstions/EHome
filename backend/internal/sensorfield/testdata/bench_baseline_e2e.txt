@@ -1,0 +1,18 @@
+# ===== 端到端求值基线（10a-2，参考记录）（REFERENCE BASELINE，非 main 基线）=====
+# bench: BenchmarkEvaluateFrame (pkg=./internal/automation)
+# note: 一帧 8 字段 3 规则；相对基线 ≤+5%（参考基线非 main 基线）
+# 为什么不是 main：main d406dc2d 上不存在 sensorfield/selector 集成，无法在 main 录基线。
+# 局限（诚实边界）：本机（AMD Ryzen 5 5600）与并行负载下录制，单次波动大；
+#   ±5% 阈值受机器/负载影响，是 D1 门槛的近似判据，不是发布级 SLA。
+# commit: b88f1b2c (docs(analysis): task-8 终态复跑证据（impl-core selector 优化提交后，双模式 -race 全绿）)
+# date: 2026-10-21T23:45:20+08:00
+# recorded_by: scripts/check_field_semantics.sh --record-bench-baseline
+goos: linux
+goarch: amd64
+pkg: ehome/backend/internal/automation
+cpu: AMD Ryzen 5 5600 6-Core Processor              
+BenchmarkEvaluateFrame-12    	  271917	       795.4 ns/op	    1600 B/op	       4 allocs/op
+BenchmarkEvaluateFrame-12    	  254378	       801.6 ns/op	    1600 B/op	       4 allocs/op
+BenchmarkEvaluateFrame-12    	  259278	       796.2 ns/op	    1600 B/op	       4 allocs/op
+BenchmarkEvaluateFrame-12    	  263347	       817.2 ns/op	    1600 B/op	       4 allocs/op
+BenchmarkEvaluateFrame-12    	  298978	       796.7 ns/op	    1600 B/op	       4 allocs/op
