@@ -1,0 +1,75 @@
+# 泰琪丰 GB3024 生产应答帧样本（真实设备 device_id=15 / node F0F5BD02DD84）
+# 来源：生产库 device_data.data_json.raw_hex；窗口 2026-10-20 ~ 10-21（30h / 70,115 帧）
+# 采样：每个命令取互不相同的真实帧；read_temperature 额外覆盖风扇 50%/100% 与状态位 00。
+# 格式：<command_id>|<不带 CR 的原始 ASCII 行>|<期望传感器 name=value，用 ; 分隔>
+#
+# 期望值来源：除 read_temperature 外 = 生产库落库值（与原始帧逐点一致，70,115/70,115）。
+# read_temperature 期望值按修正后语义生成：
+#   field[0..4] -> 5 温度；field[5]/[6] -> fan1_speed/fan2_speed(%)；field[7][0:2] -> fan1_status/fan2_status。
+#   历史实现把 field[5]/[6] 写成 pv2_temp/dc_rectifier_temp(°C)，属缺陷，不作为期望。
+read_status|(00 B010000000000 102110021200000000000|fault_code=0;work_mode=3;alarm_pv_to_load=0;alarm_output=1;alarm_battery_low=0;alarm_battery_missing=0;alarm_overload=0;alarm_overtemp=0;alarm_eeprom_data=0;alarm_eeprom_rw=0;alarm_pv_low=0;alarm_input_overvoltage=0;alarm_battery_overvoltage=0;alarm_fan_error=0
+read_status|(00 B010000000000 102110021000000000000|fault_code=0;work_mode=3;alarm_pv_to_load=0;alarm_output=1;alarm_battery_low=0;alarm_battery_missing=0;alarm_overload=0;alarm_overtemp=0;alarm_eeprom_data=0;alarm_eeprom_rw=0;alarm_pv_low=0;alarm_input_overvoltage=0;alarm_battery_overvoltage=0;alarm_fan_error=0
+read_status|(00 B010000000000 102110021100000000000|fault_code=0;work_mode=3;alarm_pv_to_load=0;alarm_output=1;alarm_battery_low=0;alarm_battery_missing=0;alarm_overload=0;alarm_overtemp=0;alarm_eeprom_data=0;alarm_eeprom_rw=0;alarm_pv_low=0;alarm_input_overvoltage=0;alarm_battery_overvoltage=0;alarm_fan_error=0
+read_grid|(243.7 49.9 280 170 65 40 +00000 0000000000000000|grid_voltage=243.7;grid_frequency=49.9
+read_grid|(244.5 49.9 280 170 65 40 +00000 0000000000000000|grid_voltage=244.5;grid_frequency=49.9
+read_grid|(245.3 49.9 280 170 65 40 +00000 0000000000000000|grid_voltage=245.3;grid_frequency=49.9
+read_grid|(244.8 49.9 280 170 65 40 +00000 0000000000000000|grid_voltage=244.8;grid_frequency=49.9
+read_grid|(246.6 50.0 280 170 65 40 +00000 0000000000000000|grid_voltage=246.6;grid_frequency=50
+read_grid|(247.0 50.0 280 170 65 40 +00000 0000000000000000|grid_voltage=247;grid_frequency=50
+read_grid|(245.5 50.0 280 170 65 40 +00000 0000000000000000|grid_voltage=245.5;grid_frequency=50
+read_grid|(245.1 50.0 280 170 65 40 +00000 0000000000000000|grid_voltage=245.1;grid_frequency=50
+read_output|(220.2 49.9 00330 00226 005 001 06200 005.5 00352|output_voltage=220.2;output_frequency=49.9;output_apparent_power=330;output_active_power=226;output_load_percent=5
+read_output|(220.1 49.9 00330 00228 005 033 06200 005.6 00364|output_voltage=220.1;output_frequency=49.9;output_apparent_power=330;output_active_power=228;output_load_percent=5
+read_output|(219.9 49.9 00352 00250 005 009 06200 005.5 00385|output_voltage=219.9;output_frequency=49.9;output_apparent_power=352;output_active_power=250;output_load_percent=5
+read_output|(220.3 50.0 00330 00229 005 034 06200 005.7 00345|output_voltage=220.3;output_frequency=50;output_apparent_power=330;output_active_power=229;output_load_percent=5
+read_output|(220.1 49.9 00330 00230 005 010 06200 005.4 00366|output_voltage=220.1;output_frequency=49.9;output_apparent_power=330;output_active_power=230;output_load_percent=5
+read_output|(219.5 50.0 00329 00226 005 027 06200 005.6 00355|output_voltage=219.5;output_frequency=50;output_apparent_power=329;output_active_power=226;output_load_percent=5
+read_output|(220.1 49.9 00330 00228 005 006 06200 005.7 00373|output_voltage=220.1;output_frequency=49.9;output_apparent_power=330;output_active_power=228;output_load_percent=5
+read_output|(220.2 49.9 00330 00235 005 022 06200 005.6 00339|output_voltage=220.2;output_frequency=49.9;output_apparent_power=330;output_active_power=235;output_load_percent=5
+read_battery|(04 053.8 096 027 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=27;battery_discharge_current=0;bus_voltage=406
+read_battery|(04 053.8 096 028 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=28;battery_discharge_current=0;bus_voltage=406
+read_battery|(04 053.9 097 027 00000 407 110007200000000000000|battery_voltage=53.9;battery_capacity=97;battery_charge_current=27;battery_discharge_current=0;bus_voltage=407
+read_battery|(04 053.8 096 026 00000 407 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=26;battery_discharge_current=0;bus_voltage=407
+read_battery|(04 053.8 096 026 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=26;battery_discharge_current=0;bus_voltage=406
+read_battery|(04 053.8 096 025 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=25;battery_discharge_current=0;bus_voltage=406
+read_battery|(04 053.8 096 024 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=24;battery_discharge_current=0;bus_voltage=406
+read_battery|(04 053.8 096 023 00000 406 110007200000000000000|battery_voltage=53.8;battery_capacity=96;battery_charge_current=23;battery_discharge_current=0;bus_voltage=406
+read_pv1|(205.0 12.4 02577 00000.0 00000 2 205.3 0 0000000|pv1_voltage=205;pv1_current=12.4;pv1_power=2577
+read_pv1|(215.6 11.8 02594 00000.0 00000 2 221.1 0 0000000|pv1_voltage=215.6;pv1_current=11.8;pv1_power=2594
+read_pv1|(218.0 11.7 02584 00000.0 00000 2 221.1 0 0000000|pv1_voltage=218;pv1_current=11.7;pv1_power=2584
+read_pv1|(214.5 12.0 02624 00000.0 00000 2 206.1 0 0000000|pv1_voltage=214.5;pv1_current=12;pv1_power=2624
+read_pv1|(204.1 12.5 02577 00000.0 00000 2 201.8 0 0000000|pv1_voltage=204.1;pv1_current=12.5;pv1_power=2577
+read_pv1|(210.1 12.3 02617 00000.0 00000 2 213.8 0 0000000|pv1_voltage=210.1;pv1_current=12.3;pv1_power=2617
+read_pv1|(215.4 11.9 02608 00000.0 00000 2 221.5 0 0000000|pv1_voltage=215.4;pv1_current=11.9;pv1_power=2608
+read_pv1|(216.4 11.8 02586 00000.0 00000 2 220.0 0 0000000|pv1_voltage=216.4;pv1_current=11.8;pv1_power=2586
+read_temperature|(038 038 033 034 038 100 100 11000000000000000000|pv_temp=38;inverter_temp=38;boost_temp=33;transformer_temp=34;max_temp=38;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(039 038 033 034 039 050 050 11000000000000000000|pv_temp=39;inverter_temp=38;boost_temp=33;transformer_temp=34;max_temp=39;fan1_speed=50;fan2_speed=50;fan1_status=1;fan2_status=1
+read_temperature|(041 038 033 035 041 030 030 11000000000000000000|pv_temp=41;inverter_temp=38;boost_temp=33;transformer_temp=35;max_temp=41;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 035 029 031 035 030 030 00000000000000000000|pv_temp=26;inverter_temp=35;boost_temp=29;transformer_temp=31;max_temp=35;fan1_speed=30;fan2_speed=30;fan1_status=0;fan2_status=0
+read_temperature|(039 038 033 034 039 100 100 11000000000000000000|pv_temp=39;inverter_temp=38;boost_temp=33;transformer_temp=34;max_temp=39;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(040 038 033 034 040 100 100 11000000000000000000|pv_temp=40;inverter_temp=38;boost_temp=33;transformer_temp=34;max_temp=40;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(041 038 033 034 041 100 100 11000000000000000000|pv_temp=41;inverter_temp=38;boost_temp=33;transformer_temp=34;max_temp=41;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(042 038 033 035 042 100 100 11000000000000000000|pv_temp=42;inverter_temp=38;boost_temp=33;transformer_temp=35;max_temp=42;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(041 038 033 035 041 100 100 11000000000000000000|pv_temp=41;inverter_temp=38;boost_temp=33;transformer_temp=35;max_temp=41;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_temperature|(042 039 033 035 042 100 100 11000000000000000000|pv_temp=42;inverter_temp=39;boost_temp=33;transformer_temp=35;max_temp=42;fan1_speed=100;fan2_speed=100;fan1_status=1;fan2_status=1
+read_energy|(261020 11:22 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:23 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:24 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:25 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:26 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:27 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:28 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+read_energy|(261020 11:29 05.766 0177.3 2200.0 000004601.6 000000000000|daily_energy=5.766;monthly_energy=177.3;yearly_energy=2200;total_energy=4601.6
+
+# --- 历史污染帧（2026-10-18 14:46 ~ 10-19 11:43 UTC）---
+# 这些帧当年被旧 ParseData 的 len>=7 -> parseHBAT 兜底读成
+# battery_voltage / battery_capacity / ... （生产污染 2501 条）。
+# 现在必须解析为温度 + 风扇，且不得出现任何电池字段。
+read_temperature|(026 036 030 032 036 030 030 11000000000000000000|pv_temp=26;inverter_temp=36;boost_temp=30;transformer_temp=32;max_temp=36;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 035 030 032 035 030 030 11000000000000000000|pv_temp=26;inverter_temp=35;boost_temp=30;transformer_temp=32;max_temp=35;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 035 029 032 035 030 030 11000000000000000000|pv_temp=26;inverter_temp=35;boost_temp=29;transformer_temp=32;max_temp=35;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 035 029 031 035 030 030 11000000000000000000|pv_temp=26;inverter_temp=35;boost_temp=29;transformer_temp=31;max_temp=35;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 034 029 031 034 030 030 11000000000000000000|pv_temp=26;inverter_temp=34;boost_temp=29;transformer_temp=31;max_temp=34;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 034 028 031 034 030 030 11000000000000000000|pv_temp=26;inverter_temp=34;boost_temp=28;transformer_temp=31;max_temp=34;fan1_speed=30;fan2_speed=30;fan1_status=1;fan2_status=1
+read_temperature|(026 034 029 031 034 030 030 00000000000000000000|pv_temp=26;inverter_temp=34;boost_temp=29;transformer_temp=31;max_temp=34;fan1_speed=30;fan2_speed=30;fan1_status=0;fan2_status=0
+read_temperature|(026 035 029 032 035 030 030 00000000000000000000|pv_temp=26;inverter_temp=35;boost_temp=29;transformer_temp=32;max_temp=35;fan1_speed=30;fan2_speed=30;fan1_status=0;fan2_status=0

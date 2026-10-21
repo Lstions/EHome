@@ -29,16 +29,31 @@ func TestTechfineHTEMPRealFrameIsParsed(t *testing.T) {
 		t.Fatalf("真机 HTEMP 帧必须能解析，实际报错: %v", err)
 	}
 
-	// 7 个温度值必须全部落在物理可行区间（实测 27~38°C）。
-	temps := []string{"pv_temp", "inverter_temp", "boost_temp", "transformer_temp",
-		"max_temp", "pv2_temp", "dc_rectifier_temp"}
+	// 5 个温度值必须全部落在物理可行区间（实测 25~48°C）。
+	temps := []string{"pv_temp", "inverter_temp", "boost_temp", "transformer_temp", "max_temp"}
 	for _, name := range temps {
-		s := findSensor(data, name);
+		s := findSensor(data, name)
 		if s == nil {
 			t.Fatalf("缺少温度字段 %s，实际字段: %v", name, sensorNames(data))
 		}
 		if s.Value < -40 || s.Value > 150 {
 			t.Fatalf("%s = %.1f°C 超出物理可行区间", name, s.Value)
+		}
+	}
+
+	// 2026-10-21 修正：第 5/6 位是 **风扇转速（%）**，不是温度。
+	// 实测 5545 帧：只有 {30,50,100} 三档，且两路 100% 相等（双风扇同步）。
+	// 旧用例把 pv2_temp/dc_rectifier_temp 当成温度来断言，等于把缺陷锁成契约。
+	for _, name := range []string{"fan1_speed", "fan2_speed"} {
+		s := findSensor(data, name)
+		if s == nil {
+			t.Fatalf("缺少风扇转速字段 %s，实际字段: %v", name, sensorNames(data))
+		}
+		if s.Unit != "%" {
+			t.Fatalf("%s 的单位应为 %%，实际 %q", name, s.Unit)
+		}
+		if s.Value < 0 || s.Value > 120 {
+			t.Fatalf("%s = %.1f%% 超出风扇转速区间", name, s.Value)
 		}
 	}
 
@@ -49,7 +64,17 @@ func TestTechfineHTEMPRealFrameIsParsed(t *testing.T) {
 		t.Fatalf("应从状态位串解析出 fan1_status/fan2_status，实际: %v", sensorNames(data))
 	}
 	if f1.Value != 1 || f2.Value != 1 {
-		t.Fatalf("位串以 \"11\" 开头，两个风扇状态都应为 1，实际 f1=%.0f f2=%.0f", f1.Value, f2.Value)
+		t.Fatalf("位串以 「11」 开头，两个风扇状态都应为 1，实际 f1=%.0f f2=%.0f", f1.Value, f2.Value)
+	}
+
+	// 【P0 回归】温度帧绝不能产出电池字段。
+	// 历史缺陷：8 字段温度帧在无命令上下文时落到 parseHBAT，产出
+	// battery_voltage=37 / bus_voltage=30，生产实测污染 2501 条。
+	for _, name := range []string{"battery_voltage", "battery_capacity", "battery_charge_current",
+		"battery_discharge_current", "bus_voltage"} {
+		if s := findSensor(data, name); s != nil {
+			t.Fatalf("温度帧产出了电池字段 %s=%.1f —— 这是 2026-10-19 生产污染 2501 条的同一缺陷", name, s.Value)
+		}
 	}
 }
 

@@ -32,7 +32,7 @@ func TestTechfineHBMS1AcceptsSixteenBitFlags(t *testing.T) {
 	// 必须产出 bms_* 字段，而不是 battery_voltage；
 	// 后者出现即说明落到了 HBAT 分支。
 	if s := findSensor(data, "battery_voltage"); s != nil {
-		t.Fatalf("HBMS1 应答被误解析成 battery_voltage=%.1f V —— " +
+		t.Fatalf("HBMS1 应答被误解析成 battery_voltage=%.1f V —— "+
 			"说明判别闸门没匹配上，落到了 parseHBAT", s.Value)
 	}
 	found := false
@@ -54,19 +54,26 @@ func TestTechfineHBMS1AcceptsSixteenBitFlags(t *testing.T) {
 //
 // 反向验证：删掉 parseHBAT 里的 hbatMaxPlausibleVoltage 判断，本用例变红。
 func TestTechfineHBATRejectsImplausibleVoltage(t *testing.T) {
-	// 这正是被误判的 HBMS1 应答：fields[1] 是 16 位二进制串。
-	raw := []byte("(00 0001000000000000 000.0 000.0 002.0 000 0000.0 0000.0 00000 0000000\r")
-
 	d := &TechfineInverterDriver{}
-	fields := []string{"00", "0001000000000000", "000.0", "000.0", "002.0", "000", "0000.0", "0000.0", "00000", "0000000"}
-	data, err := d.parseHBAT(fields)
-	if err == nil {
-		t.Fatalf("HBAT 收到 %q 必须拒绝（那是 HBMS1 的形状），实际返回 %d 个字段", fields[1], len(data))
-	}
-	if !strings.Contains(err.Error(), "implausible") {
+
+	// (a) 形状正确（恰好 7 字段）但电压离谱：必须由**物理闸门**拒绝。
+	//     2026-10-21 起字段数先收紧到恰好 7，所以这里要用 7 字段帧才能
+	//     真正测到闸门本身（否则会先被字段数校验拦下，测不到闸门）。
+	implausible := []string{"04", "1500.0", "069", "000", "00000", "379", "110007100000000000000"}
+	if data, err := d.parseHBAT(implausible); err == nil {
+		t.Fatalf("battery_voltage=1500V 必须拒绝，实际返回 %d 个字段", len(data))
+	} else if !strings.Contains(err.Error(), "implausible") {
 		t.Fatalf("错误信息应指出电压不合理，实际: %v", err)
 	}
-	_ = raw // 保留原始帧便于对照
+
+	// (b) 历史缺陷帧（HBMS1 的 16 位标志串被 8 字段路径误当电压）：
+	//     现在由**字段数校验**在更早一层拒绝——两道防线都要在。
+	hbms1Shaped := []string{"00", "0001000000000000", "000.0", "000.0", "002.0", "000", "0000.0", "0000.0", "00000", "0000000"}
+	if data, err := d.parseHBAT(hbms1Shaped); err == nil {
+		t.Fatalf("HBMS1 形状（10 字段）必须拒绝，实际返回 %d 个字段", len(data))
+	} else if !strings.Contains(err.Error(), "exactly 7") {
+		t.Fatalf("错误信息应指出字段数不符（恰好 7），实际: %v", err)
+	}
 }
 
 // TestTechfineHBATAcceptsRealVoltage 防止闸门过严把正常数据也拒掉。

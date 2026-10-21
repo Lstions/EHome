@@ -343,9 +343,10 @@ func TestTechfine_HIMSG1(t *testing.T) {
 		t.Errorf("HIMSG1 was mis-parsed as PV: pv1_voltage=%f", s.Value)
 	}
 
-	// version and date are now stored as float64 Value (not StringValue)
-	// "0000.03" → 0.0003, "20230220" → 20230220
-	assertFloat(t, data, "software_version", 0.0003, 0.0001)
+	// version and date 以 float64 Value 存储（不是 StringValue）。
+	// "0000.03" 是十进制记法 ⇒ 0.03（不是旧实现的 0.0003 = 3/10000）。
+	// "20230220" 是 8 位整数，float64 可精确表示。
+	assertFloat(t, data, "software_version", 0.03, 0.0001)
 	assertFloat(t, data, "software_date", 20230220, 0.01)
 }
 
