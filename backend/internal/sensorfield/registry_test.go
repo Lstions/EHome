@@ -17,6 +17,9 @@ func TestNewDefaultsAndEmptyState(t *testing.T) {
 	if cfg.SnapshotTTL != 10*time.Minute {
 		t.Fatalf("SnapshotTTL = %v", cfg.SnapshotTTL)
 	}
+	if cfg.PreviewMaxSamples != 5000 {
+		t.Fatalf("PreviewMaxSamples = %d want 5000 (方案 §11 preview_max_samples)", cfg.PreviewMaxSamples)
+	}
 	if reg.Enabled() {
 		t.Fatal("zero Config must be disabled (fail-closed)")
 	}
