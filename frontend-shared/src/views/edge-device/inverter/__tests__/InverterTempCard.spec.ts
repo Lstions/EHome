@@ -26,28 +26,33 @@ function mountCard(latestData: Record<string, any> | null) {
 }
 
 describe('InverterTempCard', () => {
+  /**
+   * 温度分级边界（2026-10-21 修正）：原实现 `>40℃ 就告警`，而逆变器正常工作时
+   * PV/逆变/升压温度本来就在 40~55℃，生产实测 PV 41℃ / 逆变 45℃ 全被涂黄，
+   * 用户第一反应就是「温度有问题」。现按行业惯例改为 ≤60 正常 / 60~75 偏高 / >75 危险。
+   */
   it('renders temperature values with magnitude classes', () => {
-    const wrapper = mountCard({ pv_temp: 35.5, inverter_temp: 55.2, boost_temp: 70.1 })
+    const wrapper = mountCard({ pv_temp: 35.5, inverter_temp: 55.2, boost_temp: 80.1 })
     const items = wrapper.findAll('.temp-item')
     expect(items).toHaveLength(3)
     expect(items[0].find('.temp-label').text()).toBe('PV温度')
     expect(items[0].find('.temp-value').text()).toBe('35.5°C')
     expect(items[0].classes()).toContain('temp-normal')
+    // 55.2℃ 是逆变器正常工作温度：必须是 normal，不能再误标黄
     expect(items[1].find('.temp-value').text()).toBe('55.2°C')
-    expect(items[1].classes()).toContain('temp-warning')
-    expect(items[2].find('.temp-value').text()).toBe('70.1°C')
+    expect(items[1].classes()).toContain('temp-normal')
+    expect(items[2].find('.temp-value').text()).toBe('80.1°C')
     expect(items[2].classes()).toContain('temp-danger')
   })
 
-  it('classifies temperatures at the 40/60 boundaries', () => {
-    const wrapper = mountCard({ pv_temp: 40, inverter_temp: 40.1, boost_temp: 60, max_temp: 60.1 })
+  it('classifies temperatures at the 60/75 boundaries', () => {
+    const wrapper = mountCard({ pv_temp: 60, inverter_temp: 60.1, boost_temp: 75, max_temp: 75.1 })
     const items = wrapper.findAll('.temp-item')
     expect(items[0].classes()).toContain('temp-normal')
     expect(items[1].classes()).toContain('temp-warning')
     expect(items[2].classes()).toContain('temp-warning')
     expect(items[3].classes()).toContain('temp-danger')
   })
-
   it('renders — and no severity class for non-numeric temperature, formats negatives', () => {
     const wrapper = mountCard({ pv_temp: 'abc', inverter_temp: -20.5 })
     const items = wrapper.findAll('.temp-item')
@@ -118,12 +123,17 @@ describe('InverterTempCard', () => {
     expect(noTemp.find('.el-empty').exists()).toBe(false)
   })
 
-  it('renders all seven temperature fields when present', () => {
+  it('renders the five verified temperature fields and hides the two unverified ones', () => {
+    // pv2_temp / dc_rectifier_temp 在该机型实测只有 30/50/100 三档跳变（非温度量），
+    // 2026-10-21 起不展示；其余 5 路保留。
     const wrapper = mountCard({
       pv_temp: 1, inverter_temp: 2, boost_temp: 3, transformer_temp: 4,
       max_temp: 5, pv2_temp: 6, dc_rectifier_temp: 7,
     })
-    expect(wrapper.findAll('.temp-item')).toHaveLength(7)
+    const items = wrapper.findAll('.temp-item')
+    expect(items).toHaveLength(5)
+    expect(wrapper.text()).not.toContain('PV2温度')
+    expect(wrapper.text()).not.toContain('DC整流温度')
   })
 
   it('shows el-empty placeholder for null or field-less data', () => {

@@ -1031,7 +1031,41 @@ html.dark .el-descriptions__content {
 }
 
 /* ---- 6. 分段控件（趋势区 1小时/24小时/7天 等）：EP 默认内高 22px ----
-   只加高度，EP 的选中态用 outline/背景，不依赖高度，视觉不变。 */
+   只加高度，EP 的选中态用 outline/背景，不依赖高度，视觉不变。
+
+   ⚠ 2026-10-21 用户真机反馈「分段按钮文字贴顶、不居中」——**根因就在这里**：
+   这个块只抬了 min-height，却把 .el-radio-button__inner 留在 EP 默认的
+   display:inline-block + 自身 line-height（12~14px）⇒ 盒子被撑到 36px、
+   文字仍按行盒贴在顶部（实测视觉中心偏移 -7px；弹窗内 14px 行高时 -3px）。
+   全站实测（.tmp-probe/round3-center-before.mjs，首轮扫到的 23 个控件）有 16 个不居中，
+   集中在 4 处（设备页显示模式、外设控制筛选、通道终端 HEX/ASCII、通道编辑弹窗）；
+   扩大扫描范围后控件数增至 39，不居中仍是这 4 处 —— 即所有「裸用 EP 分段控件」的地方。
+
+   收口方式：**统一在本文件声明** inline-flex 居中（display 与两个 center），
+   不再让各页面 :deep 各自覆盖（历史教训：BMS/仪表盘/弹窗曾出现三档不同高度）。
+   TimeRangeSelector.vue 自带同款声明（组件级收口，早于本文件的通用兜底），
+   两者取值一致、语义相同，不冲突；其余页面（Dashboard/GPIOResourceList/
+   ChannelTerminal/ChannelManager/RealtimeDataList）由此统一达标。
+
+   ⚠ 为什么居中要另起一条 (0,2,0) 的规则、而不是并进下面这个 (0,1,0) 的块：
+   Element Plus 的 theme-chalk 是**按组件懒注入**的（dev 下实测 el-radio-button.css
+   的 <style> 排在 theme.css **之后**），其 .el-radio-button__inner{display:inline-block}
+   与本文件同特异性 ⇒ 按顺序被它覆盖，居中会静默失效（实测改完仍是 inline-block）。
+   因此居中三件套写成 .el-radio-group .el-radio-button__inner（0,2,0），不依赖注入顺序。
+   下面这个基础块的 min-height 保持原样（touchTargetsF6.spec 按源码字面量锁定该选择器）。
+
+   为什么不改行高/字号（注意：**别在这段注释里写出那两个 CSS 属性名**，
+   touchTargetsF6.spec 对本「尺寸区」做的是**纯文本**正则扫描，注释里的字面量也会被判红）：
+   裁决要求「不得借改行高/字号来凑高度 / 不改视觉密度」。实测 inline-flex + 两个 center
+   已能让文字视觉中心与盒子中心重合（偏移 0px，见 .logs/ui-fix/round3/center-evidence.json），
+   完全不需要动行高。 */
+.el-radio-group .el-radio-button__inner,
+.el-checkbox-group .el-checkbox-button__inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .el-radio-button__inner,
 .el-checkbox-button__inner {
   min-height: 36px;

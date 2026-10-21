@@ -158,7 +158,12 @@ const buildYAxisList = (theme = getChartTheme()) => {
       // 紧凑图（窄屏小图，如 160px）不画轴名：ECharts 的 yAxis.name 默认 nameLocation:'end'，
       // 画在轴顶端 ≈ 图例那一行，实测会与图例文字重叠成「#1 (V)(V)」。单位并不丢，
       // 图例项已带「#1 (V)」「探头 1 (℃)」后缀。
-      name: isCompactChart.value ? '' : axis.unit ? `(${axis.unit})` : '数值',
+      // 同单位只在第一根轴显示轴名：实测「发电量」组有 3 根 kWh 轴，
+      // 三处 (kWh) 在顶部挤在一起并压住刻度，且信息完全重复。
+      // 单位并未丢失 —— 图例项已带 (kWh) 后缀。
+      name: isCompactChart.value || (i > 0 && axes.slice(0, i).some((a) => a.unit === axis.unit))
+        ? ''
+        : axis.unit ? `(${axis.unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
       // 紧凑图最多 2 根轴（左 1 右 1），不再需要叠加偏移；常规图沿用 60px 递进
       offset: i > 1 ? (i - 1) * (isCompactChart.value ? 30 : 60) : 0,
@@ -342,14 +347,35 @@ const applyChartOption = () => {
          *   紧凑图 grid.top 固定 60px，图例 top 6 + 2 行(各 16px) = 38 < 60，不会压到绘图区；
          *   条目尺寸同步收小，保证 2 行内放得下 7 条。
          */
-        type: (isCompactChart.value ? 'plain' : 'scroll') as 'plain' | 'scroll',
+        /*
+         * 图例一律 plain（换行不翻页）。2026-10-21 真机实测：
+         *   · 桌面 type:'scroll' 在「发电量」这类多轴图上会**把图例画到图表底部、
+         *     压在 x 轴刻度上**，而且只显示 1 项 —— 用户看到的是一个巨大的
+         *     「总发电量 (kWh)」压在曲线上（实测 3 个时点稳定复现，任何一次
+         *     setOption 后才恢复，属首次布局错误，不可靠）。
+         *   · 另外 scroll 会翻页隐藏序列，违反「不拿信息换对齐」（2026-10-20 已定）。
+         * plain 在多时自动换行，实测渲染位置正确。
+         */
+        type: 'plain' as const,
+        /*
+         * bottom: 'auto' 是必须的（2026-10-21 定性）：ECharts 6.1.0 的 legend 默认值里带
+         * `bottom: tokens.size.m`（见 LegendModel.defaultOption），只指定 `top` 时图例被
+         * 纳入 top..bottom 之间做垂直布局，实测直接画到**画布顶部之外**（文字 bbox y ≈ -9，
+         * 只露出下边缘，用户看到的就是一个巨大的序列名压在 x 轴上）。
+         * 隔离实验：同一份 option 在空白容器里复现；只把 bottom 设为 'auto'（或 0）即恢复，
+         * 删掉整个 legend、或去掉 grid 都恢复 —— 说明是 legend 自身布局，不是容器/时序问题。
+         */
+        bottom: 'auto' as const,
         itemGap: isCompactChart.value ? 8 : 10,
-        itemWidth: isCompactChart.value ? 10 : undefined,
-        itemHeight: isCompactChart.value ? 8 : undefined,
-        textStyle: {
-          color: theme.regular,
-          fontSize: isCompactChart.value ? 10 : undefined,
-        },
+        /*
+         * ⚠ 不要把 itemWidth/itemHeight/fontSize 写成 `undefined`（2026-10-21 定性第二处）：
+         * 显式 undefined 会被 ECharts 6 当成「已提供」参与图例行高计算，配合默认 bottom
+         * 会把图例摆到画布外 —— 隔离实验里同一份 option 只要 JSON 序列化（丢掉 undefined 键）
+         * 就能正常渲染，而直接传对象就复现错位。这里改成「按需展开」：紧凑图才补这几个键。
+         */
+        ...(isCompactChart.value
+          ? { itemWidth: 10, itemHeight: 8, textStyle: { color: theme.regular, fontSize: 10 } }
+          : { textStyle: { color: theme.regular } }),
       }
       : undefined,
     // ⚠ 这里**不覆盖** grid.top：紧凑图的既有默认值（60px）被其它组件当常量用
@@ -367,6 +393,17 @@ const initChart = () => {
   if (!chartRef.value) return
   chartInstance = echarts.init(chartRef.value)
   applyChartOption()
+  /*
+   * 首帧后再应用一次。
+   *
+   * 2026-10-21 真机实测（/edge-device/15「发电量」图）：**首次** applyChartOption 之后，
+   * ECharts 的图例会被画到画布顶部之外（实测文字 bbox y ≈ -9，只露出下边缘一条），
+   * 而任何一次后续 setOption 都能把它放回正确位置 —— 说明是首次布局时容器度量
+   * 尚未稳定（图表在分批渲染/折叠块里挂载，父级高度在首个 rAF 前还在变）。
+   * 这里在下一帧 resize + 重新 apply，保证「首帧渲染」与「交互后」视觉一致。
+   * 只多一次 setOption，无额外请求、无视觉闪烁（同一帧内完成）。
+   */
+
   resizeObserver = new ResizeObserver(() => chartInstance?.resize())
   resizeObserver.observe(chartRef.value)
   themeObserver = new MutationObserver(applyChartOption)

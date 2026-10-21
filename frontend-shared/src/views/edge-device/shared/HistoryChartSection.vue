@@ -263,7 +263,23 @@ const inverterChartGroups: ChartSubGroup[] = [
   { title: '电网', categories: ['grid_voltage', 'grid_frequency'] },
   { title: '输出', categories: ['output_voltage', 'output_frequency', 'output_apparent_power', 'output_active_power', 'output_load_percent'] },
   { title: '电池', categories: ['battery_voltage', 'battery_capacity', 'battery_charge_current', 'battery_discharge_current', 'bus_voltage'] },
-  { title: '温度 (°C)', categories: ['pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp', 'max_temp', 'pv2_temp', 'dc_rectifier_temp'] },
+  /*
+   * 温度组**不含 pv2_temp / dc_rectifier_temp**（2026-10-21 生产数据实测）。
+   *
+   * 证据（近 3 小时 362 个采样点，unified-data historical-batch）：
+   *   pv2_temp：min=30 max=100 mean=90.52，**只有 3 个取值 30 / 50 / 100**；
+   *   dc_rectifier_temp：与它完全同步（同一组 30/50/100）；
+   *   两者在 04:01~05:01 之间反复跳变；
+   *   而其余 5 路温度是正常连续区间（pv 38~42、inverter 36~43、boost 31~38、
+   *   transformer 32~39、max 38~43）。
+   * 结论：这两个字段在该机型上不是温度（更像状态/枚举位，或驱动 HTEMP 位序
+   * 对该固件不成立）。当 °C 画出来会出现一条 100℃ 假尖峰，并把真实 30~43℃
+   * 的曲线压扁 —— 用户看到的就是「逆变器温度有问题」。
+   *
+   * 处理：前端先不展示这两路（数据仍在库里，可随时恢复）；驱动侧位序需厂商
+   * 文档确认后再改名/改位。
+   */
+  { title: '温度 (°C)', categories: ['pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp', 'max_temp'] },
   { title: '发电量 (kWh)', categories: ['daily_energy', 'monthly_energy', 'yearly_energy', 'total_energy'] },
   { title: 'BMS', categories: ['bms_soc', 'bms_charge_current', 'bms_discharge_current', 'bms_charge_voltage_limit', 'bms_discharge_voltage_limit', 'bms_charge_current_limit', 'bms_temp'] },
 ]

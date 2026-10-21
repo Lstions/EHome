@@ -61,18 +61,36 @@
         <div class="alert-detail">{{ detailError }}</div>
       </el-alert>
 
+      <!-- 实时数据四态（2026-10-21 修复「刚进页面把加载中显示成空数据」）：
+           loading → 卡片骨架；error → 本错误条 + 重试（下方数字「—」= 未知，不是设备值）；
+           data → 真实数据；empty → 明确「设备未上报」。错误与空态文案彻底分开。 -->
+      <el-alert v-if="realtimeError" type="error" :closable="false" show-icon class="inline-alert realtime-alert">
+        <template #title>实时数据加载失败（下方数字显示「—」表示未知，不是设备当前值）</template>
+        <div class="alert-detail">
+          {{ snapshotErrorText }}
+          <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
+        </div>
+      </el-alert>
+      <el-alert v-else-if="realtimeEmpty" type="info" :closable="false" show-icon class="inline-alert realtime-alert">
+        <template #title>设备暂未上报实时数据</template>
+        <div class="alert-detail">
+          下方数字显示「—」表示未知（不是 0）。设备按轮询周期上报后会自动出现；也可以现在重试一次。
+          <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
+        </div>
+      </el-alert>
+
       <!-- 指标卡 -->
       <section class="row metrics">
-        <MetricStatCard label="SOC 剩余电量" :value="fmt(soc, 1)" unit="%" tone="success" :progress="socProgress" sub-text="健康区间 20% – 90%">
+        <MetricStatCard label="SOC 剩余电量" :value="fmt(soc, 1)" unit="%" tone="success" :progress="socProgress" sub-text="健康区间 20% – 90%" :loading="realtimeLoading">
           <template #icon><el-icon :size="22"><PieChart /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="剩余容量" :value="fmt(remainingCapacity, 2)" unit="Ah" tone="primary" :sub-text="capacitySubText">
+        <MetricStatCard label="剩余容量" :value="fmt(remainingCapacity, 2)" unit="Ah" tone="primary" :sub-text="capacitySubText" :loading="realtimeLoading">
           <template #icon><el-icon :size="22"><Odometer /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="总电压" :value="fmt(totalVoltage, 2)" unit="V" tone="primary" :sub-text="voltageSubText">
+        <MetricStatCard label="总电压" :value="fmt(totalVoltage, 2)" unit="V" tone="primary" :sub-text="voltageSubText" :loading="realtimeLoading">
           <template #icon><el-icon :size="22"><DataLine /></el-icon></template>
         </MetricStatCard>
-        <MetricStatCard label="电流" :value="fmt(currentDisplay, 2)" unit="A" tone="primary" :sub-text="currentHint">
+        <MetricStatCard label="电流" :value="fmt(currentDisplay, 2)" unit="A" tone="primary" :sub-text="currentHint" :loading="realtimeLoading">
           <template #icon><el-icon :size="22"><Lightning /></el-icon></template>
         </MetricStatCard>
       </section>
@@ -80,105 +98,151 @@
       <!-- 诉求①：MOS 充电/放电直接开关 + 诉求④：保护状态 -->
       <section class="row mos-protect">
         <!-- 诉求① 落点：MOS 直控卡（页首主位，不再埋进受控操作清单） -->
-        <div class="card mos-card">
+        <div class="card mos-card" :aria-busy="realtimeLoading ? 'true' : undefined">
           <div class="card-head">
             <span class="card-title">MOS 直控</span>
             <span class="card-hint">像电灯开关一样直接操作</span>
             <span class="head-right mono-badge">{{ hasFetStatus ? 'fet_status = 0x' + fetHex : 'fet_status = ' + DASH }}</span>
           </div>
-          <p class="card-note">
-            充电 / 放电回路通断的软件策略 <code>set_mos_policy</code>。开关即时下发，切换前弹
-            <b>一次极简确认</b>（只有 确认 / 取消，不填理由）；后端回读 fet_status 校验，不一致即判失败并常驻原因。
-          </p>
 
-          <div v-for="m in mosRows" :key="m.key" class="mos-item">
-            <div class="mos-row" :class="{ 'is-applying': !!m.phase }">
-              <span class="mos-icon" :class="m.on ? 'is-on' : 'is-off'">
-                <el-icon :size="18"><component :is="m.on ? Open : Lock" /></el-icon>
-              </span>
-              <div class="mos-main">
-                <div class="mos-name-line">
-                  <span class="mos-name">{{ m.name }}</span>
-                  <el-tag :type="m.on ? 'success' : 'info'" size="small" effect="plain">{{ m.on ? '导通' : '关断' }}</el-tag>
-                  <el-tag v-if="m.phase" type="primary" size="small">{{ m.phase }}…</el-tag>
-                  <span v-if="m.hwOff" class="hw-off-note"><el-icon :size="12"><WarningFilled /></el-icon>可能被硬件保护关断</span>
-                </div>
-                <div class="mos-desc">{{ m.desc }}</div>
+          <!-- 加载中：骨架占位。**不渲染「关断/导通」行，也不写「尚无 fet_status 数据」**
+               —— 那两种表达都会把「未知」说成事实（2026-10-21 用户真机反馈）。 -->
+          <div v-if="realtimeLoading" class="realtime-state" role="status">
+            <el-skeleton :rows="3" animated />
+            <p class="realtime-state-note">正在加载 MOS 状态…（尚未收到 fet_status，未知不等于关断）</p>
+          </div>
+          <!-- 失败：独立错误态 + 重试（与「暂无数据」彻底分开） -->
+          <div v-else-if="realtimeError" class="realtime-state" role="alert">
+            <el-alert type="error" :closable="false" show-icon class="inline-alert">
+              <template #title>MOS 状态加载失败（当前未知，不等于关断）</template>
+              <div class="alert-detail">
+                {{ snapshotErrorText }}
+                <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
               </div>
-              <el-switch
-                class="mos-switch"
-                :model-value="m.on"
-                :loading="!!m.phase"
-                :disabled="!!m.phase || !canControlMos"
-                :aria-label="m.name + '开关'"
-                @change="(v: string | number | boolean) => requestMosChange(m.key, !!v)"
-              />
-            </div>
-            <el-alert v-if="m.error" type="error" :closable="false" show-icon class="inline-alert">
-              <template #title>{{ m.name }}操作失败（回读校验不一致）</template>
-              <div class="alert-detail">{{ m.error }}</div>
             </el-alert>
           </div>
+          <template v-else>
+            <p class="card-note">
+              充电 / 放电回路通断的软件策略 <code>set_mos_policy</code>。开关即时下发，切换前弹
+              <b>一次极简确认</b>（只有 确认 / 取消，不填理由）；后端回读 fet_status 校验，不一致即判失败并常驻原因。
+            </p>
 
-          <p v-if="!canControlMos" class="card-footnote mos-manual-note">
-            当前不可控制：{{ hasFetStatus ? '设备离线（状态 ' + statusTag.text + '），指令无法下发' : '尚无 fet_status 数据' }}。
-          </p>
+            <div v-for="m in mosRows" :key="m.key" class="mos-item">
+              <div class="mos-row" :class="{ 'is-applying': !!m.phase }">
+                <span class="mos-icon" :class="m.known ? (m.on ? 'is-on' : 'is-off') : 'is-unknown'">
+                  <el-icon :size="18"><component :is="m.known && m.on ? Open : Lock" /></el-icon>
+                </span>
+                <div class="mos-main">
+                  <div class="mos-name-line">
+                    <span class="mos-name">{{ m.name }}</span>
+                    <!-- 未知（尚未收到 fet_status）显示中性「未知」，不得伪装成「关断」 -->
+                    <el-tag :type="m.known ? (m.on ? 'success' : 'info') : 'info'" size="small" effect="plain">
+                      {{ m.known ? (m.on ? '导通' : '关断') : '未知' }}
+                    </el-tag>
+                    <el-tag v-if="m.phase" type="primary" size="small">{{ m.phase }}…</el-tag>
+                    <span v-if="m.hwOff" class="hw-off-note"><el-icon :size="12"><WarningFilled /></el-icon>可能被硬件保护关断</span>
+                  </div>
+                  <div class="mos-desc">{{ m.desc }}</div>
+                </div>
+                <el-switch
+                  class="mos-switch"
+                  :model-value="m.known ? m.on : false"
+                  :loading="!!m.phase"
+                  :disabled="!!m.phase || !canControlMos"
+                  :aria-label="m.name + (m.known ? '开关' : '开关（状态未知，暂不可操作）')"
+                  @change="(v: string | number | boolean) => requestMosChange(m.key, !!v)"
+                />
+              </div>
+              <el-alert v-if="m.error" type="error" :closable="false" show-icon class="inline-alert">
+                <template #title>{{ m.name }}操作失败（回读校验不一致）</template>
+                <div class="alert-detail">{{ m.error }}</div>
+              </el-alert>
+            </div>
 
-          <p class="card-footnote">
-            <b>关断</b>是正常工况而非故障，因此用中性色；只有「保护已触发」才显示告警色。
-          </p>
+            <p v-if="!canControlMos && !deviceOnline" class="card-footnote mos-manual-note">
+              当前不可控制：设备离线（状态 {{ statusTag.text }}），指令无法下发。
+            </p>
+            <p v-else-if="!hasFetStatus" class="card-footnote mos-manual-note">
+              当前不可控制：尚未收到 fet_status 字段（状态未知，不等于关断）。
+            </p>
+
+            <p class="card-footnote">
+              <b>关断</b>是正常工况而非故障，因此用中性色；只有「保护已触发」才显示告警色。
+            </p>
+          </template>
         </div>
 
         <!-- 诉求④ 落点：保护状态（正常态紧凑一行 / 有保护位时展开 12 项明细） -->
-        <div class="card protect-card">
+        <div class="card protect-card" :aria-busy="realtimeLoading ? 'true' : undefined">
           <div class="card-head">
             <span class="card-title">保护状态</span>
-            <el-tag v-if="activeProtections.length" type="danger" size="small">
+            <!-- 状态标签是互斥状态展示：关掉 el-tag 的切换动画，
+                 否则 loading→data 的 300ms 淡出/淡入会让两个状态标签同时出现（实测） -->
+            <el-tag v-if="realtimeLoading" type="info" size="small" effect="plain" disable-transitions>加载中…</el-tag>
+            <el-tag v-else-if="realtimeError" type="danger" size="small" effect="plain" disable-transitions>加载失败</el-tag>
+            <el-tag v-else-if="!hasProtectionData" type="info" size="small" effect="plain" disable-transitions>暂无数据</el-tag>
+            <el-tag v-else-if="activeProtections.length" type="danger" size="small" disable-transitions>
               {{ activeProtections.length }} 项保护已触发
             </el-tag>
-            <el-tag v-else-if="!hasProtectionData" type="info" size="small" effect="plain">暂无数据</el-tag>
-            <el-tag v-else type="success" size="small" effect="plain">
+            <el-tag v-else type="success" size="small" effect="plain" disable-transitions>
               <el-icon :size="12"><CircleCheckFilled /></el-icon> 全部正常
             </el-tag>
             <span class="head-right mono-badge">{{ hasProtectionData ? 'protection_status = 0x' + protHex : 'protection_status = ' + DASH }}</span>
           </div>
 
-          <!-- 无保护命中：紧凑一行。
-               ⚠ 2026-10-16 用户要求：**删除收起/展开，明细默认展开**。
-               原来正常态只给一行摘要 + 「展开明细」按钮，要用户多点一次才能看到
-               12 位明细；而这页的主要用途就是核对保护位，默认藏起来反而妨碍阅读。
-               现在 12 项明细恒定可见（见下方 .protect-grid），少一层交互。 -->
-          <div
-            v-if="!activeProtections.length"
-            class="protect-compact"
-            :class="{ 'is-all-normal': hasProtectionData }"
-            role="status"
-          >
-            <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
-            <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据' }}</span>
+          <!-- 加载中：骨架占位。**绝不渲染 12 个「正常」徽标** ——
+               那会把「未知」伪装成「全部正常」，是安全语义错误（用户真机反馈）。 -->
+          <div v-if="realtimeLoading" class="realtime-state" role="status">
+            <el-skeleton :rows="3" animated />
+            <p class="realtime-state-note">正在加载保护状态…（尚未收到 protection_status，未知不等于正常）</p>
           </div>
-
-          <!-- 有保护命中：结论 + 明细 -->
-          <template v-else>
-            <el-alert type="error" :closable="false" show-icon class="inline-alert">
-              <template #title>{{ activeProtections.map(p => p.label).join('、') }} 已触发</template>
-              <div class="alert-detail">
-                protection_status = 0x{{ protHex }}。硬件保护可能已覆盖对应 MOS：请先排除故障，再到左上方尝试开关。
-              </div>
-            </el-alert>
-          </template>
-
-          <!-- 12 位明细：**恒定展开**（用户要求删除收起/展开）。
-               不再依赖 protectExpanded 状态，因此也不会有"默认收起"的信息缺口。 -->
-          <div class="protect-grid">
-            <div v-for="p in protectionBits" :key="p.bit" class="protect-item" :class="{ active: p.active }">
-              <span class="protect-name">{{ p.label }}</span>
-              <el-tag :type="p.active ? 'danger' : 'success'" size="small" :effect="p.active ? 'dark' : 'plain'">
-                {{ p.active ? '已触发' : '正常' }}
-              </el-tag>
-              <span class="protect-bit">bit{{ p.bit }}</span>
+          <!-- 失败：独立错误态 + 重试（与「暂无数据」彻底分开） -->
+          <el-alert v-else-if="realtimeError" type="error" :closable="false" show-icon class="inline-alert">
+            <template #title>保护状态加载失败（未知，不能当作「全部正常」）</template>
+            <div class="alert-detail">
+              {{ snapshotErrorText }}
+              <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
             </div>
-          </div>
+          </el-alert>
+          <template v-else>
+            <!-- 无保护命中：紧凑一行。
+                 ⚠ 2026-10-16 用户要求：**删除收起/展开，明细默认展开**。
+                 原来正常态只给一行摘要 + 「展开明细」按钮，要用户多点一次才能看到
+                 12 位明细；而这页的主要用途就是核对保护位，默认藏起来反而妨碍阅读。
+                 现在 12 项明细恒定可见（见下方 .protect-grid），少一层交互。 -->
+            <div
+              v-if="!activeProtections.length"
+              class="protect-compact"
+              :class="{ 'is-all-normal': hasProtectionData }"
+              role="status"
+            >
+              <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
+              <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据（设备未上报，未知不等于正常）' }}</span>
+            </div>
+
+            <!-- 有保护命中：结论 + 明细 -->
+            <template v-else>
+              <el-alert type="error" :closable="false" show-icon class="inline-alert">
+                <template #title>{{ activeProtections.map(p => p.label).join('、') }} 已触发</template>
+                <div class="alert-detail">
+                  protection_status = 0x{{ protHex }}。硬件保护可能已覆盖对应 MOS：请先排除故障，再到左上方尝试开关。
+                </div>
+              </el-alert>
+            </template>
+
+            <!-- 12 位明细：**恒定展开**（用户要求删除收起/展开）。
+                 不再依赖 protectExpanded 状态，因此也不会有"默认收起"的信息缺口。
+                 未知（尚未收到 protection_status）显示中性「未知」，不得伪装成「正常」。 -->
+            <div class="protect-grid">
+              <div v-for="p in protectionBits" :key="p.bit" class="protect-item" :class="{ active: p.active }">
+                <span class="protect-name">{{ p.label }}</span>
+                <el-tag :type="p.active ? 'danger' : hasProtectionData ? 'success' : 'info'" size="small" :effect="p.active ? 'dark' : 'plain'">
+                  {{ p.active ? '已触发' : (hasProtectionData ? '正常' : '未知') }}
+                </el-tag>
+                <span class="protect-bit">bit{{ p.bit }}</span>
+              </div>
+            </div>
+          </template>
         </div>
       </section>
 
@@ -217,7 +281,7 @@
               · 最低 <b class="txt-secondary">#{{ minCell.index }} {{ minCell.voltage.toFixed(3) }}V</b>
               · 压差 <b :class="diff > 0.1 ? 'txt-warning' : 'txt-secondary'">{{ diff.toFixed(3) }}V</b>
             </span>
-            <span v-else class="head-right cell-summary">暂无单体电压数据</span>
+            <span v-else class="head-right cell-summary">{{ realtimeLoading ? '正在加载单体电压…' : realtimeError ? '单体电压加载失败' : '暂无单体电压数据' }}</span>
           </div>
           <div class="cell-chart-host">
             <BmsCellVoltageChart
@@ -226,7 +290,7 @@
               :cell-count="cellVoltages.length"
               :height="isMobileViewport ? '112px' : '300px'"
             />
-            <div v-else class="cell-chart-empty">暂无单体电压数据</div>
+            <div v-else class="cell-chart-empty">{{ realtimeLoading ? '正在加载单体电压…' : realtimeError ? '单体电压加载失败（下方已提供重试）' : '暂无单体电压数据' }}</div>
           </div>
           <div class="cell-legend">
             <span class="lg"><i class="swatch swatch-normal"></i>正常</span>
@@ -243,7 +307,7 @@
         <div class="card temp-card">
           <div class="card-head">
             <span class="card-title">温度探头</span>
-            <span class="card-hint">{{ temps.length }} 路</span>
+            <span class="card-hint">{{ realtimeLoading ? '加载中…' : temps.length + ' 路' }}</span>
           </div>
           <div class="temp-list">
             <div v-for="t in temps" :key="t.index" class="temp-item">
@@ -253,7 +317,7 @@
                 {{ t.text }}
               </el-tag>
             </div>
-            <div v-if="!temps.length" class="stream-empty">暂无温度数据</div>
+            <div v-if="!temps.length" class="stream-empty">{{ realtimeLoading ? '正在加载温度数据…' : realtimeError ? '温度数据加载失败' : '暂无温度数据' }}</div>
           </div>
           <p class="card-footnote">&gt;45℃ 偏高 · &gt;60℃ 过高</p>
         </div>
@@ -385,7 +449,7 @@
                 <span class="s-unit">{{ row.unit }}</span>
                 <span class="s-status" :class="'is-' + row.status">{{ row.statusText }}</span>
               </div>
-              <div v-if="!streamRows.length" class="stream-empty">暂无实时数据；设备下一次上报后会自动出现在这里</div>
+              <div v-if="!streamRows.length" class="stream-empty">{{ realtimeLoading ? '正在等待设备实时数据…' : realtimeError ? '实时数据加载失败（见页面顶部错误条，可重试）' : '暂无实时数据；设备下一次上报后会自动出现在这里' }}</div>
             </div>
             <transition name="fade">
               <button v-if="!following" type="button" class="back-latest" @click="scrollToLatest">
@@ -649,6 +713,12 @@ import {
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 统一设备页头（逆变器 / BMS / 通用设备三页共用）：身份、标签、面包屑、操作组都由它渲染
 import DeviceHeader from '@/views/edge-device/shared/DeviceHeader.vue'
+// 实时数据首屏四态（加载/失败/数据/空态）纯函数：锁「加载中不得伪装成空数据」
+import {
+  REALTIME_FIRST_DATA_GRACE_MS,
+  resolveRealtimeViewState,
+  type RealtimeViewState,
+} from './realtimeViewState'
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
@@ -806,6 +876,7 @@ const {
 /** 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。 */
 async function loadLatestSnapshot() {
   snapshotError.value = ''
+  snapshotLoading.value = true
   try {
     const response = await edgeDeviceApi.getLatestData(deviceId.value)
     if (!response) return
@@ -835,9 +906,13 @@ async function loadLatestSnapshot() {
   } catch (e) {
     // 快照只是兜底：失败不弹 toast，但原因常驻页面（WS 仍会带来数据）。
     snapshotError.value = extractErrorMessage(e, '最新快照加载失败')
+  } finally {
+    snapshotLoading.value = false
   }
 }
 const snapshotError = ref('')
+/** 最新快照请求在途（首屏骨架的判定信号之一；改前没有这个状态位） */
+const snapshotLoading = ref(false)
 /**
  * 快照是**兜底**请求（WS 才是主通道），它的失败不该把 axios 原文怼到用户脸上。
  * 生产实测：历史查询并发时 latest-data 会 10s 超时，页面就常驻一行
@@ -851,6 +926,48 @@ const snapshotErrorText = computed(() => {
   if (/network|Network Error/i.test(raw)) return '最新快照请求失败：网络不可达（实时数据流仍会持续更新）'
   return '最新快照加载失败：' + raw
 })
+
+// ════════════ 实时数据首屏四态（2026-10-21 修复「加载中伪装成空数据」） ════════════
+/**
+ * 用户真机反馈：刚进 BMS 页面时顶栏指标卡显示「—」、保护状态卡显示「暂无数据」+ 12 个
+ * 「正常」、MOS 卡显示「尚无 fet_status 数据」，而真实状态是**还在加载**。
+ * 把「未知」渲染成「空数据 / 正常 / 关断」是信息错误 —— 保护位尤其危险：
+ * 「未知」被当成「正常」会让用户错过真实故障。
+ *
+ * 修法：用四态（与逻辑设备页同款、互斥）驱动三块卡片的渲染：
+ *   loading → 骨架（不渲染「—」/「暂无数据」/「正常」徽标）
+ *   error   → 独立错误文案 + 重试（绝不与空态共用文案）
+ *   data    → 真实数据（保护位未知时显示「未知」而不是「正常」）
+ *   empty   → 明确「设备未上报」，不是加载中
+ */
+const hasRealtimeData = computed(() => !!latestData.value && Object.keys(latestData.value).length > 0)
+const firstDataGraceOver = ref(false)
+let firstDataGraceTimer: ReturnType<typeof setTimeout> | null = null
+/** 重新开始首帧宽限计时（首挂载 / 切换设备 / 手动重试时调用） */
+function startFirstDataGrace() {
+  firstDataGraceOver.value = false
+  if (firstDataGraceTimer) clearTimeout(firstDataGraceTimer)
+  firstDataGraceTimer = setTimeout(() => { firstDataGraceOver.value = true }, REALTIME_FIRST_DATA_GRACE_MS)
+}
+const realtimeState = computed<RealtimeViewState>(() => resolveRealtimeViewState({
+  hasData: hasRealtimeData.value,
+  snapshotLoading: snapshotLoading.value,
+  snapshotError: snapshotError.value,
+  graceOver: firstDataGraceOver.value,
+}))
+/** 加载中：三块卡片渲染骨架，**不渲染「—」/「暂无数据」/「正常」徽标** */
+const realtimeLoading = computed(() => realtimeState.value === 'loading')
+/** 失败：独立错误态 + 重试（与空态文案彻底分开） */
+const realtimeError = computed(() => realtimeState.value === 'error')
+/** 空态：宽限期已过、请求成功但设备确实没上报 —— 与「加载中」分开表达 */
+const realtimeEmpty = computed(() => realtimeState.value === 'empty')
+/** 重试：清掉错误、重新请求快照并重新给首帧宽限（WS 断线时顺带重连） */
+function retryRealtime() {
+  snapshotError.value = ''
+  startFirstDataGrace()
+  wsStore.connect()
+  void loadLatestSnapshot()
+}
 
 // ── 字段口径：单体电压 cell_voltage_N / 温度 temp_N（或 temperature_N） ──
 const cellCount = computed(() => {
@@ -1016,8 +1133,11 @@ const mosRows = computed(() => [
     on: chargeOn.value,
     phase: mosPhase.charge,
     error: mosError.charge,
+    known: hasFetStatus.value,
     hwOff: hasFetStatus.value && !chargeOn.value && protectionActive(0),
-    desc: chargeOn.value ? '允许充电 · fet_status bit0 = 1' : '禁止充电 · fet_status bit0 = 0',
+    desc: !hasFetStatus.value
+      ? '尚未收到 fet_status 字段（状态未知，不等于关断）'
+      : chargeOn.value ? '允许充电 · fet_status bit0 = 1' : '禁止充电 · fet_status bit0 = 0',
   },
   {
     key: 'discharge' as const,
@@ -1025,8 +1145,11 @@ const mosRows = computed(() => [
     on: dischargeOn.value,
     phase: mosPhase.discharge,
     error: mosError.discharge,
+    known: hasFetStatus.value,
     hwOff: hasFetStatus.value && !dischargeOn.value && (protectionActive(9) || protectionActive(10)),
-    desc: dischargeOn.value ? '允许放电 · fet_status bit1 = 1' : '禁止放电 · fet_status bit1 = 0',
+    desc: !hasFetStatus.value
+      ? '尚未收到 fet_status 字段（状态未知，不等于关断）'
+      : dischargeOn.value ? '允许放电 · fet_status bit1 = 1' : '禁止放电 · fet_status bit1 = 0',
   },
 ])
 
@@ -1116,7 +1239,10 @@ interface ProtectionBit { bit: number; label: string; active: boolean }
 const protectionBits = computed<ProtectionBit[]>(() =>
   PROTECTION_BITS.map((p) => ({ ...p, active: protectionActive(p.bit) })),
 )
-const activeProtections = computed(() => protectionBits.value.filter((p) => p.active))
+/** 只有真的收到 protection_status 才谈「已触发」；未知时不得推断（未知 ≠ 全部正常） */
+const activeProtections = computed(() =>
+  hasProtectionData.value ? protectionBits.value.filter((p) => p.active) : [],
+)
 function protectionActive(bit: number): boolean {
   return (protectionStatus.value & (1 << bit)) !== 0
 }
@@ -1881,6 +2007,8 @@ function resetDeviceScopedState() {
   pendingCount.value = 0
   following.value = true
   snapshotError.value = ''
+  snapshotLoading.value = false
+  startFirstDataGrace()
   mosPhase.charge = ''
   mosPhase.discharge = ''
   mosError.charge = ''
@@ -2013,6 +2141,7 @@ onMounted(() => {
   }
   // connect() 幂等：已连接/连接中会直接返回，不会打断 MainLayout 建立的连接。
   wsStore.connect()
+  startFirstDataGrace()
   void loadDetail()
   void loadPollCommands()
   void loadLatestSnapshot()
@@ -2028,6 +2157,8 @@ onUnmounted(() => {
   // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听，属于内存泄漏
   mobileMql?.removeEventListener('change', onMobileChange)
   mobileMql = null
+  if (firstDataGraceTimer) clearTimeout(firstDataGraceTimer)
+  firstDataGraceTimer = null
 })
 </script>
 
@@ -2166,6 +2297,20 @@ onUnmounted(() => {
 .mono-badge { font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 11px; color: var(--el-text-color-secondary); background: var(--el-fill-color-light); border-radius: 4px; padding: 2px 8px; }
 .alert-detail { margin-top: 4px; font-size: 12px; line-height: 1.6; }
 .inline-alert { margin: 8px 0; }
+
+/* ── 实时数据四态：骨架 / 错误占位（2026-10-21 修复「加载中伪装成空数据」） ──
+   加载中只出骨架与「正在加载…」，错误态固定给独立文案 + 重试；
+   骨架高度略小于真实内容，数据到达后由卡片自身高度兜住，避免页面跳动。 */
+.realtime-alert { margin-bottom: 12px; }
+.realtime-state { padding: 6px 0 2px; }
+.realtime-state-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--el-text-color-secondary);
+}
+/* MOS 状态未知时图标用中性色：既不是「导通」也不是「关断」 */
+.mos-icon.is-unknown { color: var(--el-text-color-secondary); }
 .page-error { margin-bottom: 16px; }
 .txt-warning { color: var(--el-color-warning); }
 .txt-danger { color: var(--el-color-danger); }

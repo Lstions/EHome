@@ -263,7 +263,7 @@
         </div>
       </el-header>
 
-      <!-- 主内容区 -->
+      <!-- 主内容区（滚动容器本体已永久关闭滚动锚定，见 .main-content 注释） -->
       <el-main class="main-content">
         <router-view v-slot="{ Component }">
           <component :is="Component" />
@@ -744,6 +744,7 @@ const handleMobileDrawerClosed = () => {
 const sidebarWidth = computed(() => {
   return uiStore.sidebarCollapsed ? '64px' : '200px'
 })
+
 
 // 当前激活菜单
 const activeMenu = computed(() => {
@@ -1409,12 +1410,30 @@ onUnmounted(() => {
 }
 
 /* ========== 主内容区 ========== */
+/* ⚠ 2026-10-21 用户真机反馈「页面有时会自己往下滚一段（用户没操作）」的根因修复：
+ *   滚动容器 = 本元素（.el-main.main-content，overflow-y:auto）。页面进入后图表/表格/折叠块
+ *   分批渲染，**视口上方的内容高度变化**会让 Chromium 的 scroll anchoring 为了保住视口内
+ *   锚点节点而**静默改写 scrollTop** —— 它不走 JS 的 scrollIntoView / focus / scrollTop
+ *   setter，也不发 focus 事件，所以"看起来没人操作却滚了"。
+ *
+ *   实测证据（.logs/ui-fix/round3/scroll3-desk-data-after-scroll.json 等）：插桩
+ *   scrollIntoView/scrollTo/focus/scrollTop setter 后，dashboard 滚到 1500 再等异步内容
+ *   沉降，出现 +76 / +60 px 的 scrollTop 自增，而 JS 侧录到 0 次程序化滚动
+ *   （samples 有 delta>0，events 里只有探针自己的 seed）；BMS 页 / 侧栏动画窗口的同类
+ *   实测见 BmsDetailPage.vue:2058-2062 与 toggleSidebar（默认锚定 -169px vs 关闭后 0px）。
+ *
+ *   修法：在**滚动容器本体**上永久关闭锚定（规范：overflow-anchor 对最近的可滚动祖先生效）。
+ *   取舍：关掉后，视口上方内容插入时不再"自动补偿"，页面会保持用户看到的 scrollTop 不变 ——
+ *   这正是用户诉求（非用户操作时 scrollTop 必须不变）；BMS 详情页此前已在本页根节点用
+ *   同一手段修过同类报障（.bms-detail-page / .stream-scroll），此处是把它收敛到唯一滚动容器。
+ *   副作用兜底：页面内仍有局部滚动区（实时流等）自带 overflow-anchor:none，不受影响。 */
 .main-content {
   padding: 20px;
   overflow-y: auto;
   height: calc(100vh - 60px);
   background: var(--el-fill-color-light);
   scrollbar-gutter: stable;
+  overflow-anchor: none;
 }
 
 /* ========== 过渡动画 ========== */

@@ -19,10 +19,22 @@ describe('LineChart 紧凑图排版（轴名不得压图例）', () => {
     expect(lineChartSource).toMatch(/h <= 220/)
   })
 
-  it('紧凑图不画 y 轴名；常规图仍按单位写轴名', () => {
-    expect(lineChartSource).toContain("name: isCompactChart.value ? '' :")
+  it('紧凑图不画 y 轴名；常规图按单位写轴名，且同单位只在第一根轴写一次', () => {
+    // 2026-10-21：「发电量」组实测有 3 根 kWh 轴，三处 (kWh) 在顶部挤在一起并压住刻度。
+    // 现在紧凑图一律不写；常规图只在**该单位首次出现**的那根轴写，其余留空（单位仍由图例后缀表达）。
+    expect(lineChartSource).toContain('name: isCompactChart.value || (i > 0 && axes.slice(0, i).some((a) => a.unit === axis.unit))')
     // 反向：常规分支的轴名逻辑必须还在（否则桌面多轴图失去单位标识）
     expect(lineChartSource).toContain('`(${axis.unit})`')
+  })
+
+  it('图例必须显式 bottom:auto 且不得带 undefined 键（2026-10-21 真机错位根因）', () => {
+    // ECharts 6.1.0 legend 默认带 bottom ⇒ 只给 top 时图例被夹在 top..bottom 盒子外；
+    // 而显式 undefined 的 itemWidth/itemHeight/fontSize 会被当成「已提供」参与行高计算。
+    expect(lineChartSource).toContain("bottom: 'auto' as const,")
+    // 图例的紧凑尺寸必须走「按需展开」，不能写成 xxx: cond ? 值 : undefined
+    expect(lineChartSource).toContain('...(isCompactChart.value')
+    expect(lineChartSource).toContain('{ itemWidth: 10, itemHeight: 8')
+    expect(lineChartSource).not.toMatch(/itemWidth: isCompactChart\.value \? 10 : undefined/)
   })
 
   it('紧凑图图例上移到 top 6，常规图保持 30', () => {

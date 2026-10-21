@@ -95,7 +95,9 @@ const GROUP_CATEGORIES: Record<string, string[]> = {
   '电网': ['grid_voltage', 'grid_frequency'],
   '输出': ['output_voltage', 'output_frequency', 'output_apparent_power', 'output_active_power', 'output_load_percent'],
   '电池': ['battery_voltage', 'battery_capacity', 'battery_charge_current', 'battery_discharge_current', 'bus_voltage'],
-  '温度 (°C)': ['pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp', 'max_temp', 'pv2_temp', 'dc_rectifier_temp'],
+    // 2026-10-21：pv2_temp / dc_rectifier_temp 在该机型实测不是温度（取值只有 30/50/100 三档跳变），
+  // 前端暂不展示，避免 100℃ 假尖峰把真实曲线压扁。见 HistoryChartSection 温度组注释。
+  '温度 (°C)': ['pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp', 'max_temp'],
   '发电量 (kWh)': ['daily_energy', 'monthly_energy', 'yearly_energy', 'total_energy'],
   'BMS': ['bms_soc', 'bms_charge_current', 'bms_discharge_current', 'bms_charge_voltage_limit', 'bms_discharge_voltage_limit', 'bms_charge_current_limit', 'bms_temp'],
 }

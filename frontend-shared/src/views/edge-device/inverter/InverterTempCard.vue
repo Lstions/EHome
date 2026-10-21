@@ -63,14 +63,19 @@ const props = defineProps<{
   latestData: Record<string, any> | null
 }>()
 
+/*
+ * 温度字段（2026-10-21 收敛）：**不含 pv2_temp / dc_rectifier_temp**。
+ * 生产数据实测（近 3 小时 362 点）：这两路只有 30 / 50 / 100 三个取值且互相完全同步，
+ * 而其余 5 路是连续区间（31~45℃）—— 判据见 HistoryChartSection 温度组注释。
+ * 展示一个恒定 30℃ / 跳变 100℃ 的「温度」比不展示更糟：用户会去查散热。
+ * 驱动侧 HTEMP 位序需厂商文档确认后再恢复。
+ */
 const TEMP_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'pv_temp', label: 'PV温度' },
   { key: 'inverter_temp', label: '逆变温度' },
   { key: 'boost_temp', label: '升压温度' },
   { key: 'transformer_temp', label: '变压器温度' },
   { key: 'max_temp', label: '最高温度' },
-  { key: 'pv2_temp', label: 'PV2温度' },
-  { key: 'dc_rectifier_temp', label: 'DC整流温度' },
 ]
 
 const hasTempData = computed(() => {
@@ -116,11 +121,21 @@ const fanItems = computed(() => {
   return fans
 })
 
+/*
+ * 温度分级（2026-10-21 修正）：原实现是 `>40℃ 就告警`，而逆变器正常工作时
+ * PV/逆变/升压温度本来就在 40~55℃ 区间 —— 生产实测 PV温度 41℃、逆变 45℃
+ * 全部被涂成黄色警告，用户截图的第一反应就是「温度有问题」。
+ * 按逆变器行业惯例（过温保护通常 ≥75~80℃）重新分档：
+ *   ≤60℃ 正常 / 60~75℃ 偏高（黄）/ >75℃ 危险（红）。
+ * 说明：这里只影响**配色**，不参与任何告警判定；真正的过温告警由后端阈值规则产生。
+ */
+const TEMP_WARN_C = 60
+const TEMP_DANGER_C = 75
 function tempClass(v: any): string {
   const n = Number(v)
   if (isNaN(n)) return ''
-  if (n > 60) return 'temp-danger'
-  if (n > 40) return 'temp-warning'
+  if (n > TEMP_DANGER_C) return 'temp-danger'
+  if (n > TEMP_WARN_C) return 'temp-warning'
   return 'temp-normal'
 }
 

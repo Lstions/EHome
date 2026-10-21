@@ -14,7 +14,12 @@
   图标容器透明底 —— 渐变底 + 白图标在组件内写不出来。
 -->
 <template>
-  <div class="metric-card">
+  <!--
+    loading（2026-10-21 新增，可选）：BMS 详情页首屏「实时数据未到达」时渲染骨架，
+    **不把「—」（未知）当成值显示** —— 用户会把「—」读成「设备没数据」，
+    真实语义是「还在加载」。默认 false，逆变器等既有调用点渲染结果逐像素不变。
+  -->
+  <div class="metric-card" :aria-busy="loading ? 'true' : undefined">
     <!-- 左图标槽：透明底 + tone 语义色，图标由调用方通过 #icon slot 传 Element Plus 图标 -->
     <div class="metric-icon" :style="iconColorStyle">
       <slot name="icon" />
@@ -22,6 +27,15 @@
 
     <!-- 右内容区：标签 - 主值 - 辅助槽（辅助槽永远占位，保证同排卡等高） -->
     <div class="metric-info">
+      <template v-if="loading">
+        <div class="metric-skeleton" role="status">
+          <span class="metric-sk metric-sk-label" aria-hidden="true" />
+          <span class="metric-sk metric-sk-value" aria-hidden="true" />
+          <span class="metric-sk metric-sk-aux" aria-hidden="true" />
+          <span class="metric-sr">正在加载</span>
+        </div>
+      </template>
+      <template v-else>
       <p class="metric-label">{{ label }}</p>
       <p class="metric-value">
         {{ value }}<span v-if="unit" class="metric-unit">{{ unit }}</span>
@@ -62,6 +76,7 @@
           aria-hidden="true"
         >&nbsp;</span>
       </div>
+      </template>
     </div>
   </div>
 </template>
@@ -84,9 +99,15 @@ const props = withDefaults(defineProps<{
   progress?: number
   /** 方向指示：charge/discharge/idle。按少爷拍板：放电红、充电绿（语义方向色，非告警） */
   direction?: 'charge' | 'discharge' | 'idle' | null
+  /**
+   * 加载中：渲染骨架占位（aria-busy + 「正在加载」读屏文案），不渲染 value/unit/subText。
+   * 用于「数据尚未到达」的卡片，避免把「—」显示成设备值（2026-10-21 BMS 首屏缺陷）。
+   */
+  loading?: boolean
 }>(), {
   tone: 'primary',
   direction: null,
+  loading: false,
 })
 
 /**
@@ -164,6 +185,50 @@ const directionColor = computed(() => {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  position: relative;
+}
+
+/* ── 加载骨架（loading=true）：标签/数值/辅助槽三行灰条 ──
+   高度刻意小于真实内容：卡片 min-height（桌面 110 / 窄屏 64）兜住整体高度，
+   数据到达后卡高不变，不会出现「骨架→数据」的跳动。 */
+.metric-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+/*
+  骨架条用**纯色 + 呼吸动画**，不用 CSS 线性渐变：
+  本组件有一条既有契约「源码不得出现 CSS 渐变声明」（防回退到旧的「渐变底 + 白图标」风格），
+  骨架动画没有理由为它破例 —— 呼吸效果同样能表达「正在加载」。
+*/
+.metric-sk {
+  display: block;
+  border-radius: 4px;
+  background: var(--el-fill-color);
+  animation: metric-sk-pulse 1.4s ease-in-out infinite;
+}
+.metric-sk-label { width: 46%; height: 10px; }
+.metric-sk-value { width: 72%; height: 20px; }
+.metric-sk-aux { width: 58%; height: 10px; }
+@keyframes metric-sk-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .metric-sk { animation: none; }
+}
+/* 读屏专用：视觉隐藏，但屏幕阅读器能读到「正在加载」 */
+.metric-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 .metric-label {
   margin: 0;
@@ -279,5 +344,10 @@ const directionColor = computed(() => {
     flex-wrap: wrap;
     gap: 0 6px;
   }
+  /* 窄屏骨架同样收一档，保证不撑破 min-height 64px */
+  .metric-skeleton { gap: 4px; }
+  .metric-sk-label { width: 52%; height: 8px; }
+  .metric-sk-value { width: 68%; height: 16px; }
+  .metric-sk-aux { width: 46%; height: 8px; }
 }
 </style>
