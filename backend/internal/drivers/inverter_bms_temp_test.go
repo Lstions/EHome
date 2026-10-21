@@ -24,7 +24,7 @@ func TestTechfineHBMS1OmitsTempWhenBmsAbsent(t *testing.T) {
 	}
 
 	if s := findSensor(data, "bms_temp"); s != nil {
-		t.Fatalf("BMS 未接入时不应产出 bms_temp，实际 = %.2f°C —— " +
+		t.Fatalf("BMS 未接入时不应产出 bms_temp，实际 = %.2f°C —— "+
 			"设备给 0 表示\"无数据\"，换算成绝对零度并写库是假数据", s.Value)
 	}
 
@@ -39,7 +39,7 @@ func TestTechfineHBMS1OmitsTempWhenBmsAbsent(t *testing.T) {
 // 反向验证：把 hasBmsTemp 改成恒 false，本用例变红。
 func TestTechfineHBMS1EmitsTempWhenBmsPresent(t *testing.T) {
 	// 29815 → 29815/100 - 273.15 = 25.00°C
-	raw := []byte("(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815\r")
+	raw := []byte("(01 1001000000000000 048.0 054.0 020.0 080 010.0 005.0 29815 000000\r")
 	data, err := (&TechfineInverterDriver{}).ParseDataWithCommand(raw, "48424d53310d")
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)

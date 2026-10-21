@@ -116,19 +116,41 @@ func TestTechfineHTEMPRejectsImplausibleTemperature(t *testing.T) {
 	}
 }
 
-// TestTechfineHTEMPStillSupportsLegacyElevenFieldShape 锁住旧机型兼容。
+// TestTechfineHTEMPProtocolTenFieldShape 锁住**协议 V0.5 §5.8 的完整 10 字段形状**。
 //
-// 11 字段形状（7 温度 + 2 风扇转速 + 2 风扇状态 + 2 额外温度）来自早期机型/
-// 固件。改成 8 字段解析时**不能**把这条路径弄坏 —— 否则老设备会突然没数据。
-func TestTechfineHTEMPStillSupportsLegacyElevenFieldShape(t *testing.T) {
-	fields := []string{"035", "045", "040", "050", "050", "060", "050", "01", "01", "038", "042"}
+// 2026-10-21 拿到协议原件后修正：之前的实现按 11 字段解析（把 HI 拆成两位），
+// 与协议不符 —— 协议原文是 `(AAA BBB CCC DDD EEE FFF GGG HI JJJ KKKOOOOOOOOOO`，
+// 其中 HI 是**一个**字段（两位风扇状态连写），KKK 与 O 标志位也没有空格。
+// 本机（PV1-only）只发前 8 个字段（见 TestTechfineHTEMPFanSemantics），
+// 完整 10 字段形状属于协议定义、当前无真机样本。
+func TestTechfineHTEMPProtocolTenFieldShape(t *testing.T) {
+	fields := []string{"035", "045", "040", "050", "050", "060", "050", "01", "038", "042000000000"}
 	data, err := (&TechfineInverterDriver{}).parseHTEMP(fields)
 	if err != nil {
-		t.Fatalf("旧的 11 字段形状必须继续支持: %v", err)
+		t.Fatalf("协议 §5.8 的 10 字段形状必须支持: %v", err)
 	}
-	// 旧形状有风扇转速（真机 8 字段形状没有）。
-	if findSensor(data, "fan1_speed") == nil {
-		t.Fatalf("11 字段形状应产出 fan1_speed，实际: %v", sensorNames(data))
+	if s := findSensor(data, "fan1_speed"); s == nil || s.Value != 60 {
+		t.Fatalf("fan1_speed 应为 60%%，实际 %+v", s)
+	}
+	// HI 是一个字段：'0' = 风扇1停，'1' = 风扇2转
+	if s := findSensor(data, "fan1_status"); s == nil || s.Value != 0 {
+		t.Fatalf("fan1_status 应为 0，实际 %+v", s)
+	}
+	if s := findSensor(data, "fan2_status"); s == nil || s.Value != 1 {
+		t.Fatalf("fan2_status 应为 1，实际 %+v", s)
+	}
+	if s := findSensor(data, "pv2_temp"); s == nil || s.Value != 38 {
+		t.Fatalf("pv2_temp 应为 38°C，实际 %+v", s)
+	}
+	// KKK 与 O 粘连：必须只取前 3 位
+	if s := findSensor(data, "dc_rectifier_temp"); s == nil || s.Value != 42 {
+		t.Fatalf("dc_rectifier_temp 应为 42°C（KKK 与 O 粘连，只取前 3 位），实际 %+v", s)
+	}
+
+	// 旧的 11 字段假设与协议不符：必须拒绝，而不是继续按位置猜。
+	eleven := []string{"035", "045", "040", "050", "050", "060", "050", "01", "01", "038", "042"}
+	if _, err := (&TechfineInverterDriver{}).parseHTEMP(eleven); err == nil {
+		t.Fatalf("11 字段（非协议形状）必须拒绝")
 	}
 }
 

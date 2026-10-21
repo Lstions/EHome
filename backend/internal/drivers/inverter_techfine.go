@@ -285,6 +285,7 @@ func (d *TechfineInverterDriver) GetSensorDefinitions() []SensorData {
 		{Name: "bms_charge_overcurrent", Unit: ""},
 		{Name: "bms_discharge_overcurrent", Unit: ""},
 		{Name: "bms_temp_low", Unit: ""},
+		{Name: "bms_temp_high", Unit: ""},
 		{Name: "bms_soc", Unit: "%"},
 		{Name: "bms_charge_current", Unit: "A"},
 		{Name: "bms_discharge_current", Unit: "A"},
@@ -484,9 +485,13 @@ func (d *TechfineInverterDriver) parseHSTS(fields []string) ([]SensorData, error
 	}
 
 	workModeByte := statusStr[0]
+	// 2026-10-21 协议核对时发现（fail-open）：旧实现把未知模式字符映射成 -1 并继续，
+	// 于是 HBMS1 的 16 位状态串（首字符 '0'）会被 read_status 上下文当成状态应答解析成功，
+	// 产出 work_mode=-1 + 12 个"告警位"（纯属假数据）。协议只定义 P/S/L/B/F/D/X。
 	workModeVal, ok := workModeMap[workModeByte]
 	if !ok {
-		workModeVal = -1 // unknown mode
+		return nil, fmt.Errorf("techfine HSTS: unknown work mode %q (协议 V0.5 §5.2 只定义 P/S/L/B/F/D/X) — "+
+			"该帧不是状态应答，拒绝按告警位解读", string(workModeByte))
 	}
 
 	// Alarm flags are positions 1..12 in the status string
@@ -849,15 +854,23 @@ func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, erro
 		return d.parseHTEMPCompact(fields)
 	}
 
-	if len(fields) != 11 {
-		return nil, fmt.Errorf("techfine HTEMP: need exactly 8 or exactly 11 fields, got %d (fields=%v) — "+
-			"8 字段为真机实测形状(5 温度+2 风扇转速+1 状态串)，11 为旧机型形状；"+
-			"当前既不是任何一种，拒绝采信", len(fields), fields)
+	// 协议 V0.5 §5.8 的完整形状是 **10 个空格分隔字段**：
+	//
+	//	(AAA BBB CCC DDD EEE FFF GGG HI JJJ KKKOOOOOOOOOO
+	//
+	// 有两处**没有空格**，必须按位置切：
+	//   · HI  是一个字段（风扇1状态 + 风扇2状态两位连写）；
+	//   · KKK 与该命令的 O 标志位直接相连（协议原文写作 KKKOOOOOOOOOO）。
+	//
+	// 2026-10-21 按协议原件修正：旧实现按 **11 个字段**、把 HI 拆成两个字段解析，
+	// 与协议不符（其注释还写着"HI 是一个 2 字符字段"，自相矛盾）。
+	if len(fields) != 10 {
+		return nil, fmt.Errorf("techfine HTEMP: need exactly 8 (真机截断形状) or exactly 10 (协议 V0.5 §5.8 完整形状) fields, got %d (fields=%v) — 拒绝采信", len(fields), fields)
 	}
 
-	// 旧机型 11 字段：5 温度 + 2 风扇转速 + 2 风扇状态 + 2 额外温度
-	vals := make([]float64, 11)
-	for i := 0; i < 11; i++ {
+	// [0..8] 是纯数字：5 温度 + 2 风扇转速 + PV2 温度
+	var vals [9]float64
+	for i := 0; i < 9; i++ {
 		v, err := parseRequiredFloat(fields, i, "HTEMP")
 		if err != nil {
 			return nil, err
@@ -870,10 +883,39 @@ func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, erro
 	if err := checkFanSpeeds(vals[5:7], "HTEMP"); err != nil {
 		return nil, err
 	}
-	if err := checkFanStatuses(vals[7:9], "HTEMP"); err != nil {
+	if err := checkTemperatures(vals[8:9], "HTEMP"); err != nil {
 		return nil, err
 	}
-	if err := checkTemperatures(vals[9:11], "HTEMP"); err != nil {
+
+	// [7] = "HI"：风扇 1/2 状态，两位各 0/1。
+	fanStatus := fields[7]
+	if len(fanStatus) < 2 || !isAllDigits(fanStatus) {
+		return nil, fmt.Errorf("techfine HTEMP: fan status field %q is not two digits (fan1/fan2) — "+
+			"拒绝采信以免把缺失位读成「风扇停转」", fanStatus)
+	}
+	fan1Status, err := parseRequiredFloat([]string{fanStatus[0:1]}, 0, "HTEMP fan1_status")
+	if err != nil {
+		return nil, err
+	}
+	fan2Status, err := parseRequiredFloat([]string{fanStatus[1:2]}, 0, "HTEMP fan2_status")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkFanStatuses([]float64{fan1Status, fan2Status}, "HTEMP"); err != nil {
+		return nil, err
+	}
+
+	// [9] = "KKK" + O 标志位（无空格）：按协议定宽取前 3 位。
+	dcDigits, ok := leadingFixedDigits(fields[9], 3)
+	if !ok {
+		return nil, fmt.Errorf("techfine HTEMP: DC rectifier temperature field %q does not start with a 3-digit value — "+
+			"该帧与协议 §5.8 的 KKKOOOOOOOOOO 形状不符", fields[9])
+	}
+	dcTemp, err := parseRequiredFloat([]string{dcDigits}, 0, "HTEMP dc_rectifier_temp")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkTemperatures([]float64{dcTemp}, "HTEMP"); err != nil {
 		return nil, err
 	}
 
@@ -885,11 +927,24 @@ func (d *TechfineInverterDriver) parseHTEMP(fields []string) ([]SensorData, erro
 		{Name: "max_temp", Value: vals[4], Unit: "°C"},
 		{Name: "fan1_speed", Value: vals[5], Unit: "%"},
 		{Name: "fan2_speed", Value: vals[6], Unit: "%"},
-		{Name: "fan1_status", Value: vals[7], Unit: ""},
-		{Name: "fan2_status", Value: vals[8], Unit: ""},
-		{Name: "pv2_temp", Value: vals[9], Unit: "°C"},
-		{Name: "dc_rectifier_temp", Value: vals[10], Unit: "°C"},
+		{Name: "fan1_status", Value: fan1Status, Unit: ""},
+		{Name: "fan2_status", Value: fan2Status, Unit: ""},
+		{Name: "pv2_temp", Value: vals[8], Unit: "°C"},
+		{Name: "dc_rectifier_temp", Value: dcTemp, Unit: "°C"},
 	}, nil
+}
+
+// leadingFixedDigits 取固定宽度的前导十进制数字（协议里 KKK 与 O 标志位无空格相连）。
+func leadingFixedDigits(s string, width int) (string, bool) {
+	if len(s) < width {
+		return "", false
+	}
+	for i := 0; i < width; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return "", false
+		}
+	}
+	return s[:width], true
 }
 
 // parseHTEMPCompact 解析 8 字段真机形状：5 温度 + 2 风扇转速 + 1 个 20 位状态串。
@@ -1032,8 +1087,8 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 		return nil, fmt.Errorf("techfine HBMS1: need >=10 fields, got %d", len(fields))
 	}
 
-	// BMS status flags from fields[1] (8 binary digits, MSB first)
-	// status1 = "b7b6b5b4b3b2b1b0" → index 0=b7, index 1=b6, ..., index 7=b0
+	// 协议 V0.5 §5.10：状态字段是**一个 16 位连写字符串** b7..b0 c7..c0，
+	// 不是两个 8 位字段。index 0=b7 ... index 7=b0，index 8=c7（BMS 温度过高）。
 	status1 := fields[1]
 
 	// 2026-10-21：状态串不足 8 位必须**拒绝**，而不是把缺失位默认成 0。
@@ -1044,6 +1099,12 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 	if len(status1) < 8 {
 		return nil, fmt.Errorf("techfine HBMS1: status field %q too short (%d bits, need >=8) — "+
 			"不足 8 位时无法判定告警，拒绝采信以免把缺失位读成「无告警」", status1, len(status1))
+	}
+	for i := 0; i < len(status1); i++ {
+		if status1[i] != '0' && status1[i] != '1' {
+			return nil, fmt.Errorf("techfine HBMS1: status field %q has non-binary char at %d — "+
+				"标志位串必须全为 0/1，否则无法判定告警（拒绝把垃圾位读成「无告警」）", status1, i)
+		}
 	}
 	// status1 = "b7b6b5b4b3b2b1b0"：index 0=b7 ... index 7=b0
 	var bmsCommOK, bmsLowAlarm, bmsLowFault float64
@@ -1073,31 +1134,43 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 	if status1[7] == '1' { // b0: BMS温度过低标志
 		bmsTempLow = 1.0
 	}
-	dischargeVLimit, err := parseRequiredFloat(fields, 3, "bms_discharge_voltage_limit")
+	// c7 = BMS 温度过高标志。c6..c0 是协议标注的"内部数据"，不对外暴露。
+	// 只有状态串确实有 16 位时才解析；8~15 位时**不发**该字段（不补 0 —— 缺失好过假"正常"）。
+	var bmsTempHigh float64
+	hasTempHigh := len(status1) >= 16
+	if hasTempHigh && status1[8] == '1' {
+		bmsTempHigh = 1.0
+	}
+
+	// 字段下标按协议 §5.10（旧实现整体错开一位，把 O 标志串当成了平均温度）：
+	//   f[0]=AA  f[1]=状态16位  f[2]=BBB.B 放电限压  f[3]=CCC.C 充电限压
+	//   f[4]=DDD.D 充电限流  f[5]=EEE SOC  f[6]=FFFF.F 充电电流
+	//   f[7]=GGGG.G 放电电流  f[8]=HHHHH 平均温度(0.01K)  f[9]=O 标志
+	dischargeVLimit, err := parseRequiredFloat(fields, 2, "bms_discharge_voltage_limit")
 	if err != nil {
 		return nil, err
 	}
-	chargeVLimit, err := parseRequiredFloat(fields, 4, "bms_charge_voltage_limit")
+	chargeVLimit, err := parseRequiredFloat(fields, 3, "bms_charge_voltage_limit")
 	if err != nil {
 		return nil, err
 	}
-	chargeILimit, err := parseRequiredFloat(fields, 5, "bms_charge_current_limit")
+	chargeILimit, err := parseRequiredFloat(fields, 4, "bms_charge_current_limit")
 	if err != nil {
 		return nil, err
 	}
-	soc, err := parseRequiredFloat(fields, 6, "bms_soc")
+	soc, err := parseRequiredFloat(fields, 5, "bms_soc")
 	if err != nil {
 		return nil, err
 	}
-	chargeCurrent, err := parseRequiredFloat(fields, 7, "bms_charge_current")
+	chargeCurrent, err := parseRequiredFloat(fields, 6, "bms_charge_current")
 	if err != nil {
 		return nil, err
 	}
-	dischargeCurrent, err := parseRequiredFloat(fields, 8, "bms_discharge_current")
+	dischargeCurrent, err := parseRequiredFloat(fields, 7, "bms_discharge_current")
 	if err != nil {
 		return nil, err
 	}
-	tempRaw, err := parseRequiredFloat(fields, 9, "bms_temp_raw")
+	tempRaw, err := parseRequiredFloat(fields, 8, "bms_temp_raw")
 	if err != nil {
 		return nil, err
 	}
@@ -1111,6 +1184,12 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 	// 此时**不产出** bms_temp 字段 —— 缺失好过荒谬值，前端会显示"—"。
 	hasBmsTemp := tempRaw > 0
 	tempCelsius := tempRaw/100.0 - 273.15
+	// 0.01K 换算后必须落在物理区间内；否则说明该位不是平均温度（形状错配），整帧拒绝。
+	if hasBmsTemp {
+		if err := checkTemperatures([]float64{tempCelsius}, "HBMS1"); err != nil {
+			return nil, err
+		}
+	}
 
 	out := []SensorData{
 		{Name: "bms_comm_ok", Value: bmsCommOK, Unit: ""},
@@ -1121,6 +1200,9 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 		{Name: "bms_charge_overcurrent", Value: bmsChargeOvercurrent, Unit: ""},
 		{Name: "bms_discharge_overcurrent", Value: bmsDischargeOvercurrent, Unit: ""},
 		{Name: "bms_temp_low", Value: bmsTempLow, Unit: ""},
+		// c7 = BMS 温度过高（协议 §5.10）。状态串只有 8 位时该位不存在，
+		// 此时不产出该字段（宁可缺失，也不报一个假的"未过热"）。
+		{Name: "bms_temp_high", Value: bmsTempHigh, Unit: ""},
 		{Name: "bms_soc", Value: soc, Unit: "%"},
 		{Name: "bms_charge_current", Value: chargeCurrent, Unit: "A"},
 		{Name: "bms_discharge_current", Value: dischargeCurrent, Unit: "A"},
@@ -1133,6 +1215,16 @@ func (d *TechfineInverterDriver) parseHBMS1(fields []string) ([]SensorData, erro
 	// 不产出而不是给 0/-273.15：前者前端显示"—"，后者会被当成真实读数。
 	if hasBmsTemp {
 		out = append(out, SensorData{Name: "bms_temp", Value: tempCelsius, Unit: "°C"})
+	}
+	if !hasTempHigh {
+		// 状态串不足 16 位：c7 不存在，剔除该字段（缺失好过假的"未过热"）。
+		filtered := out[:0]
+		for _, sd := range out {
+			if sd.Name != "bms_temp_high" {
+				filtered = append(filtered, sd)
+			}
+		}
+		out = filtered
 	}
 	return out, nil
 }

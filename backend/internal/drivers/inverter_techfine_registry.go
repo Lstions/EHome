@@ -143,8 +143,11 @@ var techfineCommands = []techfineCommand{
 		ID: "read_bms", Name: "读取 BMS 信息", Wire: "HBMS1\r",
 		Description: "BMS 状态、SOC、电流与限制值",
 		Parser:      (*TechfineInverterDriver).parseHBMS1,
-		MinSensors:  14, // 8 个状态位 + SOC/电流/限制值；bms_temp 为条件产出
-		Family:      []string{"bms_"},
+		// 协议 V0.5 §5.10：10 个字段 = AA + 16 位状态串 + 8 个数值 + O 标志。
+		// 产出：b7..b0 八个标志 + c7（BMS 温度过高，16 位时）+ 6 个数值 = 15；
+		// 平均温度 bms_temp 为条件产出（设备用 00000 表示未接 BMS）。
+		MinSensors: 15,
+		Family:     []string{"bms_"},
 	},
 	{
 		ID: "read_eeprom", Name: "读取 EEPROM 设置", Wire: "HEEP1\r",
@@ -343,19 +346,28 @@ var techfineShapeRules = []techfineShapeRule{
 			strings.Contains(f[1], ".")
 	}},
 
-	// HTEMP(旧机型 11 字段): 5 温度 + 2 风扇转速 + 2 风扇状态 + 2 额外温度。
-	// 收紧为**恰好 11**（历史实现是 >=11，会给畸形长帧开口子）。
-	{Name: "HTEMP11", Command: "read_temperature", Match: func(f []string) bool {
-		if len(f) != 11 || isAllBinary(f[1]) {
+	// HTEMP(协议 V0.5 §5.8 完整形状): **恰好 10 字段**
+	//   (AAA BBB CCC DDD EEE FFF GGG HI JJJ KKKOOOOOOOOOO
+	// 两处无空格粘连：HI 是一个字段（两位风扇状态），KKK 与 O 标志位相连。
+	// 2026-10-21 按协议原件修正：旧实现按 11 字段、把 HI 拆成两位，与协议不符。
+	{Name: "HTEMP10", Command: "read_temperature", Match: func(f []string) bool {
+		if len(f) != 10 || isAllBinary(f[1]) {
 			// isAllBinary(f[1]) 为真说明这是 BMS 状态串，不是温度帧。
 			return false
 		}
-		for i := 0; i < 11; i++ {
-			if !isNumericField(f[i]) {
+		// 前 9 位纯数字（5 温度 + 2 风扇转速 + PV2 温度）
+		for i := 0; i < 9; i++ {
+			if !isAllDigits(f[i]) {
 				return false
 			}
 		}
-		return true
+		// HI：两位风扇状态
+		if len(f[7]) != 2 || !isAllDigits(f[7]) {
+			return false
+		}
+		// KKK + O：以 3 位数字开头
+		_, ok := leadingFixedDigits(f[9], 3)
+		return ok
 	}},
 
 	// HIMSG1: (NNNN.NN YYYYMMDD [DD]) —— f[1] 是 8 位日期。

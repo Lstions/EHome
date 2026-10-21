@@ -226,8 +226,10 @@ func TestTechfine_HPV_WithCommand(t *testing.T) {
 // ============================================================================
 
 func TestTechfine_HTEMP(t *testing.T) {
-	// (035 045 040 050 050 060 050 01 01 038 042
-	raw := []byte("(035 045 040 050 050 060 050 01 01 038 042\r")
+	// 协议 V0.5 §5.8 的 10 字段形状：
+	//   AAA BBB CCC DDD EEE FFF GGG HI JJJ KKK+O
+	// HI="01" 是**一个字段**（风扇1状态=0、风扇2状态=1）；KKK 与 O 标志位无空格相连。
+	raw := []byte("(035 045 040 050 050 060 050 01 038 042000000000\r")
 	data, err := (&TechfineInverterDriver{}).ParseData(raw)
 	if err != nil {
 		t.Fatalf("ParseData error: %v", err)
@@ -240,7 +242,7 @@ func TestTechfine_HTEMP(t *testing.T) {
 	assertFloat(t, data, "max_temp", 50, 0.01)
 	assertFloat(t, data, "fan1_speed", 60, 0.01)
 	assertFloat(t, data, "fan2_speed", 50, 0.01)
-	assertFloat(t, data, "fan1_status", 1, 0.01)
+	assertFloat(t, data, "fan1_status", 0, 0.01)
 	assertFloat(t, data, "fan2_status", 1, 0.01)
 	assertFloat(t, data, "pv2_temp", 38, 0.01)
 	assertFloat(t, data, "dc_rectifier_temp", 42, 0.01)
@@ -269,9 +271,10 @@ func TestTechfine_HGEN(t *testing.T) {
 // ============================================================================
 
 func TestTechfine_HBMS1(t *testing.T) {
-	// status1 = "10010000" → b7=1 (comm OK), b4=1 (charge allowed), b3=0 (no discharge)
-	// temp = 29815 → 29815/100 - 273.15 = 25.00°C
-	raw := []byte("(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815\r")
+	// 协议 V0.5 §5.10 的 10 字段形状：AA + 16 位状态串 + 6 数值 + 平均温度 + O。
+	// 状态 "1001000000000000" → b7=1(comm OK), b4=1(charge allowed), b3=0(no discharge),
+	// c7=0(无温度过高)。temp = 29815 → 29815/100 - 273.15 = 25.00°C
+	raw := []byte("(01 1001000000000000 048.0 054.0 020.0 080 010.0 005.0 29815 000000\r")
 	data, err := (&TechfineInverterDriver{}).ParseData(raw)
 	if err != nil {
 		t.Fatalf("ParseData error: %v", err)
@@ -292,11 +295,13 @@ func TestTechfine_HBMS1(t *testing.T) {
 	assertFloat(t, data, "bms_discharge_voltage_limit", 48.0, 0.01)
 	assertFloat(t, data, "bms_charge_current_limit", 20, 0.01)
 	assertFloat(t, data, "bms_temp", 25.0, 0.01)
+	// c7 = BMS 温度过高（16 位状态串的第 9 位），此处为 0。
+	assertFloat(t, data, "bms_temp_high", 0, 0.01)
 }
 
 func TestTechfine_HBMS1_AllAllowed(t *testing.T) {
-	// status1 = "10011000" → b7=1 (comm), b4=1 (charge), b3=1 (discharge)
-	raw := []byte("(01 10011000 00000000 048.0 054.0 020 100 015.0 008.0 29815\r")
+	// 状态 "1001100000000000" → b7=1 (comm), b4=1 (charge), b3=1 (discharge)
+	raw := []byte("(01 1001100000000000 048.0 054.0 020.0 100 015.0 008.0 29815 000000\r")
 	data, err := (&TechfineInverterDriver{}).ParseData(raw)
 	if err != nil {
 		t.Fatalf("ParseData error: %v", err)
@@ -309,8 +314,8 @@ func TestTechfine_HBMS1_AllAllowed(t *testing.T) {
 }
 
 func TestTechfine_HBMS1_AllFlagsActive(t *testing.T) {
-	// status1 = "11111111" → all flags active
-	raw := []byte("(01 11111111 00000000 048.0 054.0 020 100 015.0 008.0 29815\r")
+	// 状态 "1111111111111111" → b7..b0 与 c7 全部置位（含温度过高）
+	raw := []byte("(01 1111111111111111 048.0 054.0 020.0 100 015.0 008.0 29815 000000\r")
 	data, err := (&TechfineInverterDriver{}).ParseData(raw)
 	if err != nil {
 		t.Fatalf("ParseData error: %v", err)
@@ -324,6 +329,7 @@ func TestTechfine_HBMS1_AllFlagsActive(t *testing.T) {
 	assertFloat(t, data, "bms_charge_overcurrent", 1, 0.01)
 	assertFloat(t, data, "bms_discharge_overcurrent", 1, 0.01)
 	assertFloat(t, data, "bms_temp_low", 1, 0.01)
+	assertFloat(t, data, "bms_temp_high", 1, 0.01)
 }
 
 // ============================================================================

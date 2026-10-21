@@ -34,7 +34,7 @@ var techfineCanonicalFrames = map[string]string{
 	"read_pv2":         "(000.0 00.0 00000 00000.0 00000 0 070.7 0 0000000",
 	"read_temperature": "(025 034 028 031 034 030 030 11000000000000000000",
 	"read_energy":      "(261020 11:21 05.766 0177.3 2200.0 000004601.6 000000000000",
-	"read_bms":         "(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815",
+	"read_bms":         "(00 0001000000000000 000.0 000.0 002.0 000 0000.0 0000.0 00000 000000",
 	"read_eeprom":      "(1 060 020 0 0 0 0 230 1 0 0 0 0 0 0 000 000 000 000 230.0 50.0 000.0 O",
 	"read_version":     "(0000.03 20230220 00",
 }
@@ -47,7 +47,10 @@ var techfineExtraFrames = []struct {
 }{
 	{"真机 8 字段温度帧：风扇转速 50%", "read_temperature", "(041 037 032 033 041 050 050 11000000000000000000"},
 	{"真机 8 字段温度帧：风扇停转（状态位 00）", "read_temperature", "(034 035 028 031 035 030 030 00000000000000000000"},
-	{"旧机型 11 字段温度帧（唯一能产出 pv2_temp/dc_rectifier_temp 的形状）", "read_temperature", "(035 045 040 050 050 060 050 01 01 038 042"},
+	{"协议 §5.8 完整 10 字段温度帧（唯一能产出 pv2_temp/dc_rectifier_temp 的形状）", "read_temperature", "(035 045 040 050 050 060 050 01 038 042000000000"},
+	// bms_temp 只在设备报告有效平均温度时产出；主夹具是真机「未接 BMS」（00000 → 哨兵），
+	// 所以这里补一条 BMS 在线帧，保证该传感器有可达的产出路径。
+	{"BMS 在线（平均温度 25°C，c7=0）", "read_bms", "(01 1001000000000000 048.0 054.0 020.0 080 010.0 005.0 29815 000000"},
 	{"QPRTL 协议类型查询（无命令模板）", "", "(MMMMMMMM"},
 }
 
@@ -273,8 +276,8 @@ func TestTechfineShapeRulesAreMutuallyExclusive(t *testing.T) {
 		{"真机 9 字段 PV 帧（结构上与 HOP 同字段数）", "(230.5 12.4 02577 00000.0 00000 2 205.3 0 0000000", "PV"},
 		{"真机 3 字段状态帧", "(00 B010000000000 102110021000000000000", "HSTS"},
 		{"真机 7 字段发电量帧", "(261020 11:21 05.766 0177.3 2200.0 000004601.6 000000000000", "HGEN"},
-		{"旧机型 11 字段温度帧", "(035 045 040 050 050 060 050 01 01 038 042", "HTEMP11"},
-		{"HBMS1 10 字段帧", "(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815", "HBMS1"},
+		{"协议 §5.8 完整 10 字段温度帧", "(035 045 040 050 050 060 050 01 038 042000000000", "HTEMP10"},
+		{"HBMS1 10 字段帧（协议 §5.10，16 位状态串）", "(00 0001000000000000 000.0 000.0 002.0 000 0000.0 0000.0 00000 000000", "HBMS1"},
 		{"HIMSG1 版本帧", "(0000.03 20230220 00", "HIMSG1"},
 	}
 	for _, c := range cases {
@@ -405,11 +408,11 @@ func TestTechfineMalformedNumericFieldIsRejected(t *testing.T) {
 		"read_battery":     {1, 2, 3, 4, 5}, // 电压/容量/充电流/放电流/BUS 电压
 		"read_pv1":         {0, 1, 2},       // 电压/电流/功率
 		"read_pv2":         {0, 1, 2},
-		"read_temperature": {0, 1, 2, 3, 4, 5, 6}, // 5 温度 + 2 风扇转速
-		"read_energy":      {2, 3, 4, 5},          // 日/月/年/总
-		"read_bms":         {3, 4, 5, 6, 7, 8, 9}, // 限制值/SOC/电流/温度原始值
-		"read_eeprom":      {0, 1, 7, 8},          // 机型码/充电限流/输出电压/频率标志
-		"read_version":     {0, 1},                // 版本号/日期
+		"read_temperature": {0, 1, 2, 3, 4, 5, 6},    // 5 温度 + 2 风扇转速
+		"read_energy":      {2, 3, 4, 5},             // 日/月/年/总
+		"read_bms":         {1, 2, 3, 4, 5, 6, 7, 8}, // 状态串 + 限制值/SOC/电流/温度原始值
+		"read_eeprom":      {0, 1, 7, 8},             // 机型码/充电限流/输出电压/频率标志
+		"read_version":     {0, 1},                   // 版本号/日期
 	}
 	d := &TechfineInverterDriver{}
 	checked := 0
@@ -465,9 +468,9 @@ var techfineShapeFixtures = map[string]string{
 	"HBAT":    "(04 051.1 069 000 00010 356 110007100000000000000",
 	"PV":      "(230.5 12.4 02577 00000.0 00000 2 205.3 0 0000000",
 	"HTEMP8":  "(041 037 032 033 041 100 100 11000000000000000000",
-	"HTEMP11": "(035 045 040 050 050 060 050 01 01 038 042",
+	"HTEMP10": "(035 045 040 050 050 060 050 01 038 042000000000",
 	"HGEN":    "(261020 11:21 05.766 0177.3 2200.0 000004601.6 000000000000",
-	"HBMS1":   "(01 10010000 00000000 048.0 054.0 020 080 010.0 005.0 29815",
+	"HBMS1":   "(00 0001000000000000 000.0 000.0 002.0 000 0000.0 0000.0 00000 000000",
 	"HEEP1":   "(1 060 020 0 0 0 0 230 1 0 0 0 0 0 0 000 000 000 000 230.0 50.0 000.0 O",
 	"HIMSG1":  "(0000.03 20230220 00",
 }
@@ -480,7 +483,7 @@ var techfineAllowedShapes = map[string][]string{
 	"read_battery":     {"HBAT"},
 	"read_pv1":         {"PV"},
 	"read_pv2":         {"PV"},
-	"read_temperature": {"HTEMP8", "HTEMP11"},
+	"read_temperature": {"HTEMP8", "HTEMP10"},
 	"read_energy":      {"HGEN"},
 	"read_bms":         {"HBMS1"},
 	"read_eeprom":      {"HEEP1"},
@@ -543,7 +546,7 @@ func TestTechfineCrossCommandMatrix(t *testing.T) {
 // 而且真实行为不是"静默降级"而是 **panic: index out of range**（status1[4]）。
 // 这条用例同时证明：拒绝发生在 panic 之前。
 func TestTechfineHBMS1ShortStatusIsRejected(t *testing.T) {
-	short := []string{"01", "1001000", "00000000", "048.0", "054.0", "020", "080", "010.0", "005.0", "29815"}
+	short := []string{"01", "1001000", "048.0", "054.0", "020.0", "080", "010.0", "005.0", "29815", "000000"}
 	data, err := (&TechfineInverterDriver{}).parseHBMS1(short)
 	if err == nil {
 		t.Fatalf("7 位状态串必须拒绝（不足 8 位无法判定告警），实际返回 %d 个字段", len(data))
@@ -553,13 +556,34 @@ func TestTechfineHBMS1ShortStatusIsRejected(t *testing.T) {
 	}
 
 	// 反向对照：8 位状态串必须正常解析（防止"一刀切拒绝"）。
-	ok := []string{"01", "10010000", "00000000", "048.0", "054.0", "020", "080", "010.0", "005.0", "29815"}
+	// 但只有 8 位时 c7 不存在 ⇒ **不产出** bms_temp_high（不补 0）。
+	ok := []string{"01", "10010000", "048.0", "054.0", "020.0", "080", "010.0", "005.0", "29815", "000000"}
 	data, err = (&TechfineInverterDriver{}).parseHBMS1(ok)
 	if err != nil {
 		t.Fatalf("8 位状态串应正常解析: %v", err)
 	}
 	if findSensor(data, "bms_comm_ok") == nil {
 		t.Fatalf("应产出 bms_comm_ok，实际 %v", sensorNames(data))
+	}
+	if s := findSensor(data, "bms_temp_high"); s != nil {
+		t.Fatalf("状态串只有 8 位时 c7 不存在，不应产出 bms_temp_high，实际 %.0f —— "+
+			"补 0 等于谎报「温度未过高」", s.Value)
+	}
+
+	// 16 位状态串：第 9 位 c7=1 应产出 bms_temp_high=1。
+	withC7 := []string{"01", "1001000010000000", "048.0", "054.0", "020.0", "080", "010.0", "005.0", "29815", "000000"}
+	data, err = (&TechfineInverterDriver{}).parseHBMS1(withC7)
+	if err != nil {
+		t.Fatalf("16 位状态串应可解析: %v", err)
+	}
+	if s := findSensor(data, "bms_temp_high"); s == nil || s.Value != 1 {
+		t.Fatalf("c7=1 时 bms_temp_high 应为 1，实际 %+v", s)
+	}
+
+	// 非 0/1 字符的状态串必须拒绝（否则垃圾位会被读成「无告警」）。
+	garbage := []string{"01", "10XX000000000000", "048.0", "054.0", "020.0", "080", "010.0", "005.0", "29815", "000000"}
+	if _, err := (&TechfineInverterDriver{}).parseHBMS1(garbage); err == nil {
+		t.Fatalf("含非 0/1 字符的状态串必须拒绝")
 	}
 }
 
