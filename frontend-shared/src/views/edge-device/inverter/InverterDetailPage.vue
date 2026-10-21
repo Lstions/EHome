@@ -1,11 +1,19 @@
 <template>
   <div class="inverter-detail">
+    <!--
+      统一页头内容（2026-10-21 用户要求「边缘设备顶部头要统一」）：
+      三个设备页必须传同样维度的信息，否则同一组件在 BMS 页有标签+副标题、
+      在逆变器/通用页只有一行名字 —— 视觉上就是「没统一」。
+      这里与 BMS 页对齐：状态标签 + 类型标签、以及「节点 · 通道 · 设备号 · 固件」副标题。
+    -->
     <DeviceHeader
       :device="device"
       :ws-connected="wsConnected"
       :syncing-h-a="syncingHA"
       :refreshing="refreshing"
       :title="device?.name || '逆变器详情'"
+      :tags="headerTags"
+      :subtitle="headerSubtitle"
       @back="goBack"
       @sync-to-h-a="handleSyncToHA"
       @refresh="handleRefresh"
@@ -186,6 +194,38 @@ const {
 const handleRefresh = () => composableHandleRefresh(() => historyChartRef.value?.fetchHistoryData())
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : '逆变器')
+
+/**
+ * 页头标签（与 BMS 页对齐）：状态 + 类型。
+ * 用 DEVICE_STATUS 的口径（在线/离线/未知），不自己造一套文案。
+ */
+const headerTags = computed<Array<{ text: string; type: 'success' | 'info' | 'warning' | 'danger'; effect: 'plain' }>>(() => {
+  const d = device.value
+  if (!d) return []
+  const online = d.status === 'online' || d.status === 'active'
+  return [
+    { text: online ? '在线' : d.status === 'offline' ? '离线' : '状态未知', type: online ? 'success' : 'info', effect: 'plain' },
+    { text: deviceTypeText.value, type: 'info', effect: 'plain' },
+  ]
+})
+
+/**
+ * 页头副标题（与 BMS 页同维度）：节点 · 通道 · 设备号 · 固件。
+ * 缺哪一项就跳过该项，不输出「—」占位（页头是身份区，占位符只会制造噪声）。
+ */
+const headerSubtitle = computed(() => {
+  const d = device.value
+  if (!d) return ''
+  const parts: string[] = []
+  const node = d.node?.name || d.node_id
+  if (node) parts.push('节点 ' + node)
+  if (d.channel?.hardware_id) parts.push('通道 ' + d.channel.hardware_id)
+  if (d.id) parts.push('设备 #' + d.id)
+  const fw = d.node?.firmware_version
+  if (fw) parts.push('节点固件 ' + fw)
+  return parts.join(' · ')
+})
+
 /**
  * 所属节点数值 id —— 透传给指令频率面板，用于保存后确认节点是否真的应用了新配置
  * （2026-10-15 报障：改前提示永久停在「正在同步到节点」，因为根本没有确认信号）。

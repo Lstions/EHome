@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 import type { Node } from '@/api/node'
@@ -572,74 +574,9 @@ describe('NodeOverview (生产页)', () => {
   // 这里的断言分两层：① DOM 里三条层级线索都真实存在；
   // ② 移动端断点里**不再**隐藏面包屑，而是压缩为两段并给出可滚动的溢出兜底。
 
-  it('渲染面包屑层级线索：首页 / 节点管理 / 当前实体，且「节点管理」是真实返回入口', async () => {
-    const wrapper = mount(NodeOverview, { global: { stubs } })
-    await flushPromises()
 
-    const crumb = wrapper.find('[data-testid="node-breadcrumb"]')
-    expect(crumb.exists()).toBe(true)
 
-    // 三段层级：首页 -> 节点管理 -> 当前实体（§4.1.2「至少表达列表 -> 当前实体」）。
-    // 这里按**子元素顺序与文本**断言，不依赖 Element Plus 内部 class 名 ——
-    // test-setup.ts 的通用 stub 渲染的是 elbreadcrumbitem（无连字符），
-    // 用 .el-breadcrumb-item 选择器会得到 0 个匹配的假绿/假红。
-    const items = Array.from(crumb.element.children) as HTMLElement[]
-    expect(items.map(el => el.textContent?.trim())).toEqual(['首页', '节点管理', '机房采集器'])
 
-    // 前两段带 to（可跳转），最后一段没有 —— 这正是「移动端裁掉根级后仍保留返回入口」的依据
-    expect(items[0].getAttribute('to')).not.toBeNull()
-    expect(items[1].getAttribute('to'), '「节点管理」必须是真实可跳转的上一级入口').not.toBeNull()
-    expect(items[2].getAttribute('to'), '当前实体不应是可跳转链接').toBeNull()
-    expect(wrapper.find('[data-testid="node-breadcrumb-current"]').text()).toBe('机房采集器')
-  })
-
-  it('移动端不再隐藏面包屑，而是压缩为「上一级 / 当前」两段并做容器内滚动', () => {
-    // 断言必须只看真实 CSS：源码注释里为了说明「改前行为」写着
-    // "改前 .no-breadcrumb{display:none}"，若带注释一起 match，
-    // not.toMatch 会被自己的说明文字误伤（本用例第一版就踩了这个坑）。
-    const css = stripCssComments(source)
-
-    // ① 旧行为必须消失：整条 display:none 会让移动端只剩标题
-    expect(css).not.toMatch(/\.no-breadcrumb\s*\{[^}]*display:\s*none/)
-
-    // ② 新行为：移动端断点内确实重定义了面包屑布局
-    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
-    const crumbRule = mobileBlock.slice(mobileBlock.indexOf('.no-breadcrumb {'), mobileBlock.indexOf('.no-breadcrumb::-webkit-scrollbar'))
-    expect(crumbRule).toMatch(/display:\s*flex/)
-    // 用 flex 而非 EP 默认的 float:left —— float 不参与父容器 overflow 计算
-    expect(crumbRule).toMatch(/overflow-x:\s*auto/)
-    expect(crumbRule).toMatch(/flex-wrap:\s*nowrap/)
-    // 只保留两段：根级「首页」在窄屏被裁掉
-    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item:first-child\)\s*\{\s*display:\s*none/)
-    // 当前实体允许收缩 + 省略号，避免把胶囊撑成逐字竖排（§4.2.5）
-    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item:last-child\)\s*\{[^}]*flex:\s*0 1 auto/)
-    expect(mobileBlock).toMatch(/word-break:\s*keep-all/)
-  })
-
-  it('F10：移动端唯一的上层级入口（「节点管理」链接）在 ≤768px 有 ≥44px 触控热区', () => {
-    const css = stripCssComments(source)
-    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
-    // 改前这里写 min-height:20px，注释却声称 44px —— 390px 真浏览器实测
-    // 该链接布局盒只有 48x20（elementFromPoint 命中，但热区不足 §4.4.5 MUST）。
-    // 它是移动端**唯一**的「退回上一层」入口（顶栏面包屑 display:none、
-    // 「返回列表」按钮不在渲染路径上），所以热区必须真的补足。
-    const linkRule = mobileBlock.match(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__inner\.is-link\)\s*\{[^}]*\}/)
-    expect(linkRule, '缺少移动端面包屑链接的触控规则').not.toBeNull()
-    expect(linkRule![0]).toMatch(/min-height:\s*44px/)
-    // 反例守卫：不得回退到 <44px
-    expect(linkRule![0]).not.toMatch(/min-height:\s*(1?[0-9]|2[0-9]|3[0-9]|4[0-3])px/)
-  })
-
-  it('移动端面包屑容器横向滚动有上限：min-width:0 + 滚动条隐藏', () => {
-    const css = stripCssComments(source)
-    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
-    const crumbRule = mobileBlock.slice(mobileBlock.indexOf('.no-breadcrumb {'), mobileBlock.indexOf('.no-breadcrumb::-webkit-scrollbar'))
-    // min-width:0 是 flex 子项能被压缩、进而触发 overflow-x 的前提
-    expect(crumbRule).toMatch(/min-width:\s*0/)
-    expect(mobileBlock).toContain('.no-breadcrumb::-webkit-scrollbar { display: none; }')
-    // 每段固定不收缩，收缩只发生在最后一段（保证「上一级」永远可读可点）
-    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item\)\s*\{\s*flex:\s*0 0 auto/)
-  })
 
   it('离线时总线写操作均被门控', async () => {
     mockGetDetail.mockResolvedValueOnce({
@@ -1696,4 +1633,24 @@ describe('NodeOverview (生产页)', () => {
     // 三项都无效 => 一行都不渲染（而不是渲染出空白行）
     expect(wrapper.findAll(".config-warning-row").length).toBe(0)
   })
+  it('页内不再自建面包屑（统一由顶部框架 MainLayout 承载，2026-10-21 用户要求）', () => {
+    /**
+     * 用户原话：「边缘设备中不应该再增加面包屑，要使用最上方框架的面包屑进行返回或跳转上层」。
+     * 节点总览属于同一类详情页，故一并收敛：页内不得出现面包屑 DOM/CSS，
+     * 层级与返回能力由 MainLayout 顶栏统一提供（见 MainLayout 的 breadcrumbs computed）。
+     *
+     * 反向守卫：这两条断言会在「有人把页内面包屑加回来」时立即变红。
+     */
+    expect(source).not.toContain('node-breadcrumb')
+    expect(source).not.toContain('no-breadcrumb')
+  })
+
+  it('顶栏面包屑的每一级都可点回上一级（返回能力没有丢失）', () => {
+    const layoutSource = readFileSync(resolve(process.cwd(), 'src/views/layout/MainLayout.vue'), 'utf8')
+    // 中间项可点、末项不可点
+    expect(layoutSource).toMatch(/:to="index < breadcrumbs.length - 1 \? \{ path: item.to \} : undefined"/)
+    // 按路径分段生成，支持 /node/3/overview 这类三级路径
+    expect(layoutSource).toContain('const segments = route.path.split')
+  })
+
 })

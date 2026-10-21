@@ -32,7 +32,7 @@ describe('DeviceHeader 统一页头 API', () => {
   it('暴露三页共用的 props（身份 / 连接 / 刷新 / 操作可见性 / 面包屑 / 内置弹窗开关）', () => {
     for (const prop of [
       'device:', 'wsConnected?:', 'syncingHA?:', 'refreshing?:',
-      'title?:', 'subtitle?:', 'tags?:', 'breadcrumb?:',
+      'title?:', 'subtitle?:', 'tags?:',
       'builtinDialogs?:', 'showEdit?:', 'showSync?:', 'showRefresh?:', 'showDelete?:',
     ]) {
       expect(source, '缺少 prop：' + prop).toContain(prop)
@@ -113,21 +113,21 @@ describe('DeviceHeader 移动端 ⋯ 溢出菜单（编辑 / 同步到 HA / 删�
   })
 })
 
-describe('DeviceHeader 面包屑（BMS 页使用）', () => {
-  it('可点段是原生 button 且清空 UA 样式（2026-10-21 从 BmsDetailPage 迁入的断言）', () => {
-    expect(source).toMatch(/<button v-if="item\.to" type="button" class="dh-crumb-link" @click="goCrumb\(item\.to\)">/)
-    // 不清零就会出现 2px outset 黑边 + 灰底 + Arial 13.33px 的老式按钮
-    expect(source).toMatch(/\.dh-crumb-link \{[\s\S]{0,300}?appearance: none;/)
-    expect(source).toMatch(/\.dh-crumb-link \{[\s\S]{0,300}?-webkit-appearance: none;/)
-    expect(source).toMatch(/\.dh-crumb-link \{[\s\S]{0,300}?font: inherit;/)
+describe('DeviceHeader 不得自带面包屑（统一由顶部框架承载）', () => {
+  /**
+   * 2026-10-21 用户要求：「边缘设备中不应该再增加面包屑，要使用最上方框架的面包屑
+   * 进行返回或跳转上层」。因此页头组件里不得再出现任何面包屑 DOM / prop / 路由跳转。
+   *
+   * 反向守卫的意义：BMS 页此前通过 breadcrumb prop 渲染了一套页面内面包屑，
+   * 与顶栏并存时同一屏出现两条「边缘设备管理 / …」，且「返回列表」被从顶栏剥离。
+   */
+  it('不渲染面包屑：无 dh-crumb / dh-crumb-link / aria-label="面包屑"', () => {
+    expect(source).not.toContain('dh-crumb')
+    expect(source).not.toContain('aria-label="面包屑"')
   })
 
-  it('面包屑导航走 router.push（真实跳转，不是 cursor:pointer 的假可点）', () => {
-    expect(source).toMatch(/function goCrumb\(to: string\) \{\s*router\.push\(to\)/)
-    expect(source).toContain('aria-label="面包屑"')
-    expect(source).toContain('class="dh-crumb-current"')
-    // 反向：面包屑不得用 ellipsis 裁掉「边缘设备管理」
-    expect(source).not.toMatch(/\.dh-crumb-link \{[^}]*text-overflow: ellipsis/)
-    expect(source).not.toMatch(/\.dh-crumb[^{]*\{[^}]*text-overflow: ellipsis/)
+  it('不再接受 breadcrumb prop，也不再为此引入 router.push', () => {
+    expect(source).not.toContain('breadcrumb?:')
+    expect(source).not.toContain('goCrumb')
   })
 })

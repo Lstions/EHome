@@ -28,7 +28,6 @@
       :refreshing="refreshing"
       :title="deviceName"
       :tags="headerTags"
-      :breadcrumb="headerBreadcrumb"
       :builtin-dialogs="false"
       @back="goBackToList"
       @sync-to-h-a="onSyncToHA"
@@ -990,10 +989,6 @@ const headerTags = computed<Array<{ text: string; type: TagType; effect: 'plain'
   { text: deviceTypeLabel.value + ' · ' + cellCountLabel.value, type: 'info', effect: 'plain' },
 ])
 /** 页头面包屑：首段可点（DeviceHeader 用原生 button + router.push 承载，不是假可点） */
-const headerBreadcrumb: Array<{ text: string; to?: string }> = [
-  { text: '边缘设备管理', to: '/edge-device' },
-  { text: 'BMS 设备详情' },
-]
 
 interface CellVoltage { index: number; voltage: number }
 const cells = computed<CellVoltage[]>(() => {

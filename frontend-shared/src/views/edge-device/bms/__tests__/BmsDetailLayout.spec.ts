@@ -145,8 +145,12 @@ describe('BmsDetailPage 布局契约（重设计版）', () => {
     expect(sourceCode).not.toContain('class="crumb-link"')
     expect(sourceCode).not.toContain('onHeadMoreCommand')
     // 面包屑首段必须是「真实可回列表」的数据（to 交给 DeviceHeader 用 router.push 承载）
-    expect(source).toContain(':breadcrumb="headerBreadcrumb"')
-    expect(source).toMatch(/headerBreadcrumb[\s\S]{0,200}?text:\s*'边缘设备管理'[\s\S]{0,80}?to:\s*'\/edge-device'/)
+    // 2026-10-21 用户要求：详情页不再自建面包屑，统一用顶部框架面包屑（MainLayout）。
+    // 因此本页既不能传 breadcrumb prop，也不能自己画面包屑。
+    expect(source).not.toContain(':breadcrumb=')
+    expect(source).not.toContain('headerBreadcrumb')
+    expect(source).not.toContain('class="crumb-link"')
+    expect(source).not.toContain('BMS 设备详情</span>')
     expect(source).toContain("router.push('/edge-device')")
   })
 })

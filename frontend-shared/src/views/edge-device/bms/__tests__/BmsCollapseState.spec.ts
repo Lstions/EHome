@@ -177,17 +177,15 @@ describe('新增诊断卡接入（4 张图 + 折叠头摘要）', () => {
     expect(bmsDetailSource).toContain('.diag-card > .card-head { display: none; }')
   })
 
-  it('面包屑随页头统一交给 DeviceHeader（UA 清零断言已迁到 DeviceHeader.spec.ts）', () => {
+  it('详情页不再自建面包屑（统一用顶部框架面包屑）', () => {
     /*
-     * 2026-10-21 契约迁移：BMS 页不再自建面包屑按钮，旧 .crumb-link 的
-     * 「appearance:none / font:inherit / 无 ellipsis」断言迁到真正渲染它的
-     * DeviceHeader 上（见 shared/__tests__/DeviceHeader.spec.ts 的「面包屑」用例）。
-     * 这里只守卫本页侧的两件事：旧 DOM/CSS 不得复活、面包屑数据必须继续传下去。
+     * 2026-10-21 用户要求：详情页不应再增加面包屑，改用最上方框架的（MainLayout）。
+     * 因此本页侧只守卫一件事：旧 DOM/CSS 不得复活，且不得再向共享组件传 breadcrumb。
      */
     expect(bmsDetailSource).not.toContain('class="crumb-link"')
     expect(bmsDetailSource).not.toMatch(/\.crumb-link\s*\{/)
-    // 数据必须传给共享组件，否则面包屑会静默消失
-    expect(bmsDetailSource).toContain('"headerBreadcrumb"')
+    expect(bmsDetailSource).not.toContain('headerBreadcrumb')
+    expect(bmsDetailSource).not.toContain(':breadcrumb=')
   })
 
   it('快照兜底失败不直出 axios 原文（timeout of 10000ms exceeded 属技术噪声）', () => {

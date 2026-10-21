@@ -9,15 +9,6 @@
       手机页头必须**确定性两行**：第一行 身份（返回/名称/状态/⋯），第二行 主操作（刷新）。
   -->
   <header class="device-header">
-    <!-- 可选面包屑（BMS 页保留「边缘设备管理 / BMS 设备详情」上下文；其它设备页不传） -->
-    <nav v-if="breadcrumb && breadcrumb.length" class="dh-crumb" aria-label="面包屑">
-      <template v-for="(item, i) in breadcrumb" :key="i">
-        <span v-if="i > 0" class="dh-sep" aria-hidden="true">/</span>
-        <button v-if="item.to" type="button" class="dh-crumb-link" @click="goCrumb(item.to)">{{ item.text }}</button>
-        <span v-else class="dh-crumb-current">{{ item.text }}</span>
-      </template>
-    </nav>
-
     <div class="dh-main">
       <el-button class="dh-back" :icon="ArrowLeft" circle aria-label="返回上一页" @click="$emit('back')" />
 
@@ -164,8 +155,6 @@ const props = withDefaults(defineProps<{
   subtitle?: string
   /** 名称行尾部的状态标签（BMS 的「在线 / jiabaida_bms · 16S」） */
   tags?: DeviceHeaderTag[]
-  /** 面包屑（BMS 用；其它设备页不传） */
-  breadcrumb?: Array<{ text: string; to?: string }>
   /** 是否使用组件内置的编辑/删除对话框（BMS 用自己的对话框，传 false） */
   builtinDialogs?: boolean
   /** 操作可见性：默认全开；BMS 页按自己的权限/状态控制 */
@@ -180,7 +169,6 @@ const props = withDefaults(defineProps<{
   title: '',
   subtitle: '',
   tags: () => [],
-  breadcrumb: () => [],
   builtinDialogs: true,
   showEdit: true,
   showSync: true,
@@ -231,10 +219,6 @@ function onEdit() {
 function onDelete() {
   if (props.builtinDialogs) deleteDialogVisible.value = true
   else emit('delete')
-}
-
-function goCrumb(to: string) {
-  router.push(to)
 }
 
 async function submitEdit() {
@@ -299,31 +283,6 @@ onUnmounted(() => {
   padding: 12px 24px 12px;
   margin-bottom: 16px;
 }
-
-/* 面包屑（可点击段必须是原生 button 且清空 UA 样式，否则手机/桌面都会出现老式按钮灰底黑边） */
-.dh-crumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.dh-crumb-link {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 0;
-  background: none;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-.dh-crumb-link:hover { color: var(--el-color-primary); }
-.dh-crumb-link:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; border-radius: 2px; }
-.dh-crumb-current { color: var(--el-text-color-primary); }
-.dh-sep { color: var(--el-border-color); }
 
 .dh-main {
   display: flex;
@@ -396,7 +355,6 @@ onUnmounted(() => {
 */
 @media (max-width: 768px) {
   .device-header { padding: 10px 16px 12px; margin-bottom: 12px; }
-  .dh-crumb { margin-bottom: 6px; font-size: 11px; }
   .dh-main { gap: 10px; }
   .dh-name { font-size: 18px; }
   .dh-actions { display: none; }

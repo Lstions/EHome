@@ -146,8 +146,14 @@
             <el-breadcrumb-item :to="{ path: '/dashboard' }">
               <el-icon><HomeFilled /></el-icon>
             </el-breadcrumb-item>
-            <el-breadcrumb-item v-for="(item, index) in breadcrumbs" :key="index">
-              {{ item }}
+            <!-- 中间项可点回上一级（详情页的「返回列表」由这里承担）；
+                 末项是当前页，保持纯文本（EP 的 :to 在末项会渲染成可点链接，属误导）。 -->
+            <el-breadcrumb-item
+              v-for="(item, index) in breadcrumbs"
+              :key="item.to"
+              :to="index < breadcrumbs.length - 1 ? { path: item.to } : undefined"
+            >
+              {{ item.text }}
             </el-breadcrumb-item>
           </el-breadcrumb>
         </div>
@@ -758,33 +764,74 @@ watch(activeMenuIndex, (idx) => {
   sidebarFocusIndex.value = idx
 })
 
-// 面包屑
-const breadcrumbs = computed(() => {
-  const pathNames: Record<string, string> = {
-    '/dashboard': '仪表盘',
-    '/node': '节点管理',
-    '/edge-device': '边缘设备管理',
-    '/channel': '通道管理',
-    '/data': '数据面板',
-    '/firmware': '固件管理',
-    '/device-configs': '配置模板',
-    '/monitor': '系统监控',
+/**
+ * 顶部框架面包屑（2026-10-21 用户要求「详情页不要再自己画面包屑，用最上方框架的」）。
+ *
+ * 规则：把当前路径**按段拆开**，每一段都能点回它的上一级。
+ *   /edge-device        → [边缘设备管理]
+ *   /edge-device/14     → [边缘设备管理(→/edge-device), 边缘设备详情]
+ *   /node/3/overview    → [节点管理(→/node), 节点详情(→/node/3), 总览]
+ *
+ * 为什么不再只 push 一个字符串：
+ *   详情页曾经在页面内自建一套「边缘设备管理 / BMS 设备详情」（DeviceHeader 的
+ *   breadcrumb prop），而顶栏只显示到「边缘设备管理」—— 同一屏两套面包屑，
+ *   且页面内那套把「返回列表」的能力从顶栏剥离了。
+ *   现在唯一来源是顶栏：中间项可点（返回列表），末项是当前页（不可点）。
+ */
+const BREADCRUMB_LABELS: Record<string, string> = {
+  dashboard: '仪表盘',
+  node: '节点管理',
+  'edge-device': '边缘设备管理',
+  channel: '通道管理',
+  data: '数据面板',
+  'data-sources': '数据源',
+  'logical-device': '逻辑设备',
+  'device-configs': '配置模板',
+  firmware: '固件管理',
+  monitor: '系统监控',
+  alerts: '告警规则',
+  automation: '自动化策略',
+  'notification-channels': '通知通道',
+  'notification-deliveries': '投递审计',
+  profile: '个人设置',
+}
 
-    '/node/:id': '节点详情',
-    '/edge-device/:id': '边缘设备详情',
-  }
+/** 详情页的第二段用固定称谓，避免把设备 ID 直接暴露成面包屑文本 */
+const BREADCRUMB_DETAIL_LABELS: Record<string, string> = {
+  'edge-device': '边缘设备详情',
+  node: '节点详情',
+  channel: '通道详情',
+  'logical-device': '逻辑设备详情',
+}
 
-  const crumbs: string[] = []
-  const path = route.path
-  
-  // 匹配一级路径
-  for (const [key, value] of Object.entries(pathNames)) {
-    if (path.startsWith(key.replace('/:id', '')) && key !== '/dashboard') {
-      crumbs.push(value)
-      break
-    }
-  }
+/**
+ * 第三段及以后（详情页的二级 tab/子视图）按段名映射。
+ * 不加这层会退化成「节点详情 / 节点详情」（实测 /node/3/overview 就是这样）——
+ * 因为第二段之后的未知段都会 fallback 到 BREADCRUMB_DETAIL_LABELS[首段]。
+ */
+const BREADCRUMB_SUB_LABELS: Record<string, string> = {
+  overview: '节点总览',
+  channels: '通道',
+  data: '数据',
+  logs: '日志',
+  config: '配置',
+}
 
+const breadcrumbs = computed<Array<{ text: string; to: string }>>(() => {
+  const segments = route.path.split('/').filter(Boolean)
+  if (segments.length === 0) return []
+  const crumbs: Array<{ text: string; to: string }> = []
+  let acc = ''
+  segments.forEach((seg, i) => {
+    acc += '/' + seg
+    // 段位优先级：一级=模块名 / 二级=详情称谓 / 三级及以后=子视图名
+    const label = i === 0
+      ? (BREADCRUMB_LABELS[seg] ?? seg)
+      : i === 1
+        ? (BREADCRUMB_DETAIL_LABELS[segments[0]] ?? seg)
+        : (BREADCRUMB_SUB_LABELS[seg] ?? seg)
+    crumbs.push({ text: label, to: acc })
+  })
   return crumbs
 })
 

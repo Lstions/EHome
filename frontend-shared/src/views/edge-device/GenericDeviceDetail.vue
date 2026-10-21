@@ -1,11 +1,14 @@
 <template>
   <div class="device-detail">
+    <!-- 统一页头内容（与 BMS / 逆变器同维度）：状态+类型标签、节点/通道/设备号/固件副标题 -->
     <DeviceHeader
       :device="device"
       :ws-connected="wsConnected"
       :syncing-h-a="syncingHA"
       :refreshing="refreshing"
       :title="pageTitle"
+      :tags="headerTags"
+      :subtitle="headerSubtitle"
       @back="goBack"
       @sync-to-h-a="handleSyncToHA"
       @refresh="handleRefresh"
@@ -93,6 +96,35 @@ const deviceNodeId = computed(() => device.value?.node?.id ?? device.value?.node
 
 // 标题优先展示设备名称，无名称时兜底设备类型
 const pageTitle = computed(() => device.value?.name || deviceTypeText.value || '边缘设备详情')
+
+/**
+ * 页头标签（三设备页统一口径）：状态 + 类型。
+ * 状态用在线/离线/未知三档，与 BMS 页一致；不自己造第四种文案。
+ */
+const headerTags = computed<Array<{ text: string; type: 'success' | 'info' | 'warning' | 'danger'; effect: 'plain' }>>(() => {
+  const d = device.value
+  if (!d) return []
+  const online = d.status === 'online' || d.status === 'active'
+  return [
+    { text: online ? '在线' : d.status === 'offline' ? '离线' : '状态未知', type: online ? 'success' : 'info', effect: 'plain' },
+    { text: deviceTypeText.value, type: 'info', effect: 'plain' },
+  ]
+})
+
+/** 页头副标题（三设备页统一维度）：节点 · 通道 · 设备号 · 固件；缺失项跳过不占位 */
+const headerSubtitle = computed(() => {
+  const d = device.value
+  if (!d) return ''
+  const parts: string[] = []
+  const node = d.node?.name || d.node_id
+  if (node) parts.push('节点 ' + node)
+  if (d.channel?.hardware_id) parts.push('通道 ' + d.channel.hardware_id)
+  if (d.id) parts.push('设备 #' + d.id)
+  const fw = d.node?.firmware_version
+  if (fw) parts.push('节点固件 ' + fw)
+  return parts.join(' · ')
+})
+
 
 // 过滤无有效载荷的数据项（如后端 latest 记录为空对象/全 null 字段），
 // 保证“共 N 条数据”计数与实际可读内容一致；全部无效时由列表组件展示空状态

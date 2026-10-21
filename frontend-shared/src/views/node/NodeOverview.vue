@@ -10,11 +10,6 @@
          错误分支里的「返回列表」又不在渲染路径上 ⇒ 390px 下只剩页面标题，
          用户无法判断自己处在哪一层。此处不新增按钮，因为「节点管理」这一段
          本身带 :to 链接：同一元素既给出位置又给出返回入口，不额外占用紧张的页头空间。 -->
-    <el-breadcrumb separator="/" class="no-breadcrumb" data-testid="node-breadcrumb">
-      <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
-      <el-breadcrumb-item :to="{ path: '/node' }">节点管理</el-breadcrumb-item>
-      <el-breadcrumb-item data-testid="node-breadcrumb-current">{{ pageTitle }}</el-breadcrumb-item>
-    </el-breadcrumb>
 
     <!-- 加载骨架 -->
     <div v-if="loading && !node" class="no-loading">
@@ -2829,7 +2824,6 @@ html.dark .node-overview-page {
   --no-warning-border: rgba(245, 158, 11, 0.45);
 }
 
-.no-breadcrumb { margin-bottom: 12px; }
 .no-loading { padding: 24px; background: var(--card-bg, #fff); border-radius: 8px; }
 
 /* 卡片基座 */
@@ -3387,43 +3381,13 @@ html.dark .node-overview-page {
      窄屏详情行改纵向堆叠后，横向空间足够，占满反而更好点按（§4.4.5 触控目标）。 */
   .bus-detail-list .bus-detail-edit { max-width: none; width: 100%; }
   .bus-detail-list .bus-detail-edit .dma-select { width: 100%; max-width: none; }
-  /* ── 面包屑：移动端从「整条隐藏」改为「压缩为两段」 ──
-     改前 .no-breadcrumb{display:none} 与 MainLayout 顶栏面包屑同时消失，
-     移动端只剩标题，层级位置感丢失（审计 F10 / §4.1.2 MUST）。
-     这里必须用 flex 而非保留 EP 的 float:left —— float 布局下容器不参与
-     overflow 计算，横向溢出会顶破页面（documentElement.scrollWidth > clientWidth）。 */
-  .no-breadcrumb {
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    min-width: 0;
-    margin-bottom: 10px;
-    font-size: 12px;
-    line-height: 18px;
-    /* 兜底：极端长实体名时容器内滚动，而不是把页面撑出横向滚动条 */
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-  }
-  .no-breadcrumb::-webkit-scrollbar { display: none; }
   /* 只保留「上一级 / 当前」两段：根级「首页」在 390px 下信息价值最低，优先裁掉 */
-  .no-breadcrumb :deep(.el-breadcrumb__item:first-child) { display: none; }
-  .no-breadcrumb :deep(.el-breadcrumb__item) { flex: 0 0 auto; }
   /* 当前实体名可长可短：允许它收缩并省略，避免把胶囊标签撑成逐字竖排（§4.2.5） */
-  .no-breadcrumb :deep(.el-breadcrumb__item:last-child) { flex: 0 1 auto; min-width: 6em; }
-  .no-breadcrumb :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    word-break: keep-all;
-  }
   /* 上一级是真实链接（:to）：它就是移动端唯一的「退回上一层」入口，
      必须满足 §4.4.5 的 44px 触控热区。改前这里写的是 min-height:20px —— 注释声称
      44px、实测 getBoundingClientRect().height 只有 20px（390px 实测 48x20），
      是「注释与实现相矛盾」的假达标。改为 44px 后热区由 flex 居中撑开，
      面包屑自身高度 20px→44px，仍在 390px 的预算内（docOverflowX 保持 0）。 */
-  .no-breadcrumb :deep(.el-breadcrumb__inner.is-link) { min-height: 44px; display: inline-flex; align-items: center; }
-  .no-breadcrumb :deep(.el-breadcrumb__separator) { margin: 0 6px; }
   .page-header { flex-direction: column; gap: 12px; }
   .ph-title-row { gap: 8px; }
   .ph-title { font-size: 18px; line-height: 26px; }
