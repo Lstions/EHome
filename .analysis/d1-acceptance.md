@@ -21,12 +21,16 @@
 | #5 产出可寻址 | 所有 `SensorData{Name:...}` 匹配 `^[a-z][a-z0-9_]*$`；`*_ack` 例外清单 | 产出字面量 104，非法 0，`*_ack` 例外 6（与评审口径一致） | **PASS** |
 | #8 语法表驱动 | §5.1 全 15 条边界有测试、且真跑（`=== RUN` 计数非假绿） | 39 个 `=== RUN`（1 父 + 38 子，15 边界逐条命中） | **PASS** |
 | #9 变异自证 | 6 类关键语义逐条改坏 ⇒ 对应测试必红 ⇒ 恢复后 md5 一致 | **7/7 CAUGHT**（含新增 virtual sum_of 变异）；restore md5 全一致；复跑全绿 | **PASS** |
-| #10a 生产链路 literal 回归（硬门禁，G-6 判据） | automation/alert 的 KindLiteral 快路径 ≤ main matchField 基线 +5% | automation **58.6ns vs 1.0ns（≈+5700%）**；alert **57ns vs 1.0ns（≈+5600%）**；0 alloc。归因：isSpecialSelector 8ns + provider RLock 4ns + 编译缓存命中 32ns + markRuleResolved 6~14ns | **FAIL（集成现状）**，修复建议见 §5.4 |
+| #10a-1a literal 零触碰解析层（硬，确定性） | 计数型 provider：字面量 selector 1000 次 ⇒ snapshot/Compile/Enabled/Epoch=0、缓存/统计=0；特殊 selector ⇒ 计数>0（防假绿） | `TestLiteralPathSkipsProviderAndCompile` **PASS**（HEAD `1cf8f0ea` 干净树）；变异后必 FAIL、恢复 md5 一致 | **PASS** |
+| #10a-1b 同 run 比值（软，仅记录） | 记录 median(literal)/median(baseline)，>5× WARN 不阻断 | automation **8.00ns / 1.15ns ≈6.9×**；alert **8.48ns / 0.92ns ≈9.2×**（`-benchtime=1s`，0 alloc）；`2000x` 短采样会抖到 7.9~16.9ns | **记录（WARN）** |
+| #10a-2 端到端 ≤+5%（硬） | `BenchmarkEvaluateFrame`（8 字段×3 literal 规则）vs 无解析层基线 | **833.1ns vs 819.0ns = +1.7%**（同 run，4 alloc 相同） | **PASS** |
 | #10b 新层抽象成本（观测，不阻断） | ≤10ns 且 0 alloc（只 WARN） | literal `Plan.Eval` 中位 **3.7ns**（最好 3.63）/ **0 alloc**；完整 `EvalPredicate` 19.5~26ns | **WARN-PASS** |
 
-**需窄复核注意**：按 Lead 2026-10-21 裁决，#10 拆成 `#10a 生产链路（硬门禁）` 与 `#10b 新层抽象成本（观测）`，不再混为一个指标。
-- `#10b` 通过（3.7ns ≤ 10ns、0 alloc）。
-- `#10a` **实测 FAIL**：不是新层成本，而是**集成实现把非特殊 literal 也送进了 provider+编译缓存+统计置位链路**（main.go 无条件注入 SetPlanProvider）。§5.4 给出可落地修复建议（预期 58ns → 约 4~12ns，极端优化可回 ~1ns）。
+**需窄复核注意**：按 Lead 2026-10-21 最终裁决，#10 拆成三层（`1a` 确定性硬判据 / `1b` 比值仅记录 / `2` 端到端硬判据），**不再用绝对 ns 阻断**——并行 teammate 负载下同一 HEAD 的 baseline 可抖动 4–5×，绝对阈值不可复现。
+- `1a` **PASS**：literal 路径确定性零触碰 provider（不依赖机器负载）。
+- `1b` 记录：修前 58.6ns → 修后 8.0ns（automation）/ 8.5ns（alert），0 alloc。
+- `2` **PASS**：端到端 +1.7% ≤ +5%。
+- 前提：**门禁/基准必须在 `git status` 干净的树 + 记录 HEAD 下跑**（见 §5.0）。
 
 ---
 
@@ -215,80 +219,139 @@ ok  	ehome/backend/internal/sensorfield
 
 ---
 
-## 5. 门禁 #10：`#10a 生产链路`（硬门禁）+ `#10b 新层抽象成本`（观测）
+## 5. 门禁 #10：三层判据（#10a-1a 确定性 / #10a-1b 观测 / #10a-2 端到端）
 
-> Lead 2026-10-21 裁决：拆分口径、不掩盖差异。**#10a 才是 G-6 判据**；#10b 只做观测（≤10ns 且 0 alloc 才 WARN-通过）。
+> **Lead 2026-10-21 最终裁决**：绝对 ns 阈值在并行 teammate 负载下不可复现
+> （同一 HEAD 上 baseline 在 1.19 / 2.95 / 5.0 / 5.5 / 6.4 ns 间跳动，4–5× 方差；
+> literal 在 7.9 / 12.6 / 15.4 / 16.9 / 17.3 ns 间跳动）。因此 #10a 改为：
+> **1a 确定性结构断言（硬，机器无关）→ 1b 比值仅记录（软）→ 2 端到端 ≤+5%（硬）**。
+> 不再用绝对 ns 作阻断判据。
 
-### 5.1 基准与复现命令
+基线来源：`backend/internal/automation/literal_path_bench_test.go` 的同包
+`matchField+compare`（集成批次原样迁入，与 main `d406dc2d` `internal/alert/evaluator.go`
+逐字节相同）。
 
-基线（两处，均为 main `d406dc2d` 的 `matchField`+`compare` 逐字节克隆）：
-- `backend/internal/sensorfield/bench_baseline_test.go`：`baselineMatchField`；
-- `internal/automation`、`internal/alert` 包内基准直接测同包 `matchField`+`compare`（集成批次未改这两函数，与 main 逐字节相同）。
+### 5.0 跑门禁/基准的前置纪律（必须遵守）
 
-生产链路基准（真实调用 `Evaluator.evalSelector` 的 `KindLiteral` 分支，provider 已注入 + 缓存 warm）：
-- `backend/internal/automation/literal_path_bench_test.go`：`BenchmarkAutomationLiteralPath`
-- `backend/internal/alert/literal_path_bench_test.go`：`BenchmarkAlertLiteralPath`
+**证据只有在干净树上才有效**。本仓工作树被多名 teammate 共享，任何人的未提交中间态
+都会让门禁读到编译失败或半成品：
+
+```bash
+cd .agents/worktrees/field-resolver
+git status --short          # 必须为空（或只含你自己的、已确认可编译的改动）
+git log --oneline -1        # 把 HEAD 写进证据
+```
+
+本文件所有实测均标注 **HEAD**；未标注 HEAD 的数字一律视为无效证据。
+
+### 5.1 #10a-1a（硬，确定性）：literal 路径零触碰解析层
+
+**测试**：`backend/internal/automation/literal_path_test.go::TestLiteralPathSkipsProviderAndCompile`
 
 ```bash
 cd backend
-# #10a 生产链路（automation 侧）
-go test ./internal/automation/ -run '^$' -bench 'BenchmarkAutomationLiteralPath' -benchmem -count=5 -benchtime=200ms
-# #10a 生产链路（alert 侧）
-go test ./internal/alert/ -run '^$' -bench 'BenchmarkAlertLiteralPath' -benchmem -count=5 -benchtime=200ms
-# #10b 新层抽象成本 + sensorfield 内基线
-go test ./internal/sensorfield/ -run '^$' -bench 'BenchmarkLiteralEval' -benchmem -count=5 -benchtime=300ms
+go test ./internal/automation/ -run TestLiteralPathSkipsProviderAndCompile -count=1 -v
 ```
 
-### 5.2 #10a 实测输出（5 次取样，0 alloc）
+实测输出（HEAD `1cf8f0ea`，干净树）：
 
 ```
-### BenchmarkAutomationLiteralPath（生产链路）
-58.62 / 64.40 / 56.36 / 56.81 / 61.72 ns/op
-### BenchmarkAutomationLiteralPathBaseline（main matchField+compare）
-0.9586 / 0.9348 / 1.055 / 1.074 / 0.9995 ns/op
-### BenchmarkAlertLiteralPath（生产链路）
-58.03 / 56.56 / 54.54 / 57.99 / 58.30 ns/op
-### BenchmarkAlertLiteralPathBaseline（main matchField+compare）
-0.9244 / 1.016 / 0.9821 / 0.9546 / 1.075 ns/op
+=== RUN   TestLiteralPathSkipsProviderAndCompile
+--- PASS: TestLiteralPathSkipsProviderAndCompile (0.00s)
+=== RUN   TestLiteralPathMatchesLegacySemantics
+--- PASS: TestLiteralPathMatchesLegacySemantics (0.00s)
+ok  	ehome/backend/internal/automation	0.008s
 ```
 
-中位数：automation **58.6ns vs 1.0ns ⇒ +5760%**；alert **57ns vs 1.0ns ⇒ +5600%**。**0 alloc/op**（分配没退化，退化的是每次调用的固定开销）。
+断言内容（**确定性、与机器负载无关**）：
+1. 注入计数型 provider（`snapshots/compiles/enableds/epochs` 四个 atomic 计数）+ 测试钩子统计
+   `planProviderSnapshot` 调用；对纯字面量 selector 调 `evalSelector` **1000 次**；
+2. 断言 `snapshots == 0 && compiles == 0 && enableds == 0 && epochs == 0`，
+   且 `len(planCache.plans) == 0`、`len(ruleStats) == 0`（统计写入 0）；
+3. **反证防假绿**：再用特殊 selector 调一次，断言上述计数 `>0` 且 plan 缓存非空
+   —— 证明计数器真的在工作，不是恒 0；
+4. 附带语义断言：literal 取**第一个同名**、返回原始上报值（帧中放两个 rsoc=42/99，断言 42）。
 
-### 5.3 开销分解（automation 包内微基准，逐项可复现）
+**判定：PASS**（确定性，与 CPU 负载无关；不受 `-benchtime` 影响）。
 
-| 工序 | ns/op（5 次） | literal 非特殊值是否每次必做 |
+### 5.2 #10a-1a 变异自证（证明该测试真能抓回归）
+
+把 literal 短路条件改成"literal 也走 provider 分支"（`if !special && isSpecialSelector(selector)`）后：
+
+```
+--- FAIL: TestLiteralPathSkipsProviderAndCompile (0.00s)
+    literal_path_test.go:76: literal must return the FIRST same-named value (42), got 55
+FAIL
+```
+
+恢复后 `md5sum` 与原文件一致（`be06b5db87c28cc46207624179889ee8`），全套复绿。**测试非假绿。**
+
+### 5.3 #10a-1b（软，仅记录）：同 run 比值（噪声下不可判）
+
+同一次 `go test -benchtime=1s -count=5` run 内（**这是可复现的采样口径**）：
+
+| benchmark | ns/op（5 次） | allocs |
 |---|---|---|
-| `isSpecialSelector`（形态判定） | 7.91~8.15 | **是**（每次 evalSelector 入口） |
-| `planProviderSnapshot`（RLock） | 3.92~4.02 | **是**（provider 已注入） |
-| `compileSelector` 缓存命中（FNV hash + RWMutex + `PlanEpoch`） | 32.1~39.6 | **是**（先取 plan 判 Kind） |
-| `markRuleResolved`（statsMu） | 5.8~14.0 | **是**（literal 成功路径也置统计） |
-| legacy `matchField`+`compare`（基线） | 0.91~1.08 | 是（真正的比较） |
+| `BenchmarkAutomationLiteralPath`（生产函数 `evalSelector`，注入 provider） | 7.945 / 7.957 / 8.001 / 8.007 / 8.000（中位 **8.00**） | 0 |
+| `BenchmarkAutomationLiteralPathBaseline`（`matchField+compare`） | 1.147 / 1.154 / 1.158 / 1.132 / 1.142（中位 **1.15**） | 0 |
+| `BenchmarkAlertLiteralPath` | 8.568 / 8.646 / 8.420 / 8.454 / 8.477 / 8.661 / 8.406（中位 **8.48**） | 0 |
+| `BenchmarkAlertLiteralPathBaseline` | 0.928 / 0.916 / 0.911 / 0.929 / 0.909（中位 **0.92**） | 0 |
+| `BenchmarkAutomationLiteralPathNoProviderTouch`（panicProvider 证明不触碰） | 7.986 / 8.026（第三次 11.91 为负载噪声） | 0 |
+| `BenchmarkAutomationLiteralPathNoProviderNoRuleStruct`（纯 matchField+compare 内联对照） | 3.70 / 4.59 / 4.57 | 0 |
 
-合计 ≈ 50~66ns，与实测 58ns 吻合。**根因**：`cmd/server/main.go:334/397` **无条件** `SetPlanProvider(fieldResolver.registry)`（即使 `enabled=false`），而 `automation/selector.go`、`alert/selector.go` 的 literal 分支在回退到 legacy `matchField` 之前，已经做了 provider 快照 + 编译缓存命中 + 统计置位。
+**比值（仅记录，不阻断）**：automation ≈ **6.9×** baseline、alert ≈ **9.2×**。>5× 记 WARN。
 
-### 5.4 判定
+**噪声证据（解释 Lead 复测到的 17.3ns，同一 HEAD）**：
+`-benchtime=2000x`（约 2000 次迭代、总耗时 ~几十 µs）下同一二进制实测
+**7.945 / 12.98 / 15.42 / 16.87 / 12.57 ns**；`-benchtime=1s` 下稳定在 **7.94~8.01 ns**。
+差异由"采样过短 + 并行 teammate 负载 + CPU 频率/调度"造成，不是代码差异
+（同一次 1s 采样内基线也从 1.13 到 1.16 波动）。
+**结论：绝对 ns 只在机器空闲且 `-benchtime≥1s` 时作参考；判据用 5.1 的确定性断言。**
 
-- **#10a（硬门禁，G-6）：FAIL**。当前集成现状相对 main 基线约 **+5700%**；5 次取样方差 <15%，不是噪声。这是**真实生产回归**（每帧×每规则×每 selector 多付 ~58ns；0 alloc 但固定开销确定存在）。
-- **#10b（观测）：WARN-PASS**。literal `Plan.Eval` 中位 3.7ns（最好 3.63ns）/ 0 alloc ≤ 10ns 阈值；`BenchmarkFamilyEval16` 301.6ns/0 alloc（目标 <2µs ✔）、`BenchmarkResolve` 4063ns/op（目标 <50µs ✔）。
-- 否决“为凑 +5% 让 literal 改走新层”（违反 G-6 逐字节等价）——本项已经不需要：新层 literal 根本不参与生产。
+### 5.4 #10a-2（硬）：端到端 `BenchmarkEvaluateFrame` ≤ +5%
 
-### 5.5 修复建议（automation/alert 包 scope，语义不变；请 Lead 指派 auto-analyst）
+**基准**：`backend/internal/automation/evaluate_frame_bench_test.go`（edge-analyst 提供）
++ `literal_path_bench_test.go` 中的 `BenchmarkEvaluateFrameBaseline`（同 Evaluate 入口、
+同帧/规则，但 `planProvider=nil` = main 基线行为）。
 
-1. **非特殊形态在 provider/compile 之前短路**（约 6 行）：
-   ```go
-   special := isSpecialSelector(selector)
-   if !special { // G-6 literal/legacy 快路径：与历史逐字节等价
-       value, found := matchField(fields, selector)
-       if !found { return false, false, 0 }
-       return true, compare(comparator, value, threshold), value
-   }
-   // 只有 special 才走下文的 provider/compile/kill-switch
-   ```
-   **实测预测**（bench 原型 `BenchmarkAutomationLiteralPathAfterShortCircuit`）：**11.68~12.22 ns/op**（仍 +1100%，因 `isSpecialSelector` 自身 8ns + 函数调用）。
-2. **把 `special` 在 LoadRules/规则装载期预计算**（ruleStat 或旁路 map 存一个 bool）：literal 快路径只剩 `matchField+compare`（≈ 基线 + 一次函数调用开销 ⇒ 约 2~3ns，**+100%~+200%**）。
-3. 若要严格 ≤ +5%（即 +0.05ns/op），只能把 literal 分支**内联回 `evalRule`**（零新增调用）；这会牺牲统一入口，需 Lead 明确取舍。
+```bash
+cd backend
+go test ./internal/automation/ -run '^$' -bench 'EvaluateFrame' -benchmem -count=7 -benchtime=300ms
+```
 
-> **对判据本身的反证**：main 基线是 1ns 级，"≤+5%" 等于要求新增 ≤0.05ns —— 任何包装层/函数调用都不可能满足（步骤 2 也只能到 ~2-3ns）。建议窄复核把 #10a 明确为**绝对预算**（如 ≤20ns/次/selector，当前 58ns 仍超、优化后 4~12ns 可达）或**端到端 `Evaluate` 回归 ≤5%**；否则该门禁在任何实现下都只能永远红，不构成有效信号。
+同 run 实测（一帧 8 字段 × 3 条 literal 规则）：
+
+| benchmark | ns/op（7 次） | 中位 | allocs |
+|---|---|---|---|
+| `BenchmarkEvaluateFrame`（注入解析层） | 807.6 / 820.1 / 833.1 / 833.2 / 836.4 / 805.5 / 834.9 | **833.1** | 4 |
+| `BenchmarkEvaluateFrameBaseline`（main 行为，无解析层） | 800.8 / 794.4 / 828.2 / 847.7 / 819.0 / 823.6 / 812.4 | **819.0** | 4 |
+
+**比值 = 833.1 / 819.0 = 1.017 ⇒ +1.7% ≤ +5% ⇒ PASS**（4 allocs 为 `Evaluate` 内部
+rules 快照分配，与解析层无关，两条路径相同）。
+
+### 5.5 修复前后对照（同口径：`-benchtime=1s`）
+
+| 阶段 | automation literal 单次 | 说明 |
+|---|---|---|
+| 修前（无条件注入 provider，commit `90da8173~1`） | **58.6 ns**（0 alloc） | literal 也走 provider 快照 + 编译缓存 + 统计 |
+| 只有"短路"原型（bench helper，**非生产**） | 11.7~12.2 ns | 原型数字，不可当生产数字引用 |
+| **(a) 字节级短路 + 内联形态快判（生产函数）** | **8.00 ns**（1s×5 中位） | 当前 HEAD；alert 8.48 ns |
+| (b) LoadRules 期预编译特殊 selector | 对 literal 无影响（已在短路后返回） | 收益在特殊 selector 首帧 |
+| (c) 统计无锁去重（sync.Map） | 对 literal 无影响（literal 不调用统计） | 收益在特殊 selector 每帧统计 |
+
+### 5.6 实施内容（automation / alert 两处，语义不变）
+
+1. **literal/legacy 快路径前置**：在 provider/编译缓存/统计之前短路，只做
+   `matchField + compare`（取第一个同名、NaN/Inf 旧语义完全不变，由
+   `TestLiteralPathMatchesLegacySemantics` 的 5 帧 × 6 比较符矩阵锁定）。
+2. **形态快判零分配**：`isSpecialSelector` 改为单遍字节扫描（无正则/无多次 Contains）。
+3. **LoadRules 期预编译**（`precompileSpecialPlans`）：只预编译特殊 selector；
+   literal 不编译；any-device 规则仍按 `Evaluate` 入参惰性编译（deviceID 语义不变）；
+   预编译失败只 WARN，求值时重试。
+4. **统计无锁去重**：`markRuleResolved/markRuleFired` 先查 `atomic.Pointer[sync.Map]`，
+   命中即返回；仅本批次首次进 `statsMu` + 刷新指标。
+5. 测试钩子 `planProviderSnapshotHook`（`atomic.Pointer[atomic.Int64]`，生产恒 nil）
+   只为 5.1 的确定性断言服务；literal 路径不会执行到该方法，对热路径零成本。
 
 ---
 
@@ -309,7 +372,7 @@ go test ./internal/sensorfield/ -run '^$' -bench 'BenchmarkLiteralEval' -benchme
 ## 7. 开放项 / 已知限制（诚实边界）
 
 1. **`go test ./...` 全仓唯一红**在 `internal/api` 的 5 个 `TestSensorFields*`：`no such table: sensor_field_obs`（task-7 集成面表注册，ds-analyst scope；Lead 已单独指派）。与 sensorfield 包无关，其余 34 包全绿。
-2. **门禁 #10a 当前 FAIL（集成现状 +5700%，非领域包问题）**：根因与修复建议见 §5.4/§5.5；需要 auto-analyst/alert 侧 literal 短路（6~10 行，语义不变），否则每帧每规则多付 ~58ns。判据本身的可行边界也见 §5.5 末尾。
+2. **门禁 #10 已按最终裁决改造完成**：`1a` 确定性 PASS、`2` 端到端 +1.7% PASS、`1b` 记录 8.0ns/8.5ns。历史回归（58.6ns）的根因与修复记录见 §5.5。**注意 §5.0 的干净树纪律**：未提交中间态会让门禁读到半成品（本轮已发生一次，非代码问题）。
 3. **virtual sum_of** 缺员保持严格 unbound（统计量失真无安全解释）；`max_of/min_of` 已按 Lead 裁决降级（`Degraded=true`）。family `min/max` 与之一致。
 4. **别名冻结**：首次解析后按 (device, semantic) 冻结；冻结物理名消失时重解析 + WARN（fail-open 可观测），不做永久死锁。
 5. **Warnings() 的 dead-candidate gauge** 无清除动作：配置变更需重启（方案 §11），进程重启即重置，无陈旧 series 风险。
