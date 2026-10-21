@@ -64,7 +64,8 @@
 //	(*Registry).SetFieldMeta(fields []Field)                    // 丰富层 value_type/unit（meta > obs > decl）
 //	(*Registry).SetEnabled(enabled bool)                        // 仅供测试/运维；配置仍重启生效
 //	(*Registry).SnapshotAge() time.Duration
-//	(*Registry).Validate() error                                // 启动期跨表门禁（含死候选检测）
+//	(*Registry).Validate() error                                // 启动期 A 级硬错误门禁（配置自相矛盾才 Fatal）
+//	(*Registry).Warnings() []string                             // B 级可用性告警（死候选/无候选/冷启动，不阻塞启动）
 //	(*Registry).SemanticsOf(physical string) []string           // /sensor-fields 的 semantics
 //	(*Registry).Aliases() []AliasRule                           // /schema（关闭态可读）
 //	(*Registry).Virtuals() []VirtualDef                         // /schema（关闭态可读）
@@ -73,14 +74,20 @@
 // 数据面求值（冻结的 Plan.Eval 无比较符参数，数学上无法实现 any/all）：
 //
 //	type CmpOp string            // gt|gte|lt|lte|eq|neq（与 models.AlertComparator* 同值）
-//	type Verdict struct { OK, Satisfied bool; Value float64; Reason string }
+//	type Verdict struct { OK, Satisfied bool; Value float64; Reason string; Degraded bool }
 //	type PredicatePlan interface { Plan; EvalPredicate(frame []Reading, op CmpOp, threshold float64) Verdict }
 //	EvalPredicate(plan Plan, frame []Reading, op CmpOp, threshold float64) Verdict
 //	Compare(op CmpOp, value, threshold float64) bool
 //	PlanEpoch(plan Plan) uint64  // 取编译期 epoch（EpochPlan 扩展）；缓存键用，无“先 Compile 再读 Epoch”竞态
 //
-// 语义：literal/semantic/virtual 直接取值后比较；family any/all 用 EvalPredicate 才能实现
-// ∃/∀ 语义（缺员/空集/非有限按 §5.3 判 unbound）；family min/max/avg/sum 先归约再比较。
+// 语义（v0.3 评审裁决）：literal/semantic/virtual 直接取值后比较；family any/all 用
+// EvalPredicate 才能实现 ∃/∀ 语义。聚合口径：
+//   - 空集：六个聚合一律 unbound（含 any/all；sum=0 会反向触发）；
+//   - 缺员方向性：all/avg/sum 一律 unbound；min/max 仍按 F_now 求值并标 Degraded=true +
+//     Reason=partial_frame|non_finite（极值保护不能因缺一个探头永不触发）；
+//   - 派生 max_of/min_of 同 min/max 降级；派生 sum_of 严格 unbound（统计量失真无安全解释）；
+//   - 非有限值/非数值类型视为本帧缺失；unbound 原因区分 empty_frame/partial_frame/non_finite。
+//
 // Plan.Eval 对 family any/all 返回 unbound + reason=aggregate_requires_comparator（fail-closed）。
 //
 // 指标：方案 §10 的 9 个 ehome_field_*/ehome_rule_* 指标全部定义在本包 metrics.go，

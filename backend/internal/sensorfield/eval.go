@@ -503,156 +503,229 @@ func (p *virtualPlan) Selector() string { return p.selector }
 func (p *virtualPlan) Kind() Kind       { return KindVirtual }
 func (p *virtualPlan) Epoch() uint64    { return p.epoch }
 
+func (p *virtualPlan) eval(frame []Reading) virtualEvalOutcome {
+	return evalBoundVirtual(p.root, frame)
+}
+
 func (p *virtualPlan) Eval(frame []Reading) EvalResult {
 	if p.enabled != nil && !p.enabled.Load() {
 		return EvalResult{Reason: reasonDisabled}
 	}
-	v, reason := evalBoundVirtual(p.root, frame)
-	if reason != "" {
-		FieldVirtualUndefinedTotal.WithLabelValues(p.name, reason).Inc()
-		return EvalResult{Reason: reason}
+	out := p.eval(frame)
+	if out.unbound() {
+		FieldVirtualUndefinedTotal.WithLabelValues(p.name, out.unboundReason).Inc()
+		return EvalResult{Reason: out.unboundReason}
 	}
-	return EvalResult{Value: v, OK: true}
+	return EvalResult{Value: out.value, OK: true}
 }
 
 func (p *virtualPlan) EvalPredicate(frame []Reading, op CmpOp, threshold float64) Verdict {
+	if p.enabled != nil && !p.enabled.Load() {
+		return Verdict{Reason: reasonDisabled}
+	}
 	if !ValidCmpOp(op) {
 		return Verdict{Reason: reasonInvalidComparator}
 	}
-	r := p.Eval(frame)
-	if !r.OK {
-		return Verdict{Reason: r.Reason}
+	out := p.eval(frame)
+	if out.unbound() {
+		FieldVirtualUndefinedTotal.WithLabelValues(p.name, out.unboundReason).Inc()
+		return Verdict{Reason: out.unboundReason}
 	}
-	return Verdict{OK: true, Satisfied: Compare(op, r.Value, threshold), Value: r.Value}
+	return Verdict{
+		OK:        true,
+		Satisfied: Compare(op, out.value, threshold),
+		Value:     out.value,
+		Degraded:  out.degradedReason != "",
+		Reason:    out.degradedReason,
+	}
+}
+
+// virtualEvalOutcome 是派生求值的内部结果。
+//
+//   - unboundReason 非空 ⇒ 不触发（任何输入缺失/非法/输出非有限）
+//   - degradedReason 非空 ⇒ 已求值但降级（v0.3 裁决：max_of/min_of 缺员时按 F_now 求值，
+//     与 family min/max 方向一致；sum_of 仍严格 unbound，统计量失真无安全解释）
+//
+// 嵌套派生：内层降级原因向顶层传播（任一输入降级 ⇒ 整体标 degraded）。
+type virtualEvalOutcome struct {
+	value          float64
+	unboundReason  string
+	degradedReason string
+}
+
+func (o virtualEvalOutcome) unbound() bool { return o.unboundReason != "" }
+
+// arithmeticOutcome 把算术结果 + 降级原因转换为 outcome；非有限输出 ⇒ unbound
+// （区分 nan/inf 原因码，方案 §6.2 不变量 2）。
+func arithmeticOutcome(v float64, degradedReason string) virtualEvalOutcome {
+	if _, reason := finiteValue(v); reason != "" {
+		return virtualEvalOutcome{unboundReason: reason}
+	}
+	return virtualEvalOutcome{value: v, degradedReason: degradedReason}
+}
+
+// scalarOutcome 把标量输入转换为 outcome；非有限输入视为缺失（定义 1）。
+func scalarOutcome(v float64) virtualEvalOutcome {
+	if !isFiniteValue(v) {
+		return virtualEvalOutcome{unboundReason: reasonNonFinite}
+	}
+	return virtualEvalOutcome{value: v}
 }
 
 // evalBoundArg 求值一个标量参数。
-func evalBoundArg(arg *boundVirtualArg, frame []Reading) (float64, string) {
+func evalBoundArg(arg *boundVirtualArg, frame []Reading) virtualEvalOutcome {
 	switch arg.kind {
 	case KindLiteral:
 		if !arg.numeric {
-			return 0, reasonNonNumeric
+			return virtualEvalOutcome{unboundReason: reasonNonNumeric}
 		}
 		v, ok := findReading(frame, arg.literalName)
 		if !ok {
-			return 0, reasonMissing
+			return virtualEvalOutcome{unboundReason: reasonMissing}
 		}
-		if !isFiniteValue(v) {
-			return 0, reasonNonFinite
-		}
-		return v, ""
+		return scalarOutcome(v)
 	case KindSemantic:
 		if !arg.bound || arg.physical == "" {
-			return 0, reasonMissing
+			return virtualEvalOutcome{unboundReason: reasonMissing}
 		}
 		if !arg.numeric {
-			return 0, reasonNonNumeric
+			return virtualEvalOutcome{unboundReason: reasonNonNumeric}
 		}
 		v, ok := findReading(frame, arg.physical)
 		if !ok {
-			return 0, reasonMissing
+			return virtualEvalOutcome{unboundReason: reasonMissing}
 		}
-		if !isFiniteValue(v) {
-			return 0, reasonNonFinite
-		}
-		return v, ""
+		return scalarOutcome(v)
 	case KindVirtual:
 		return evalBoundVirtual(arg.nested, frame)
 	}
-	return 0, reasonMissing
+	return virtualEvalOutcome{unboundReason: reasonMissing}
 }
 
 // evalBoundVirtual 递归求值派生树（无环/深度已在校验期保证）。
-// 返回 (value, reason)：reason=="" 表示成功。
-func evalBoundVirtual(b *boundVirtual, frame []Reading) (float64, string) {
+func evalBoundVirtual(b *boundVirtual, frame []Reading) virtualEvalOutcome {
 	if b == nil || b.node == nil {
-		return 0, reasonMissing
+		return virtualEvalOutcome{unboundReason: reasonMissing}
 	}
 	n := b.node
 	switch n.fn {
 	case "scale":
-		v, reason := evalBoundArg(&b.scalars[0], frame)
-		if reason != "" {
-			return 0, reason
+		a := evalBoundArg(&b.scalars[0], frame)
+		if a.unbound() {
+			return a
 		}
-		return finiteValue(v * n.scale)
+		return arithmeticOutcome(a.value*n.scale, a.degradedReason)
 	case "product":
 		acc := 1.0
+		degrade := ""
 		for i := range b.scalars {
-			v, reason := evalBoundArg(&b.scalars[i], frame)
-			if reason != "" {
-				return 0, reason
+			a := evalBoundArg(&b.scalars[i], frame)
+			if a.unbound() {
+				return a
 			}
-			acc *= v
+			if degrade == "" {
+				degrade = a.degradedReason
+			}
+			acc *= a.value
 		}
-		return finiteValue(acc)
+		return arithmeticOutcome(acc, degrade)
 	case "sum":
 		acc := 0.0
+		degrade := ""
 		for i := range b.scalars {
-			v, reason := evalBoundArg(&b.scalars[i], frame)
-			if reason != "" {
-				return 0, reason
+			a := evalBoundArg(&b.scalars[i], frame)
+			if a.unbound() {
+				return a
 			}
-			acc += v
+			if degrade == "" {
+				degrade = a.degradedReason
+			}
+			acc += a.value
 		}
-		return finiteValue(acc)
+		return arithmeticOutcome(acc, degrade)
 	case "diff":
-		acc, reason := evalBoundArg(&b.scalars[0], frame)
-		if reason != "" {
-			return 0, reason
+		a := evalBoundArg(&b.scalars[0], frame)
+		if a.unbound() {
+			return a
 		}
+		acc := a.value
+		degrade := a.degradedReason
 		for i := 1; i < len(b.scalars); i++ {
-			v, reason := evalBoundArg(&b.scalars[i], frame)
-			if reason != "" {
-				return 0, reason
+			next := evalBoundArg(&b.scalars[i], frame)
+			if next.unbound() {
+				return next
 			}
-			acc -= v
+			if degrade == "" {
+				degrade = next.degradedReason
+			}
+			acc -= next.value
 		}
-		return finiteValue(acc)
+		return arithmeticOutcome(acc, degrade)
 	case "abs_diff":
-		a, reason := evalBoundArg(&b.scalars[0], frame)
-		if reason != "" {
-			return 0, reason
+		a := evalBoundArg(&b.scalars[0], frame)
+		if a.unbound() {
+			return a
 		}
-		c, reason := evalBoundArg(&b.scalars[1], frame)
-		if reason != "" {
-			return 0, reason
+		c := evalBoundArg(&b.scalars[1], frame)
+		if c.unbound() {
+			return c
 		}
-		return finiteValue(math.Abs(a - c))
+		degrade := a.degradedReason
+		if degrade == "" {
+			degrade = c.degradedReason
+		}
+		return arithmeticOutcome(math.Abs(a.value-c.value), degrade)
 	case "ratio":
-		a, reason := evalBoundArg(&b.scalars[0], frame)
-		if reason != "" {
-			return 0, reason
+		a := evalBoundArg(&b.scalars[0], frame)
+		if a.unbound() {
+			return a
 		}
-		den, reason := evalBoundArg(&b.scalars[1], frame)
-		if reason != "" {
-			return 0, reason
+		den := evalBoundArg(&b.scalars[1], frame)
+		if den.unbound() {
+			return den
 		}
-		if den == 0 {
-			return 0, reasonDiv0
+		if den.value == 0 {
+			return virtualEvalOutcome{unboundReason: reasonDiv0}
 		}
-		if den < 0 {
+		if den.value < 0 {
 			// 负数分母也拒绝（方案 §6.2 不变量 3：避免符号歧义）。
-			return 0, reasonNegativeDenominator
+			return virtualEvalOutcome{unboundReason: reasonNegativeDenominator}
 		}
-		return finiteValue(a / den)
+		degrade := a.degradedReason
+		if degrade == "" {
+			degrade = den.degradedReason
+		}
+		return arithmeticOutcome(a.value/den.value, degrade)
 	case "sum_of", "max_of", "min_of":
 		if b.family == nil {
-			return 0, reasonMissing
+			return virtualEvalOutcome{unboundReason: reasonMissing}
 		}
 		f := b.family
 		s := scanMembers(f.prefix, f.known, f.knownSet, f.nonNumeric, frame)
-		if reason := familyUnboundReason(s); reason != "" {
-			return 0, reason
+		if s.count == 0 {
+			// 空集：一律 unbound（含 max_of/min_of，不能给零/极值默认）。
+			return virtualEvalOutcome{unboundReason: familyUnboundReason(s)}
+		}
+		if s.missing > 0 {
+			// v0.3 裁决：sum_of 严格 unbound（统计量失真无安全解释）；
+			// max_of/min_of 降级求值（极值保护不能因缺一个成员永不触发）。
+			if n.fn == "sum_of" {
+				return virtualEvalOutcome{unboundReason: familyUnboundReason(s)}
+			}
+			degrade := familyDegradedReason(s)
+			if n.fn == "max_of" {
+				return arithmeticOutcome(s.max, degrade)
+			}
+			return arithmeticOutcome(s.min, degrade)
 		}
 		switch n.fn {
 		case "sum_of":
-			return finiteValue(s.sum)
+			return arithmeticOutcome(s.sum, "")
 		case "max_of":
-			return finiteValue(s.max)
+			return arithmeticOutcome(s.max, "")
 		default:
-			return finiteValue(s.min)
+			return arithmeticOutcome(s.min, "")
 		}
 	}
-	return 0, reasonMissing
+	return virtualEvalOutcome{unboundReason: reasonMissing}
 }

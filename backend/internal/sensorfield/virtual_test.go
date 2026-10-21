@@ -126,23 +126,87 @@ func TestVirtualNonFinite(t *testing.T) {
 	}
 }
 
-// TestVirtualFamilyReduction 验证 *_of 的族归约与缺员规则（本帧缺失 ⇒ unbound）。
+// TestVirtualFamilyReduction 验证 *_of 的族归约与缺员规则（v0.3 裁决）：
+//   - max_of/min_of 缺员 ⇒ 降级求值（Degraded=true，与 family min/max 一致）
+//   - sum_of 缺员 ⇒ 严格 unbound（统计量失真无安全解释）
+//   - 空集 ⇒ 六个聚合一律 unbound（空集规则优先于降级）
 func TestVirtualFamilyReduction(t *testing.T) {
 	reg := newVirtualTestRegistry(t, enabledConfig())
 	maxPlan := mustCompile(t, reg, 1, "virtual:max_t")
-	// 缺 temperature_3（已知 3 个）⇒ 缺员 unbound（派生遵循 §6.2 不变量 1）。
+	minPlan := mustCompile(t, reg, 1, "virtual:min_t")
+	sumPlan := mustCompile(t, reg, 1, "virtual:sum_t")
+
+	// 缺 temperature_3（已知 3 个）⇒ max_of/min_of 降级，sum_of unbound。
 	partial := readings("temperature_1", 10.0, "temperature_2", 20.0)
-	if r := maxPlan.Eval(partial); r.OK || r.Reason != reasonPartialFrame {
-		t.Fatalf("partial family = %+v want unbound partial_frame", r)
+	maxVerdict := EvalPredicate(maxPlan, partial, CmpGT, 15)
+	if !maxVerdict.OK || !maxVerdict.Degraded || maxVerdict.Reason != reasonPartialFrame {
+		t.Fatalf("max_of partial = %+v want OK+degraded partial_frame", maxVerdict)
 	}
-	// 非有限成员视同缺失。
+	if !nearlyEqual(maxVerdict.Value, 20) || !maxVerdict.Satisfied {
+		t.Fatalf("max_of partial value/satisfied = %v/%v want 20/true", maxVerdict.Value, maxVerdict.Satisfied)
+	}
+	minVerdict := EvalPredicate(minPlan, partial, CmpGT, 15)
+	if !minVerdict.OK || !minVerdict.Degraded || minVerdict.Reason != reasonPartialFrame ||
+		!nearlyEqual(minVerdict.Value, 10) || minVerdict.Satisfied {
+		t.Fatalf("min_of partial = %+v want degraded value 10 satisfied false", minVerdict)
+	}
+	if v := EvalPredicate(sumPlan, partial, CmpGT, 0); v.OK || v.Reason != reasonPartialFrame {
+		t.Fatalf("sum_of partial = %+v want unbound partial_frame", v)
+	}
+	// Plan.Eval：降级仍返回值（Degraded 只在 Verdict 表达）；sum_of 保持 unbound。
+	if r := maxPlan.Eval(partial); !r.OK || !nearlyEqual(r.Value, 20) {
+		t.Fatalf("max_of partial Eval = %+v want 20", r)
+	}
+	if r := sumPlan.Eval(partial); r.OK || r.Reason != reasonPartialFrame {
+		t.Fatalf("sum_of partial Eval = %+v want unbound", r)
+	}
+
+	// 非有限成员视同缺失：max_of/min_of 降级原因 non_finite；sum_of unbound。
 	nonFinite := readings("temperature_1", 10.0, "temperature_2", math.NaN(), "temperature_3", 30.0)
-	if r := maxPlan.Eval(nonFinite); r.OK || r.Reason != reasonNonFinite {
-		t.Fatalf("nan family = %+v want unbound non_finite", r)
+	nanVerdict := EvalPredicate(maxPlan, nonFinite, CmpGT, 15)
+	if !nanVerdict.OK || !nanVerdict.Degraded || nanVerdict.Reason != reasonNonFinite || !nearlyEqual(nanVerdict.Value, 30) {
+		t.Fatalf("max_of non-finite = %+v want degraded non_finite value 30", nanVerdict)
 	}
-	// 已知成员全部缺失（本帧为空）⇒ 缺员 unbound（F_now=∅ 且 F_known≠∅）。
+	if v := EvalPredicate(sumPlan, nonFinite, CmpGT, 0); v.OK || v.Reason != reasonNonFinite {
+		t.Fatalf("sum_of non-finite = %+v want unbound non_finite", v)
+	}
+
+	// 已知成员全部缺失（本帧为空）⇒ 空集/缺员规则优先：max_of/min_of 也 unbound。
 	if r := maxPlan.Eval(nil); r.OK || r.Reason != reasonPartialFrame {
 		t.Fatalf("empty frame with known members = %+v want unbound partial_frame", r)
+	}
+
+	// 齐全时正常求值、不降级。
+	full := readings("temperature_1", 10.0, "temperature_2", 20.0, "temperature_3", 30.0)
+	fullVerdict := EvalPredicate(maxPlan, full, CmpGTE, 30)
+	if !fullVerdict.OK || fullVerdict.Degraded || fullVerdict.Reason != "" || !nearlyEqual(fullVerdict.Value, 30) {
+		t.Fatalf("max_of full = %+v want clean bound 30", fullVerdict)
+	}
+}
+
+// TestVirtualDegradationPropagates 验证嵌套派生的降级原因向顶层传播，unbound 传染。
+func TestVirtualDegradationPropagates(t *testing.T) {
+	reg := New(enabledConfig())
+	reg.RegisterDeclarations("dev", []Field{
+		numField("va"), numField("temperature_1"), numField("temperature_2"), numField("temperature_3"),
+	})
+	reg.SetDeviceType(1, "dev")
+	mustSetAliases(t, reg, AliasRule{Semantic: "a", Candidates: []string{"va"}})
+	mustSetVirtuals(t, reg,
+		VirtualDef{Name: "max_t", Fn: "max_of", Args: []string{"temperature_*"}},
+		VirtualDef{Name: "margin", Fn: "diff", Args: []string{"virtual:max_t", "@a"}},
+		VirtualDef{Name: "sum_t", Fn: "sum_of", Args: []string{"temperature_*"}},
+		VirtualDef{Name: "sum_margin", Fn: "diff", Args: []string{"virtual:sum_t", "@a"}},
+	)
+	partial := readings("va", 5.0, "temperature_1", 10.0, "temperature_2", 20.0)
+	// 内层 max_t 降级 ⇒ 外层 margin 也标 degraded，但值仍正确（20-5=15）。
+	v := EvalPredicate(mustCompile(t, reg, 1, "virtual:margin"), partial, CmpGT, 10)
+	if !v.OK || !v.Degraded || v.Reason != reasonPartialFrame || !nearlyEqual(v.Value, 15) || !v.Satisfied {
+		t.Fatalf("nested degradation = %+v want degraded value 15 satisfied", v)
+	}
+	// 内层 sum_t unbound ⇒ 外层整体 unbound（缺失传染）。
+	if v := EvalPredicate(mustCompile(t, reg, 1, "virtual:sum_margin"), partial, CmpGT, 0); v.OK || v.Reason != reasonPartialFrame {
+		t.Fatalf("nested unbound = %+v want unbound partial_frame", v)
 	}
 }
 
