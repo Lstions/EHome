@@ -132,7 +132,6 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
-
 // FieldResolverConfig 是"数据字段解析层"（Field Resolution Layer）的配置段。
 //
 // 权威设计：docs/设计/数据字段解析层-方案-2026-10-21.md v0.2 §11。
@@ -454,7 +453,6 @@ func overrideWithEnv(cfg *Config) {
 		}
 	}
 }
-
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {

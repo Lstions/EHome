@@ -61,7 +61,7 @@ type SensorFieldMeta struct {
 	Precision *int `json:"precision"`
 	// Status active / deprecated。deprecated 的字段默认不出现在 GET /sensor-fields，
 	// 需 include_deprecated=true 才返回（响应里 deprecated:true）。
-	Status string `gorm:"size:16;not null;default:'';index" json:"status"`
+	Status    string    `gorm:"size:16;not null;default:'';index" json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
