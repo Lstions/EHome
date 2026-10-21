@@ -320,6 +320,12 @@ static void test_status_report_channel_health(void) {
     channels[0].edge_device_count = 1;
     channels[0].edge_devices[0].edge_device_id = 7;
     channels[0].edge_devices[0].command_count = 1;
+    /* 2026-10-21：sched_edge_device_t.commands 是动态指针（scheduler.h），
+     * 手工搭 sched_channel_t 时必须给存储，否则空指针写 ⇒ 段错误
+     * （CI 的 handler_data_tests 曾因此 SEGFAULT）。 */
+    static sched_command_t fixture_cmds[1];
+    memset(fixture_cmds, 0, sizeof(fixture_cmds));
+    channels[0].edge_devices[0].commands = fixture_cmds;
     channels[0].edge_devices[0].commands[0].enabled = true;
     channels[0].edge_devices[0].commands[0].error_count = 5;
 

@@ -512,6 +512,11 @@ func condRun005(e *harness.Env) {
 		"action_params_json":     "{}",
 		"require_confirmed":      false,
 		"cooldown_sec":           300,
+		// O-2 规则级授权（实施计划 §0.1）：reset_rainfall 属风险动作，自动执行
+		// 必须显式授权，否则创建请求会被 400 risk_action_requires_confirmation 拒绝
+		// （本场景 2026-10-21 之前一直因此失败：它想验证的是"执行前复核"，
+		//  不是"授权门"，所以这里补齐授权，让 F4 复核成为唯一变量）。
+		"risk_acknowledged": true,
 	})
 
 	// 一帧同时满足触发（250 > 200）与附加条件（23.5 > 20）。

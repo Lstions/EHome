@@ -438,6 +438,13 @@ static void make_v2_channel(uint32_t channel_id, uint32_t template_id,
     ch.edge_devices[0].edge_device_id = EDGE_ID;
     ch.edge_devices[0].hardware_id = EDGE_ID;
     ch.edge_devices[0].command_count = 1;
+    /* 2026-10-21：config_edge_device_t.commands 自 2026-10-15 起是**按需分配的指针**
+     * （改前是内联数组）。此处以前直接写 commands[0] 而没分配 ⇒ 空指针写 ⇒
+     * CI 的 Firmware (host tests) 里 scheduler_route_tests 段错误（实测 SIGSEGV）。
+     * 夹具给静态存储即可：scheduler_add_channel 只在本调用内读这份 config。 */
+    static config_command_t fixture_cmds[1];
+    memset(fixture_cmds, 0, sizeof(fixture_cmds));
+    ch.edge_devices[0].commands = fixture_cmds;
     ch.edge_devices[0].commands[0].template_id = template_id;
     ch.edge_devices[0].commands[0].interval_ms = interval_ms;
     ch.edge_devices[0].commands[0].enabled = true;
@@ -537,10 +544,14 @@ static void test_command_outcome_separates_devices_on_same_channel(void)
     ch.enabled = true;
     ch.interval_ms = 5000;
     ch.edge_device_count = 2;
+    static config_command_t fixture_cmds[2][1];
+    memset(fixture_cmds, 0, sizeof(fixture_cmds));
     for (int d = 0; d < 2; d++) {
         ch.edge_devices[d].edge_device_id = (uint32_t)(EDGE_ID + d); /* 7, 8 */
         ch.edge_devices[d].hardware_id = (uint32_t)(EDGE_ID + d);
         ch.edge_devices[d].command_count = 1;
+        /* 同上：commands 是动态指针，夹具必须给每台设备一块静态存储。 */
+        ch.edge_devices[d].commands = fixture_cmds[d];
         /* Same template_id AND same command_index on both devices. */
         ch.edge_devices[d].commands[0].template_id = 11;
         ch.edge_devices[d].commands[0].interval_ms = 5000;

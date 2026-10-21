@@ -264,6 +264,11 @@ static void setup_channel(void)
     ch.edge_devices[0].edge_device_id = ED_ID;
     ch.edge_devices[0].hardware_id = ED_ID;
     ch.edge_devices[0].command_count = 1;
+    /* 2026-10-21：commands 是动态指针（见 scheduler.h 的说明），夹具必须给存储，
+     * 否则空指针写 ⇒ 段错误（CI 的 rx_health_e2e_tests 曾因此 SEGFAULT）。 */
+    static config_command_t fixture_cmds[1];
+    memset(fixture_cmds, 0, sizeof(fixture_cmds));
+    ch.edge_devices[0].commands = fixture_cmds;
     ch.edge_devices[0].commands[0].template_id = TEMPLATE_ID;
     ch.edge_devices[0].commands[0].interval_ms = 5000;
     ch.edge_devices[0].commands[0].enabled = true;

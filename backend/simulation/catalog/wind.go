@@ -26,7 +26,6 @@ package catalog
 
 import (
 	"fmt"
-	"net/http"
 	"sort"
 	"strconv"
 	"time"
@@ -311,39 +310,55 @@ func windRun001(e *harness.Env) {
 
 func windRun002(e *harness.Env) {
 	now := time.Now()
-	start, end := windWindowAround(now, -1, 20)
-	windAssertContains(e, "SIM-WIND-002 进入窗口", start, end, now, true)
 
-	// 两条策略起手都在同一个「包含当前时刻」的窗口里：
-	//   enter 策略负责证明「第一次 tick 已经发生、且当时两条规则都在窗口内」；
-	//   exit 策略此刻不触发（它要的是「上一次在窗口内、这一次不在」）。
-	enterID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "enter"), start, end, "enter", 300)
-	exitID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "exit"), start, end, "exit", 300)
+	// enter 策略用一条"当前包含、且很久以后才结束"的窗口，只负责证明 tick 在跑。
+	enterStart, enterEnd := windWindowAround(now, -1, 20)
+	windAssertContains(e, "SIM-WIND-002 进入窗口", enterStart, enterEnd, now, true)
+	enterID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "enter"), enterStart, enterEnd, "enter", 300)
+
+	// exit 策略的窗口必须**自然过期**才能触发离开边沿 —— 这是 A-17 的直接后果。
+	//
+	// 2026-10-21 修正：本场景原来用 PUT 把窗口挪走，再等 exit 事件。但 A-17 明确规定
+	// "影响窗口判定的字段变化 ⇒ 清除 windowStates"（evaluator.go 的 sameWindowStateFields），
+	// 于是改窗口后引擎不再知道"上次在窗口内"，exit 边沿永远不会触发 ——
+	// SIM-WIND-002 因此长期误红（17s 内 0 条 notification）。
+	// 现在的构造是真实语义：窗口在 exitEndAt 整分钟边界自然结束，引擎在下一个 tick
+	// 看到 inside=false 且 wasInside=true，触发一次离开边沿。
+	exitEndAt := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), 0, 0, now.Location()).
+		Add(time.Minute)
+	if exitEndAt.Sub(now) < 20*time.Second {
+		// 留够至少 3 个 tick 的"窗口内"时间，否则建立 wasInside 会被边界打断。
+		exitEndAt = exitEndAt.Add(time.Minute)
+	}
+	exitStart := windHHMM(windMinutes(now) - 120)
+	exitEnd := windHHMM(windMinutes(exitEndAt))
+	windAssertContains(e, "SIM-WIND-002 离开前的窗口", exitStart, exitEnd, now, true)
+	if left, err := windContains(exitStart, exitEnd, exitEndAt.Add(time.Second)); err != nil {
+		e.Fatalf("离开窗口构造自检失败: %v", err)
+	} else if left {
+		e.Fatalf("构造自检失败：%s（窗口结束 %s 之后 1s）仍被判为在窗口内",
+			exitEndAt.Add(time.Second).Format(time.RFC3339), exitEndAt.Format("15:04"))
+	}
+	exitID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "exit"), exitStart, exitEnd, "exit", 300)
+
+	// tick 探针：inside 边沿 + 1s 冷却 ⇒ 每个 tick 必然落一条 notification，
+	// 用它当"已经过去几个 tick"的**确凿证据**（不靠 sleep 猜）。
+	probeID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "tick-probe"), enterStart, enterEnd, "inside", 1)
 
 	trigWaitResult(e, enterID, "notification", 1, windTickTimeout)
-	// 仍在窗口内：exit 边沿不能触发。
-	trigAssertNoResult(e, "仍在窗口内时的离开边沿策略", exitID, "notification", 2*time.Second)
+	trigWaitResult(e, probeID, "notification", 3, 3*windTickTimeout)
 
-	// 把 exit 策略的窗口挪到一个**一定不含当前时刻**的区间 —— 这就是「离开窗口」。
-	// 过去时段的窗口在任何解释下都不含当前时刻（非跨零点时 end < now；跨零点时
-	// 两段分别是 [start,24:00) 与 [00:00,end)，而现在既不 ≥ start 也不 < end）。
-	leaveAt := time.Now()
-	outStart, outEnd := windWindowAround(leaveAt, -420, -300)
-	windAssertContains(e, "SIM-WIND-002 离开窗口", outStart, outEnd, leaveAt, false)
-	exitText := strconv.FormatInt(exitID, 10)
-	e.Admin.Put("/api/v1/automation-rules/"+exitText, map[string]any{
-		"trigger_window_start": outStart,
-		"trigger_window_end":   outEnd,
-	}).Expect(http.StatusOK)
+	// 仍在窗口内：离开边沿不能触发（此时至少已过 3 个 tick、wasInside 必然已建立）。
+	trigAssertNoResult(e, "仍在窗口内时的离开边沿策略", exitID, "notification", 0)
 
-	// 下一次 tick：上一次在窗口内、这一次不在 → exit 触发一次。
-	rows := trigWaitResult(e, exitID, "notification", 1, windTickTimeout)
+	// 窗口自然结束后的下一个 tick：必须恰好触发一次。
+	rows := trigWaitResult(e, exitID, "notification", 1,
+		time.Until(exitEndAt)+3*windTickTimeout)
 	exitAt := trigEventTime(e, rows[0])
-	// 触发时刻必须晚于「窗口被挪走」的那一刻：否则这条事件可能只是窗口仍在
-	// 原始区间时的残留，根本证明不了离开边沿。这是本场景唯一的时序断言。
-	if !exitAt.After(leaveAt) {
-		e.Fatalf("离开边沿的触发时刻 %s 早于窗口被挪走的时刻 %s，无法归因到「离开窗口」",
-			exitAt.Format(time.RFC3339Nano), leaveAt.Format(time.RFC3339Nano))
+	// 本场景唯一的时序断言：触发时刻必须晚于窗口结束时刻，否则无法归因到"离开边沿"。
+	if !exitAt.After(exitEndAt) {
+		e.Fatalf("离开边沿的触发时刻 %s 早于窗口结束时刻 %s，无法归因到「离开窗口」",
+			exitAt.Format(time.RFC3339Nano), exitEndAt.Format(time.RFC3339Nano))
 	}
 
 	// enter 策略仍在窗口内：它只有第一次那一条事件（边沿不是每 tick 刷新）。
@@ -353,12 +368,14 @@ func windRun002(e *harness.Env) {
 	}
 
 	e.Evidence("SIM-WIND-002.exit", map[string]any{
-		"enter_rule_id": enterID, "exit_rule_id": exitID,
-		"initial_window":  start + "–" + end,
-		"moved_window":    outStart + "–" + outEnd,
-		"window_moved_at": leaveAt.Format(time.RFC3339Nano),
+		"enter_rule_id":   enterID,
+		"exit_rule_id":    exitID,
+		"initial_window":  enterStart + "–" + enterEnd,
+		"exit_window":     exitStart + "–" + exitEnd,
+		"exit_window_end": exitEndAt.Format(time.RFC3339Nano),
 		"exit_event_at":   exitAt.Format(time.RFC3339Nano),
 		"enter_events":    trigCountResult(finalEnter, "notification"),
+		"note":            "A-17：窗口几何变化会清除 wasInside 状态，故离开边沿只能由窗口自然结束证明（不能用 PUT 改窗口）",
 	})
 }
 

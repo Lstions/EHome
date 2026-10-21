@@ -373,17 +373,22 @@ func actnExecutionByCommandID(e *harness.Env, commandID string) actnExecutionRow
 	return row
 }
 
-// actnIdempotencyKeyPattern 是 planner.executeDeviceAction 的幂等键形态（planner.go:179）：
+// actnIdempotencyKeyPattern 是 planner.executeDeviceAction 的幂等键形态（planner.go:340）：
 //
-//	automation:<rule_id>:<yyyymmdd>:<seq>   seq = 当日该规则已 executed 数 + 1
-var actnIdempotencyKeyPattern = regexp.MustCompile(`^automation:(\d+):(\d{8}):(\d+)$`)
+//	automation:<rule_id>:<yyyymmdd>:<trigger_seq>:<action_seq>
+//
+// 2026-10-21 修正：本正则此前按 4 段写（automation:<rule_id>:<yyyymmdd>:<seq>），
+// 但 planner 自多动作支持起就在末尾追加了 action_seq（否则同一次触发的多个动作
+// 会共用幂等键，第二个动作被幂等重放顶掉 —— 见 docs/分析/B2多动作评审缺陷台账-2026-10-14.md:17）。
+// 于是 SIM-ACTN-004 长期误红（代码对、断言旧），CI 的 Backend (simulation gates) 一直在报它。
+var actnIdempotencyKeyPattern = regexp.MustCompile(`^automation:(\d+):(\d{8}):(\d+):(\d+)$`)
 
 // actnParseAutomationKey 拆解自动路径的幂等键并校验规则归属，返回 (日期段, 序号段)。
 func actnParseAutomationKey(e *harness.Env, key string, ruleID int64) (string, int) {
 	e.T.Helper()
 	groups := actnIdempotencyKeyPattern.FindStringSubmatch(key)
 	if groups == nil {
-		e.Fatalf("幂等键 %q 不符合 automation:<rule_id>:<yyyymmdd>:<seq> 形态（设计 §9 变异 A6 守护的就是它）", key)
+		e.Fatalf("幂等键 %q 不符合 automation:<rule_id>:<yyyymmdd>:<trigger_seq>:<action_seq> 形态（设计 §9 变异 A6 守护的就是它）", key)
 	}
 	if groups[1] != strconv.FormatInt(ruleID, 10) {
 		e.Fatalf("幂等键 %q 的规则段是 %q，期望 %d（执行必须归因到本场景的规则）", key, groups[1], ruleID)

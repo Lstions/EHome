@@ -166,8 +166,12 @@ func TestConfirmEventExecutesAllActionsInOrder(t *testing.T) {
 	// 冷却锚点 = 原事件的触发时刻 (pending_confirm 落库时刻)。
 	var after models.AutomationRule
 	pl.db.First(&after, rule.ID)
-	if after.LastTriggeredAt == nil || !after.LastTriggeredAt.UTC().Equal(ev.TriggeredAt.UTC()) {
-		t.Fatalf("冷却锚点=%v want %v", after.LastTriggeredAt, ev.TriggeredAt)
+	// PostgreSQL 的 timestamptz 精度是微秒，而 ev.TriggeredAt 来自 Go 的 time.Now()（纳秒）。
+	// 直接用 Equal 比较会把「同一时刻」判成不等 —— 这曾让 backend-integration 恒红。
+	// 口径：两边都截断到微秒再比（DB 能表达的最大精度）。
+	if after.LastTriggeredAt == nil ||
+		!after.LastTriggeredAt.UTC().Truncate(time.Microsecond).Equal(ev.TriggeredAt.UTC().Truncate(time.Microsecond)) {
+		t.Fatalf("冷却锚点=%v want %v（按微秒精度比较）", after.LastTriggeredAt, ev.TriggeredAt)
 	}
 }
 

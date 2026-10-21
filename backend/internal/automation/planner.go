@@ -254,10 +254,28 @@ func (p *Planner) resolveSystemActorID() (uint, error) {
 // 后写), 不是本批引入。命中时 command_executions 的 (scope, key) 唯一索引与
 // RequestHash 比对会把它挡成 ErrIdempotencyCollision (fail-closed, 绝不静默少执行)。
 // 规则级执行串行化不在本批范围。
+
+// nextTriggerSeq 返回"当日该规则第几次触发"（幂等键的 trigger_seq 段）。
+//
+// ⚠ 2026-10-21 修正：此前统计的是当日**全部** automation_events 行数，把被抑制的
+// 求值 tick 也算成了触发 —— 冷却期内的每个 tick 都会落一条 suppressed_cooldown，
+// 于是同日第二次执行的序号会从 2 跳到 3（SIM-ACTN-004 实测 1、3）。
+// 幂等键的语义是"第几次触发"，被抑制的 tick 不是新触发，必须排除。
+//
+// 保留 suppressed_* 之外的一切结果：executed / partial_failure / failed_* /
+// confirmation_required / pending_confirm / notification / condition_changed 都是
+// 一次真实触发，排除它们会让两次不同触发共用同一个 trigger_seq，进而命中
+// commandexec 的幂等重放（把第二次执行静默吞掉）—— 那正是 A-6 要防的反例。
 func (p *Planner) nextTriggerSeq(ctx context.Context, ruleID uint, at time.Time, triggerSource string) int64 {
 	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
+	suppressed := []string{
+		models.AutomationResultSuppressedCooldown,
+		models.AutomationResultSuppressedDailyLimit,
+		models.AutomationResultSuppressedNoSolarEvent,
+	}
 	q := p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
-		Where("rule_id = ? AND triggered_at >= ?", ruleID, dayStart)
+		Where("rule_id = ? AND triggered_at >= ?", ruleID, dayStart).
+		Where("result NOT IN ?", suppressed)
 	if triggerSource != "" {
 		q = q.Where("trigger_source = ?", triggerSource)
 	}
