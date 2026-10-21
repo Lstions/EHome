@@ -13,7 +13,8 @@
 #   ./scripts/check_field_semantics.sh --self-test     # 反假绿自证
 #   ./scripts/check_field_semantics.sh --only 8        # 只跑第 8 条
 #   ./scripts/check_field_semantics.sh --mutation      # 打开门禁 9 的变异自证
-#   ./scripts/check_field_semantics.sh --record-bench-baseline
+#   ./scripts/check_field_semantics.sh --record-bench-baseline [--bench-name NAME]
+#   ./scripts/check_field_semantics.sh --bench-name BenchmarkLiteralEval   # 基准函数名（默认见下）
 #
 # 纪律：只读仓库/DB；门禁 9 的变异临时改被测源文件，必须备份-改-跑-还原并核对 md5。
 set -uo pipefail   # 不用 -e（逐门禁收集结果）；pipefail 防「管道失败即绿」。
@@ -29,6 +30,10 @@ if ! command -v "$GO" >/dev/null 2>&1; then
 fi
 BENCH_BASELINE="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline.txt"
 MUTATION_MANIFEST="$BACKEND_DIR/scripts/field_semantics_mutations.tsv"
+# 门禁 #10 的基准函数名（设计 §13.5 指定 BenchmarkLiteralEval）。
+# impl-core 的 bench_test.go 当前提供：BenchmarkLiteralEval / BenchmarkFamilyEval16 / BenchmarkResolve；
+# 若改名用 --bench-name 覆盖（脚本不猜，也不放宽「无基准即 FAIL」判据）。
+BENCH_NAME="BenchmarkLiteralEval"
 
 STRICT=0
 ONLY=""
@@ -176,7 +181,9 @@ go_test_has_cases() {
     echo 0
     return
   fi
-  grep -c '^Test' "$out" || true
+  # 兼容 Test / Benchmark / Example 三类。原实现只数 ^Test，导致以 Benchmark 命名的
+  # 门禁（#10）在基准存在时仍判 0 ⇒ 永远 FAIL（Lead 独立复核发现并修正）。
+  grep -cE '^(Test|Benchmark|Example)' "$out" || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
