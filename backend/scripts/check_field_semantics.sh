@@ -89,7 +89,10 @@ trap 'rm -rf "$tmp_dir"' EXIT
 #   · 基准类门禁（#10a-1a 确定性、#10a-2 端到端）dirty 时降级 SKIP(dirty-worktree)，
 #     不用别人的中间态判 PASS/FAIL（1b 仅记录，不受影响）。
 GATE_HEAD=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
-GATE_DIRTY_COUNT=$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+# 只统计**代码面**（backend/、.github/）的未提交改动：.analysis/ 下的评审/分析产物
+# 不参与任何编译或基准，把它们算进 dirty 会让"别人写文档期间基准门禁一律 SKIP"。
+# 反过来，backend/ 内任何未提交改动（含 _test.go 中间态）都必须让基准类门禁 SKIP。
+GATE_DIRTY_COUNT=$(git -C "$REPO_DIR" status --porcelain -- backend .github 2>/dev/null | wc -l | tr -d ' ')
 GATE_DIRTY=0
 if [ "$GATE_DIRTY_COUNT" -gt 0 ]; then
   GATE_DIRTY=1
