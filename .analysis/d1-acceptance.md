@@ -314,3 +314,70 @@ go test ./internal/sensorfield/ -run '^$' -bench 'BenchmarkLiteralEval' -benchme
 4. **别名冻结**：首次解析后按 (device, semantic) 冻结；冻结物理名消失时重解析 + WARN（fail-open 可观测），不做永久死锁。
 5. **Warnings() 的 dead-candidate gauge** 无清除动作：配置变更需重启（方案 §11），进程重启即重置，无陈旧 series 风险。
 6. 详细的实现期契约扩展（SetDeviceType/SetFieldMeta/EvalPredicate/PlanEpoch/Warnings 等）见 `backend/internal/sensorfield/doc.go` 的“实现期新增 API”一节。
+---
+
+## 8. D6 门禁脚本实跑（`backend/scripts/check_field_semantics.sh`）
+
+> 本节由 D6 交付物报告（edge-analyst / task-13）。脚本把方案 §12.3 的 11 条门禁做成**可独立执行、可复跑**的单一入口，
+> 并对「目标不存在」判红而不是 PASS（反假绿），对「依赖未落地」显式 SKIP 并打印原因。
+
+### 8.1 复现命令
+
+```bash
+cd backend
+export PATH=<repo>/.tools/gotool/bin:$PATH GOCACHE=/tmp/eh-wt-cache
+./scripts/check_field_semantics.sh              # 11 条门禁（10 拆 10a/10b）
+./scripts/check_field_semantics.sh --self-test  # 反假绿自证：16 条断言（含 2026-10-21 Benchmark 计数回归）
+./scripts/check_field_semantics.sh --mutation   # 门禁 #9 变异自证（apply→test→restore→md5）
+./scripts/check_field_semantics.sh --strict     # SKIP 也判红（D6 完成后的发布口径）
+./scripts/check_field_semantics.sh --record-bench-baseline  # 录两份参考基线（非判据来源，见 8.3）
+```
+
+### 8.2 实跑结果（HEAD `72409ce2` + 本脚本改动；GOCACHE 可写）
+
+```
+[PASS] #1 数据面零 import — databus 闭包 401 行，sensorfield 行锚定命中 0
+[PASS] #2 领域包零 internal 依赖 — ehome/backend/ 仅自身 + pkg/logger + pkg/metrics
+[PASS] #3 包级默认拒绝 — import 包 = cmd/server, internal/alert, internal/api, internal/automation
+[PASS] #4 声明自洽（AST） — 声明 93 ⊆ 可达{字面量 321 ∪ 族 4 ∪ 拼接后缀 3}；动作参数名 23 仅报告
+[PASS] #5 产出可寻址（AST） — *_ack 例外 6；动态名 13 处 WARN（静态不可判）
+[PASS] #6 别名一致（可加载） — config/field_aliases.yaml 可加载；执行 16 个用例（=== RUN 断言）
+[PASS] #7 派生无环 — 执行 38 个用例
+[PASS] #8 语法表驱动 — 执行 40 个用例，全部通过
+[SKIP] #9 变异自证 — 默认不执行（--mutation 实跑：捕获 4/4，restore md5 一致）
+[FAIL] #10a 生产链 literal 性能（硬判据） — prod 56.59ns / main基线 0.9145ns = 61.88x > 1.05
+[PASS] #10b 新层抽象成本（观测） — median 3.678ns ≤10ns 且 0 alloc
+[PASS] #11 回滚盘点 — 生产库四类来源 NON_LITERAL=0
+RESULT: FAIL(1) — 未通过项只有 #10a（与 §5 的独立实测一致：57.1ns vs 0.91ns）
+```
+
+**结论**：11 条门禁中 10 条绿/1 条 SKIP/1 条 FAIL；唯一 FAIL 是 #10a，与本文 §5 用独立基准得出的 FAIL **互相印证**（同一根因：
+集成实现未给非特殊 literal 做短路）。脚本化后该结论可一条命令复跑，不再依赖人工粘贴。
+
+### 8.3 #10a / #10b 的基线策略（口径与局限，必须连同结论一起读）
+
+| 项 | 判据 | 基线来源 | 机器相关性 |
+|---|---|---|---|
+| #10a 生产链（硬） | **同一次 run 内** `BenchmarkAutomationLiteralPath / BenchmarkAutomationLiteralPathBaseline ≤ 1.05` | 基线 clone 就在 automation 包内（与 main d406dc2d 的 matchField/compare 逐字节相同） | **无**（同机同 run 比值） |
+| #10b 新层成本（观测） | `BenchmarkLiteralEval` 中位 ≤10ns 且 0 alloc，否则 WARN 不阻断 | 绝对值阈值（方案 §13.5） | 弱（10ns 阈值留足余量） |
+
+**为什么 #10a 不用文件基线**：main `d406dc2d` 上没有 `sensorfield`/集成层，**无法在 main 上录制基线**（这是 Lead 已知前提）。
+若把文件基线录在当前 HEAD（含回归）再比较，会得到"相对 0% 退化"的假绿。故硬判据改为**同 run 比值**：参照物是包内的 main 基线克隆，
+机器与负载因素在比式中抵消。`backend/internal/sensorfield/testdata/bench_baseline_prod.txt` 与 `bench_baseline_layer.txt` 仅是
+**参考记录（history）**，文件头已写明"非判据来源/非 main 基线"，不参与 PASS/FAIL。
+
+### 8.4 反假绿自证（`--self-test`，16 条断言，退出码即判据）
+
+覆盖 2026-10-21 真实回归与评审要求：
+1. `go test -list` 计数必须含 `Benchmark/Example`（**原 bug：只数 `^Test` ⇒ #10 把存在的基准判成 0 并 FAIL**；Lead commit `036ee259` 修复，本自证防回归）；
+2. 有 Benchmark + 无基线 ⇒ `SKIP(baseline-missing)`，**不是 FAIL**（判据不放宽：无 benchmark 仍 FAIL）；
+3. bench 行解析必须容忍 go test 的 `-<GOMAXPROCS>` 后缀（`BenchmarkX-12`）；
+4. #10a 比值判据三态：1.05/1.0 ⇒ pass（边界含等号）、1.06/1.0 ⇒ fail、缺值 ⇒ skip；
+5. AST 判据红必须以 `VIOLATION=` 行为证据（构建失败不得被当成"判据变红"或"通过"）；
+6. WARN 不阻断、SKIP 默认容忍、`--strict` 下 SKIP 失败。
+
+### 8.5 局限（诚实边界）
+1. `#9` 变异清单（`scripts/field_semantics_mutations.tsv`）的 pattern 绑定当前实现符号（`AggAny` / `reasonPartialFrame` / `reasonEmptyFrame` / `KindFamily`）；改名后 `--mutation` 会按 `SKIP(missing)` 诚实降级，需要同步清单。
+2. `#11` 回滚盘点依赖运行中的 PostgreSQL（`ehome-postgres`）；CI 无 DB 时返回 77 ⇒ `SKIP(db-unavailable)`，不假绿。
+3. `#10a` 的"main 基线"是包内逐字节克隆，不是 main 上的真实二进制——它证明的是**同一算法在两条路径上的成本差**，这正是 G-6 判据要的语义。
+4. CI 的 `field-semantics` job 对 `[FAIL] #10a` 做**窄豁免**（打印 `::warning`、不阻断），其余任何 FAIL 仍红；移除条件写在 workflow 注释里（短路落地后改回直接执行）。

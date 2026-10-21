@@ -13,8 +13,9 @@
 #   ./scripts/check_field_semantics.sh --self-test     # 反假绿自证
 #   ./scripts/check_field_semantics.sh --only 8        # 只跑第 8 条
 #   ./scripts/check_field_semantics.sh --mutation      # 打开门禁 9 的变异自证
-#   ./scripts/check_field_semantics.sh --record-bench-baseline [--bench-name NAME]
-#   ./scripts/check_field_semantics.sh --bench-name BenchmarkLiteralEval   # 基准函数名（默认见下）
+#   ./scripts/check_field_semantics.sh --record-bench-baseline
+#     录两份参考基线：bench_baseline_prod.txt（10a 生产链）/ bench_baseline_layer.txt（10b 新层成本）。
+#     main d406dc2d 无集成层 ⇒ 无法在 main 录；在首个含 literal 快速路径的 commit 上录，文件头记录 commit 与局限。
 #
 # 纪律：只读仓库/DB；门禁 9 的变异临时改被测源文件，必须备份-改-跑-还原并核对 md5。
 set -uo pipefail   # 不用 -e（逐门禁收集结果）；pipefail 防「管道失败即绿」。
@@ -26,14 +27,27 @@ REPO_DIR=$(cd "$BACKEND_DIR/.." && pwd)
 GO=$(printenv GO 2>/dev/null || true)
 if [ -z "$GO" ]; then GO="go"; fi
 if ! command -v "$GO" >/dev/null 2>&1; then
-  if [ -x "$REPO_DIR/.tools/gotool/bin/go" ]; then GO="$REPO_DIR/.tools/gotool/bin/go"; fi
+  # 工具链可能只存在于主仓 .tools（git worktree 里没有 .tools/）。
+  # 先试 worktree 根，再用 git-common-dir 推出主仓根，最后试规范路径；都没有则明确失败。
+  for cand in "$REPO_DIR/.tools/gotool/bin/go" "/mnt/storage/WorkSpace/EHome/.tools/gotool/bin/go"; do
+    if [ -x "$cand" ]; then GO="$cand"; break; fi
+  done
+  if ! command -v "$GO" >/dev/null 2>&1 && [ ! -x "$GO" ]; then
+    common=$(git -C "$REPO_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "$common" ]; then
+      cand=$(dirname "$common")/.tools/gotool/bin/go
+      if [ -x "$cand" ]; then GO="$cand"; fi
+    fi
+  fi
 fi
-BENCH_BASELINE="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline.txt"
+if ! command -v "$GO" >/dev/null 2>&1 && [ ! -x "$GO" ]; then
+  echo "FATAL: 找不到 go 工具链（PATH 无 go；也未见 .tools/gotool/bin/go）。" >&2
+  echo "       请 export PATH=<repo>/.tools/gotool/bin:$PATH 后重跑。" >&2
+  exit 2
+fi
+BENCH_BASELINE_PROD="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline_prod.txt"
+BENCH_BASELINE_LAYER="$BACKEND_DIR/internal/sensorfield/testdata/bench_baseline_layer.txt"
 MUTATION_MANIFEST="$BACKEND_DIR/scripts/field_semantics_mutations.tsv"
-# 门禁 #10 的基准函数名（设计 §13.5 指定 BenchmarkLiteralEval）。
-# impl-core 的 bench_test.go 当前提供：BenchmarkLiteralEval / BenchmarkFamilyEval16 / BenchmarkResolve；
-# 若改名用 --bench-name 覆盖（脚本不猜，也不放宽「无基准即 FAIL」判据）。
-BENCH_NAME="BenchmarkLiteralEval"
 
 STRICT=0
 ONLY=""
@@ -61,9 +75,16 @@ append_result() { RESULTS="$RESULTS$1|$2|$3|$4
 record_pass() { append_result PASS "$1" "$2" "$3"; }
 record_fail() { append_result FAIL "$1" "$2" "$3"; }
 record_skip() { append_result SKIP "$1" "$2" "$3"; }
+record_warn() { append_result WARN "$1" "$2" "$3"; }
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
+
+# Go 构建缓存：无 GOCACHE 或默认缓存不可写时，退回临时目录（沙箱/CI 只读 $HOME 场景）。
+if [ -z "$(printenv GOCACHE 2>/dev/null || true)" ]; then
+  export GOCACHE="$tmp_dir/gocache"
+  mkdir -p "$GOCACHE"
+fi
 
 run_in_backend() {
   local out="$1" err="$2"; shift 2
@@ -315,51 +336,219 @@ gate9() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 门禁 10：性能基准。无 benchmark 必须 FAIL（防假绿）；有 bench 无基线 ⇒ SKIP。
-# ─────────────────────────────────────────────────────────────────────────────
-gate10() {
-  local cnt
-  cnt=$(go_test_has_cases ./internal/sensorfield '^BenchmarkLiteralEval$' | head -1)
-  if [ "$cnt" -eq 0 ]; then
-    record_fail 10 "性能基准" "无 BenchmarkLiteralEval —— §12.3#10 要求此时必须 FAIL 而不是 PASS（防假绿）"
-    return
-  fi
-  local raw="$tmp_dir/bench.txt"
-  if ! run_in_backend "$raw" "$tmp_dir/bench.err" "$GO" test ./internal/sensorfield -run '^$' -bench '^BenchmarkLiteralEval$' -benchmem -count=5 -benchtime=200ms; then
-    record_fail 10 "性能基准" "bench 执行失败：$(head -1 "$tmp_dir/bench.err")"
-    return
-  fi
-  if ! grep -q '^BenchmarkLiteralEval' "$raw"; then
-    record_fail 10 "性能基准" "输出无 'BenchmarkLiteralEval' 基准行（假绿形态）"
-    return
-  fi
-  if [ "$RECORD_BENCH" -eq 1 ]; then
-    mkdir -p "$(dirname "$BENCH_BASELINE")"
-    {
-      echo "# recorded_by: scripts/check_field_semantics.sh --record-bench-baseline"
-      echo "# commit: $(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-      echo "# date: $(date -Is)"
-      cat "$raw"
-    } > "$BENCH_BASELINE"
-    record_pass 10 "性能基准" "已记录基线到 $BENCH_BASELINE（基线须在 main 上产生）"
-    return
-  fi
-  if [ ! -f "$BENCH_BASELINE" ]; then
-    record_skip 10 "性能基准" "SKIP(baseline-missing)：$BENCH_BASELINE 不存在；先在 main 上 --record-bench-baseline"
-    return
-  fi
-  if ! command -v benchstat >/dev/null 2>&1; then
-    record_skip 10 "性能基准" "SKIP(benchstat-missing)：未安装 benchstat（CI 需 go install golang.org/x/perf/cmd/benchstat@latest）"
-    return
-  fi
-  local cmp="$tmp_dir/benchstat.out"
-  if benchstat -fail "$BENCH_BASELINE" "$raw" > "$cmp" 2>&1; then
-    record_pass 10 "性能基准" "benchstat -fail 通过（≤基线+5%）"
-  else
-    record_fail 10 "性能基准" "benchstat 判定退化 >5%：$(grep -m1 'p=' "$cmp" || tail -2 "$cmp" | tr '\n' ' ')"
-  fi
+# 门禁 10（Lead 2026-10-21 裁决：拆两条，只有 10a 参与 PASS/FAIL）
+#
+#   10a 生产求值链路（硬判据）：BenchmarkAutomationLiteralPath / BenchmarkAlertLiteralPath
+#       相对 main 基线 ≤ +5%。两个专用 bench 尚未落地时，用 sensorfield 包内
+#       BenchmarkLiteralEvalBaselineMatchField（逐字节拷贝 main 的 matchField）作 proxy，
+#       并在输出里明确标注 proxy（可见，不伪装成生产 bench）。
+#   10b 新层抽象成本（观测，不阻断）：BenchmarkLiteralEval ≤10ns 且 0 alloc ⇒ PASS；
+#       否则 WARN。理由：新层 +428% 但生产链 literal 仍走 legacy matchField（G-6），
+#       可感知回归 0%，把它当硬门禁会逼实现者优化一条不承载流量的路径。
+#
+# 基线两份：bench_baseline_prod.txt（10a）/ bench_baseline_layer.txt（10b）。
+# ⚠ 下面这句必须打印（防后人误读「新层更慢=线上更慢」）：
+BENCH_WORDING="生产链 literal 走 legacy matchField（G-6），新层成本不计入回归"
+
+# bench_median_ns 取同名基准 ns/op 中位数（benchstat 缺失时的兜底；go test 会附加 -<GOMAXPROCS> 后缀）。
+bench_median_ns() {
+  local file="$1" name="$2"
+  grep -E "^$name(-[0-9]+)?[[:space:]]" "$file" 2>/dev/null \
+    | awk '{for (i=1;i<=NF;i++) if ($i=="ns/op") print $(i-1)}' \
+    | sort -n \
+    | awk '{a[NR]=$1} END{
+        if (NR==0) exit 2;
+        if (NR%2==1) { print a[(NR+1)/2] }
+        else { printf "%.6f", (a[NR/2]+a[NR/2+1])/2 }
+      }'
 }
 
+# bench_alloc_nonzero 统计 allocs/op 非 0 的行数（0 表示全部无分配）。
+bench_alloc_nonzero() {
+  local file="$1" name="$2"
+  grep -E "^$name(-[0-9]+)?[[:space:]]" "$file" 2>/dev/null \
+    | awk '{for (i=1;i<=NF;i++) if ($i=="allocs/op") { if ($(i-1)+0 != 0) n++ }} END{print n+0}'
+}
+
+# bench_gate_verdict 三态纯函数（--self-test 断言不回归）：
+#   has_bench=0 -> fail；record=1 -> record；baseline_present=0 -> skip-baseline；否则 compare
+bench_gate_verdict() {
+  if [ "$1" -eq 0 ]; then echo fail; return 0; fi
+  if [ "$3" -eq 1 ]; then echo record; return 0; fi
+  if [ "$2" -eq 0 ]; then echo skip-baseline; return 0; fi
+  echo compare
+}
+
+# bench_resolve_name <pkg> <候选名...>：在包内 -list 结果里找第一个存在的基准名。
+bench_resolve_name() {
+  local pkg="$1"; shift
+  local out="$tmp_dir/bench.list.out" err="$tmp_dir/bench.list.err"
+  if ! run_in_backend "$out" "$err" "$GO" test "$pkg" -list '^Benchmark'; then return 0; fi
+  local cand
+  for cand in "$@"; do
+    if grep -qx "$cand" "$out"; then echo "$cand"; return 0; fi
+  done
+  return 0
+}
+
+# bench_measure <pkg> <name> <outfile>：跑 5 轮 benchmem，写原始输出。
+bench_measure() {
+  run_in_backend "$3" "$tmp_dir/bench.err" "$GO" test "$1" -run '^$' \
+    -bench "^$2$" -benchmem -count=5 -benchtime=200ms
+}
+
+# bench_compare <name> <baseline-file> <raw-file>：pass/fail/skip（benchstat 优先，中位数兜底）。
+bench_compare() {
+  local name="$1" baseline="$2" raw="$3"
+  if [ ! -s "$baseline" ]; then echo skip; return 0; fi
+  local filtered="$tmp_dir/cmp.base"
+  grep -v '^#' "$baseline" > "$filtered"
+  if command -v benchstat >/dev/null 2>&1; then
+    if benchstat -fail "$filtered" "$raw" > "$tmp_dir/benchstat.out" 2>&1; then echo pass; else echo fail; fi
+    return 0
+  fi
+  local b c
+  b=$(bench_median_ns "$filtered" "$name")
+  c=$(bench_median_ns "$raw" "$name")
+  if [ -z "$b" ] || [ -z "$c" ]; then echo skip; return 0; fi
+  if awk -v b="$b" -v c="$c" 'BEGIN{exit (c<=b*1.05)?0:1}'; then echo pass; else echo fail; fi
+}
+
+# bench_record <file> <pkg> <name> <label> <note>：录参考基线（带 header 与 commit）。
+bench_record() {
+  local file="$1" pkg="$2" name="$3" label="$4" note="$5"
+  local raw="$tmp_dir/bench.record.txt"
+  if ! bench_measure "$pkg" "$name" "$raw"; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$file")"
+  local c s
+  c=$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+  s=$(cd "$REPO_DIR" && git log -1 --format=%s "$c" 2>/dev/null || echo unknown)
+  {
+    echo "# ===== $label（REFERENCE BASELINE，非 main 基线）====="
+    echo "# bench: $name (pkg=$pkg)"
+    echo "# note: $note"
+    echo "# 为什么不是 main：main d406dc2d 上不存在 sensorfield/selector 集成，无法在 main 录基线。"
+    echo "# 局限（诚实边界）：本机（AMD Ryzen 5 5600）与并行负载下录制，单次波动大；"
+    echo "#   ±5% 阈值受机器/负载影响，是 D1 门槛的近似判据，不是发布级 SLA。"
+    echo "# commit: $c ($s)"
+    echo "# date: $(date -Is)"
+    echo "# recorded_by: scripts/check_field_semantics.sh --record-bench-baseline"
+    grep -E '^(Benchmark|goos|goarch|pkg|cpu)' "$raw"
+  } > "$file"
+  return 0
+}
+
+# bench_pair_exists <pkg> <prod> <baseline>：两个 bench 都必须存在（成对才可比）。
+bench_pair_exists() {
+  local pkg="$1" prod="$2" base="$3"
+  local out="$tmp_dir/bench.pair.out" err="$tmp_dir/bench.pair.err"
+  if ! run_in_backend "$out" "$err" "$GO" test "$pkg" -list "^Benchmark"; then return 1; fi
+  grep -qx "$prod" "$out" || return 1
+  grep -qx "$base" "$out" || return 1
+  return 0
+}
+
+# bench_ratio_verdict <prod_ns> <base_ns>：同一次 run 的比值判据（机器无关）。
+#   prod 或 base 为空/非数 -> skip；ratio <= 1.05 -> pass；否则 fail。
+bench_ratio_verdict() {
+  local prod="$1" base="$2"
+  if [ -z "$prod" ] || [ -z "$base" ]; then echo skip; return 0; fi
+  if ! awk -v b="$base" 'BEGIN{exit (b>0)?0:1}'; then echo skip; return 0; fi
+  if awk -v p="$prod" -v b="$base" 'BEGIN{exit (p <= b*1.05) ? 0 : 1}'; then echo pass; else echo fail; fi
+}
+
+gate10a() {
+  echo "  口径：$BENCH_WORDING"
+  # 硬判据 = 同一次 run 内「生产链 literal 路径」/「本包内的 main matchField 基线克隆」<= 1.05。
+  # 为什么用比值而不是文件基线：#10a 的参照物是 main d406dc2d 的 matchField，而 main 无集成层
+  # 无法录基线；两个 bench 在同一台机器/同一 run 内跑，比值去掉机器与负载因素，是可复核的硬判据。
+  local prod="" base="" pkg="" label=""
+  if bench_pair_exists ./internal/automation BenchmarkAutomationLiteralPath BenchmarkAutomationLiteralPathBaseline; then
+    prod=BenchmarkAutomationLiteralPath; base=BenchmarkAutomationLiteralPathBaseline
+    pkg=./internal/automation; label=automation
+  elif bench_pair_exists ./internal/alert BenchmarkAlertLiteralPath BenchmarkAlertLiteralPathBaseline; then
+    prod=BenchmarkAlertLiteralPath; base=BenchmarkAlertLiteralPathBaseline
+    pkg=./internal/alert; label=alert
+  fi
+  if [ -z "$prod" ]; then
+    record_skip 10a "生产链 literal 性能（硬判据）" "SKIP(benchmark-missing)：未找到成对的 BenchmarkAutomationLiteralPath(+Baseline) 或 BenchmarkAlertLiteralPath(+Baseline)；硬判据未生效，必须可见"
+    return
+  fi
+  local raw="$tmp_dir/bench10a.txt"
+  if ! run_in_backend "$raw" "$tmp_dir/bench.err" "$GO" test "$pkg" -run '^$' \
+      -bench "^$prod$|^$base$" -benchmem -count=5 -benchtime=200ms; then
+    record_fail 10a "生产链 literal 性能（硬判据）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err") [pkg=$pkg]"
+    return
+  fi
+  local prod_med base_med ratio
+  prod_med=$(bench_median_ns "$raw" "$prod")
+  base_med=$(bench_median_ns "$raw" "$base")
+  ratio=$(awk -v p="$prod_med" -v b="$base_med" 'BEGIN{ if (b>0) printf "%.2fx", p/b; else print "n/a" }')
+  if [ "$RECORD_BENCH" -eq 1 ]; then
+    mkdir -p "$(dirname "$BENCH_BASELINE_PROD")"
+    local c sv
+    c=$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    sv=$(cd "$REPO_DIR" && git log -1 --format=%s "$c" 2>/dev/null || echo unknown)
+    {
+      echo "# ===== 10a 参考记录（REFERENCE RECORD，非判据来源）====="
+      echo "# 硬判据：同 run 内 $prod / $base <= 1.05（机器无关）。本文件只是历史记录，不参与 PASS/FAIL。"
+      echo "# 口径：$BENCH_WORDING"
+      echo "# commit: $c ($sv)"
+      echo "# date: $(date -Is)"
+      grep -E '^(Benchmark|goos|goarch|pkg|cpu)' "$raw"
+    } > "$BENCH_BASELINE_PROD"
+    record_pass 10a "生产链 literal 性能（硬判据）" "已记录参考 $BENCH_BASELINE_PROD；当前比值 = $ratio [pkg=$pkg]"
+    return
+  fi
+  local v
+  v=$(bench_ratio_verdict "$prod_med" "$base_med")
+  case "$v" in
+    pass) record_pass 10a "生产链 literal 性能（硬判据）" "prod "$prod_med"ns / main基线 "$base_med"ns = "$ratio" <= 1.05 [pkg=$pkg]" ;;
+    fail) record_fail 10a "生产链 literal 性能（硬判据）" "prod "$prod_med"ns / main基线 "$base_med"ns = "$ratio" > 1.05 [pkg=$pkg]（G-6 判据：字面量必须走 legacy 快路径）" ;;
+    *) record_skip 10a "生产链 literal 性能（硬判据）" "SKIP(prod-baseline-unusable)：无法解析 ns/op（prod="$prod_med" base="$base_med"）[pkg=$pkg]" ;;
+  esac
+}
+gate10b() {
+  local name
+  name=$(bench_resolve_name ./internal/sensorfield BenchmarkLiteralEval)
+  if [ -z "$name" ]; then
+    record_fail 10b "新层抽象成本（观测）" "无 BenchmarkLiteralEval —— 目标不存在必须 FAIL（防假绿）"
+    return
+  fi
+  local raw="$tmp_dir/bench10b.txt"
+  if ! bench_measure ./internal/sensorfield "$name" "$raw"; then
+    record_fail 10b "新层抽象成本（观测）" "bench 执行失败：$(head -1 "$tmp_dir/bench.err")"
+    return
+  fi
+  if ! grep -qE "^$name(-[0-9]+)?[[:space:]]" "$raw"; then
+    record_fail 10b "新层抽象成本（观测）" "输出无基准行（假绿形态）"
+    return
+  fi
+  local verdict
+  verdict=$(bench_gate_verdict 1 "$([ -s "$BENCH_BASELINE_LAYER" ] && echo 1 || echo 0)" "$RECORD_BENCH")
+  if [ "$verdict" = "record" ]; then
+    if bench_record "$BENCH_BASELINE_LAYER" ./internal/sensorfield "$name" "新层抽象成本基线（10b，观测）" "$BENCH_WORDING"; then
+      record_pass 10b "新层抽象成本（观测）" "已记录参考基线 $BENCH_BASELINE_LAYER [$BENCH_WORDING]"
+    else
+      record_fail 10b "新层抽象成本（观测）" "录制基线失败"
+    fi
+    return
+  fi
+  local med allocs
+  med=$(bench_median_ns "$raw" "$name")
+  allocs=$(bench_alloc_nonzero "$raw" "$name")
+  if [ -z "$med" ]; then
+    record_skip 10b "新层抽象成本（观测）" "无法解析 ns/op"
+    return
+  fi
+  if awk -v m="$med" 'BEGIN{exit (m<=10)?0:1}' && [ "$allocs" -eq 0 ]; then
+    record_pass 10b "新层抽象成本（观测）" "median "$med"ns ≤10ns 且 0 alloc（$BENCH_WORDING）"
+  else
+    record_warn 10b "新层抽象成本（观测）" "WARN(不阻断)：median "$med"ns / alloc 非0 行数="$allocs"（阈值 ≤10ns 且 0 alloc；$BENCH_WORDING）"
+  fi
+}
 # ─────────────────────────────────────────────────────────────────────────────
 # 门禁 11：回滚盘点（无该脚本不得执行代码回退）
 # 退出码：0=无非字面量；1=存在（禁止回退）；77=DB 不可达（SKIP）。
@@ -383,6 +572,27 @@ gate11() {
 # ─────────────────────────────────────────────────────────────────────────────
 # 反假绿自证：把判据作用于合成输入，断言它会红/会 SKIP。
 # ─────────────────────────────────────────────────────────────────────────────
+# selftest_fieldsem <out> <err> <fieldsem args...>：跑 AST 工具，返回其退出码。
+selftest_fieldsem() {
+  local out="$1" err="$2"; shift 2
+  run_in_backend "$out" "$err" "$GO" run ./scripts/fieldsem "$@"
+}
+
+# selftest_retry_fieldsem <out> <err> <args...>：最多重试 3 次（GOCACHE 并发/抖动）。
+# 返回 0 表示命令成功，非 0 表示最后一次退出码（可能是判据红，也可能是构建失败）。
+selftest_retry_fieldsem() {
+  local out="$1" err="$2"; shift 2
+  local attempt=0 rc=1
+  while [ "$attempt" -lt 3 ]; do
+    rc=0
+    selftest_fieldsem "$out" "$err" "$@" || rc=$?
+    if [ "$rc" -eq 0 ]; then return 0; fi
+    if grep -q '^VIOLATION=' "$out"; then return "$rc"; fi   # 真判据红，不必重试
+    attempt=$((attempt + 1))
+  done
+  return "$rc"
+}
+
 self_test() {
   local failures=0
   echo "== 反假绿自证 =="
@@ -399,10 +609,12 @@ self_test() {
     echo '  return []SensorData{{Name: "rsoc", Value: 1}}, nil'
     echo '}'
   } > "$ast_dir/drivers/a.go"
-  if run_in_backend "$tmp_dir/st.out" "$tmp_dir/st.err" "$GO" run ./scripts/fieldsem -drivers "$ast_dir/drivers" -mode decl; then
-    echo "SELFTEST FAIL: 幽灵声明未变红"; failures=$((failures + 1))
+  selftest_retry_fieldsem "$tmp_dir/st.out" "$tmp_dir/st.err" -drivers "$ast_dir/drivers" -mode decl || true
+  if [ -s "$tmp_dir/st.out" ] && grep -q '^VIOLATION=' "$tmp_dir/st.out"; then
+    echo "SELFTEST PASS: 幽灵声明 ⇒ 门禁红（VIOLATION 行存在）"
   else
-    echo "SELFTEST PASS: 幽灵声明 ⇒ 门禁红"
+    echo "SELFTEST FAIL: 幽灵声明未产生 VIOLATION 行（rc=0 或工具构建失败都会落这里；stderr=$(tail -1 "$tmp_dir/st.err" 2>/dev/null)）"
+    failures=$((failures + 1))
   fi
   {
     echo 'package drivers'
@@ -410,10 +622,15 @@ self_test() {
     echo '  return []SensorData{{Name: "ghost_field", Value: 2}}, nil'
     echo '}'
   } > "$ast_dir/drivers/b.go"
-  if run_in_backend "$tmp_dir/st2.out" "$tmp_dir/st2.err" "$GO" run ./scripts/fieldsem -drivers "$ast_dir/drivers" -mode decl; then
+  if selftest_retry_fieldsem "$tmp_dir/st2.out" "$tmp_dir/st2.err" -drivers "$ast_dir/drivers" -mode decl; then
     echo "SELFTEST PASS: 有产出 ⇒ 门禁绿"
   else
-    echo "SELFTEST FAIL: 有产出仍红"; failures=$((failures + 1))
+    if grep -q '^VIOLATION=' "$tmp_dir/st2.out"; then
+      echo "SELFTEST FAIL: 有产出仍红：$(grep -m1 '^VIOLATION=' "$tmp_dir/st2.out")"
+    else
+      echo "SELFTEST ERROR: 工具未跑成（构建/缓存失败，非判据结论）：$(tail -1 "$tmp_dir/st2.err" 2>/dev/null)"
+    fi
+    failures=$((failures + 1))
   fi
 
   local name_dir="$tmp_dir/name"
@@ -426,10 +643,12 @@ self_test() {
     echo '  return []SensorData{{Name: "Props", Value: 1}}, nil'
     echo '}'
   } > "$name_dir/drivers/c.go"
-  if run_in_backend "$tmp_dir/st3.out" "$tmp_dir/st3.err" "$GO" run ./scripts/fieldsem -drivers "$name_dir/drivers" -mode name; then
-    echo "SELFTEST FAIL: 非法产出名未变红"; failures=$((failures + 1))
+  selftest_retry_fieldsem "$tmp_dir/st3.out" "$tmp_dir/st3.err" -drivers "$name_dir/drivers" -mode name || true
+  if [ -s "$tmp_dir/st3.out" ] && grep -q '^VIOLATION=' "$tmp_dir/st3.out"; then
+    echo "SELFTEST PASS: 非法产出名 ⇒ 门禁红（VIOLATION 行存在）"
   else
-    echo "SELFTEST PASS: 非法产出名 ⇒ 门禁红"
+    echo "SELFTEST FAIL: 非法产出名未产生 VIOLATION 行（不是判据红）：$(tail -1 "$tmp_dir/st3.err" 2>/dev/null)"
+    failures=$((failures + 1))
   fi
   {
     echo 'package drivers'
@@ -439,10 +658,11 @@ self_test() {
     echo '  return []SensorData{{Name: "write_ack", Value: 1}}, nil'
     echo '}'
   } > "$name_dir/drivers/c.go"
-  if run_in_backend "$tmp_dir/st4.out" "$tmp_dir/st4.err" "$GO" run ./scripts/fieldsem -drivers "$name_dir/drivers" -mode name; then
+  if selftest_retry_fieldsem "$tmp_dir/st4.out" "$tmp_dir/st4.err" -drivers "$name_dir/drivers" -mode name; then
     echo "SELFTEST PASS: *_ack 例外 ⇒ 门禁绿"
   else
-    echo "SELFTEST FAIL: *_ack 例外被判红（应列入例外清单）"; failures=$((failures + 1))
+    echo "SELFTEST FAIL: *_ack 例外被判红（应列入例外清单）：$(grep -m1 '^VIOLATION=' "$tmp_dir/st4.out" 2>/dev/null)"
+    failures=$((failures + 1))
   fi
 
   printf 'ok  	ehome/backend/internal/sensorfield	0.001s\n' > "$tmp_dir/fake8.out"
@@ -452,17 +672,86 @@ self_test() {
     echo "SELFTEST PASS: 无 '=== RUN' ⇒ 门禁 #8 判红（反假绿）"
   fi
 
-  printf 'no benchmarks found\n' > "$tmp_dir/fake10.out"
-  if grep -q '^BenchmarkLiteralEval' "$tmp_dir/fake10.out"; then
-    echo "SELFTEST FAIL: 无 bench 输出被判有"; failures=$((failures + 1))
+  # #10 三态判定：把 2026-10-21 的真实回归（存在 Benchmark 却被计数成 0 ⇒ 误判 FAIL）
+  # 钉成用例 —— 计数必须能数到 Benchmark 行，且"有基准+无基线"必须是 SKIP 不是 FAIL。
+  printf 'BenchmarkLiteralEval\nTestFoo\nExampleBar\n' > "$tmp_dir/fake10.list"
+  local names
+  names=$(grep -cE '^(Test|Benchmark|Example)' "$tmp_dir/fake10.list" || true)
+  if [ "$names" -ne 3 ]; then
+    echo "SELFTEST FAIL: 用例计数 $names，期望 3（含 Benchmark 行；回归 bug 会让它为 0）"
+    failures=$((failures + 1))
   else
-    echo "SELFTEST PASS: 无 benchmark ⇒ 门禁 #10 判红（不是 PASS）"
+    echo "SELFTEST PASS: go test -list 计数含 Benchmark/Example（#10 不会把存在的基准判成 0）"
   fi
-  if [ ! -f "$BENCH_BASELINE" ]; then
-    echo "SELFTEST PASS: 基线缺失 ⇒ 门禁 #10 走 SKIP(baseline-missing)"
+  if [ "$(bench_gate_verdict 1 0 0)" != "skip-baseline" ]; then
+    echo "SELFTEST FAIL: 有 benchmark 但无基线 -> $(bench_gate_verdict 1 0 0)，期望 skip-baseline（不得 FAIL）"
+    failures=$((failures + 1))
   else
-    echo "SELFTEST WARN: 基线已存在，跳过 baseline-missing 断言"
+    echo "SELFTEST PASS: 存在 Benchmark ⇒ #10 = SKIP(baseline-missing)（不是 FAIL）"
   fi
+  if [ "$(bench_gate_verdict 0 0 0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 无 benchmark 未判 fail（假绿风险）"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: 无 benchmark ⇒ #10 FAIL（判据未被放宽）"
+  fi
+  # #10a 比值判据（Lead 裁决的核心）：生产链/基线克隆 同 run 比值 ≤1.05 才 PASS。
+  if [ "$(bench_ratio_verdict 1.05 1.0)" != "pass" ]; then
+    echo "SELFTEST FAIL: 比值 1.05x 边界应判 pass（1.05/1.0 <= 1.05），实得 $(bench_ratio_verdict 1.05 1.0)"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a 比值判据：1.05/1.0 = 1.05x ⇒ pass（边界含等号）"
+  fi
+  if [ "$(bench_ratio_verdict 1.06 1.0)" != "fail" ]; then
+    echo "SELFTEST FAIL: 比值 1.06x 应判 fail"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a 比值判据：1.06/1.0 ⇒ fail（超 5% 即红）"
+  fi
+  if [ "$(bench_ratio_verdict 57.0 0.91)" != "fail" ]; then
+    echo "SELFTEST FAIL: 57ns/0.91ns 应判 fail（当前集成现状的回归形态）"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a 比值判据：57ns/0.91ns ⇒ fail（能抓住 G-6 回归）"
+  fi
+  if [ "$(bench_ratio_verdict "" 0.91)" != "skip" ]; then
+    echo "SELFTEST FAIL: 缺 prod 值应判 skip 而不是 pass"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: #10a 缺值 ⇒ skip（不假绿）"
+  fi
+  if [ "$(bench_gate_verdict 1 1 0)" != "compare" ]; then
+    echo "SELFTEST FAIL: 有 benchmark+基线未进入 compare"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: 有 benchmark+参考基线 ⇒ #10 进入 benchstat/中位数比较"
+  fi
+
+  # #10 拆分后的回归断言（Lead 裁决）：10a 硬判据 / 10b 观测；中位数解析必须容忍 -N 后缀。
+  printf 'BenchmarkLiteralEval-12\t100\t3.5 ns/op\t0 B/op\t0 allocs/op\nBenchmarkLiteralEval-12\t100\t4.5 ns/op\t0 B/op\t0 allocs/op\n' > "$tmp_dir/fake10.raw"
+  local med
+  med=$(bench_median_ns "$tmp_dir/fake10.raw" BenchmarkLiteralEval)
+  if [ "$med" != "4" ] && [ "$med" != "4.0" ] && [ "$med" != "4.000000" ]; then
+    echo "SELFTEST FAIL: 中位数解析=$med，期望 4（必须容忍 go test 的 -N 后缀）"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: bench 行解析容忍 -N 后缀（median=$med）"
+  fi
+  if [ "$(bench_alloc_nonzero "$tmp_dir/fake10.raw" BenchmarkLiteralEval)" -ne 0 ]; then
+    echo "SELFTEST FAIL: 0 alloc 的 bench 被判成有分配"
+    failures=$((failures + 1))
+  else
+    echo "SELFTEST PASS: 0 alloc 判定正确（10b 的硬条件之一）"
+  fi
+  local saved2="$RESULTS"
+  RESULTS="WARN|99|合成 WARN|
+"
+  if summary >/dev/null 2>&1; then
+    echo "SELFTEST PASS: WARN 不阻断（RESULT: PASS 含 WARN）"
+  else
+    echo "SELFTEST FAIL: WARN 被当成失败"; failures=$((failures + 1))
+  fi
+  RESULTS="$saved2"
 
   local saved="$RESULTS"
   RESULTS="SKIP|99|合成 SKIP|
@@ -488,10 +777,11 @@ self_test() {
 }
 
 summary() {
-  local fails=0 skips=0 passes=0 status num title detail
+  local fails=0 skips=0 passes=0 warns=0 status num title detail
   while IFS='|' read -r status num title detail; do
     case "$status" in
       PASS) passes=$((passes + 1)) ;;
+      WARN) warns=$((warns + 1)) ;;
       FAIL) fails=$((fails + 1)) ;;
       SKIP) skips=$((skips + 1)) ;;
     esac
@@ -520,14 +810,20 @@ EOF
     echo "RESULT: PASS_WITH_SKIPS($skips) — 通过 $passes 条；SKIP 原因见上（D6 完成后用 --strict）"
     return 0
   fi
-  echo "RESULT: PASS — $passes 条门禁全部通过"
+  if [ "$warns" -gt 0 ]; then
+    echo "RESULT: PASS（含 $warns 条 WARN，不阻断）— $passes 条 PASS / $skips 条 SKIP"
+  else
+    echo "RESULT: PASS — $passes 条门禁全部通过"
+  fi
   return 0
 }
 
 run_gate() {
   case "$1" in
     1) gate1 ;; 2) gate2 ;; 3) gate3 ;; 4) gate4 ;; 5) gate5 ;;
-    6) gate6 ;; 7) gate7 ;; 8) gate8 ;; 9) gate9 ;; 10) gate10 ;; 11) gate11 ;;
+    6) gate6 ;; 7) gate7 ;; 8) gate8 ;; 9) gate9 ;;
+    10) gate10a; gate10b ;; 10a) gate10a ;; 10b) gate10b ;;
+    11) gate11 ;;
     *) echo "未知门禁编号: $1" >&2; exit 2 ;;
   esac
 }
