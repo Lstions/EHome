@@ -164,9 +164,17 @@ func TestConfirmEventExecutesAllActionsInOrder(t *testing.T) {
 		keys[row.IdempotencyKey] = true
 	}
 	// 冷却锚点 = 原事件的触发时刻 (pending_confirm 落库时刻)。
+	//
+	// 跨方言精度（2026-10-21 修）：PostgreSQL 的 timestamp 精度是**微秒**，SQLite 存
+	// 纳秒（字符串）。ConfirmEvent 从库里重读 ev 后写锚点，故 PG 下锚点是 µs 截断值，
+	// 与内存里的 ns 值永不 Equal —— 原断言在 SQLite 绿、PG 红（PR 里表现为
+	// "冷却锚点=...788932 want ...78893272"）。语义只到"锚点==事件触发时刻"，
+	// 故两侧统一截断到 µs 再比；不改变被测行为，也不会掩盖真实偏差（µs 以上仍会红）。
 	var after models.AutomationRule
 	pl.db.First(&after, rule.ID)
-	if after.LastTriggeredAt == nil || !after.LastTriggeredAt.UTC().Equal(ev.TriggeredAt.UTC()) {
+	const dbTimeResolution = time.Microsecond
+	if after.LastTriggeredAt == nil ||
+		!after.LastTriggeredAt.UTC().Truncate(dbTimeResolution).Equal(ev.TriggeredAt.UTC().Truncate(dbTimeResolution)) {
 		t.Fatalf("冷却锚点=%v want %v", after.LastTriggeredAt, ev.TriggeredAt)
 	}
 }
