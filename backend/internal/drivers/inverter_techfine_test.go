@@ -370,7 +370,9 @@ func TestTechfine_HEEP1(t *testing.T) {
 	}
 
 	// Verify basic EEPROM fields
-	assertFloat(t, data, "eeprom_model_source", 1, 0.01)
+	// 协议 V0.5：A = 工作模式 0=UTI / 1=SUB / 2=SBU。
+	// 夹具第 1 位是 "1" ⇒ SUB（太阳能优先）；旧的 eeprom_model_source 命名与语义都不对。
+	assertFloat(t, data, "eeprom_work_mode", 1, 0.01)
 	assertFloat(t, data, "eeprom_max_charge_current", 60, 0.01)
 	assertFloat(t, data, "eeprom_output_voltage", 230, 0.01)
 	// fields[8] = "1" → 60Hz

@@ -295,7 +295,7 @@ func (d *TechfineInverterDriver) GetSensorDefinitions() []SensorData {
 		// EEPROM（read_eeprom 动作产出。2026-10-21 补齐：此前 4 个字段
 		// 一直被解析并写库，却从未在这里声明 —— 前端拿不到单位，
 		// HA Discovery 也发现不了它们）
-		{Name: "eeprom_model_source", Unit: ""},
+		{Name: "eeprom_work_mode", Unit: ""},
 		{Name: "eeprom_max_charge_current", Unit: "A"},
 		{Name: "eeprom_output_voltage", Unit: "V"},
 		{Name: "eeprom_output_frequency", Unit: "Hz"},
@@ -1182,7 +1182,9 @@ func (d *TechfineInverterDriver) parseHIMSG1(fields []string) ([]SensorData, err
 // parseHEEP1 — EEPROM settings (basic parse, stores key fields)
 // ============================================================================
 // Format: (A BBB CCC D E F G HHH I J K L M N P QQQ RRR SSS TTT UUU.U VVV.V XXX.X O
-//   A     – machine model source (0-2)
+//   A     – 工作模式：0=UTI（市电优先）、1=SUB（太阳能优先）、2=SBU（电池优先）
+//           协议 V0.5「HEEP1 响应与写后核对字段」表：A | 工作模式：0 UTI、1 SUB、2 SBU
+//           旧代码把它叫 eeprom_model_source（机型来源），名称与语义都不对
 //   BBB   – max charge current
 //   CCC   – (config data)
 //   D     – input voltage range
@@ -1201,7 +1203,7 @@ func (d *TechfineInverterDriver) parseHEEP1(fields []string) ([]SensorData, erro
 		return nil, fmt.Errorf("techfine HEEP1: need >=15 fields, got %d", len(fields))
 	}
 
-	modelSource, err := parseRequiredFloat(fields, 0, "eeprom_model_source")
+	workMode, err := parseRequiredFloat(fields, 0, "eeprom_work_mode")
 	if err != nil {
 		return nil, err
 	}
@@ -1227,7 +1229,7 @@ func (d *TechfineInverterDriver) parseHEEP1(fields []string) ([]SensorData, erro
 	// 注意：本 parser 固定产出 4 个传感器，注册表里的 MinSensors 必须等于 4。
 	// 2026-10-21 前注册表写的是 15，导致 read_eeprom 动作永远不可能成功。
 	result := []SensorData{
-		{Name: "eeprom_model_source", Value: modelSource, Unit: ""},
+		{Name: "eeprom_work_mode", Value: workMode, Unit: ""},
 		{Name: "eeprom_max_charge_current", Value: maxChargeCurrent, Unit: "A"},
 		{Name: "eeprom_output_voltage", Value: outputVoltage, Unit: "V"},
 		{Name: "eeprom_output_frequency", Value: freqValue, Unit: "Hz"},
