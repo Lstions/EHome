@@ -492,5 +492,21 @@ git rev-parse --short HEAD; git status --porcelain | wc -l
 ./scripts/check_field_semantics.sh
 ```
 
-最终结果（见交付消息与本文件附录）：11 条门禁 = PASS/PASS_WITH_SKIPS（#9 opt-in 为唯一常态 SKIP；基准类在脏树上自动 SKIP(dirty-worktree)）。
+**最终实测（干净树，HEAD=9baf806e，代码面 dirty=0）**：
+
+```
+HEAD: 9baf806e (dirty files: 0)
+[PASS] #1/#2/#3/#4/#5/#6/#7/#8  ...（见下）
+[SKIP] #9 变异自证 — 默认不执行（--mutation 实跑 4/4 CAUGHT）
+[PASS] #10a-1a literal 路径结构断言（确定性） — TestLiteralPathSkipsProviderAndCompile 真实执行且通过
+[WARN] #10a-1b literal/基线 同 run 比值（仅记录） — 7.46x（并行负载噪声，不判定）
+[PASS] #10a-2 端到端 — 两次采样 784.2ns/768.1ns vs 基线 796.7ns ⇒ 更优比 0.96x ≤ 1.05
+[PASS] #10b 新层抽象成本 — median 3.684ns ≤10ns 且 0 alloc
+[PASS] #11 回滚盘点 — NON_LITERAL=0
+RESULT: PASS_WITH_SKIPS(1) — 通过 12 条；唯一 SKIP = #9（变异自证 opt-in） (HEAD=9baf806e)
+```
+
+对比修正前的矛盾结果（HEAD f9956c95, DIRTY=7）：基准类降级为 `SKIP(dirty-worktree)`，不再用别人的中间态判生死。
+
+参考基线已录：`testdata/bench_baseline_e2e.txt`（HEAD 与局限在文件头）。
 #10a-2 参考基线已录：`backend/internal/sensorfield/testdata/bench_baseline_e2e.txt`（`--record-bench-baseline` 生成，文件头含 commit 与局限）。
