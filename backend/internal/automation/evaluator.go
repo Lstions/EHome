@@ -895,7 +895,7 @@ func (e *Evaluator) resolveLogicalID(edgeDeviceID uint) uint {
 func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields []parser.Field, at time.Time) {
 	// trigger 求值走解析层（literal 路径内部与 matchField 逐字节等价）。
 	// ok=false（本批无该字段 / unbound / kill switch）⇒ 不更新窗口、不触发。
-	triggerOK, satisfied, value := e.evalSelector(rule, 0, deviceID,
+	triggerOK, satisfied, value := e.evalSelector(rule.ID, 0, deviceID,
 		rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, fields, at)
 	if !triggerOK {
 		return
@@ -908,7 +908,7 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields [
 		return
 	}
 	for i, c := range conds {
-		condOK, condSatisfied, _ := e.evalSelector(rule, uint8(i+1), deviceID,
+		condOK, condSatisfied, _ := e.evalSelector(rule.ID, uint8(i+1), deviceID,
 			c.SensorName, c.Comparator, c.Threshold, fields, at)
 		if !condOK || !condSatisfied {
 			return // 任一条件无法判定/不满足 则不触发（混合规则整条 fail-closed）

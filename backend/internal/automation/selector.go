@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -40,7 +41,7 @@ import (
 // 告警分不清"配错"与"开关"。models 常量表与前端枚举由 impl-wiring/D5 批次同步
 // （models 不在本任务写入范围），本包常量承载同一字符串值。
 const (
-	ResultUnresolvedSelector = "unresolved_selector"
+	ResultUnresolvedSelector    = "unresolved_selector"
 	ResultFieldResolverDisabled = "field_resolver_disabled"
 )
 
@@ -77,13 +78,24 @@ type compiledPlan struct {
 }
 
 // planCache 是包内旁路缓存（不挂 models.AutomationRule，避免 models→sensorfield 包环）。
+//
+// resolvedSeen/firedSeen 是**无锁统计去重**（#10a 裁决 (c-轻)）：literal 规则根本不进
+// 统计（evalSelector 已短路）；特殊规则每帧 markRuleResolved 先查 sync.Map，命中即返回，
+// 不触碰 statsMu；只有"本批次首次"才走锁 + 指标刷新。用 atomic.Pointer 持有 sync.Map，
+// reset 整体替换，避免复制已使用的 sync.Map（noCopy）。
 type planCache struct {
 	mu    sync.RWMutex
 	plans map[ruleKey]compiledPlan
+
+	resolvedSeen atomic.Pointer[sync.Map] // map[uint]struct{}
+	firedSeen    atomic.Pointer[sync.Map] // map[uint]struct{}
 }
 
 func newPlanCache() *planCache {
-	return &planCache{plans: make(map[ruleKey]compiledPlan)}
+	c := &planCache{plans: make(map[ruleKey]compiledPlan)}
+	c.resolvedSeen.Store(&sync.Map{})
+	c.firedSeen.Store(&sync.Map{})
+	return c
 }
 
 // reset 清空全部编译产物（LoadRules/Invalidate 调用；设计 §7.2）。
@@ -94,6 +106,34 @@ func (c *planCache) reset() {
 	c.mu.Lock()
 	c.plans = make(map[ruleKey]compiledPlan)
 	c.mu.Unlock()
+	c.resolvedSeen.Store(&sync.Map{})
+	c.firedSeen.Store(&sync.Map{})
+}
+
+// markResolvedSeen 返回是否"本批次首次解析成功"（命中即无锁快路径，不碰 statsMu）。
+func (c *planCache) markResolvedSeen(ruleID uint) bool {
+	if c == nil {
+		return true
+	}
+	seen := c.resolvedSeen.Load()
+	if seen == nil {
+		return true // 未经 newPlanCache 的测试替身 ⇒ 走完整路径，语义不变
+	}
+	_, loaded := seen.LoadOrStore(ruleID, struct{}{})
+	return !loaded
+}
+
+// markFiredSeen 返回是否"本批次首次触发"。
+func (c *planCache) markFiredSeen(ruleID uint) bool {
+	if c == nil {
+		return true
+	}
+	seen := c.firedSeen.Load()
+	if seen == nil {
+		return true
+	}
+	_, loaded := seen.LoadOrStore(ruleID, struct{}{})
+	return !loaded
 }
 
 func (c *planCache) get(key ruleKey) (compiledPlan, bool) {
@@ -151,26 +191,59 @@ func selectorHash(selector string) uint64 {
 // matchField 行为（G-6）；特殊形态必须 fail-closed（设计 §11 kill switch：
 // 不自动降级为字面量，否则 family 会被当不存在的物理名静默失效）。
 func isSpecialSelector(selector string) bool {
-	s := strings.TrimSpace(selector)
+	// 性能契约（#10a 裁决 (a)）：零分配、单遍字节扫描、最多两次短循环；
+	// literal 规则每帧都会走到这里，目标 ≤1ns。语义与历史实现逐字节等价：
+	// 前后 ASCII 空白 ≡ TrimSpace（selector 文法本身就是 ASCII）；'@' ⇒ semantic；
+	// "virtual:" ⇒ virtual；首处 "_*" 的前缀须合法，其后为空或 ":agg"（至多一个冒号）。
+	s := selector
+	for len(s) > 0 {
+		switch s[0] {
+		case ' ', '\t', '\n', '\r':
+			s = s[1:]
+			continue
+		}
+		break
+	}
+	for len(s) > 0 {
+		switch s[len(s)-1] {
+		case ' ', '\t', '\n', '\r':
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
 	if s == "" {
 		return false // 空串：历史行为是"找不到同名字段"，按字面量处理（不审计刷量）
 	}
-	if strings.HasPrefix(s, "@") || strings.HasPrefix(s, "virtual:") {
+	if s[0] == '@' {
 		return true
 	}
-	star := strings.Index(s, "_*")
-	if star <= 0 {
-		return false
-	}
-	prefix := s[:star]
-	rest := s[star+2:]
-	if !validFamilyPrefix(prefix) {
-		return false
-	}
-	if rest == "" {
+	if len(s) >= 8 && s[:8] == "virtual:" {
 		return true
 	}
-	return strings.HasPrefix(rest, ":") && !strings.Contains(rest[1:], ":")
+	for i := 1; i < len(s); i++ {
+		if s[i] != '*' || s[i-1] != '_' {
+			continue
+		}
+		prefix := s[:i-1]
+		if !validFamilyPrefix(prefix) {
+			return false
+		}
+		rest := s[i+1:]
+		if rest == "" {
+			return true
+		}
+		if rest[0] != ':' {
+			return false
+		}
+		for j := 1; j < len(rest); j++ {
+			if rest[j] == ':' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // validFamilyPrefix：family 前缀文法 = lower {lower|digit|_} lower-or-digit
@@ -214,16 +287,36 @@ func toReadings(fields []parser.Field) []sensorfield.Reading {
 //
 // literal 路径：走历史 matchField + compare，与今天逐字节等价（含"取第一个同名"、
 // 含 NaN/Inf 的旧比较语义）——G-6 的硬要求；特殊 selector 才使用 EvalPredicate。
-func (e *Evaluator) evalSelector(rule models.AutomationRule, slot uint8, deviceID uint,
+func (e *Evaluator) evalSelector(ruleID uint, slot uint8, deviceID uint,
 	selector, comparator string, threshold float64, fields []parser.Field, at time.Time) (bool, bool, float64) {
 
-	special := isSpecialSelector(selector)
-	provider := e.planProviderSnapshot()
-	if provider == nil {
-		if special {
-			e.recordUnresolvedSelector(rule, at, ResultUnresolvedSelector, "field_resolver_not_configured", selector)
-			return false, false, 0
+	// ① G-6 literal/legacy 快路径（#10a 裁决）：非特殊形态与历史 matchField **逐字节等价**
+	// （含"取第一个同名"、含 NaN/Inf 旧比较语义），且**不触碰** provider/编译缓存/统计。
+	// 目标 ≤3ns/0 alloc；混合规则里的 literal slot 也走这里。
+	//
+	// 内联形态快判（与 isSpecialSelector 等价；热路径避免一次函数调用）：
+	// 首字节 '@' ⇒ semantic；前 8 字节 "virtual:" ⇒ virtual；首字节为空白 ⇒ 回退完整
+	// 判定（legacy 异常值）；否则只需扫一遍找 '*'（family 必含 "*"），没有就是字面量。
+	special := false
+	if selector != "" {
+		c := selector[0]
+		switch {
+		case c == '@':
+			special = true
+		case len(selector) >= 8 && selector[:8] == "virtual:":
+			special = true
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			special = isSpecialSelector(selector) // 前导空白：legacy 异常形态，走完整判定
+		default:
+			for i := 0; i < len(selector); i++ {
+				if selector[i] == '*' {
+					special = isSpecialSelector(selector)
+					break
+				}
+			}
 		}
+	}
+	if !special {
 		value, found := matchField(fields, selector)
 		if !found {
 			return false, false, 0
@@ -231,22 +324,22 @@ func (e *Evaluator) evalSelector(rule models.AutomationRule, slot uint8, deviceI
 		return true, compare(comparator, value, threshold), value
 	}
 
-	plan, err := e.compileSelector(rule.ID, slot, deviceID, selector)
+	// ② 以下只处理特殊形态（family/semantic/virtual），全部 fail-closed 方向。
+	provider := e.planProviderSnapshot()
+	if provider == nil {
+		e.recordUnresolvedSelector(ruleID, at, ResultUnresolvedSelector, "field_resolver_not_configured", selector)
+		return false, false, 0
+	}
+
+	plan, err := e.compileSelector(ruleID, slot, deviceID, selector)
 	if err != nil {
-		if special {
-			e.recordUnresolvedSelector(rule, at, ResultUnresolvedSelector, "compile_failed:"+sensorfield.ErrorCode(err), selector)
-			return false, false, 0
-		}
-		// 历史字面量/legacy 值：解析层报错（未就绪/语法）时保持逐字节兼容。
-		value, found := matchField(fields, selector)
-		if !found {
-			return false, false, 0
-		}
-		return true, compare(comparator, value, threshold), value
+		e.recordUnresolvedSelector(ruleID, at, ResultUnresolvedSelector, "compile_failed:"+sensorfield.ErrorCode(err), selector)
+		return false, false, 0
 	}
 	if plan.Kind() == sensorfield.KindLiteral {
-		// G-6：literal 路径与历史 matchField 逐字节等价（含取第一个同名）。
-		e.markRuleResolved(rule.ID)
+		// 防御：provider 对特殊 selector 返回了 literal plan（测试替身/实现不一致）。
+		// 语义上按历史字面量处理（与旧实现一致），仅用于非生产路径。
+		e.markRuleResolved(ruleID)
 		value, found := matchField(fields, selector)
 		if !found {
 			return false, false, 0
@@ -256,16 +349,16 @@ func (e *Evaluator) evalSelector(rule models.AutomationRule, slot uint8, deviceI
 	if !provider.Enabled() {
 		// kill switch（B7）：已编译的特殊 plan 在关闭态也必须拒绝；混合规则
 		// （literal trigger + 特殊 conditions）整条 fail-closed，审计用专用 result。
-		e.recordUnresolvedSelector(rule, at, ResultFieldResolverDisabled, "field_resolver_disabled", selector)
+		e.recordUnresolvedSelector(ruleID, at, ResultFieldResolverDisabled, "field_resolver_disabled", selector)
 		return false, false, 0
 	}
 
 	verdict := sensorfield.EvalPredicate(plan, toReadings(fields), sensorfield.CmpOp(comparator), threshold)
 	if !verdict.OK {
-		e.recordUnresolvedSelector(rule, at, ResultUnresolvedSelector, verdict.Reason, selector)
+		e.recordUnresolvedSelector(ruleID, at, ResultUnresolvedSelector, verdict.Reason, selector)
 		return false, false, 0
 	}
-	e.markRuleResolved(rule.ID)
+	e.markRuleResolved(ruleID)
 	return true, verdict.Satisfied, verdict.Value
 }
 
@@ -275,14 +368,14 @@ func (e *Evaluator) evalSelector(rule models.AutomationRule, slot uint8, deviceI
 // 规则数 = 2880 条/日/规则；按 selector 去重还能让"同规则 trigger+conditions 两个
 // 不同 selector 各自留痕"）。为什么必须落审计而不是静默 return：配错的 selector
 // 若只是"永不触发"，正是本方案要消灭的静默失效（G-4）。
-func (e *Evaluator) recordUnresolvedSelector(rule models.AutomationRule, at time.Time, resultCode, reason, selector string) {
+func (e *Evaluator) recordUnresolvedSelector(ruleID uint, at time.Time, resultCode, reason, selector string) {
 	if e.db == nil {
 		return
 	}
 	if reason == "" {
 		reason = "unbound"
 	}
-	key := unresolvedKey{ruleID: rule.ID, selectorHash: selectorHash(selector)}
+	key := unresolvedKey{ruleID: ruleID, selectorHash: selectorHash(selector)}
 	e.auditMu.Lock()
 	last, seen := e.unresolvedAudit[key]
 	if seen && at.Sub(last) < unresolvedAuditInterval {
@@ -293,7 +386,7 @@ func (e *Evaluator) recordUnresolvedSelector(rule models.AutomationRule, at time
 	e.auditMu.Unlock()
 
 	ev := models.AutomationEvent{
-		RuleID:      rule.ID,
+		RuleID:      ruleID,
 		TriggeredAt: at,
 		Result:      resultCode,
 		Detail:      "field resolution failed: " + reason + " (selector=" + selector + ")",
@@ -301,7 +394,7 @@ func (e *Evaluator) recordUnresolvedSelector(rule models.AutomationRule, at time
 	}
 	if err := e.db.Create(&ev).Error; err != nil {
 		logger.Warn("automation: failed to record field-resolution event",
-			"rule_id", rule.ID, "selector", selector, "result", resultCode, "reason", reason, "error", err)
+			"rule_id", ruleID, "selector", selector, "result", resultCode, "reason", reason, "error", err)
 	}
 }
 
@@ -339,7 +432,13 @@ func (e *Evaluator) ruleStatLocked(ruleID uint) *ruleStat {
 }
 
 // markRuleResolved 在第一次解析成功时置位并刷新指标。
+//
+// 热路径优化（#10a / (c-轻)）：先走 planCache 的 sync.Map 无锁去重；命中即返回，
+// 不触碰 statsMu。literal 规则根本不会调用本函数（evalSelector 已短路）。
 func (e *Evaluator) markRuleResolved(ruleID uint) {
+	if !e.plans.markResolvedSeen(ruleID) {
+		return
+	}
 	e.statsMu.Lock()
 	stat := e.ruleStatLocked(ruleID)
 	first := stat.hasSpecial && !stat.resolved
@@ -350,8 +449,11 @@ func (e *Evaluator) markRuleResolved(ruleID uint) {
 	}
 }
 
-// markRuleFired 在规则第一次触发时置位并刷新指标。
+// markRuleFired 在规则第一次触发时置位并刷新指标（同上：sync.Map 无锁快路径）。
 func (e *Evaluator) markRuleFired(ruleID uint) {
+	if !e.plans.markFiredSeen(ruleID) {
+		return
+	}
 	e.statsMu.Lock()
 	stat := e.ruleStatLocked(ruleID)
 	first := stat.hasSpecial && !stat.fired
@@ -380,6 +482,61 @@ func (e *Evaluator) rebuildRuleStats(rules map[uint]models.AutomationRule) {
 	e.ruleStats = next
 	e.statsMu.Unlock()
 	e.refreshRuleGauges()
+	// (b) LoadRules 期预编译特殊 selector 的 plan（literal 规则不编译）；
+	// 预编译失败只 WARN，求值时仍会按缓存 miss 惰性重试（不改变参与/不参与语义）。
+	e.precompileSpecialPlans()
+}
+
+// precompileSpecialPlans 在规则装载期把特殊 selector 预编译为 plan（#10a 裁决 (b)）。
+//
+// 目的：把"首帧编译"移出求值热路径；literal 规则**不编译**（G-6 走 legacy matchField）。
+// 跳过 any-device 规则（TriggerEdgeDeviceID==0）：编译必须绑定具体 deviceID，
+// 求值时按 Evaluate 入参惰性编译（缓存 key 含 deviceID，语义不变）。
+func (e *Evaluator) precompileSpecialPlans() {
+	provider := e.planProviderSnapshot()
+	if provider == nil {
+		return
+	}
+	e.mu.RLock()
+	rules := make([]models.AutomationRule, 0, len(e.rules))
+	for _, rule := range e.rules {
+		rules = append(rules, rule)
+	}
+	e.mu.RUnlock()
+	for _, rule := range rules {
+		if rule.TriggerEdgeDeviceID == 0 {
+			continue
+		}
+		e.precompileSelector(provider, rule.ID, 0, rule.TriggerEdgeDeviceID, rule.TriggerSensorName)
+		conds, err := rule.ParseConditions()
+		if err != nil {
+			continue // 非法 conditions 由求值路径 fail-closed；此处不越权改语义
+		}
+		for i := range conds {
+			e.precompileSelector(provider, rule.ID, uint8(i+1), rule.TriggerEdgeDeviceID, conds[i].SensorName)
+		}
+	}
+}
+
+// precompileSelector 预编译单个特殊 selector slot（幂等：缓存同内容同 epoch 则跳过）。
+func (e *Evaluator) precompileSelector(provider PlanProvider, ruleID uint, slot uint8, deviceID uint, selector string) {
+	if !isSpecialSelector(selector) {
+		return // literal 不编译（G-6）
+	}
+	hash := selectorHash(selector)
+	key := ruleKey{ruleID: ruleID, slot: slot, deviceID: deviceID}
+	if entry, ok := e.plans.get(key); ok && entry.selectorHash == hash {
+		if planEpoch := sensorfield.PlanEpoch(entry.plan); planEpoch == 0 || planEpoch == provider.Epoch() {
+			return
+		}
+	}
+	plan, err := provider.Compile(deviceID, selector)
+	if err != nil {
+		logger.Warn("automation: precompile special selector failed; will retry lazily at evaluation",
+			"rule_id", ruleID, "slot", slot, "device_id", deviceID, "selector", selector, "error", err)
+		return
+	}
+	e.plans.put(key, hash, plan)
 }
 
 // refreshRuleGauges 覆盖式 Set 两个 Gauge（promauto 指标由 sensorfield 定义，禁止重复定义）。

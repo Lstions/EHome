@@ -61,13 +61,13 @@ func BenchmarkAutomationLiteralPath(b *testing.B) {
 	frame := literalBenchFrame()
 	at := time.Now()
 	// warmup：编译并写入 plan 缓存，基准只测稳态生产路径。
-	if ok, _, _ := ev.evalSelector(rule, 0, 1, rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, frame, at); !ok {
+	if ok, _, _ := ev.evalSelector(rule.ID, 0, 1, "rsoc", "gt", 30, frame, at); !ok {
 		b.Fatal("literal path warmup failed")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ok, satisfied, _ := ev.evalSelector(rule, 0, 1, rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, frame, at)
+		ok, satisfied, _ := ev.evalSelector(rule.ID, 0, 1, "rsoc", "gt", 30, frame, at)
 		if !ok || !satisfied {
 			b.Fatalf("literal path broken: ok=%v satisfied=%v", ok, satisfied)
 		}
