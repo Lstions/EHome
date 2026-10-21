@@ -739,6 +739,7 @@ import { useRealtimeData } from '@/composables/useRealtimeData'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useControlAction } from '@/composables/useControlAction'
 import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
 import { deviceOperationApi } from '@/api/deviceOperation'
@@ -821,6 +822,19 @@ let mobileMql: MediaQueryList | null = null
 const onMobileChange = (e: MediaQueryListEvent) => { isMobileViewport.value = e.matches }
 
 const deviceName = computed(() => device.value?.name || DASH)
+
+/*
+ * 顶部框架面包屑末段显示**设备名称**（2026-10-21 用户要求：不要「边缘设备详情」）。
+ * 名称异步到达，watch 到就登记；卸载清空避免串页。
+ * 用 device?.name（不是 deviceName：后者在加载期是占位符 DASH，不能拿去当面包屑）。
+ */
+const breadcrumbStore = useBreadcrumbStore()
+watch(
+  () => device.value?.name,
+  (name) => breadcrumbStore.setLeafLabel(name || ''),
+  { immediate: true },
+)
+onBeforeUnmount(() => breadcrumbStore.clearLeafLabel())
 const deviceTypeLabel = computed(() => device.value?.device_type || DASH)
 const firmwareLabel = computed(() => device.value?.node?.firmware_version || DASH)
 const nodeLabel = computed(() => {

@@ -54,6 +54,7 @@
             height="260px"
             :yAxisMin="group.yAxisMin"
             :yAxisMax="group.yAxisMax"
+            :reserve-right-axes="maxReserveRightAxes"
           />
           <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
         </div>
@@ -385,6 +386,27 @@ const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
   }
 
   return groups.map(g => ({ ...g, ...adaptive(g.series) }))
+})
+
+/**
+ * 组内**最大右轴数**，供每个 LineChart 预留同样的右边距（2026-10-21）。
+ *
+ * 背景：LineChart 的右边距原本按本图自己的右轴数算，于是同一页里
+ * 「PV输入」1 根右轴（15%）与「输出」3 根右轴（29%）的绘图区宽度不同，
+ * 曲线的左右端点不在同一竖线 —— 用户看到的就是「图表长度参差不齐」。
+ *
+ * 这里按「组内不同单位数」估算轴数：与 LineChart 的分轴规则同口径（同单位且量级
+ * 可比才共轴），但**刻意取上限** —— 宁可多留几像素空白，也要保证同页严格对齐。
+ * 上限与 LineChart 的 MAX_Y_AXIS=4 对齐（4 根轴 ⇒ 最多 3 根右轴）。
+ */
+const LINE_CHART_MAX_Y_AXIS = 4
+const maxReserveRightAxes = computed(() => {
+  let max = 0
+  for (const group of chartSubGroups.value) {
+    const units = new Set(group.series.map(s => s.unit || ''))
+    max = Math.max(max, Math.min(units.size, LINE_CHART_MAX_Y_AXIS) - 1)
+  }
+  return Math.max(0, max)
 })
 
 /** 该分组是否确实有数据点（没有就不渲染 260px 图表，避免大片空白） */

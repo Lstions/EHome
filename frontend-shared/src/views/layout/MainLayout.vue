@@ -311,6 +311,7 @@ import { NAV_DESTINATIONS, NAV_GROUPS, assertGroupsCoverDestinations } from './m
 import { useUserStore } from '@/stores/user'
 import { withBase } from '@/utils/basePath'
 import { useUIStore } from '@/stores/ui'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useNodeStore } from '@/stores/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -328,6 +329,7 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const uiStore = useUIStore()
+const breadcrumbStore = useBreadcrumbStore()
 const wsStore = useWebSocketStore()
 const nodeStore = useNodeStore()
 const edgeDeviceStore = useEdgeDeviceStore()
@@ -832,6 +834,16 @@ const breadcrumbs = computed<Array<{ text: string; to: string }>>(() => {
         : (BREADCRUMB_SUB_LABELS[seg] ?? seg)
     crumbs.push({ text: label, to: acc })
   })
+  /*
+   * 末段优先用页面登记的名称（2026-10-21 用户要求）：
+   * 详情页加载完详情后调 breadcrumbStore.setLeafLabel('bms')，
+   * 顶栏就显示「/ 边缘设备管理 / bms」而不是抽象的「边缘设备详情」。
+   * 中间段仍用模块名 —— 它必须保持「可点回列表」的语义，不应变成实体名。
+   */
+  const leaf = breadcrumbStore.leafLabel
+  if (leaf && crumbs.length > 0) {
+    crumbs[crumbs.length - 1] = { ...crumbs[crumbs.length - 1], text: leaf }
+  }
   return crumbs
 })
 

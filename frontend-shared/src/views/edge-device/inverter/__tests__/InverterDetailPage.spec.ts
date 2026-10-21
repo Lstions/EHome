@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import type { Ref } from 'vue'
@@ -100,6 +101,9 @@ const globalOptions = {
 
 describe('InverterDetailPage', () => {
   beforeEach(() => {
+    // 2026-10-21：页面 setup 里要登记顶部面包屑末段（useBreadcrumbStore），
+    // 组件因此依赖 active pinia。这里给每个用例一份干净实例。
+    setActivePinia(createPinia())
     vi.clearAllMocks()
     hoisted.state.device.value = null
     hoisted.state.loading.value = false

@@ -60,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import DeviceHeader from './shared/DeviceHeader.vue'
 import DeviceInfoCard from './shared/DeviceInfoCard.vue'
@@ -70,6 +70,7 @@ import DeviceControlPanel from './shared/DeviceControlPanel.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 const router = useRouter()
 const route = useRoute()
@@ -96,6 +97,15 @@ const deviceNodeId = computed(() => device.value?.node?.id ?? device.value?.node
 
 // 标题优先展示设备名称，无名称时兜底设备类型
 const pageTitle = computed(() => device.value?.name || deviceTypeText.value || '边缘设备详情')
+
+/* 顶部框架面包屑末段显示设备名称（2026-10-21 用户要求），卸载清空避免串页 */
+const breadcrumbStore = useBreadcrumbStore()
+watch(
+  () => device.value?.name,
+  (name) => breadcrumbStore.setLeafLabel(name || ''),
+  { immediate: true },
+)
+onBeforeUnmount(() => breadcrumbStore.clearLeafLabel())
 
 /**
  * 页头标签（三设备页统一口径）：状态 + 类型。

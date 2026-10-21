@@ -46,6 +46,15 @@ const props = withDefaults(defineProps<{
   yAxisMax?: number
   showArea?: boolean
   realtime?: boolean
+  /**
+   * 为右侧 Y 轴**预留**的轴数（父级传入组内最大值）。
+   *
+   * 为什么需要它：右边距原本按本图自己的右轴数计算，于是同一页里
+   * 「1 根右轴」和「3 根右轴」的分组拿到的右边距不同（15% vs 29%），
+   * 绘图区右边界不一致 —— 用户看到的就是「图表长度参差不齐」（2026-10-21 反馈）。
+   * 父级（HistoryChartSection）算出组内最大右轴数传下来，组内所有图预留同样宽度。
+   */
+  reserveRightAxes?: number
 }>(), {
   data: () => [],
   title: '',
@@ -53,7 +62,8 @@ const props = withDefaults(defineProps<{
   smooth: true,
   series: () => [],
   showArea: true,
-  realtime: false
+  realtime: false,
+  reserveRightAxes: 0
 })
 
 const chartRef = ref<HTMLElement>()
@@ -98,6 +108,33 @@ const MAGNITUDE_SPLIT_RATIO = 10
  * 紧凑图（窄屏小图，高度 ≤220px）再收紧到 2 根：实测 319px 宽 + 4 根轴
  * （每根 offset 60px + containLabel）会把绘图区压到 20~30px，曲线完全读不出。
  * 合并后次要量纲改由 tooltip / 图例读数，绘图区宽度回到可用区间。 */
+/** 非紧凑图固定上边距（px）：给「图例一行 + Y 轴名一行」留位。
+ *  用常量而不是交给 ECharts 自动布局 —— 自动 top 会随「轴名个数 + 图例行数」变化，
+ *  实测同一屏里单轴分组 plot 高 139px、三轴分组只有 122px（用户反馈「图表长度参差不齐」）。
+ *  取值依据：图例 top:30、行高约 20px（底 ≈50），轴名画在绘图区顶端之上；56px 实测不压不切。 */
+const TOP_RESERVED_PX = 56
+/**
+ * 常规图左右下边距（px）。与 TOP_RESERVED_PX 同一目的：让每张图的 plot 区严格同宽同高。
+ *
+ * 取值依据（1440 实测）：
+ *   · LEFT 64：Y 轴刻度最宽约 5 字符（「300.0」≈40px）+ 轴名，留 64 不切标签；
+ *   · RIGHT 基准 24 + 每根右轴 104（offset 60 递进 + 刻度约 44）；
+ *   · BOTTOM 46：X 轴时间刻度单行（「MM/DD HH:mm」≈62×14px）画在轴下方。
+ * ⚠ 这几个常量只在 containLabel:false 下成立 —— 换回 true 时它们只是「最小边距」，
+ *   标签宽度仍会参与收缩，同页会重新变得参差不齐。
+ */
+const LEFT_RESERVED_PX = 64
+const RIGHT_BASE_PX = 24
+const RIGHT_AXIS_PX = 64
+/**
+ * 右边距占画布宽度的上限（避免窄桌面 769~1000px 被固定像素边距吃光绘图区）。
+ * 实测 769px 视口下画布只有约 453px：若仍按 24+3×64=216 预留，
+ * 绘图区只剩 173px；夹到 34% 后回到 235px，曲线可读。
+ * 上限只影响「能否放下全部右轴标签」，不影响同页对齐 —— 组内画布宽度相同，
+ * 夹取结果也相同。
+ */
+const RIGHT_MAX_RATIO = 0.34
+const BOTTOM_RESERVED_PX = 46
 const MAX_Y_AXIS = 4
 const MAX_Y_AXIS_COMPACT = 2
 
@@ -230,6 +267,17 @@ const buildSeries = (seriesToYAxis?: number[], palette = getThemePalette()) => {
  * Time-based xAxis config.
  * Uses type: 'time' so series with different timestamps align correctly.
  */
+/**
+ * 常规图右边距（px）：按预留的右轴数计算，再夹到画布宽度的 RIGHT_MAX_RATIO。
+ * 抽成函数是为了让「窄桌面夹取」的规则只有一处、可被单测直接调用。
+ */
+const normalRightMargin = (rightAxes: number): number => {
+  const raw = RIGHT_BASE_PX + rightAxes * RIGHT_AXIS_PX
+  const canvasWidth = chartRef.value?.clientWidth ?? 0
+  if (canvasWidth <= 0) return raw
+  return Math.round(Math.min(raw, Math.max(RIGHT_BASE_PX * 2, canvasWidth * RIGHT_MAX_RATIO)))
+}
+
 const getXAxisConfig = (theme = getChartTheme()) => {
   return {
     type: 'time' as const,
@@ -381,7 +429,45 @@ const applyChartOption = () => {
     // ⚠ 这里**不覆盖** grid.top：紧凑图的既有默认值（60px）被其它组件当常量用
     // （如 TempTrendCard 用 CSS 绝对定位画 45℃ 告警线，按 gridTop=60 换算 y 坐标）。
     // 本次只解决「轴名压图例」，不动 plot 区域几何。
-    grid: { left: '3%', right: multiSeries ? (rightAxisCount > 0 ? `${8 + rightAxisCount * 7}%` : '8%') : '4%', bottom: '3%', containLabel: true },
+    /*
+     * 绘图区几何必须**跨分组一致**（2026-10-21 用户反馈「图表长度参差不齐」）：
+     *
+     * ① 右边距：原本按本图自己的右轴数算（1 轴 15% / 3 轴 29%），于是同页不同分组的
+     *    绘图区右边界各不相同 —— 「输出」的 3 根右轴把图压窄 14%，曲线右端点与
+     *    「PV输入」不在同一竖线。改为 max(本图右轴数, 父级预留数)，组内预留同样宽度。
+     * ② 上边距：原本不设 top、交给 ECharts 自动布局，而自动 top 会随「轴名个数 +
+     *    图例行数」变化 —— 实测同屏单轴图 plot 高 139px、三轴图 122px。
+     *    改为显式常量 TOP_RESERVED_PX。
+     * ⚠ 只**条件展开**写入 top：显式 top:undefined 在 ECharts 6 会被当成「已提供」
+     *    参与布局（与下方 legend.bottom 同源陷阱）。
+     */
+    grid: isCompactChart.value
+      ? {
+        // 紧凑图（窄屏小图）沿用百分比 + containLabel：容器只有 150px 高，
+        // 必须让 ECharts 自己按标签宽度收放，写死像素反而会切标签。
+        left: '3%',
+        right: multiSeries ? (rightAxisCount > 0 ? `${8 + rightAxisCount * 7}%` : '8%') : '4%',
+        bottom: '3%',
+        containLabel: true,
+      }
+      : {
+        /*
+         * 常规图（桌面 260px）：**写死像素边距 + containLabel:false**，
+         * 让每张图的 plot rect 严格相等 —— 这是「图表长度参差不齐」的正解。
+         *
+         * 为什么不能继续用 containLabel:true：它会先按百分比起算，再按**本图标签实际宽度**
+         * 往里收，于是「300.0」（5 字符）和「54.9」的分组得到不同的左边距，
+         * 右轴 1 根与 3 根的分组得到不同的右边距 —— 实测同一屏 6 张图 plot 宽
+         * 615 / 688 / 555 / 628 / 723 / 622px，用户看到的就是右端点不在同一竖线。
+         * 写死边距后宽度只由 reserveRightAxes（组内最大值）决定 ⇒ 组内完全一致。
+         */
+        top: TOP_RESERVED_PX,
+        left: LEFT_RESERVED_PX,
+        // 每多一根右轴，ECharts 按 offset 60px 递进摆放，轴标签再占约 45px
+        right: normalRightMargin(Math.max(rightAxisCount, props.reserveRightAxes ?? 0)),
+        bottom: BOTTOM_RESERVED_PX,
+        containLabel: false,
+      },
     xAxis: getXAxisConfig(theme),
     yAxis: yAxisConfig,
     series: buildSeries(yAxisInfo?.seriesToYAxis, theme.palette)
@@ -413,7 +499,11 @@ const initChart = () => {
 // Watch for data changes
 // realtime mode: shallow watch (reference change only) — appendRealtimeData does chartSeries.value = [...]
 // normal mode: deep watch to detect nested data array mutations
-watch(() => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax], applyChartOption, { deep: true })
+watch(
+  () => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax, props.reserveRightAxes],
+  applyChartOption,
+  { deep: true },
+)
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
@@ -426,6 +516,29 @@ onUnmounted(() => {
 
 onMounted(() => {
   initChart()
+})
+
+/**
+ * 供测试/探针读取真实绘图区几何（2026-10-21）。
+ *
+ * 为什么需要：用户反馈「图表长度参差不齐」，而**容器高度是相等的（都 260px）**，
+ * 差异藏在 ECharts 内部的 grid（plot 区）上 —— 从 DOM 或截图都没法可靠测出来
+ * （曲线/面积填充会干扰像素扫描，实测不可用）。这里暴露真实 rect，
+ * 让对齐可以被**断言**，而不是靠肉眼比划。
+ */
+defineExpose({
+  getChartInstance: () => chartInstance,
+  getPlotRect: (): { x: number; y: number; width: number; height: number } | null => {
+    if (!chartInstance) return null
+    // ECharts 未把 getModel 放进公开类型，但运行时可用来读 grid 布局；
+    // 这里只在测试/探针路径使用，取不到就返回 null（不影响生产渲染）。
+    const internals = chartInstance as unknown as {
+      getModel?: () => { getComponent: (n: string) => { coordinateSystem?: { getRect?: () => { x: number; y: number; width: number; height: number } } } }
+    }
+    const grid = internals.getModel?.()?.getComponent('grid')
+    const rect = grid?.coordinateSystem?.getRect?.()
+    return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+  },
 })
 </script>
 

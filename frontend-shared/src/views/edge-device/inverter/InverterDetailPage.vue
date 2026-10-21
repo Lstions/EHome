@@ -158,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Sunrise, Lightning, Connection, HomeFilled } from '@element-plus/icons-vue'
 import DeviceHeader from '../shared/DeviceHeader.vue'
@@ -177,6 +177,7 @@ import MetricStatCard from '@/components/common/MetricStatCard.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { formatPower } from '@/utils/format'
+import { useBreadcrumbStore } from '@/stores/breadcrumb'
 
 const router = useRouter()
 const route = useRoute()
@@ -194,6 +195,18 @@ const {
 const handleRefresh = () => composableHandleRefresh(() => historyChartRef.value?.fetchHistoryData())
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : '逆变器')
+
+/*
+ * 顶部框架面包屑末段显示**设备名称**（2026-10-21 用户要求：不要「边缘设备详情」）。
+ * 名称是异步拿到的，所以 watch 到就登记；卸载时清空，避免串到别的页面。
+ */
+const breadcrumbStore = useBreadcrumbStore()
+watch(
+  () => device.value?.name,
+  (name) => breadcrumbStore.setLeafLabel(name || ''),
+  { immediate: true },
+)
+onBeforeUnmount(() => breadcrumbStore.clearLeafLabel())
 
 /**
  * 页头标签（与 BMS 页对齐）：状态 + 类型。
