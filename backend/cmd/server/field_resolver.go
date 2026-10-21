@@ -89,14 +89,19 @@ func setupFieldResolver(db *gorm.DB, cfg *config.Config, driverRegistry *drivers
 		logger.Warnf("[field-resolver] cold load failed, degrading to declarations-only: %v", err)
 	}
 
-	// 4) 启动校验（M1/§12.1 fail-closed 落点）：必须在声明/观测/meta/别名/派生全装载后。
-	//    注意：Validate 的死候选检测要求候选真的出现在声明或观测里；全新库（投影表空）
-	//    开启开关时可能因此拒绝启动 —— 这是设计要求的 fail-closed，不是缺陷。
+	// 4) 启动校验（v0.3 分级裁决）：
+	//    A 级（Validate）：只查配置自相矛盾（别名冲突/单位类不符/派生环/引用未知语义）；
+	//    enabled=true 时不通过 ⇒ **拒绝启动**（fail-closed）。
+	//    B 级（Warnings）：死候选/无候选/观测表为空等**数据依赖**问题 ⇒ 只 WARN + 指标，
+	//    绝不 Fatal（全新部署或动态族尚未上报时服务必须能起来）。
 	if err := registry.Validate(); err != nil {
 		if frCfg.Enabled {
 			return nil, fmt.Errorf("field_resolver config invalid (fail-closed): %w", err)
 		}
 		logger.Warnf("[field-resolver] config validation warnings (disabled mode, not fatal): %v", err)
+	}
+	for _, warning := range registry.Warnings() {
+		logger.Warnf("[field-resolver] %s", warning)
 	}
 
 	projector := &fieldResolverProjector{

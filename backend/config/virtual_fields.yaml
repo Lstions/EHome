@@ -1,0 +1,29 @@
+# 数据字段解析层 · 派生字段定义（唯一一份）
+#
+# 权威设计：docs/设计/数据字段解析层-方案-2026-10-21.md v0.3 §6.2。
+# 加载方：cmd/server → sensorfield.Registry.SetVirtuals → Validate()（环/深度/参数个数/未知语义 ⇒ 启动失败）。
+#
+# 统一不变量（§6.2）：任何输入缺失 ⇒ 整体 unbound（不 fallback 0）；输出非有限 ⇒ unbound。
+# 命名规范：派生名必须带物理限定（dc_power 而非 power）。
+#
+# ⚠ 与方案 §6.2 示例的唯一偏差（已在交付报告登记）：
+#   示例写 dc_power = product(@total_voltage, @current)，但 v0.3 §6.1 已把 current 拆分为
+#   charge_current / discharge_current / net_current，**不存在 @current 语义**；desc 若照抄
+#   §6.2 会在 SetVirtuals/Validate 处以 ErrUnknownSemantic **拒绝启动**。
+#   这里用 @net_current（JBD 带符号电流，充正放负）作为等价输入，语义与 §6.1 的勘误一致。
+#   若后续需要覆盖"Techfine 充电/放电分离"的功率，应新增独立派生（如 dc_power_charge），
+#   而不是恢复一个会掩盖符号歧义的 @current。
+
+virtual:
+  dc_power:
+    fn: product
+    args: ["@total_voltage", "@net_current"]
+  max_temperature:
+    fn: max_of
+    args: ["temperature_*"]
+  cell_delta:
+    fn: diff
+    args: ["cell_voltage_max", "cell_voltage_min"]
+  soc_gap:
+    fn: abs_diff
+    args: ["@soc", "bms_soc"]

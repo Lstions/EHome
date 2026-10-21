@@ -171,7 +171,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			registerDataSourceUnavailable(v1.Group("/data-sources"))
 			registerFailoverLogUnavailable(v1)
 		} else {
-			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc)
+			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc, db)
 			registerFailoverLogRoutes(v1, datasourceSvc)
 		}
 

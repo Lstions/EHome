@@ -6,12 +6,62 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/config"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
 	"ehome/backend/testutil"
 )
 
 // ==================== 字段解析层装配/投影测试 ====================
+
+// TestSetupFieldResolver_ShippedConfigLoads 用**仓库里随镜像分发的真实 YAML** 装配一次，
+// 证明 enabled=true 时默认配置能通过 Validate A 级（别名冲突/单位类/派生引用）。
+//
+// 空驱动注册表 ⇒ 所有别名候选都是"死候选"，走 Warnings() B 级（不阻塞启动）——
+// 这正是全新部署/动态族未上报时的预期行为。
+func TestSetupFieldResolver_ShippedConfigLoads(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	cfg := &config.Config{FieldResolver: config.FieldResolverConfig{
+		Enabled: true,
+		// go test 的 CWD 是包目录 backend/cmd/server；仓库配置文件在 backend/config/。
+		AliasesFile: filepath.Join("..", "..", "config", "field_aliases.yaml"),
+		VirtualFile: filepath.Join("..", "..", "config", "virtual_fields.yaml"),
+	}}
+	rt, err := setupFieldResolver(db, cfg, drivers.NewRegistry())
+	if err != nil {
+		t.Fatalf("shipped config must pass startup validation (enabled=true): %v", err)
+	}
+	if rt == nil || rt.registry == nil {
+		t.Fatalf("runtime/registry is nil")
+	}
+	if !rt.registry.Enabled() {
+		t.Fatalf("registry.Enabled() = false want true")
+	}
+	if len(rt.registry.Aliases()) != 8 {
+		t.Fatalf("aliases = %d want 8 (v0.3 §6.1)", len(rt.registry.Aliases()))
+	}
+	if len(rt.registry.Virtuals()) != 4 {
+		t.Fatalf("virtuals = %d want 4 (v0.3 §6.2)", len(rt.registry.Virtuals()))
+	}
+	// 空注册表 ⇒ 应有 Warnings（死候选），但不得因此拒绝启动。
+	if len(rt.registry.Warnings()) == 0 {
+		t.Fatalf("expected B-level warnings with empty driver registry")
+	}
+}
+
+// TestSetupFieldResolver_MissingFileFailsClosed enabled=true 但配置文件缺失 ⇒ 拒绝启动。
+func TestSetupFieldResolver_MissingFileFailsClosed(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	cfg := &config.Config{FieldResolver: config.FieldResolverConfig{
+		Enabled:     true,
+		AliasesFile: filepath.Join("..", "..", "config", "does_not_exist_aliases.yaml"),
+		VirtualFile: filepath.Join("..", "..", "config", "virtual_fields.yaml"),
+	}}
+	if _, err := setupFieldResolver(db, cfg, drivers.NewRegistry()); err == nil {
+		t.Fatalf("missing aliases file with enabled=true must fail closed")
+	}
+}
 
 // TestFieldObsFlushSink_UpsertSemantics 覆盖方案 §4.2 的增量 UPSERT 语义：
 // samples 累加（不是覆盖）、first_seen 取 min、last_seen 取 max、空 unit 不覆盖。

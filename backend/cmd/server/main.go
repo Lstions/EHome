@@ -250,6 +250,9 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Field resolver startup failed (fail-closed): %v", err)
 	}
+	// 保存期 selector 校验注入（precheck / alert / automation / data_sources 的校验路径共用）：
+	// 经 api 包窄接口注入，不影响未接线时的旧行为（nil = 不校验）。
+	api.SetFieldSelectorResolver(fieldResolver.registry)
 	fieldResolverCtx, fieldResolverStop := context.WithCancel(context.Background())
 	defer fieldResolverStop()
 	go fieldResolver.projector.Run(fieldResolverCtx)
@@ -391,6 +394,12 @@ func main() {
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)
+	// F4 复核按 selector 取最新值（设计 §9.2#4 / AU-12）：
+	//   literal  → 按 (设备, 物理名) 精确取（新增函数，不改旧签名）；
+	//   family/@semantic/virtual → 最新一帧多槽值（复核输入需要整帧）。
+	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	automationPlanner.SetLatestValuesFn(api.LatestValues)
+	automationPlanner.SetPlanProvider(fieldResolver.registry)
 	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
 	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物；
 	// 纯字面量走快速路径（与历史 matchField 逐字节等价）。
