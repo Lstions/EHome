@@ -56,7 +56,10 @@ type Verdict struct {
 	OK        bool    // false = unbound（不触发，Reason 说明原因）
 	Satisfied bool    // OK=true 时：比较结论
 	Value     float64 // 参与比较的值（any/all 时为第一个有效成员值；reducer 为归约值）
-	Reason    string  // OK=false 时的原因码（有界字符串，可直接做指标 label）
+	Reason    string  // OK=false 或 Degraded=true 时的原因码（有界字符串，可直接做指标 label）
+	// Degraded 表示 min/max 在“本帧缺已知成员”时仍按 F_now 求值（v0.3 评审裁决：
+	// 极值保护不能因缺一个探头就永不触发）。此时 OK=true、Satisfied 正常、Reason 给出降级原因。
+	Degraded bool
 }
 
 // PredicatePlan 是可做比较符求值的编译产物。所有内置 Plan 都实现它；
@@ -215,8 +218,26 @@ func scanMembers(prefix string, known []string, knownSet map[string]struct{}, no
 	return s
 }
 
-// familyUnboundReason 把一次 scan 的“为什么不能归约”翻译成有界原因码。
-// missingByNonFinite 为 true 表示缺失全部由“出现但非有限”造成（审计可分辨）。
+// familyDegradedReason 返回“极值聚合（min/max）允许降级求值”的降级原因。
+//
+// v0.3 评审裁决（方向性）：缺员时 all/avg/sum 一律 unbound；但 min/max 仍按 F_now
+// 求值 + Degraded=true + Reason 标 partial_frame/non_finite —— 极值型保护规则
+// 不能因为少一个探头就永不触发。
+func familyDegradedReason(s familyScan) string {
+	if s.missing <= 0 {
+		return ""
+	}
+	if s.nonFiniteKnown > 0 && s.nonFiniteKnown >= s.missing {
+		return reasonNonFinite
+	}
+	return reasonPartialFrame
+}
+
+// familyUnboundReason 把一次 scan 的“为什么不能求值”翻译成有界原因码。
+//
+// 口径（v0.3 评审修订）：
+//   - 空集 ⇒ 六个聚合一律 unbound（含 any/all/min/max；sum=0 会反向触发）
+//   - 缺员 ⇒ all/avg/sum unbound；min/max 走降级求值（见 familyDegradedReason）
 func familyUnboundReason(s familyScan) string {
 	if s.missing > 0 {
 		if s.nonFiniteKnown > 0 && s.nonFiniteKnown >= s.missing {
@@ -228,6 +249,19 @@ func familyUnboundReason(s familyScan) string {
 		return reasonEmptyFrame
 	}
 	return ""
+}
+
+// minMaxDegraded 求 min/max：空集 unbound；缺员降级求值并返回降级原因。
+func minMaxDegraded(agg Aggregate, s familyScan) (value float64, degraded bool, degradeReason, unboundReason string) {
+	if s.count == 0 {
+		return 0, false, "", familyUnboundReason(s)
+	}
+	degradeReason = familyDegradedReason(s)
+	v, reason := reduceFamily(agg, s)
+	if reason != "" {
+		return 0, false, "", reason
+	}
+	return v, degradeReason != "", degradeReason, ""
 }
 
 // anyUnboundReason 是 any 的空集原因（any 不受缺员影响，只受“没有有效值”影响）。
@@ -346,6 +380,13 @@ func (p *familyPlan) Eval(frame []Reading) EvalResult {
 		return EvalResult{Reason: reasonAggregateNeedsComparator}
 	}
 	s := p.scan(frame)
+	if p.agg == AggMin || p.agg == AggMax {
+		v, _, _, unbound := minMaxDegraded(p.agg, s)
+		if unbound != "" {
+			return EvalResult{Reason: unbound}
+		}
+		return EvalResult{Value: v, OK: true}
+	}
 	if reason := familyUnboundReason(s); reason != "" {
 		return EvalResult{Reason: reason}
 	}
@@ -386,6 +427,13 @@ func (p *familyPlan) EvalPredicate(frame []Reading, op CmpOp, threshold float64)
 		}
 		return Verdict{OK: true, Satisfied: true, Value: s.first}
 	default:
+		if p.agg == AggMin || p.agg == AggMax {
+			v, degraded, degradeReason, unbound := minMaxDegraded(p.agg, s)
+			if unbound != "" {
+				return Verdict{Reason: unbound}
+			}
+			return Verdict{OK: true, Satisfied: Compare(op, v, threshold), Value: v, Degraded: degraded, Reason: degradeReason}
+		}
 		if reason := familyUnboundReason(s); reason != "" {
 			return Verdict{Reason: reason}
 		}

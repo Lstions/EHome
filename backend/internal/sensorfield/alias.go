@@ -27,6 +27,15 @@ const (
 	unitClassCount       unitClass = "count"
 	unitClassTime        unitClass = "time"
 	unitClassSignal      unitClass = "signal"
+
+	// 数据语义规范 §3.1 其余受控白名单类别（用于别名单位类校验）。
+	unitClassIlluminance   unitClass = "illuminance"
+	unitClassLength        unitClass = "length"
+	unitClassPressure      unitClass = "pressure"
+	unitClassConcentration unitClass = "concentration"
+	unitClassSpeed         unitClass = "speed"
+	unitClassAngle         unitClass = "angle"
+	unitClassBitrate       unitClass = "bitrate"
 )
 
 // normalizeUnit 归一单位串（不去符号，只 trim + 小写）。
@@ -41,7 +50,7 @@ func classOfUnit(u string) unitClass {
 		return unitClassVoltage
 	case "a", "ma", "ka", "amp", "ampere", "current", "安":
 		return unitClassCurrent
-	case "w", "kw", "mw", "watt", "power", "功率":
+	case "w", "kw", "mw", "va", "kva", "watt", "power", "功率":
 		return unitClassPower
 	case "wh", "kwh", "mwh", "energy", "电能":
 		return unitClassEnergy
@@ -51,14 +60,28 @@ func classOfUnit(u string) unitClass {
 		return unitClassTemperature
 	case "hz", "khz", "mhz", "frequency", "频率":
 		return unitClassFrequency
-	case "ω", "ohm", "kω", "ωΩ", "resistance", "电阻":
+	case "ω", "ohm", "kω", "mω", "resistance", "电阻":
 		return unitClassResistance
 	case "次", "串", "个", "pcs", "count", "cycles":
 		return unitClassCount
-	case "s", "sec", "secs", "second", "ms", "min", "h", "hour", "time", "时间":
+	case "s", "sec", "secs", "second", "ms", "min", "h", "hour", "day", "天", "time", "时间":
 		return unitClassTime
 	case "db", "dbm", "signal":
 		return unitClassSignal
+	case "lx", "lux", "illuminance", "照度":
+		return unitClassIlluminance
+	case "mm", "m", "cm", "km", "length", "长度":
+		return unitClassLength
+	case "pa", "hpa", "kpa", "pressure", "气压":
+		return unitClassPressure
+	case "ppm", "ppb", "concentration", "浓度":
+		return unitClassConcentration
+	case "m/s", "km/h", "speed", "速度":
+		return unitClassSpeed
+	case "°", "deg", "angle", "角度":
+		return unitClassAngle
+	case "bit/s", "bps", "bitrate":
+		return unitClassBitrate
 	}
 	return unitClassUnknown
 }
@@ -68,7 +91,9 @@ func isKnownUnitClass(c unitClass) bool {
 	switch c {
 	case unitClassPercent, unitClassVoltage, unitClassCurrent, unitClassPower,
 		unitClassEnergy, unitClassCharge, unitClassTemperature, unitClassFrequency,
-		unitClassResistance, unitClassCount, unitClassTime, unitClassSignal:
+		unitClassResistance, unitClassCount, unitClassTime, unitClassSignal,
+		unitClassIlluminance, unitClassLength, unitClassPressure, unitClassConcentration,
+		unitClassSpeed, unitClassAngle, unitClassBitrate:
 		return true
 	}
 	return false

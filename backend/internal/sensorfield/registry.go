@@ -344,21 +344,22 @@ func (r *Registry) SetVirtuals(defs []VirtualDef) error {
 	return nil
 }
 
-// Validate 复核配置整体自洽（方案 §6.1/§6.2/§12.1 的启动期 fail-closed 落点）。
+// Validate 复核“配置内部自洽”（硬错误，main 应 Fatal；Lead 裁决 A 级）。
 //
-// 必须在“声明/观测/元数据/别名/派生全部装载之后”调用：
-//  1. 别名表重建（冲突 + 单位类）
-//  2. 死候选检测（评审 H1）：候选必须出现在**任何**声明或观测里
-//  3. 派生定义重建（参数个数/类型/环/深度 + @semantic 交叉引用）
+// 必须在“声明/观测/元数据/别名/派生全部装载之后”调用。只查与运行数据无关的
+// 配置自相矛盾：
+//  1. 别名表非法（同一物理名多语义且未 allow_overlap、单位类不符、候选为空/重复等）
+//  2. 派生定义非法（参数个数/类型、环、深度、引用不存在的 @semantic）
 //
-// 与 SetAliases/SetVirtuals 的区别：那两个方法只做单表自洽校验（可能因装载顺序
-// 看不到对方），Validate 做跨表校验，是启动期唯一权威门禁。
+// **不**把“候选当前没有数据来源 / 观测表为空”判为硬错误——那是数据依赖的可用性
+// 问题（全新部署、动态族未上报、多厂商机队不可能同时有全部候选），由 Warnings()
+// 输出（B 级：只记日志 + 指标，不阻塞启动）。这是评审 H1 的落地方式：
+// 死候选可被观测到，但不因“设备还没上报”打不开服务。
 func (r *Registry) Validate() error {
 	r.mu.Lock()
 	rules := cloneAliasRules(r.aliasRules)
 	defs := cloneVirtualDefs(r.virtualDefs)
 	declared := r.unitClassesLocked()
-	knownNames := r.knownNamesLocked()
 	curAliases := r.aliases
 	r.mu.Unlock()
 
@@ -366,8 +367,6 @@ func (r *Registry) Validate() error {
 	table, err := buildAliasTable(rules, declared)
 	if err != nil {
 		errs = append(errs, err)
-	} else if dead := table.deadCandidates(knownNames); len(dead) > 0 {
-		errs = append(errs, fmt.Errorf("%w: dead alias candidates not produced by any declaration/observation: %v", ErrAliasConflict, dead))
 	}
 	aliasForVirtual := table
 	if aliasForVirtual == nil {
@@ -380,6 +379,59 @@ func (r *Registry) Validate() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// Warnings 返回“数据依赖的可用性提示”（B 级：main 记 WARN + 指标，绝不 Fatal）。
+//
+// 口径（Lead 裁决）：
+//  1. 别名候选当前不在 声明 ∪ 观测 中（死候选；动态族未上报；全新部署）
+//  2. 语义名当前没有任何可用候选
+//  3. 观测表为空（冷启动首轮）
+//
+// 副作用：每个死候选把 ehome_field_alias_dead_candidate{semantic,candidate} 置 1
+// （配置变更需重启，故不会有跨配置的陈旧 series）。
+func (r *Registry) Warnings() []string {
+	r.mu.Lock()
+	rules := cloneAliasRules(r.aliasRules)
+	declared := r.unitClassesLocked()
+	knownNames := r.knownNamesLocked()
+	hasObservations := false
+	for _, byName := range r.obs {
+		if len(byName) > 0 {
+			hasObservations = true
+			break
+		}
+	}
+	r.mu.Unlock()
+
+	table, err := buildAliasTable(rules, declared)
+	if err != nil {
+		return []string{fmt.Sprintf("alias config invalid: %v", err)}
+	}
+	var warns []string
+	for _, cand := range table.deadCandidates(knownNames) {
+		semantics := table.semanticsOf(cand)
+		for _, sem := range semantics {
+			FieldAliasDeadCandidate.WithLabelValues(sem, cand).Set(1)
+		}
+		warns = append(warns, fmt.Sprintf("dead alias candidate %q (semantic %s): not produced by any declaration/observation", cand, strings.Join(semantics, ",")))
+	}
+	for _, sem := range table.order {
+		usable := false
+		for _, cand := range table.bySemantic[sem].candidates {
+			if _, ok := knownNames[cand]; ok {
+				usable = true
+				break
+			}
+		}
+		if !usable {
+			warns = append(warns, fmt.Sprintf("semantic %q has no candidate produced by declarations/observations", sem))
+		}
+	}
+	if !hasObservations {
+		warns = append(warns, "no observations loaded (cold start); family expansion stays empty until the first projection flush")
+	}
+	return warns
 }
 
 // unitClassesLocked 汇总已知单位类（声明 + 观测 + 元数据），供别名单位类校验。

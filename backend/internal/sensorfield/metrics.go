@@ -44,6 +44,12 @@ var (
 		Help: "Virtual field evaluations that produced unbound by reason",
 	}, []string{"name", "reason"})
 
+	// FieldAliasDeadCandidate 死候选标记（Warnings() 置 1；B 级可观测性，不阻塞启动）。
+	FieldAliasDeadCandidate = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ehome_field_alias_dead_candidate",
+		Help: "Alias candidates not produced by any declaration/observation (set by Warnings)",
+	}, []string{"semantic", "candidate"})
+
 	// FieldObservedTotal 观测计数（按设备类型；Flush 批次内按字段条数累加）。
 	FieldObservedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_field_observed_total",

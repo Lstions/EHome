@@ -3,6 +3,7 @@ package sensorfield
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"ehome/backend/pkg/logger"
 )
@@ -35,12 +36,29 @@ type semanticBinding struct {
 	nonFirst        bool     // 命中的不是首候选
 }
 
-// isNumericFieldType 报告 value_type 是否参与数值比较。
+// nonNumericUnit 是“单位列里的值类型伪单位”兜底集合（迁移期）。
 //
-// 口径（Lead 评审修正 + types.go 注释）：只有显式 number 与未知类型参与比较；
-// 未知类型按 number 处理（兼容存量：观测投影/声明里大量字段没有 value_type）。
-func isNumericFieldType(t ValueType) bool {
-	return t == TypeUnknown || t == TypeNumber
+// 依据 docs/设计/数据语义规范.md §3.2/§4：ack/raw/state/bitmask 不是单位，
+// 现网驱动仍有约 27 处技术债；obs 投影表暂无 value_type 列，故解析层兜底：
+// unit 命中这四个值 ⇒ 视为非数值（数值聚合中按“本帧缺失”处理，fail-closed）。
+func nonNumericUnit(unit string) bool {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "ack", "raw", "state", "bitmask":
+		return true
+	}
+	return false
+}
+
+// fieldNumeric 报告字段是否参与数值比较。
+//
+// 口径（Lead 评审修正 + 数据语义规范 §4）：显式 value_type 优先（只有 number 参与，
+// boolean/enum/bitmask/string/raw 视为缺失）；未知类型（兼容存量）再按伪单位兜底，
+// 仍无法判定则按 number 处理。
+func fieldNumeric(f Field) bool {
+	if f.ValueType != TypeUnknown {
+		return f.ValueType == TypeNumber
+	}
+	return !nonNumericUnit(f.Unit)
 }
 
 // knownSet 返回该设备的已知集合（声明 ∪ 观测，meta 做单位/类型丰富）。
@@ -181,15 +199,15 @@ func (s *snapshot) knownField(deviceID uint, name string) (Field, bool) {
 	return out, true
 }
 
-// fieldType 返回字段的已知 value_type（meta 优先；未知返回 TypeUnknown）。
-func (s *snapshot) fieldType(deviceID uint, name string) ValueType {
-	if f, ok := s.knownField(deviceID, name); ok && f.ValueType != TypeUnknown {
-		return f.ValueType
+// fieldNumeric 返回字段是否参与数值比较（meta 优先；未知字段按 number 处理）。
+func (s *snapshot) fieldNumeric(deviceID uint, name string) bool {
+	if f, ok := s.knownField(deviceID, name); ok {
+		return fieldNumeric(f)
 	}
 	if mf, ok := s.meta[name]; ok {
-		return mf.ValueType
+		return fieldNumeric(mf)
 	}
-	return TypeUnknown
+	return true
 }
 
 // expandFamilyNames 从已知集合展开族成员（严格 ^prefix_[0-9]+$）。
@@ -324,7 +342,7 @@ func (r *Registry) compileWithSnapshot(snap *snapshot, deviceID uint, ps parsedS
 			selector: ps.raw,
 			epoch:    snap.epoch,
 			literal:  ps.literal,
-			numeric:  isNumericFieldType(snap.fieldType(deviceID, ps.literal)),
+			numeric:  snap.fieldNumeric(deviceID, ps.literal),
 		}
 		return p, nil
 	case KindFamily:
@@ -343,7 +361,7 @@ func (r *Registry) compileWithSnapshot(snap *snapshot, deviceID uint, ps parsedS
 		}
 		for _, name := range names {
 			p.knownSet[name] = struct{}{}
-			if !isNumericFieldType(known[name].ValueType) {
+			if !fieldNumeric(known[name]) {
 				p.nonNumeric[name] = struct{}{}
 			}
 		}
@@ -362,7 +380,7 @@ func (r *Registry) compileWithSnapshot(snap *snapshot, deviceID uint, ps parsedS
 			enabled:  &r.enabled,
 		}
 		if b.physical != "" {
-			p.numeric = isNumericFieldType(snap.fieldType(deviceID, b.physical))
+			p.numeric = snap.fieldNumeric(deviceID, b.physical)
 		}
 		return p, nil
 	case KindVirtual:
@@ -403,7 +421,7 @@ func (r *Registry) bindVirtual(snap *snapshot, deviceID uint, node *virtualNode)
 		}
 		for _, name := range names {
 			f.knownSet[name] = struct{}{}
-			if !isNumericFieldType(known[name].ValueType) {
+			if !fieldNumeric(known[name]) {
 				f.nonNumeric[name] = struct{}{}
 			}
 		}
@@ -416,7 +434,7 @@ func (r *Registry) bindVirtual(snap *snapshot, deviceID uint, node *virtualNode)
 		case KindLiteral:
 			ba.literalName = arg.literal
 			if f, ok := known[arg.literal]; ok {
-				ba.numeric = isNumericFieldType(f.ValueType)
+				ba.numeric = fieldNumeric(f)
 			}
 		case KindSemantic:
 			bnd, err := r.bindSemantic(snap, deviceID, arg.semantic)
@@ -426,7 +444,7 @@ func (r *Registry) bindVirtual(snap *snapshot, deviceID uint, node *virtualNode)
 			ba.physical = bnd.physical
 			ba.bound = bnd.physical != ""
 			if bnd.physical != "" {
-				ba.numeric = isNumericFieldType(snap.fieldType(deviceID, bnd.physical))
+				ba.numeric = snap.fieldNumeric(deviceID, bnd.physical)
 			}
 		case KindVirtual:
 			nested, err := r.bindVirtual(snap, deviceID, snap.virtuals[arg.virtual])
