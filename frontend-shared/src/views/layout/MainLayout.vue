@@ -1217,6 +1217,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
+  /*
+    ⚠ 2026-10-21 用户反馈「宽度达到一定条件下顶部组件显示异常」的第二处（第一处是设备页头）：
+    应用顶栏在 769~900 之间会被挤爆 —— 实测面包屑「边缘设备管理 / inter」被压成
+    2 行(900) -> 3 行(860) -> 4 行(820) -> **6 行/114px**(800~769)，文字变成竖排并溢出 60px 高顶栏。
+    根因：left / center / right 三段都按内容取宽、没有一处可收缩 ——
+    center 的输入框有 min-content，right 的图标组固定，最后只能压 left。
+    这里给 left 显式 min-width:0（允许收缩到 0）+ flex-shrink:1，配合下方面包屑 nowrap，
+    压缩表现为**省略号**而不是换行成竖排。
+  */
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .collapse-btn {
@@ -1243,8 +1254,43 @@ onUnmounted(() => {
   }
 }
 
+/*
+  ⚠ .breadcrumb 就是 el-breadcrumb 的根元素（模板写成 <el-breadcrumb class="breadcrumb">），
+  所以「不换行」必须直接写在 .breadcrumb 上，不能再写成 .breadcrumb :deep(.el-breadcrumb)。
+  实测（2026-10-21）：只写后代选择器时 769~900 下面包屑仍折行（「边缘设备管理 /」一行、「inter」一行），
+  因为 EP 的 .el-breadcrumb 本身是 flex 且允许换行。
+*/
 .breadcrumb {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  white-space: nowrap;
   font-size: 14px;
+  /* 放不下时省略而不是换行（实测数据见 .header-left 注释） */
+  min-width: 0;
+  overflow: hidden;
+}
+
+.breadcrumb :deep(.el-breadcrumb__item) {
+  /* 前面各级 crumb 固定宽度（层级信息不该被截断） */
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* 只有**最后一级**可收缩并出省略号：放不下时表现为「边缘设备管理 / int…」，
+   而不是把整块裁掉（裁掉会看起来像文字压到右侧「在线」徽标上，实测 769 即如此）。 */
+.breadcrumb :deep(.el-breadcrumb__item:last-child) {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.breadcrumb :deep(.el-breadcrumb__inner) {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
 }
 
 :deep(.el-breadcrumb__item) {
@@ -1253,7 +1299,9 @@ onUnmounted(() => {
 }
 
 .header-center {
-  flex: 1;
+  flex: 1 1 auto;
+  /* 允许收缩（默认 min-width:auto 会被输入框的 min-content 顶住） */
+  min-width: 0;
   max-width: 480px;
   margin: 0 24px;
 }
@@ -1292,12 +1340,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
+  /* 图标组是固定内容：不参与收缩（否则「在线」徽标会被压成两行小圆点）。
+     需要腾空间时收缩 header-left 的面包屑（有省略号），见 .breadcrumb 注释。 */
+  flex: 0 0 auto;
 }
 
 .ws-status {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 6px 12px;
   background: var(--el-color-danger-light-9);
   border-radius: 20px;
@@ -1668,8 +1721,10 @@ onUnmounted(() => {
     display: none;
   }
   
-  .global-search {
-    max-width: 240px;
+  /* 769~1024 顶栏放不下「面包屑 + 搜索框 + 图标组」，隐藏搜索框（Ctrl+K 快捷键仍可用）。
+     实测 900 宽：隐藏前 left 只剩 197px（面包屑折 2 行），隐藏后余量足够单行。 */
+  .header-center {
+    display: none;
   }
 }
 

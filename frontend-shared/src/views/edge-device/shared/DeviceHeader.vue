@@ -404,6 +404,23 @@ onUnmounted(() => {
 }
 
 /*
+  窄桌面（769~900）：操作组只差 30~50px 就能排成一行，却因为默认 12px 间距 + 按钮内距
+  折成两行（实测 769 页头 163px、加 60px 应用顶栏占屏 23%）。
+  这里把间距收到 8px、按钮左右内距收到 10px：5 个操作 454px + 4×8 = 486px，
+  769 视口下操作行可用宽 521px ⇒ 单行放下，页头回到 ≈119px。
+  （<769 走上面「确定性两行」的移动布局，不受影响。）
+*/
+@media (min-width: 769px) and (max-width: 900px) {
+  .device-header { padding: 12px 16px; }
+  .dh-actions { gap: 8px; }
+  .dh-actions :deep(.el-button) {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .dh-conn-tag { padding: 0 6px; }
+}
+
+/*
   超窄屏（≤360px，如 320 的 iPhone SE / 老安卓）：操作行只有 240px 内容宽，
   「实时连接」文字版标签(86px) + 刷新(113px) + ⋯(44px) + 间距(16px) = 259px ⇒ 溢出 19px，
   ⋯ 右边界越出页头盒 3px（2026-10-21 独立复核实测）。
