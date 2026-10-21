@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/automation"
@@ -13,6 +15,7 @@ import (
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sensorfield"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -152,6 +155,9 @@ func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automa
 	{
 		rules.GET("", listAutomationRules(db))
 		rules.POST("", createAutomationRule(db, evaluator, catalog))
+		// 保存前风险预检（修 AU-06）：契约 = frontend-shared/src/api/automation.ts 的
+		// PrecheckResponse{risk_actions,blocking_errors,warnings}。只读、无副作用。
+		rules.POST("/precheck", precheckAutomationRule(db, catalog))
 		rules.GET("/:id", getAutomationRule(db))
 		rules.PUT("/:id", updateAutomationRule(db, evaluator, catalog))
 		rules.DELETE("/:id", deleteAutomationRule(db, evaluator))
@@ -1117,4 +1123,243 @@ func sunNodeForDevices(db *gorm.DB, triggerEdgeDeviceID *uint, actionDeviceID *u
 		return nil
 	}
 	return &node
+}
+
+// ── 字段解析层（sensorfield）控制面接入 + 保存前预检（AU-06）──────────────────
+
+// selectorResolver 是解析层控制面在 api 包的最小依赖（生产实现：*sensorfield.Registry）。
+//
+// 经 SetFieldSelectorResolver 注入（main.go 构造 Registry 后接线），避免 api 包在
+// 构造期强依赖具体 Registry；nil = 关闭保存期 selector 校验（兼容未接线/单测）。
+type selectorResolver interface {
+	Resolve(deviceID uint, selector string) (sensorfield.Resolved, error)
+	Enabled() bool
+}
+
+var (
+	fieldSelectorMu       sync.RWMutex
+	fieldSelectorResolver selectorResolver
+)
+
+// SetFieldSelectorResolver 注入字段解析层控制面（nil = 仅语法不校验，保持旧行为）。
+func SetFieldSelectorResolver(r selectorResolver) {
+	fieldSelectorMu.Lock()
+	fieldSelectorResolver = r
+	fieldSelectorMu.Unlock()
+}
+
+func currentSelectorResolver() selectorResolver {
+	fieldSelectorMu.RLock()
+	defer fieldSelectorMu.RUnlock()
+	return fieldSelectorResolver
+}
+
+// precheckRiskAction 是 precheck 响应里的单个风险动作。
+// 字段与 frontend-shared/src/api/automation.ts 的 PrecheckRiskAction 对齐；
+// risk_reason / params_summary 后端未实现（前端已明确"不得编造危险说明"），故省略。
+type precheckRiskAction struct {
+	Seq              int    `json:"seq"`
+	ActionID         string `json:"action_id"`
+	ActionDeviceID   uint   `json:"action_device_id"`
+	ActionDeviceName string `json:"action_device_name,omitempty"`
+	RiskLevel        string `json:"risk_level,omitempty"`
+	RiskLabel        string `json:"risk_label,omitempty"`
+}
+
+// automationPrecheckResponse 是三键契约（前端 automation.ts:176-186）。
+type automationPrecheckResponse struct {
+	RiskActions    []precheckRiskAction `json:"risk_actions"`
+	BlockingErrors []string             `json:"blocking_errors"`
+	Warnings       []string             `json:"warnings"`
+}
+
+// POST /api/v1/automation-rules/precheck
+//
+// 修 AU-06：前端早已调用该端点（404 → 降级），后端缺失。契约必须与前端
+// PrecheckResponse 三键一致：
+//   - risk_actions：**语义与今天的风险清单完全一致**（Catalog 的
+//     RiskLevel.RequiresConfirmation 单一事实源；前端据此弹风险确认框，
+//     不得因新增 warnings 而跳过确认——评审 B9 的安全退化点）；
+//   - blocking_errors：与保存端点相同的硬校验（V1-V7 中除 V7 授权判定外的全部），
+//     另加 selector 语法/未知语义错误；
+//   - warnings：selector 语法合法但当前解析不到（unbound，不阻塞保存）。
+//
+// 只读、无副作用：不写规则/动作/事件，不触发 Invalidate。
+func precheckAutomationRule(db *gorm.DB, catalog automationCatalogQuerier) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req createAutomationRuleRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, 400, "参数错误: "+err.Error())
+			return
+		}
+		scalarProvided := req.ActionType != "" || req.ActionID != "" || req.ActionParamsJSON != "" ||
+			req.ActionLevel != "" || req.ActionDeviceID != nil
+		actions := resolveRuleActions(req.Actions, nil, req.ActionType, derefUint(req.ActionDeviceID),
+			req.ActionID, req.ActionParamsJSON, req.ActionLevel, scalarProvided)
+
+		resp := automationPrecheckResponse{
+			RiskActions:    make([]precheckRiskAction, 0),
+			BlockingErrors: make([]string, 0),
+			Warnings:       make([]string, 0),
+		}
+
+		// ── 1) 与保存端点同源的硬校验（逐条收集，不 early-return）──
+		if msg := validateActionSequence(actions); msg != "" {
+			resp.BlockingErrors = append(resp.BlockingErrors, msg)
+		}
+		for _, a := range actions {
+			if msg := validateActionFields(a); msg != "" {
+				resp.BlockingErrors = append(resp.BlockingErrors, msg)
+			}
+		}
+		first := models.AutomationRuleAction{}
+		if len(actions) > 0 {
+			first = mirrorAction(actions)
+		}
+		requireConfirmed := req.RequireConfirmed != nil && *req.RequireConfirmed
+		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, first.ActionType,
+			req.TriggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
+			req.TriggerWindowStart, req.TriggerWindowEnd, req.TriggerWindowEdge,
+			&first.ActionDeviceID, first.ActionID, first.ActionLevel, requireConfirmed, false); msg != "" {
+			resp.BlockingErrors = append(resp.BlockingErrors, msg)
+		}
+		if msg := validateAutomationRuleConstraints(req.CooldownSec, req.MaxDailyExec); msg != "" {
+			resp.BlockingErrors = append(resp.BlockingErrors, msg)
+		}
+		sunOffset := 0
+		if req.TriggerSunOffsetMin != nil {
+			sunOffset = *req.TriggerSunOffsetMin
+		}
+		if msg := validateSunEventRule(db, sunCandidates{
+			TriggerType: req.TriggerType,
+			SunKind:     req.TriggerSunKind,
+			OffsetMin:   sunOffset,
+			Latitude:    req.Latitude,
+			Longitude:   req.Longitude,
+			Timezone:    req.Timezone,
+		}, req.TriggerEdgeDeviceID, &first.ActionDeviceID); msg != "" {
+			resp.BlockingErrors = append(resp.BlockingErrors, msg)
+		}
+		if msg := validateActionsCatalog(c.Request.Context(), catalog, actions); msg != "" {
+			resp.BlockingErrors = append(resp.BlockingErrors, msg)
+		}
+
+		// ── 2) 风险动作清单（与 V7/前端降级路径同一判定源）──
+		resp.RiskActions = collectPrecheckRiskActions(c.Request.Context(), db, catalog, actions)
+
+		// ── 3) selector 诊断（语法/未知语义 ⇒ blocking；unbound ⇒ warnings）──
+		blocking, warnings := collectSelectorDiagnostics(c.Request.Context(), db, req)
+		resp.BlockingErrors = append(resp.BlockingErrors, blocking...)
+		resp.Warnings = append(resp.Warnings, warnings...)
+
+		Success(c, resp)
+	}
+}
+
+// collectPrecheckRiskActions 列出动作集合里所有**风险动作**（不含授权判定）。
+//
+// 与 V7 的区别：V7 决定"能不能保存"（未授权 + require_confirmed=false ⇒ 400）；
+// precheck 只负责"把风险清单交给前端弹窗"，保存时前端会带 risk_acknowledged=true。
+// 因此这里**不得**因未授权而把规则判成 blocking（否则风险规则永远存不进去）。
+func collectPrecheckRiskActions(ctx context.Context, db *gorm.DB, catalog automationCatalogQuerier,
+	actions []models.AutomationRuleAction) []precheckRiskAction {
+	out := make([]precheckRiskAction, 0)
+	if catalog == nil {
+		return out
+	}
+	for _, a := range actions {
+		if a.ActionType != models.AutomationActionDeviceAction || a.ActionDeviceID == 0 {
+			continue
+		}
+		items, err := catalog.Catalog(ctx, a.ActionDeviceID)
+		if err != nil {
+			continue // 动作目录不可用已在 validateActionsCatalog 里报 blocking
+		}
+		for _, item := range items {
+			if item.Definition.ID != a.ActionID {
+				continue
+			}
+			if item.Definition.RiskLevel.RequiresConfirmation() {
+				out = append(out, precheckRiskAction{
+					Seq:              a.Seq,
+					ActionID:         a.ActionID,
+					ActionDeviceID:   a.ActionDeviceID,
+					ActionDeviceName: edgeDeviceName(db, a.ActionDeviceID),
+					RiskLevel:        string(item.Definition.RiskLevel),
+					RiskLabel:        "风险",
+				})
+			}
+			break
+		}
+	}
+	return out
+}
+
+// edgeDeviceName 回填动作目标设备名（前端不必自己查表；缺失时省略该字段）。
+func edgeDeviceName(db *gorm.DB, edgeDeviceID uint) string {
+	if db == nil || edgeDeviceID == 0 {
+		return ""
+	}
+	var dev models.EdgeDevice
+	if err := db.Select("id", "name").First(&dev, edgeDeviceID).Error; err != nil {
+		return ""
+	}
+	return dev.Name
+}
+
+// collectSelectorDiagnostics 校验 trigger/conditions 里的 selector。
+//
+// 规则（设计 §8.5）：
+//   - 语法错误 / 未知语义 / 未知派生 / 开关关闭下的特殊 selector ⇒ blocking_errors；
+//   - 语法合法但当前解析不到（unbound）⇒ warnings（不阻塞保存）。
+//
+// 只在 sensor_threshold 规则上校验：conditions 仅在传感器求值路径参与判定
+// （evalRule），time_window/sun_event 的 conditions 不生效，不应因此阻塞保存。
+func collectSelectorDiagnostics(_ context.Context, db *gorm.DB, req createAutomationRuleRequest) (blocking, warnings []string) {
+	blocking = make([]string, 0)
+	warnings = make([]string, 0)
+	// conditions_json 的结构校验与解析层无关：非法 JSON 是硬错误，必须阻塞
+	// （否则保存后 evaluator 只 Warn 并整条规则永不触发 —— 静默失效）。
+	var conds []models.AutomationCondition
+	conditionsValid := true
+	if strings.TrimSpace(req.ConditionsJSON) != "" {
+		if err := json.Unmarshal([]byte(req.ConditionsJSON), &conds); err != nil {
+			blocking = append(blocking, "conditions_json 非法: "+err.Error())
+			conditionsValid = false
+		}
+	}
+
+	resolver := currentSelectorResolver()
+	if resolver == nil {
+		return blocking, warnings // 未接线：selector 不校验（conditions JSON 仍已校验）
+	}
+	deviceID := uint(0)
+	if req.TriggerEdgeDeviceID != nil {
+		deviceID = *req.TriggerEdgeDeviceID
+	}
+	check := func(field, selector string) {
+		if strings.TrimSpace(selector) == "" {
+			return
+		}
+		resolved, err := resolver.Resolve(deviceID, selector)
+		if err != nil {
+			blocking = append(blocking, fmt.Sprintf("%s: 字段选择器非法 (%s): %v",
+				field, sensorfield.ErrorCode(err), err))
+			return
+		}
+		if resolved.Status == sensorfield.StatusUnbound && deviceID != 0 {
+			warnings = append(warnings, fmt.Sprintf("%s: 选择器 %q 当前解析不到（resolution_unbound），保存后可能永不触发",
+				field, selector))
+		}
+	}
+	if req.TriggerType == models.AutomationTriggerSensorThreshold {
+		check("trigger_sensor_name", req.TriggerSensorName)
+		if conditionsValid {
+			for i := range conds {
+				check(fmt.Sprintf("conditions_json[%d].sensor_name", i), conds[i].SensorName)
+			}
+		}
+	}
+	_ = db // 预留：将来 unbound 需要"是否上报过"时读投影表
+	return blocking, warnings
 }

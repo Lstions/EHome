@@ -1,10 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sensorfield"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -112,6 +115,10 @@ func createAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 			ErrorWithCode(c, 400, "invalid_alert_rule", msg)
 			return
 		}
+		if code, msg := validateAlertSensorSelector(req.TargetType, *req.TargetID, req.SensorName); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
+			return
+		}
 		if req.Threshold == nil {
 			ErrorWithCode(c, 400, "invalid_alert_rule", "threshold 不能为空")
 			return
@@ -181,6 +188,10 @@ func updateAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 		}
 		if msg := validateAlertRuleFields(targetType, &targetID, sensorName, comparator, level); msg != "" {
 			ErrorWithCode(c, 400, "invalid_alert_rule", msg)
+			return
+		}
+		if code, msg := validateAlertSensorSelector(targetType, targetID, sensorName); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
 			return
 		}
 		updates := map[string]interface{}{}
@@ -411,4 +422,31 @@ func defaultAlertSilenceSec(v *int) int {
 		return 300
 	}
 	return *v
+}
+
+// validateAlertSensorSelector 保存期校验 sensor_name 的 selector 合法性（设计 §9.2#7）。
+//
+// 规则（设计 §8.5）：保存端点只返回**硬错误**——语法错误/未知语义/未知派生/开关关闭
+// 下的特殊 selector ⇒ 400 + error_code；语法合法但当前解析不到（unbound）**不阻塞**
+// （符号可能尚未上报，属于软告警，precheck 的 warnings 才负责提示）。
+//
+// target_type=logical_device 时 TargetID 不是 EdgeDevice.ID：无法按设备解析
+// （unbound 判定需要设备已知集合），因此只用 deviceID=0 做**语法/语义**校验。
+func validateAlertSensorSelector(targetType string, targetID uint, sensorName string) (string, string) {
+	resolver := currentSelectorResolver()
+	if resolver == nil || strings.TrimSpace(sensorName) == "" {
+		return "", "" // 未接线：保持旧行为（不校验）
+	}
+	deviceID := uint(0)
+	if targetType == models.AlertTargetEdgeDevice {
+		deviceID = targetID
+	}
+	if _, err := resolver.Resolve(deviceID, sensorName); err != nil {
+		code := sensorfield.ErrorCode(err)
+		if code == "" {
+			code = "invalid_alert_rule"
+		}
+		return code, fmt.Sprintf("sensor_name 字段选择器非法 (%s): %v", code, err)
+	}
+	return "", ""
 }
