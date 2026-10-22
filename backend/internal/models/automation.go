@@ -156,6 +156,16 @@ type AutomationRule struct {
 	TriggerWindowEdge   string  `gorm:"size:8" json:"trigger_window_edge,omitempty"`
 	TriggerEdgeDeviceID uint    `gorm:"index" json:"trigger_edge_device_id,omitempty"` // sensor_threshold 目标设备 (0=任意设备上报该字段即触发, 不推荐)
 
+	// ── 数据来源引用（方案《规则数据来源与复合来源》§4.3；NULL = 存量老路）──
+	//
+	// SourceKind edge_device | source_group；SourceGroupID 指向 source_groups.id。
+	// 两列必须用指针承载 SQL NULL（五态校验见 models/source_ref.go）。
+	// 回退铁律（方案 N-7）：绑来源组时必须同时双写非 0 的 TriggerEdgeDeviceID
+	//（= 组锚点成员），旧二进制忽略新列后退化为「只看锚点成员」，而不是
+	//「任意设备上报即触发」—— 后者是静默乱触发，不可接受。
+	SourceKind    *string `gorm:"size:20;index" json:"source_kind,omitempty"`
+	SourceGroupID *uint   `gorm:"index" json:"source_group_id,omitempty"`
+
 	// ── Trigger: sun_event (日出/日落, 用户裁决 O-3/O-4) ──
 	//
 	// TriggerSunKind 取值 sunrise|sunset, sun_event 规则必填 (handler V2)。
@@ -299,6 +309,21 @@ type AutomationEvent struct {
 	// 没有动作维度, NULL 表达"无动作维度", 而不是用 0 冒充"第 0 个动作"。
 	// 多动作下的失败事件才填 seq (1 起, 与 automation_rule_actions.seq 同域)。
 	ActionSeq *int      `json:"action_seq,omitempty"`
+
+	// ── 来源快照（方案 §4.4；NULL = 存量事件）──
+	//
+	// 为什么必须有：规则绑来源组后，「这次触发到底谁供的数、各成员值多少、
+	// 哪个缺席」无法从触发值反推（方案 E8 可追溯性）。MembersJSON 是
+	// [{member_id,edge_device_id,value,age_ms,state}] 的序列化快照。
+	SourceKind         *string `gorm:"size:20" json:"source_kind,omitempty"`
+	SourceGroupID      *uint   `json:"source_group_id,omitempty"`
+	SourceEdgeDeviceID *uint   `json:"source_edge_device_id,omitempty"`
+	MembersJSON        string  `gorm:"type:text" json:"members_json,omitempty"`
+	// SourceHash / SourceEvidence 是 Y5 pending_confirm 的来源快照（方案 D-8）：
+	// pending 期间 active 可能切换，confirm 时比对不一致即拒绝执行（TOCTOU）。
+	SourceHash     string `gorm:"size:64" json:"source_hash,omitempty"`
+	SourceEvidence string `gorm:"type:text" json:"source_evidence,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 

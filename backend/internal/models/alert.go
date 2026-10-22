@@ -60,6 +60,11 @@ type AlertRule struct {
 	//   LastMatchedAt 最近一次条件满足的时刻（nil = 从未满足）。
 	// 写入纪律：由 alert evaluator 每 60s **批量刷**一次，禁止每帧写 DB（§10 明示）；
 	// 未刷盘丢失 ≤ 一个批次，不影响判定方向。
+	// ── 数据来源引用（方案 §4.3；NULL = 存量 target_type/target_id 老路）──
+	// 与 automation_rules 同款双指针语义，唯一解析在 models.SourceRef()。
+	SourceKind    *string `gorm:"size:20;index" json:"source_kind,omitempty"`
+	SourceGroupID *uint   `gorm:"index" json:"source_group_id,omitempty"`
+
 	ResolveCount  int64      `gorm:"default:0" json:"resolve_count"`
 	MatchCount    int64      `gorm:"default:0" json:"match_count"`
 	LastMatchedAt *time.Time `json:"last_matched_at,omitempty"`
@@ -83,6 +88,15 @@ type AlertEvent struct {
 	FiredAt    *time.Time `json:"fired_at"`
 	ResolvedAt *time.Time `json:"resolved_at"`
 	NotifiedAt *time.Time `json:"notified_at"`
+
+	// ── 来源快照（方案 §4.4）──
+	// 注：AlertEvent 无 detail 列（见 internal/alert/evaluator.go 注释），
+	// 因此失败原因走指标 + 日志，不新增 detail（保持既有契约）。
+	SourceKind         *string `gorm:"size:20" json:"source_kind,omitempty"`
+	SourceGroupID      *uint   `json:"source_group_id,omitempty"`
+	SourceEdgeDeviceID *uint   `json:"source_edge_device_id,omitempty"`
+	MembersJSON        string  `gorm:"type:text" json:"members_json,omitempty"`
+
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
