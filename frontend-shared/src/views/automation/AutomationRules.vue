@@ -1259,7 +1259,7 @@ function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
       // 编辑「来源组规则」后切回边缘设备：必须显式清空来源列（后端按指针区分 NULL）。
       if (editingSourceWasGroup.value) {
         payload.source_kind = 'edge_device'
-        payload.source_group_id = null
+        payload.source_group_id = undefined
       }
     }
   } else if (form.trigger_type === 'time_window') {
@@ -1748,6 +1748,9 @@ function resultText(r: AutomationEventResult): string {
     confirmation_required: '需确认（未授权）',
     partial_failure: '部分失败',
     suppressed_no_solar_event: '无日出日落事件',
+    source_member_changed: '来源成员已变',
+    source_stale: '来源数据过期',
+    source_degraded: '来源降级',
   }
   return map[r] ?? r
 }

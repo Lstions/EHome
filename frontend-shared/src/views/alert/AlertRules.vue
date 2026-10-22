@@ -21,7 +21,7 @@
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
         <el-table-column label="目标" min-width="120">
           <template #default="{ row }">
-            <span class="mono">{{ targetText(row) }}</span>
+            <span class="mono">{{ targetText(asRule(row)) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="sensor_name" label="传感器" min-width="120" show-overflow-tooltip />
@@ -91,7 +91,7 @@
             <dl class="rule-card__meta">
               <div>
                 <dt>目标</dt>
-                <dd class="mono">{{ targetText(row) }}</dd>
+                <dd class="mono">{{ targetText(asRule(row)) }}</dd>
               </div>
               <div>
                 <dt>传感器</dt>

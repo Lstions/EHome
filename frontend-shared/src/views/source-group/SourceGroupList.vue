@@ -59,26 +59,26 @@
             <template #default="{ row }">
               <!-- composite 才显示 combine；primary_backup 语义就是 active 单值 -->
               <span v-if="row.kind === 'composite'" class="mono" data-test="sg-combine">
-                {{ combineText(row) }}
+                {{ combineText(asGroup(row)) }}
               </span>
               <span v-else class="text-muted" data-test="sg-combine">—</span>
             </template>
           </el-table-column>
           <el-table-column label="最少成员" width="100">
             <template #default="{ row }">
-              <span class="mono" data-test="sg-min-members">{{ minMembersText(row) }}</span>
+              <span class="mono" data-test="sg-min-members">{{ minMembersText(asGroup(row)) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="成员" min-width="110">
             <template #default="{ row }">
-              <span class="mono" data-test="sg-members">{{ memberRows(row).length }} 个成员</span>
+              <span class="mono" data-test="sg-members">{{ memberRows(asGroup(row)).length }} 个成员</span>
             </template>
           </el-table-column>
           <el-table-column label="权威成员" min-width="180">
             <template #default="{ row }">
               <!-- 主备组显示 active；复合组没有 active 概念（禁激活，契约裁决 #6） -->
               <span v-if="row.kind === 'composite'" class="text-muted" data-test="sg-no-active">复合组无 active</span>
-              <span v-else-if="activeMemberText(row)" class="mono" data-test="sg-active">{{ activeMemberText(row) }}</span>
+              <span v-else-if="activeMemberText(asGroup(row))" class="mono" data-test="sg-active">{{ activeMemberText(asGroup(row)) }}</span>
               <span v-else class="text-muted" data-test="sg-active">无 active</span>
             </template>
           </el-table-column>
@@ -94,7 +94,7 @@
                 size="small"
                 :aria-label="'启用来源组 ' + row.name"
                 data-test="sg-enabled"
-                @change="(v: string | number | boolean) => onToggleEnabled(row, v === true)"
+                @change="(v: string | number | boolean) => onToggleEnabled(asGroup(row), v === true)"
               />
             </template>
           </el-table-column>
@@ -107,11 +107,11 @@
                 size="small"
                 data-test="sg-activate"
                 :loading="actingId === row.id"
-                @click="onActivate(row)"
-              >{{ activeMemberText(row) ? '重新选举' : '激活' }}</el-button>
+                @click="onActivate(asGroup(row))"
+              >{{ activeMemberText(asGroup(row)) ? '重新选举' : '激活' }}</el-button>
               <!-- 复合组不渲染激活按钮：不存在"哪个成员权威"的语义 -->
-              <el-button link type="primary" size="small" data-test="sg-edit" @click="openEdit(row)">编辑</el-button>
-              <el-button link type="danger" size="small" data-test="sg-delete" @click="onDelete(row)">删除</el-button>
+              <el-button link type="primary" size="small" data-test="sg-edit" @click="openEdit(asGroup(row))">编辑</el-button>
+              <el-button link type="danger" size="small" data-test="sg-delete" @click="onDelete(asGroup(row))">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -241,6 +241,9 @@ import type {
 
 const store = useSourceGroupStore()
 const { isMobile } = useResponsive()
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asGroup = (row: unknown) => row as SourceGroup
 
 const combines: Array<{ value: SourceGroupCombine; label: string }> = [
   { value: 'avg', label: '平均（avg）' },
