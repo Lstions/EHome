@@ -12,11 +12,11 @@
 |---|---|
 | `go build ./...` | **绿** |
 | `go vet ./internal/datasource/ ./internal/api/` | **绿** |
-| 本验证测试 | **6 文件 / 35 个 `=== RUN` 全绿**（复验 HEAD 982e298e，含后续新增的 staleness 归一/降级可见性覆盖） |
+| 本验证测试 | **6 文件 / 38 个 `=== RUN` 全绿**（复验 HEAD ed75c02b，含 staleness 归一/降级可见性/零组快速路径覆盖） |
 | 整包 `go test ./internal/datasource/` | **ok**（含 ds-analyst 原有测试） |
 | `-race`（TestVerify*） | **ok**（4.9s） |
 | 等价性差分 | **3 seeds × 40 步状态轨迹逐步相等** |
-| 变异自证 | **17 项尝试：16 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1/§3.2），恢复后 md5 全一致、整包复绿 |
+| 变异自证 | **20 项尝试：19 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1/§3.2/§3.3/§7.1），恢复后 md5 全一致、整包复绿 |
 | 发现 | 1 高风险（R5 双 active）+ 5 处契约/一致性偏差 —— **均已由 ds-analyst 修复/裁决**（§4 状态列） |
 
 ## 1. 五个验证重点 → 用例映射
@@ -84,12 +84,24 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 
 | # | 改坏点 | 目标用例 | 结果 |
 |---|---|---|---|
-| M14 | 关闭 StalenessSec=0 归一 | ' + bt + 'TestVerifyStalenessNormalization' + bt + ' | **CAUGHT** |
-| M15 | 关闭 RecordDegraded 1min 节流 | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
-| M16 | 节流键忽略 reason（不同 reason 互相抑制） | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
-| M17 | 删除组孤儿健康行守卫移除 | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
+| M14 | 关闭 StalenessSec=0 归一 | `TestVerifyStalenessNormalization` | **CAUGHT** |
+| M15 | 关闭 RecordDegraded 1min 节流 | `TestVerifyRecordDegradedThrottle` | **CAUGHT** |
+| M16 | 节流键忽略 reason（不同 reason 互相抑制） | `TestVerifyRecordDegradedThrottle` | **CAUGHT** |
+| M17 | 删除组孤儿健康行守卫移除 | `TestVerifyRecordDegradedThrottle` | **CAUGHT** |
 
-恢复后 ' + bt + 'group_crud.go' + bt + '/' + bt + 'group_service.go' + bt + ' md5 一致，整包复绿。
+恢复后 `group_crud.go`/`group_service.go` md5 一致，整包复绿。
+
+### 3.3 R10 语义变更变异（HEAD `c6014dd0`：B-2/架构终审）
+
+Lead 裁决 R10 抑制语义变更：抑制的是「切换动作」，不是「组失去权威」这个事实。
+当前语义 = active 置 error 后无 active ⇒ 必须发 `ActiveChange{Prev=原active, Next=0, Reason=cooldown_suppressed}`、
+bump revision、落 `degraded` 健康事件（message 含 `no_active_after_cooldown`）；切换日志仍不得新增。
+
+| # | 改坏点 | 目标用例 | 结果 |
+|---|---|---|---|
+| M18 | 退回旧语义：冷却抑制分支 `return nil`（不事件） | `TestVerifyEvents_R10_CooldownSuppresses` | **CAUGHT**（等事件超时 / 断言失败） |
+
+恢复后 `group_state.go` md5 一致、整包复绿。
 
 ## 4. 发现的实现问题（按严重度）
 
@@ -169,7 +181,7 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 4. 变异自证以「目标用例必红」为判据，不追求全包必红（避免无关用例噪声掩盖因果）。
 5. `TestVerifyDiff` 覆盖 3 seeds × 40 步；如需更高置信度可加 seeds，但当前已覆盖 R1–R11 全部分支（由用例内断言覆盖矩阵保证）。
 
-## 7. 修复后复验（HEAD `9f94c279` → `982e298e`，2026-10-22 15:2x）
+## 7. 修复后复验（HEAD `9f94c279` → `982e298e` → `c6014dd0`）
 
 ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
 
@@ -182,11 +194,40 @@ ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
 | `-race`（TestVerify*） | ok（5.6s） |
 | API 验证 | `TestVerifySourceGroupAPI_CompositeActiveForbidden`（activate 400 / deactivate 200+disabled）绿 |
 | 差分 | 3 seeds × 40 步仍逐步等价（末态含 logs=5/6、disabled/standby 混合，seed 轨迹不同） |
-| 追加变异 | M10b/M11/M12/M13 **CAUGHT**（§3.1）；M14/M15/M16/M17 **CAUGHT**（§3.2，覆盖 982e298e 新改动） |
+| 追加变异 | M10b/M11/M12/M13 **CAUGHT**（§3.1）；M14/M15/M16/M17 **CAUGHT**（§3.2）；M18 **CAUGHT**（§3.3，R10 新语义） |
 
 **关于 `source_group_guard.go`**：该文件不是本任务的验证产出（本任务只新增
 `internal/api/handler_source_group_verify_test.go`）；它属于规则来源绑定校验的接线文件，
 当前 `go vet ./internal/api/` 已无 unreachable 告警，无需本任务处理。
+
+### 7.1 终审提交复验（HEAD `ed75c02b`：B1/B2/B3 + R10 + F-8 + H-3/H-5，含 O-1/O-2 修复复验）
+
+Lead 终审提交后按同一套验证复跑；随后针对我提的两个观测点（O-1/O-2）ds-analyst 已修复并补锁，再次复验：
+
+| 命令 | 结果 |
+|---|---|
+| `go test ./internal/datasource/ -count=1` | **ok**（4.8s，含 ds 新增用例） |
+| `go test ./internal/datasource/ -count=1 -race` | **ok**（8.2s） |
+| `go test ./internal/datasource/ -run TestVerify -v -count=1` | **38 RUN 全绿** |
+| 差分 `TestVerifyDiff_LegacyVsGroupEquivalence` | **3 seeds × 40 步仍逐步等价**（末态 logs=5/0/6） |
+| `go build ./...` + `go vet ./internal/{datasource,api,models}/` | 绿 |
+
+**交叉回归结论**：B1（cooldown 下限去 kind 限制）/ B2（停用守卫 409）/ B3（reconcileRuleAnchors）未改变差分轨迹（差分世界无规则引用，B2/B3 不触发）；R10 新语义与 `afterAuthorityLost()` 不冲突（O-2 已闭环）。
+
+**O-1（已修复 ✅）`groupsLive()` 不再把「registry 未注入」当「0 组」**
+
+ds 改为 `registry == nil ⇒ true`（保守执行；仅“已注入且 Len()==0”才零查询短路）。
+本验证新增 `TestVerifyFastPath`（2 子例）独立锁定该语义：
+- `nil_registry_runs_conservatively`：不注入 registry + CreateGroup + MarkSuccess ⇒ `last_success` **必须真写入**；
+- `injected_empty_registry_short_circuits`：注入空 registry（直写 DB 造组）⇒ 短路不写 DB；`PublishAll` 后（Len>0）恢复正常写入。
+- 变异 M19（退回 `registry==nil ⇒ false`）⇒ **CAUGHT**。
+
+**O-2（已修复 ✅）R10 冷却抑制只落 1 行 degraded 健康事件**
+
+ds 移除事务内重复行，统一由 `afterAuthorityLost → RecordDegraded` 单点写（1min 节流）。
+本验证 `TestVerifyEvents_R10_CooldownSuppresses` 断言升级为**恰 1 行**（event=degraded 且 message 含 no_active_after_cooldown）；变异 M20（恢复事务内重复行）⇒ **CAUGHT**。
+
+**累计变异**：20 项尝试 → **19 CAUGHT + 1 被防御性兜底掩盖**（M10，见 §3.1），恢复后实现 md5 全一致、整包复绿。
 
 ## 6. 复跑命令
 

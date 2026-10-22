@@ -809,6 +809,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
+		// B2/I6：停用被规则引用的组成员 ⇒ 409（与删除守卫同精神）。
+		if dto.Enabled != nil && !*dto.Enabled {
+			if edgeID, perr := strconv.ParseUint(id, 10, 64); perr == nil {
+				if !guardEdgeDeviceDisable(c, db, uint(edgeID)) {
+					return
+				}
+			}
+		}
 		var d models.EdgeDevice
 		if err := db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&d, id).Error; err != nil {

@@ -14,7 +14,10 @@ import (
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sourceref"
+	"ehome/backend/pkg/metrics"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"gorm.io/gorm"
 )
 
@@ -206,6 +209,84 @@ func TestM0AlertSourceHealthCallbackOnCompositeStale(t *testing.T) {
 		t.Fatalf("健康回调参数应为 group=8 + source_degraded，got %q", calls[0])
 	}
 }
+
+// ── B-2：告警侧丢帧可见性（F-8 / R-9）──────────────────────────────────────
+
+// 备成员帧 = 正常丢弃，但必须可见：health 回调 1 次 + 指标每帧 +1。
+func TestM0AlertStandbyFrameDiscardedObservable(t *testing.T) {
+	db := newTestDB(t)
+	r := groupAlertRule(1, 7)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	reg := sourceref.NewRegistry()
+	reg.Publish(backupGroupSnapshot(7, 11, 101, 102, 1, 1))
+	ev := NewEvaluator(db, nil)
+	ev.SetSourceResolver(reg)
+	var calls []string
+	ev.SetSourceHealthFn(func(groupID uint, reason string) {
+		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	metric := metrics.SourceFrameDiscardedTotal.WithLabelValues(frameDiscardNotActive)
+	before := counterValue(t, metric)
+
+	ev.Evaluate(102, fields("temperature", 60), time.Now()) // 备成员帧
+
+	if n := eventCount(db, 1); n != 0 {
+		t.Fatalf("备成员帧不得触发告警，got %d", n)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("告警丢帧必须通知健康回调 1 次，got %d: %v", len(calls), calls)
+	}
+	if !strings.Contains(calls[0], "source_frame_discarded") ||
+		!strings.Contains(calls[0], frameDiscardNotActive) {
+		t.Fatalf("健康事件应含 source_frame_discarded:not_active_member，got %q", calls[0])
+	}
+	if got := counterValue(t, metric); got != before+1 {
+		t.Fatalf("source_frame_discarded_total{reason=%s} 应 +1（alert 侧），before=%v got=%v",
+			frameDiscardNotActive, before, got)
+	}
+}
+
+// counterValue 读取 counter 当前值（与 automation 侧同款 helper，包内私有副本）。
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 1)
+	c.Collect(ch)
+	var out dto.Metric
+	if err := (<-ch).Write(&out); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return out.GetCounter().GetValue()
+}
+
+// H-3（Lead 2026-10-22）：告警侧同款 —— 非法 source_kind 只 Warn+计数，不跳过、
+// 不 fail-closed，求值仍按老路 target_type/target_id。
+func TestM0AlertInvalidSourceKindWarnedButLoadsAndEvaluates(t *testing.T) {
+	db := newTestDB(t)
+	kind := "dataset"
+	r := rule(1, "temperature", "gt", 50, 0)
+	r.SourceKind = &kind
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	metric := metrics.RuleInvalidSourceKindTotal.WithLabelValues("alert")
+	before := counterValue(t, metric)
+
+	ev := NewEvaluator(db, nil)
+	if got := counterValue(t, metric); got != before+1 {
+		t.Fatalf("非法 source_kind 必须使 ehome_rule_invalid_source_kind_total{kind=alert} +1，before=%v got=%v",
+			before, got)
+	}
+	if _, ok := ev.rules[1]; !ok {
+		t.Fatal("H-3：非法 source_kind 的告警规则不得被跳过")
+	}
+	ev.Evaluate(1, fields("temperature", 60), time.Now())
+	if n := eventCount(db, 1); n != 1 {
+		t.Fatalf("H-3：非法 source_kind 必须回落老路继续求值，got %d 条事件", n)
+	}
+}
+
 
 
 // ── 锁放大回归：Evaluate 不得在 RLock 内查 DB ──────────────────────────────

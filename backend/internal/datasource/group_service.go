@@ -4,9 +4,13 @@ package datasource
 //
 // 为什么单独一个 GroupService（而不是改 data_sources 的 Service）：
 //   - 组键不同（source_group_id vs (device_id,category)），data_sources 行语义不动（P-1）；
-//   - 但 R1–R11 的**决策逻辑必须只有一份**：本文件的 applySuccess/countFailure/
-//     pickCandidate/cooldownActive/minResidencyElapsed 是纯函数，组路径直接调用；
-//     data_sources 路径的等价调用点由 Lead 接线（见交付消息），不得复制第二份逻辑。
+//   - R1–R11 语义相同，但**实现目前是两套**（架构终审 H-1 的如实记录）：
+//     本文件的 applySuccess/countFailure/pickCandidate/cooldownActive/minResidencyElapsed
+//     是组路径的决策实现；legacy data_sources 路径（service.go）**仍保留自己的内联实现，
+//     并未改为调用这些 helper**（改 legacy 需动已冻结的 908 行状态机，合并前风险高于收益）。
+//     为什么可以接受：等价性由**差分测试**保证（impl-core 3 seeds × 40 步逐步等价，
+//     两条状态机末态一致）+ 20+ 组用例 + 33 RUN 独立验证；若未来改任一侧，差分测试会红。
+//     若后续要真正共用，需单独立项重写 legacy 并保留差分对照。
 //
 // 快照所有权（方案 §12.2.2 / N-13）：**本文件是唯一发布者** —— 任何组/成员/active
 // 变更在事务提交后调用 publishGroup；切换钩子只做"清窗加速 + 审计"，不在快照真值
@@ -25,6 +29,7 @@ import (
 	"ehome/backend/internal/notify"
 	"ehome/backend/internal/sourceref"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -126,8 +131,9 @@ func (d *activeChangeDispatcher) run(ctx context.Context) {
 
 // GroupService 是来源组的领域服务（组 CRUD、成员运行态、R1–R11 适配、切换钩子）。
 //
-// 它**不替代** data_sources 的 Service：两者并存，规则按 source_kind 选择其一；
-// 二者共享的决策纯函数在同一包内（本文件 + group_decide.go），禁止复制。
+// 它**不替代** data_sources 的 Service：两者并存，规则按 source_kind 选择其一。
+// 注意（H-1）：两套 R1–R11 实现**当前未共用 helper**，等价性靠差分测试锁定；
+// 本文件内的 applySuccess/countFailure/... 只服务组路径，改语义必须同步跑差分。
 type GroupService struct {
 	db   *gorm.DB
 	opts Options
@@ -187,8 +193,33 @@ func NewGroupService(db *gorm.DB, opts Options) *GroupService {
 
 func (g *GroupService) now() time.Time { return g.opts.Now() }
 
-// SetGroupRegistry 注入 sourceref 注册表（快照唯一发布目标；nil = 只跑状态机不发布）。
+// SetGroupRegistry 注入 sourceref 注册表（快照唯一发布目标）。
+//
+// nil 语义（impl-core 探针后修正）：nil 无法证明"没有组"，因此**保守执行状态机**
+// （MarkSuccess/MarkFailure 照常查库/更新，只是无法发布快照）。若 nil 也短路，
+// 漏注入 registry 的装配会**静默丢 R1/R2 运行态**（last_success 不写、切不切换），
+// 比多一次查询危险得多。生产 main.go 恒注入且先 PublishAll，故 0 组快速路径仍然生效
+// （registry 非 nil 且 Len()==0 ⇒ 短路，零查询）。
 func (g *GroupService) SetGroupRegistry(r *sourceref.Registry) { g.registry = r }
+
+// groupsLive 报告是否存在已发布的组（热路径闸门，O(1)）。
+//
+// 判据：
+//   - registry 已注入且 Len()==0 ⇒ false（确证无组，生产 0 组场景走此分支，零查询）；
+//   - registry==nil ⇒ true（**保守执行**：不能把"没接线"误判成"没有组"）；
+//   - 其余 ⇒ true（0→N 由 publish 自动翻转，无需失效钩子）。
+//
+// 为什么读 registry 而不是查 DB：快照是状态机自己发布的真值（唯一发布者），
+// 0→N 由 publish 自动翻转；热路径每帧查库会把 0 组场景的收益抵消掉（B-3 第 1 步）。
+func (g *GroupService) groupsLive() bool {
+	if g == nil {
+		return false
+	}
+	if g.registry == nil {
+		return true // 装配缺失：保守跑，宁多查一次也不能静默丢状态
+	}
+	return g.registry.Len() > 0
+}
 
 // Registry 返回注入的注册表（测试/装配断言用）。
 func (g *GroupService) Registry() *sourceref.Registry { return g.registry }
@@ -366,10 +397,10 @@ func (g *GroupService) commitGroupChange(groupID uint, ev *ActiveChange) {
 	g.dispatcher.emit(*ev)
 }
 
-// ── 纯决策辅助（R1–R11 的唯一实现，组/存量路径共用）──────────────────────
+// ── 纯决策辅助（组路径实现；legacy data_sources 仍用 service.go 内联逻辑，见包注释 H-1）──
 
 // applySuccess 是 R1 的纯逻辑：给定运行态与成功时刻，返回应写入的列。
-// 不抢占 active；error → standby。组/存量两个适配器都必须调用它（禁止复制）。
+// 不抢占 active；error → standby。**只服务组路径**（legacy 有自己的内联版本，见 H-1）。
 func applySuccess(currentStatus string, at time.Time) map[string]interface{} {
 	updates := map[string]interface{}{
 		"last_success": at,
@@ -723,3 +754,41 @@ func (g *GroupService) SelfCheck() error {
 	}
 	return nil
 }
+
+// RunDirtyReloader 是切换钩子通道溢出后的**安全阀消费者**（架构终审 H-5）：
+// 分发器丢弃事件时会置 dirty（见 activeChangeDispatcher.emit），若不重载，快照会
+// 永久陈旧 ⇒ "切换后跟随"失效（正确性仍由 S3 窗口 identity 兜底，但跟随会停）。
+//
+// 每 interval 检查一次 dirty；脏则 PublishAll（含 SelfCheck）全量重建快照，成功后清 dirty。
+// 为什么不用事件驱动：溢出本身就是"队列满了"，再入队只会继续丢；固定小周期重载最稳。
+// main.go 接线：go sourceGroupSvc.RunDirtyReloader(sourceGroupCtx, 5*time.Second)。
+func (g *GroupService) RunDirtyReloader(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !g.DirtySinceLastReload() {
+				continue
+			}
+			if err := g.PublishAll(); err != nil {
+				// 自检/DB 失败：保持 dirty，下一轮重试（绝不静默当作已重载）。
+				logger.Warn("datasource: source_group dirty reload failed", "error", err)
+				continue
+			}
+			g.ClearDirty()
+			// 指标：既能发现"重载频繁"（写热/节流失效），也能发现"重载完全没跑"
+			// （main 漏接线）——后者是 dirty 永久的典型形态。
+			metrics.SourceGroupDirtyReloadTotal.Inc()
+			// Warn 而非 Info：钩子通道溢出不重载会让"切换后跟随"永久失效，属需要
+			// 运维知晓的降级事件（架构终审 H-5 要求可见）。
+			logger.Warn("datasource: source_group hook queue overflowed; registry fully reloaded (dirty cleared)")
+		}
+	}
+}
+

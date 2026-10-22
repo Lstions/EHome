@@ -47,6 +47,9 @@ func evaluateFrameBenchEvaluator() *Evaluator {
 	for _, r := range rules {
 		e.rules[r.ID] = r
 	}
+	// 规则快照（#10a-2 性能修复后 Evaluate 读 atomic.Pointer；测试构造不经 LoadRules，
+	// 这里显式发布一次，保证基准测的是真实 Evaluate 热路径而不是空快照早退）。
+	e.rulesSnap.Store(makeRulesSnapshot(e.rules))
 	return e
 }
 

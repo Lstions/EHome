@@ -8,6 +8,7 @@ package datasource
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,28 +228,60 @@ func TestVerifyEvents_R10_CooldownSuppresses(t *testing.T) {
 	if got := len(f.failoverLogs(g.ID)); got != 1 {
 		t.Fatalf("首次切换应写 1 条日志，got %d", got)
 	}
+	revBefore := f.revision(g.ID)
 
-	// A 恢复为 standby；10s 后 B 熔断 ⇒ 冷却窗内抑制（0 事件）。
+	// A 恢复为 standby；10s 后 B 熔断 ⇒ 冷却窗内**不切换**。
+	//
+	// B-2/架构终审裁决（2026-10-22）：R10 抑制的是「切换动作」，不是「组失去权威」这个事实。
+	// B 已被置 error ⇒ 组内无 active ⇒ 必须发 ActiveChange{Prev=B, Next=0,
+	// Reason=cooldown_suppressed}、bump revision、落 degraded 健康事件（message 含
+	// no_active_after_cooldown）；切换日志仍为 1（没有新的切换动作）。
 	f.gsvc.MarkSuccess(a.ID, []string{"illuminance"}, f.now)
 	f.advance(10 * time.Second)
 	f.gsvc.MarkFailure(b.ID, TriggerDeviceOffline)
-	f.expectNoEvents()
+
+	evs := f.waitEvents(1)
+	if len(evs) != 1 {
+		t.Fatalf("冷却抑制应恰 1 条事件（Next=0），got %d: %+v", len(evs), evs)
+	}
+	ev := evs[0]
+	if ev.GroupID != g.ID || ev.PrevMemberID != bm.ID || ev.NextMemberID != 0 {
+		t.Fatalf("冷却抑制事件字段错误（want GroupID=%d Prev=%d Next=0）: %+v", g.ID, bm.ID, ev)
+	}
+	if ev.Reason != ReasonGroupCooldownSuppressed || ev.Trigger != TriggerDeviceOffline {
+		t.Fatalf("reason/trigger = {%q,%q} want {%q,%q}",
+			ev.Reason, ev.Trigger, ReasonGroupCooldownSuppressed, TriggerDeviceOffline)
+	}
+	if ev.Revision != revBefore+1 {
+		t.Fatalf("冷却抑制也改变组身份：revision=%d want %d", ev.Revision, revBefore+1)
+	}
+	// 冷却抑制的是「切换动作」：不得新增切换日志。
 	if got := len(f.failoverLogs(g.ID)); got != 1 {
 		t.Fatalf("冷却抑制不得写切换日志，got %d", got)
 	}
-	found := false
+	// 组已无权威：DB / 快照 / 规则侧三处一致 fail-closed。
+	if edge := f.activeEdge(g.ID); edge != 0 {
+		t.Fatalf("冷却抑制后组应无 active，got edge %d", edge)
+	}
+	if snap := f.snapshot(g.ID); snap.ActiveMemberID != 0 {
+		t.Fatalf("快照 ActiveMemberID=%d want 0", snap.ActiveMemberID)
+	}
+	if m := f.reg.MatchFrame(b.ID, sourceref.GroupKindSourceGroup, g.ID); m.Accepts() {
+		t.Fatalf("组无权威后帧不得再驱动求值: %+v", m)
+	}
+	// 健康表：degraded 行（message 含 no_active_after_cooldown），不再是旧的 silent；
+	// 且必须**恰 1 行**——事务内不再写重复行，统一由 afterAuthorityLost → RecordDegraded
+	// 单点写（1min 节流），否则按行计数的看板会重复（impl-core 观测点 O-2）。
+	degradedRows := 0
 	for _, h := range f.healthEvents(g.ID) {
-		if h.Event == "silent" {
-			found = true
-			break
+		if h.Event == "degraded" && strings.Contains(h.Message, "no_active_after_cooldown") {
+			degradedRows++
 		}
 	}
-	if !found {
-		t.Fatal("冷却抑制必须落 silent 健康事件（可观测）")
+	if degradedRows != 1 {
+		t.Fatalf("冷却抑制应恰 1 行 degraded no_active_after_cooldown，got %d: %+v", degradedRows, f.healthEvents(g.ID))
 	}
-	if f.activeEdge(g.ID) != 0 {
-		t.Fatal("冷却抑制后组应无 active（B 已熔断）")
-	}
+	f.expectNoMoreEvents(1)
 }
 
 // ── R11：刚 active 的成员不得立刻计失败；驻留期满后可计 ──────────────────

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -874,6 +875,228 @@ func TestNormalizeStalenessSecTable(t *testing.T) {
 		}
 	}
 }
+
+// ── 18. B-3 第 1 步：0 组快速路径（热路径不产生任何 DB 查询）──
+//
+// 背景（impl-reviewer B-3）：生产 data_sources=0 / 组=0 时，MarkSuccess 每帧都白跑一次
+// 成员 JOIN 查询。快速路径读状态机自己发布的 registry（atomic load + len），0→N 由
+// publish 自动翻转，无需失效钩子。
+func TestGroupFastPathZeroGroupsSkipsQueries(t *testing.T) {
+	f := newGroupFixture(t)
+	if got := f.reg.Len(); got != 0 {
+		t.Fatalf("fixture 初始应为 0 组，got %d", got)
+	}
+	var queries int64
+	f.db.Callback().Query().Before("gorm:query").Register("test:count_queries_zero_groups",
+		func(tx *gorm.DB) { atomic.AddInt64(&queries, 1) })
+
+	f.gsvc.MarkSuccess(1, []string{"illuminance"}, f.now)
+	f.gsvc.MarkFailure(1, TriggerDeviceOffline)
+	if got := atomic.LoadInt64(&queries); got != 0 {
+		t.Fatalf("0 组时 MarkSuccess/MarkFailure 不得产生 DB 查询，got %d", got)
+	}
+
+	// 有组后快速路径必须自动放行（0→N 由 publish 翻转），且 R1 真正落库。
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+	if got := f.reg.Len(); got != 1 {
+		t.Fatalf("建组后 registry.Len 应为 1，got %d", got)
+	}
+	atomic.StoreInt64(&queries, 0)
+	f.gsvc.MarkSuccess(d1.ID, []string{"illuminance"}, f.now)
+	if got := atomic.LoadInt64(&queries); got == 0 {
+		t.Fatalf("有组后 MarkSuccess 必须真正查库更新（快速路径不得误杀）")
+	}
+	members := f.members(t, group.ID)
+	var active models.SourceGroupMember
+	for i := range members {
+		if members[i].Status == models.SourceMemberStatusActive {
+			active = members[i]
+		}
+	}
+	if active.LastSuccess == nil {
+		t.Fatalf("有组时 MarkSuccess 必须写 last_success（快速路径误杀）")
+	}
+}
+
+// ── 19. B-3：registry 未注入（nil）⇒ 保守执行，不能把"没接线"误判成"没组" ──
+//
+// impl-core 探针发现：nil 若短路，漏注入 registry 的装配会静默丢 R1/R2
+// （last_success 不写、永不切换）。因此语义修正为：
+//   registry==nil ⇒ 照常执行状态机（只是无法发布快照）；
+//   仅"已注入且 Len()==0"才短路为零查询（生产 0 组场景）。
+func TestGroupFastPathNilRegistryRunsConservatively(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	gsvc := NewGroupService(db, Options{Now: func() time.Time { return testBase() }})
+	ed := models.EdgeDevice{Name: "light-nil-reg", NodeID: "node-1", ChannelID: 1, IntervalMs: 5000, Enabled: true}
+	if err := db.Create(&ed).Error; err != nil {
+		t.Fatalf("create edge device: %v", err)
+	}
+	if err := db.Create(&models.SensorFieldObs{DeviceID: ed.ID, SensorName: "illuminance"}).Error; err != nil {
+		t.Fatalf("create obs: %v", err)
+	}
+	group, err := gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		Members: []GroupMemberInput{{EdgeDeviceID: ed.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	var queries int64
+	db.Callback().Query().Before("gorm:query").Register("test:count_queries_nil_registry_conservative",
+		func(tx *gorm.DB) { atomic.AddInt64(&queries, 1) })
+	gsvc.MarkSuccess(ed.ID, []string{"illuminance"}, testBase())
+	if got := atomic.LoadInt64(&queries); got == 0 {
+		t.Fatalf("registry=nil 时必须保守执行状态机（否则漏接线会静默丢 R1）")
+	}
+	var member models.SourceGroupMember
+	if err := db.Where("group_id = ?", group.ID).First(&member).Error; err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+	if member.LastSuccess == nil {
+		t.Fatalf("registry=nil 时 MarkSuccess 仍必须写 last_success（保守执行）")
+	}
+	queries = 0
+	gsvc.MarkFailure(ed.ID, TriggerDeviceOffline)
+	if got := atomic.LoadInt64(&queries); got == 0 {
+		t.Fatalf("registry=nil 时 MarkFailure 也必须保守执行")
+	}
+}
+
+// ── 20. B-2：R10 冷却抑制但组已无权威 ⇒ 必须发 Next=0 + degraded 健康行 ──────
+//
+// 架构终审 B-1 的静默失效链：coldown 抑制切换 → active 已 error 但无新 active →
+// MatchFrame 全成员 Accepts()=false → 引擎静默丢帧、规则停求值、**零审计**。
+// 修法：抑制的是"切换动作"不是"失去权威"，必须发 ActiveChange{Next:0} 并落健康事件。
+func TestGroupCooldownSuppressedEmitsNextZeroAndHealth(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+	members := f.members(t, group.ID)
+	f.waitEvents(t, 1)
+	f.clearEvents()
+	for _, m := range members {
+		if err := f.db.Model(&models.SourceGroupMember{}).Where("id = ?", m.ID).
+			Update("max_fail_count", 1).Error; err != nil {
+			t.Fatalf("set max_fail: %v", err)
+		}
+	}
+
+	// 第一次失败：正常切换 d1→d2（首条切换日志落在 now，形成冷却窗）。
+	f.gsvc.MarkFailure(d1.ID, TriggerDeviceOffline)
+	evs := f.waitEvents(t, 1)
+	first := evs[len(evs)-1]
+	if first.NextMemberID == 0 {
+		t.Fatalf("首次失败应正常切换，got %+v", first)
+	}
+	f.clearEvents()
+	revBefore, _ := f.gsvc.GetGroup(group.ID)
+
+	// 冷却窗内第二次失败（d2 是 active）：抑制切换，但组已无权威。
+	f.gsvc.MarkFailure(d2.ID, TriggerDeviceOffline)
+	evs = f.waitEvents(t, 1)
+	ev := evs[len(evs)-1]
+	if ev.NextMemberID != 0 {
+		t.Fatalf("R10 抑制时组已无 active，事件必须 Next=0，got %+v", ev)
+	}
+	if ev.Reason != ReasonGroupCooldownSuppressed {
+		t.Fatalf("事件 reason 应为 %s，got %s", ReasonGroupCooldownSuppressed, ev.Reason)
+	}
+	got, _ := f.gsvc.GetGroup(group.ID)
+	if got.Revision != revBefore.Revision+1 {
+		t.Fatalf("失去权威必须 bump revision: got %d want %d", got.Revision, revBefore.Revision+1)
+	}
+
+	// 快照：ActiveMemberID=0 + 两个成员 MatchFrame 均不接受（引擎不会再按旧 active 过滤）。
+	snap, ok := f.reg.Group(group.ID)
+	if !ok {
+		t.Fatalf("组快照丢失")
+	}
+	if snap.ActiveMemberID != 0 {
+		t.Fatalf("无权威时快照 ActiveMemberID 必须为 0，got %d", snap.ActiveMemberID)
+	}
+	for _, d := range []uint{d1.ID, d2.ID} {
+		m := f.reg.MatchFrame(d, sourceref.KindPrimaryBackup, group.ID)
+		if m.Accepts() {
+			t.Fatalf("无权威时设备 %d 的帧不应被接受（否则按旧 active 过滤）: %+v", d, m)
+		}
+	}
+
+	// 组健康表：必须有一条 degraded 行（1min 节流键 no_active_after_cooldown）。
+	health, err := f.gsvc.Health(group.ID, 50)
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	// 去重断言（impl-core 观测点 2）：同一事实只落 1 行 degraded——事务内不再写，
+	// 由 afterAuthorityLost → RecordDegraded 单点写且 1min 节流，按行计数的看板不重复。
+	degenerateRows := 0
+	for _, h := range health {
+		if h.Event == "degraded" && containsSub(h.Message, "no_active_after_cooldown") {
+			degenerateRows++
+		}
+	}
+	if degenerateRows != 1 {
+		t.Fatalf("no_active_after_cooldown 降级行必须恰 1 行（去重），got %d: %+v", degenerateRows, health)
+	}
+
+	// R10 语义未破：抑制期间不新增切换日志。
+	logs, err := f.gsvc.FailoverLogs(group.ID, 10)
+	if err != nil {
+		t.Fatalf("FailoverLogs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("冷却窗内不得新增切换日志，got %d", len(logs))
+	}
+}
+
+// ── 21. H-5：钩子通道溢出（dirty）由 RunDirtyReloader 消费，快照不会永久陈旧 ──
+func TestGroupDirtyReloaderRestoresSnapshot(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+	f.waitEvents(t, 1)
+
+	before, ok := f.reg.Group(group.ID)
+	if !ok {
+		t.Fatalf("初始快照不存在")
+	}
+	// 模拟：钩子通道溢出丢事件（dirty 置位），同时 DB 已前进但快照仍是旧的。
+	if err := f.db.Model(&models.SourceGroup{}).Where("id = ?", group.ID).
+		UpdateColumn("revision", gorm.Expr("revision + 1")).Error; err != nil {
+		t.Fatalf("bump revision: %v", err)
+	}
+	f.gsvc.dispatcher.dirty.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.gsvc.RunDirtyReloader(ctx, 5*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, _ := f.reg.Group(group.ID)
+		if snap != nil && snap.Revision == before.Revision+1 && !f.gsvc.DirtySinceLastReload() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	snap, _ := f.reg.Group(group.ID)
+	t.Fatalf("H-5：dirty 后快照未重载（registry rev=%v want %d, dirty=%v）",
+		snapshotRevision(snap), before.Revision+1, f.gsvc.DirtySinceLastReload())
+}
+
+func snapshotRevision(s *sourceref.GroupSnapshot) int64 {
+	if s == nil {
+		return -1
+	}
+	return s.Revision
+}
+
+
+
 
 
 

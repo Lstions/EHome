@@ -286,6 +286,38 @@ func TestSourceGroupReferenceValidationGroupState(t *testing.T) {
 				rule.TargetType, rule.TargetID, ed.ID)
 		}
 	})
+
+	// B1 终审收口：cooldown 推导下限必须对 composite 同样生效（F-3 无 kind 限制；
+	// 复合组 N 个成员帧交错驱动，cooldown=0 会让同一次物理变化多次动作）。
+	composite, err := gsvc.CreateGroup(datasource.CreateGroupInput{
+		Name: "组-复合-floor", Kind: models.SourceGroupKindComposite, Category: "illuminance",
+		Combine: models.CombineSum, Members: []datasource.GroupMemberInput{{EdgeDeviceID: ed.ID}},
+	})
+	if err != nil {
+		t.Fatalf("create composite group: %v", err)
+	}
+	t.Run("composite cooldown below floor also rejected", func(t *testing.T) {
+		body := guardAutomationRuleBody()
+		body["name"] = "guard-rule-composite-0"
+		body["source_kind"] = models.SourceKindSourceGroup
+		body["source_group_id"] = composite.ID
+		body["cooldown_sec"] = 0
+		status, env := doGuardJSON(t, r, http.MethodPost, "/api/v1/automation-rules", body)
+		if status != http.StatusBadRequest || guardErrCode(env) != SourceRefCodeCooldownFloor {
+			t.Fatalf("composite cooldown=0 应 400 %s，got %d %v", SourceRefCodeCooldownFloor, status, env)
+		}
+	})
+	t.Run("composite cooldown at floor accepted", func(t *testing.T) {
+		body := guardAutomationRuleBody()
+		body["name"] = "guard-rule-composite-ok"
+		body["source_kind"] = models.SourceKindSourceGroup
+		body["source_group_id"] = composite.ID
+		body["cooldown_sec"] = 5 // 成员 IntervalMs=5000 ⇒ 推导下限 5s
+		status, env := doGuardJSON(t, r, http.MethodPost, "/api/v1/automation-rules", body)
+		if status != http.StatusOK {
+			t.Fatalf("composite cooldown=5 应保存成功，got %d %v", status, env)
+		}
+	})
 }
 
 // 3) 边缘设备被来源组引用 ⇒ 单删/批量删 409；移除成员后可删。
@@ -318,6 +350,41 @@ func TestEdgeDeviceDeleteReferencedByGroup(t *testing.T) {
 	status, env = doGuardJSON(t, r, http.MethodDelete, fmt.Sprintf("/api/v1/edge-devices/%d", ed.ID), nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 after member removed, got %d %v", status, env)
+	}
+}
+
+// 3b) B2/I6 终审收口：停用"组被规则引用"的成员设备 ⇒ 409。
+func TestEdgeDeviceDisableReferencedByGroup(t *testing.T) {
+	r, db, gsvc := newSourceGroupGuardAPI(t)
+	ed := createGuardEdgeDevice(t, db, "light-disable")
+	group := createGuardGroup(t, gsvc, "组-停用守卫", ed)
+	// 组被一条 automation 规则引用（source_group_id 指向该组）。
+	kind := string(models.SourceKindSourceGroup)
+	rule := models.AutomationRule{
+		Name: "ref-rule", Enabled: true,
+		TriggerType: models.AutomationTriggerSensorThreshold, TriggerSensorName: "illuminance",
+		TriggerComparator: models.AlertComparatorGT, TriggerThreshold: 500,
+		TriggerEdgeDeviceID: ed.ID, CooldownSec: 300,
+		SourceKind: &kind, SourceGroupID: &group.ID,
+	}
+	if err := db.Create(&rule).Error; err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	status, env := doGuardJSON(t, r, http.MethodPut, fmt.Sprintf("/api/v1/edge-devices/%d", ed.ID),
+		map[string]any{"enabled": false})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 when disabling referenced group member, got %d %v", status, env)
+	}
+	if msg, _ := env["message"].(string); !strings.Contains(msg, group.Name) {
+		t.Fatalf("409 message must contain group name %q, got %q", group.Name, msg)
+	}
+	// 移除规则后守卫放行（直接断言 helper，避免依赖 update handler 的其它校验）。
+	if err := db.Delete(&rule).Error; err != nil {
+		t.Fatalf("delete rule: %v", err)
+	}
+	ginCtx, _ := gin.CreateTestContext(nil)
+	if !guardEdgeDeviceDisable(ginCtx, db, ed.ID) {
+		t.Fatalf("移除规则后应允许停用（guard 仍返回 false）")
 	}
 }
 

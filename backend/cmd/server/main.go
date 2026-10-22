@@ -424,6 +424,11 @@ func main() {
 	defer sourceGroupStop()
 	go sourceGroupSvc.RunDispatcher(sourceGroupCtx)
 	go sourceGroupSvc.Start(sourceGroupCtx)
+	// 钩子通道溢出后的兜底重载：dispatcher 的变更通道是固定缓冲，突发变更
+	// （批量导入 / 脚本操作）会溢出并丢通知。丢了不重载 ⇒ 快照陈旧 ⇒ 规则继续按
+	// 旧 active 过滤，而且**没有任何告警**。这个循环是那条失效路径的唯一出口
+	// （架构终审 H-5：DirtySinceLastReload 原先无消费方，是个死安全阀）。
+	go sourceGroupSvc.RunDirtyReloader(sourceGroupCtx, 5*time.Second)
 
 	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；
 	// 设备离线 ⇒ 两边都 MarkFailure。漏接一条会让该引擎「永不切换」（静默失效）。

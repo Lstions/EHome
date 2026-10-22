@@ -14,7 +14,11 @@ import (
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sourceref"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // backupGroup 构造主备组快照（activeMemberID 对应 memberID，activeEdge 是其物理设备）。
@@ -122,7 +126,17 @@ func TestM0StandbyFrameDiscarded(t *testing.T) {
 	ev := NewEvaluator(db, h)
 	ev.SetSourceResolver(reg)
 
+	// 两段断言（Lead 2026-10-22 B-2）：①不触发/不落失败审计；②丢帧必须可见
+	//（health 事件 + 指标）。丢帧是正常行为，但"静默"不是——这是 F-8 的核心。
+	var healthCalls []string
+	ev.SetSourceHealthFn(func(groupID uint, reason string) {
+		healthCalls = append(healthCalls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	metric := metrics.SourceFrameDiscardedTotal.WithLabelValues(frameDiscardNotActive)
+	before := counterValue(t, metric)
+
 	ev.Evaluate(102, illuminanceField(60), time.Now()) // 备成员，非 active
+
 	if len(h.events) != 0 {
 		t.Fatalf("备成员帧不得驱动求值，got %d", len(h.events))
 	}
@@ -131,6 +145,79 @@ func TestM0StandbyFrameDiscarded(t *testing.T) {
 		ResultSourceMemberChanged).Count(&n)
 	if n != 0 {
 		t.Fatalf("备成员帧是正常丢弃，不应落失败审计，got %d", n)
+	}
+	// ② health 事件：每次判定都通知（节流由 GroupService 侧做）。
+	if len(healthCalls) != 1 {
+		t.Fatalf("丢帧必须通知健康回调 1 次，got %d: %v", len(healthCalls), healthCalls)
+	}
+	if !strings.HasPrefix(healthCalls[0], "7|source_frame_discarded") ||
+		!strings.Contains(healthCalls[0], frameDiscardNotActive) {
+		t.Fatalf("健康事件应含 group=7 + source_frame_discarded:not_active_member，got %q", healthCalls[0])
+	}
+	// ② 指标：每帧 +1（counter 不写库、每帧累加）。
+	if got := counterValue(t, metric); got != before+1 {
+		t.Fatalf("source_frame_discarded_total{reason=%s} 应 +1，before=%v got=%v",
+			frameDiscardNotActive, before, got)
+	}
+}
+
+// 指标存在性断言：名字与有界 label 必须与方案 §12.9.3 R-9 一致
+//（ehome_source_frame_discarded_total{reason}），防止后续改名导致仪表盘/D4 验收静默失配。
+func TestM0SourceFrameDiscardedMetricExists(t *testing.T) {
+	c := metrics.SourceFrameDiscardedTotal.WithLabelValues(frameDiscardGroupMissing)
+	desc := c.Desc().String()
+	if !strings.Contains(desc, "ehome_source_frame_discarded_total") {
+		t.Fatalf("指标名不符（期望 ehome_source_frame_discarded_total）: %s", desc)
+	}
+	if !strings.Contains(desc, "reason") {
+		t.Fatalf("指标缺少 reason label（应为有界枚举）: %s", desc)
+	}
+	before := counterValue(t, c)
+	c.Inc()
+	if got := counterValue(t, c); got != before+1 {
+		t.Fatalf("counter 不递增: before=%v got=%v", before, got)
+	}
+}
+
+// counterValue 读取 counter 当前值（与 internal/downlink 的测试 helper 同款：
+// 用 client_model dto 而不是 prometheus/testutil，避免引入第二套读法）。
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 1)
+	c.Collect(ch)
+	var out dto.Metric
+	if err := (<-ch).Write(&out); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return out.GetCounter().GetValue()
+}
+
+// H-3（Lead 2026-10-22）：非法 source_kind 只 Warn + 计数，**不跳过、不 fail-closed**，
+// 求值仍按老路 TriggerEdgeDeviceID。判据三条：加载不丢、求值仍生效、指标 +1。
+func TestM0InvalidSourceKindWarnedButLoadsAndEvaluates(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	kind := "dataset" // 未知取值（脏数据）
+	r := automationRule(1, "temperature", "gt", 40, 0)
+	r.CooldownSec = 0
+	r.SourceKind = &kind
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	metric := metrics.RuleInvalidSourceKindTotal.WithLabelValues("automation")
+	before := counterValue(t, metric)
+
+	ev := NewEvaluator(db, h) // LoadRules 内 Warn+Inc；不 panic、不跳过
+	if got := counterValue(t, metric); got != before+1 {
+		t.Fatalf("非法 source_kind 必须使 ehome_rule_invalid_source_kind_total{kind=automation} +1，before=%v got=%v",
+			before, got)
+	}
+	if _, ok := ev.rules[1]; !ok {
+		t.Fatal("H-3：非法 source_kind 的规则不得被跳过（应保持加载）")
+	}
+	ev.Evaluate(1, []parser.Field{{Name: "temperature", Value: 50}}, time.Now())
+	if len(h.events) != 1 {
+		t.Fatalf("H-3：非法 source_kind 必须回落老路（TriggerEdgeDeviceID）继续求值，got %d 次触发", len(h.events))
 	}
 }
 
@@ -411,11 +498,18 @@ func TestM0SourceHealthCallbackOnGroupMissing(t *testing.T) {
 		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
 	})
 	ev.Evaluate(101, illuminanceField(65), time.Now())
-	if len(calls) != 1 {
-		t.Fatalf("组缺失必须通知健康回调 1 次，got %d: %v", len(calls), calls)
+	// 组缺失同时产生两条健康证据（B-2 后）：①丢帧级 source_frame_discarded
+	//（F-8/R-9：运维看"组在不在供数"）；②类别级 source_member_changed
+	//（前一版要求的"为什么不可用"）。两者由 GroupService 各自按 reason 节流。
+	if len(calls) != 2 {
+		t.Fatalf("组缺失应通知健康回调 2 次（discard + 类别），got %d: %v", len(calls), calls)
 	}
-	if !strings.HasPrefix(calls[0], "9|source_member_changed") {
-		t.Fatalf("健康回调应带 source_member_changed 类别与组 ID，got %q", calls[0])
+	joined := strings.Join(calls, ",")
+	if !strings.Contains(joined, "9|source_frame_discarded:group_missing") {
+		t.Fatalf("缺丢帧级健康证据，got %v", calls)
+	}
+	if !strings.Contains(joined, "9|source_member_changed:group_missing") {
+		t.Fatalf("缺类别级健康证据，got %v", calls)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
@@ -61,6 +62,10 @@ type Evaluator struct {
 	mu sync.RWMutex
 	// rules 规则缓存 (仅 enabled 规则), key: rule ID。
 	rules map[uint]models.AlertRule
+	// rulesSnap 是 rules 的不可变快照（LoadRules/Invalidate 时整体重建）。
+	// 与 automation 同因（硬性能门禁 #10a-2）：Evaluate 每帧按值拷贝规则数组会让
+	// 帧开销随规则数增长（AlertRule 也含来源指针列）。快照不可变 ⇒ 无锁零拷贝读取。
+	rulesSnap atomic.Pointer[[]models.AlertRule]
 	// windows 每规则滑动窗口, key: rule ID。
 	windows map[uint][]sample
 	// firing 规则当前是否处于 firing 态 (内存态)。
@@ -134,6 +139,12 @@ func (e *Evaluator) LoadRules() {
 	}
 	next := make(map[uint]models.AlertRule, len(rules))
 	for _, r := range rules {
+		// H-3：非法 source_kind ⇒ Warn + 计数，不跳过、不 fail-closed，保持老路求值。
+		if models.InvalidSourceKind(r.SourceKind) {
+			logger.Warn("alert: rule has invalid source_kind, falling back to edge_device",
+				"rule_id", r.ID, "source_kind", *r.SourceKind)
+			metrics.RuleInvalidSourceKindTotal.WithLabelValues("alert").Inc()
+		}
 		next[r.ID] = r
 	}
 	e.mu.Lock()
@@ -185,6 +196,8 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	e.rulesByGroup = byGroup
+	// 发布热路径规则快照（锁内构建，避免读者看到半更新状态）。
+	e.rulesSnap.Store(makeAlertRulesSnapshot(next))
 	e.mu.Unlock()
 	// DB 写放在锁外（失败只告警，不影响规则加载）。
 	for _, rule := range updatedWhileFiring {
@@ -202,6 +215,15 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	e.auditMu.Unlock()
+}
+
+// makeAlertRulesSnapshot 构建不可变告警规则快照（语义同原每帧浅拷贝）。
+func makeAlertRulesSnapshot(m map[uint]models.AlertRule) *[]models.AlertRule {
+	snap := make([]models.AlertRule, 0, len(m))
+	for _, r := range m {
+		snap = append(snap, r)
+	}
+	return &snap
 }
 
 // sameAlertTriggerState 是告警求值状态的**内容白名单**（窄复核 R2-followup S1）。
@@ -301,14 +323,14 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	if len(fields) == 0 || edgeDeviceID == 0 {
 		return
 	}
-	// H2 修复（锁放大 + 锁内查 DB）：RLock 内只做规则浅拷贝；resolveLogicalID 的
-	// SQL 往返必须移到锁外（原实现在 RLock 内调用它，DB 慢查询会阻塞所有写锁等待）。
-	e.mu.RLock()
-	snapshot := make([]models.AlertRule, 0, len(e.rules))
-	for _, r := range e.rules {
-		snapshot = append(snapshot, r)
+	// 热路径零拷贝：规则快照由 LoadRules/Invalidate 一次性构建并以 atomic.Pointer
+	// 发布；快照不可变 ⇒ 无需 RLock、无需每帧重建（硬性能门禁 #10a-2）。
+	// resolveLogicalID 的 SQL 往返仍在锁外（原 H2 修复语义不变）。
+	snapPtr := e.rulesSnap.Load()
+	if snapPtr == nil {
+		return
 	}
-	e.mu.RUnlock()
+	snapshot := *snapPtr
 
 	target := edgeDeviceID
 	var logicalID uint
