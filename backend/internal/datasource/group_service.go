@@ -195,19 +195,28 @@ func (g *GroupService) now() time.Time { return g.opts.Now() }
 
 // SetGroupRegistry 注入 sourceref 注册表（快照唯一发布目标）。
 //
-// nil 语义（B-3 快速路径）：视为"当前没有可服务的组"——MarkSuccess/MarkFailure 会
-// **直接短路、不跑状态机**。embedding/测试若要在无 registry 前提下验证 R1/R2，必须
-// 注入 registry（空 registry 也会在 PublishAll/CreateGroup 后被填充）。生产 main.go
-// 恒注入且先 PublishAll，不存在该分支。
+// nil 语义（impl-core 探针后修正）：nil 无法证明"没有组"，因此**保守执行状态机**
+// （MarkSuccess/MarkFailure 照常查库/更新，只是无法发布快照）。若 nil 也短路，
+// 漏注入 registry 的装配会**静默丢 R1/R2 运行态**（last_success 不写、切不切换），
+// 比多一次查询危险得多。生产 main.go 恒注入且先 PublishAll，故 0 组快速路径仍然生效
+// （registry 非 nil 且 Len()==0 ⇒ 短路，零查询）。
 func (g *GroupService) SetGroupRegistry(r *sourceref.Registry) { g.registry = r }
 
 // groupsLive 报告是否存在已发布的组（热路径闸门，O(1)）。
 //
+// 判据：
+//   - registry 已注入且 Len()==0 ⇒ false（确证无组，生产 0 组场景走此分支，零查询）；
+//   - registry==nil ⇒ true（**保守执行**：不能把"没接线"误判成"没有组"）；
+//   - 其余 ⇒ true（0→N 由 publish 自动翻转，无需失效钩子）。
+//
 // 为什么读 registry 而不是查 DB：快照是状态机自己发布的真值（唯一发布者），
 // 0→N 由 publish 自动翻转；热路径每帧查库会把 0 组场景的收益抵消掉（B-3 第 1 步）。
 func (g *GroupService) groupsLive() bool {
-	if g == nil || g.registry == nil {
+	if g == nil {
 		return false
+	}
+	if g.registry == nil {
+		return true // 装配缺失：保守跑，宁多查一次也不能静默丢状态
 	}
 	return g.registry.Len() > 0
 }

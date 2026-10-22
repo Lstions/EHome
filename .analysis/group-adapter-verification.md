@@ -12,11 +12,11 @@
 |---|---|
 | `go build ./...` | **绿** |
 | `go vet ./internal/datasource/ ./internal/api/` | **绿** |
-| 本验证测试 | **6 文件 / 35 个 `=== RUN` 全绿**（复验 HEAD 982e298e，含后续新增的 staleness 归一/降级可见性覆盖） |
+| 本验证测试 | **6 文件 / 38 个 `=== RUN` 全绿**（复验 HEAD ed75c02b，含 staleness 归一/降级可见性/零组快速路径覆盖） |
 | 整包 `go test ./internal/datasource/` | **ok**（含 ds-analyst 原有测试） |
 | `-race`（TestVerify*） | **ok**（4.9s） |
 | 等价性差分 | **3 seeds × 40 步状态轨迹逐步相等** |
-| 变异自证 | **18 项尝试：17 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1/§3.2/§3.3），恢复后 md5 全一致、整包复绿 |
+| 变异自证 | **20 项尝试：19 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1/§3.2/§3.3/§7.1），恢复后 md5 全一致、整包复绿 |
 | 发现 | 1 高风险（R5 双 active）+ 5 处契约/一致性偏差 —— **均已由 ds-analyst 修复/裁决**（§4 状态列） |
 
 ## 1. 五个验证重点 → 用例映射
@@ -199,6 +199,35 @@ ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
 **关于 `source_group_guard.go`**：该文件不是本任务的验证产出（本任务只新增
 `internal/api/handler_source_group_verify_test.go`）；它属于规则来源绑定校验的接线文件，
 当前 `go vet ./internal/api/` 已无 unreachable 告警，无需本任务处理。
+
+### 7.1 终审提交复验（HEAD `ed75c02b`：B1/B2/B3 + R10 + F-8 + H-3/H-5，含 O-1/O-2 修复复验）
+
+Lead 终审提交后按同一套验证复跑；随后针对我提的两个观测点（O-1/O-2）ds-analyst 已修复并补锁，再次复验：
+
+| 命令 | 结果 |
+|---|---|
+| `go test ./internal/datasource/ -count=1` | **ok**（4.8s，含 ds 新增用例） |
+| `go test ./internal/datasource/ -count=1 -race` | **ok**（8.2s） |
+| `go test ./internal/datasource/ -run TestVerify -v -count=1` | **38 RUN 全绿** |
+| 差分 `TestVerifyDiff_LegacyVsGroupEquivalence` | **3 seeds × 40 步仍逐步等价**（末态 logs=5/0/6） |
+| `go build ./...` + `go vet ./internal/{datasource,api,models}/` | 绿 |
+
+**交叉回归结论**：B1（cooldown 下限去 kind 限制）/ B2（停用守卫 409）/ B3（reconcileRuleAnchors）未改变差分轨迹（差分世界无规则引用，B2/B3 不触发）；R10 新语义与 `afterAuthorityLost()` 不冲突（O-2 已闭环）。
+
+**O-1（已修复 ✅）`groupsLive()` 不再把「registry 未注入」当「0 组」**
+
+ds 改为 `registry == nil ⇒ true`（保守执行；仅“已注入且 Len()==0”才零查询短路）。
+本验证新增 `TestVerifyFastPath`（2 子例）独立锁定该语义：
+- `nil_registry_runs_conservatively`：不注入 registry + CreateGroup + MarkSuccess ⇒ `last_success` **必须真写入**；
+- `injected_empty_registry_short_circuits`：注入空 registry（直写 DB 造组）⇒ 短路不写 DB；`PublishAll` 后（Len>0）恢复正常写入。
+- 变异 M19（退回 `registry==nil ⇒ false`）⇒ **CAUGHT**。
+
+**O-2（已修复 ✅）R10 冷却抑制只落 1 行 degraded 健康事件**
+
+ds 移除事务内重复行，统一由 `afterAuthorityLost → RecordDegraded` 单点写（1min 节流）。
+本验证 `TestVerifyEvents_R10_CooldownSuppresses` 断言升级为**恰 1 行**（event=degraded 且 message 含 no_active_after_cooldown）；变异 M20（恢复事务内重复行）⇒ **CAUGHT**。
+
+**累计变异**：20 项尝试 → **19 CAUGHT + 1 被防御性兜底掩盖**（M10，见 §3.1），恢复后实现 md5 全一致、整包复绿。
 
 ## 6. 复跑命令
 

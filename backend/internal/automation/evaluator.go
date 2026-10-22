@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
@@ -97,6 +98,13 @@ type Evaluator struct {
 	mu sync.RWMutex
 	// rules 规则缓存 (仅 enabled 且 trigger_type IN (sensor_threshold, time_window)), key: rule ID。
 	rules map[uint]models.AutomationRule
+	// rulesSnap 是 rules 的不可变快照（LoadRules/Invalidate 时整体重建一次）。
+	//
+	// 为什么需要（Lead 2026-10-22 硬性能门禁 #10a-2）：Evaluate 是每帧热路径，
+	// 按值拷贝整个规则数组会让帧开销随规则数线性增长 —— 本批 AutomationRule
+	// 从 352B 涨到 448B，3 条规则即 +288B/帧（实测 +23%）。快照发布后不再修改，
+	// 读者用 atomic.Pointer 无锁零拷贝读取，连 RLock 都省掉。
+	rulesSnap atomic.Pointer[[]models.AutomationRule]
 	// windows 每规则滑动窗口, key: rule ID (sensor_threshold 专用)。
 	windows map[uint][]sample
 	// triggered 规则当前是否处于 triggered 态 (冷却中)。
@@ -394,6 +402,9 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	e.rulesByGroup = byGroup
+	// 发布热路径规则快照（一次构建、之后每帧只读）。必须在锁内构建，避免
+	// 读者看到"map 已换但快照未换"的半更新状态；Store 与构建同在一把锁内。
+	e.rulesSnap.Store(makeRulesSnapshot(next))
 	e.mu.Unlock()
 	// 设计 §7.2：LoadRules/Invalidate 后清空编译产物（selector/epoch 变化惰性重编译）。
 	// 兜底刷新每 30s 一次，重编译是纯内存操作（零 DB），热路径仍靠缓存。
@@ -413,6 +424,17 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	e.auditMu.Unlock()
+}
+
+// makeRulesSnapshot 构建不可变规则快照（调用方保证 m 不再被并发修改）。
+//
+// 语义与原来的"每帧浅拷贝"逐字节相同，只是把构建时机从热路径移到规则加载期。
+func makeRulesSnapshot(m map[uint]models.AutomationRule) *[]models.AutomationRule {
+	snap := make([]models.AutomationRule, 0, len(m))
+	for _, r := range m {
+		snap = append(snap, r)
+	}
+	return &snap
 }
 
 // sameSensorTriggerState 是 sensor_threshold 求值状态的**内容白名单**（窄复核 R2）。
@@ -910,14 +932,14 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	if len(fields) == 0 || edgeDeviceID == 0 {
 		return
 	}
-	// H2 修复 (锁放大): RLock 内只快照 rules 浅拷贝, resolveLogicalID 的 SQL 往返
-	// 移到 RUnlock 之后 — 写锁等待会阻塞所有 RLock, DB 慢查询时求值 stall。
-	e.mu.RLock()
-	rules := make([]models.AutomationRule, 0, len(e.rules))
-	for _, r := range e.rules {
-		rules = append(rules, r)
+	// 热路径零拷贝：规则快照由 LoadRules/Invalidate 一次性构建并以 atomic.Pointer
+	// 发布；快照不可变 ⇒ 无需 RLock、无需每帧重建（硬性能门禁 #10a-2：
+	// 原按值拷贝在 3 条规则时 +288B/帧、+23% 时间）。
+	snapPtr := e.rulesSnap.Load()
+	if snapPtr == nil {
+		return
 	}
-	e.mu.RUnlock()
+	rules := *snapPtr
 
 	target := edgeDeviceID
 	var logicalID uint

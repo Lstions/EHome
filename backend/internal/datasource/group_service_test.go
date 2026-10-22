@@ -920,18 +920,48 @@ func TestGroupFastPathZeroGroupsSkipsQueries(t *testing.T) {
 	}
 }
 
-// ── 19. B-3：registry 未注入（nil）同样短路，不 panic、不查库 ───────────────
-func TestGroupFastPathNilRegistrySkipsQueries(t *testing.T) {
+// ── 19. B-3：registry 未注入（nil）⇒ 保守执行，不能把"没接线"误判成"没组" ──
+//
+// impl-core 探针发现：nil 若短路，漏注入 registry 的装配会静默丢 R1/R2
+// （last_success 不写、永不切换）。因此语义修正为：
+//   registry==nil ⇒ 照常执行状态机（只是无法发布快照）；
+//   仅"已注入且 Len()==0"才短路为零查询（生产 0 组场景）。
+func TestGroupFastPathNilRegistryRunsConservatively(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	gsvc := NewGroupService(db, Options{Now: func() time.Time { return testBase() }})
-	var queries int64
-	db.Callback().Query().Before("gorm:query").Register("test:count_queries_nil_registry",
-		func(tx *gorm.DB) { atomic.AddInt64(&queries, 1) })
+	ed := models.EdgeDevice{Name: "light-nil-reg", NodeID: "node-1", ChannelID: 1, IntervalMs: 5000, Enabled: true}
+	if err := db.Create(&ed).Error; err != nil {
+		t.Fatalf("create edge device: %v", err)
+	}
+	if err := db.Create(&models.SensorFieldObs{DeviceID: ed.ID, SensorName: "illuminance"}).Error; err != nil {
+		t.Fatalf("create obs: %v", err)
+	}
+	group, err := gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		Members: []GroupMemberInput{{EdgeDeviceID: ed.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
 
-	gsvc.MarkSuccess(1, []string{"illuminance"}, testBase())
-	gsvc.MarkFailure(1, TriggerDeviceOffline)
-	if got := atomic.LoadInt64(&queries); got != 0 {
-		t.Fatalf("registry=nil 时组状态机应短路，got %d 次查询", got)
+	var queries int64
+	db.Callback().Query().Before("gorm:query").Register("test:count_queries_nil_registry_conservative",
+		func(tx *gorm.DB) { atomic.AddInt64(&queries, 1) })
+	gsvc.MarkSuccess(ed.ID, []string{"illuminance"}, testBase())
+	if got := atomic.LoadInt64(&queries); got == 0 {
+		t.Fatalf("registry=nil 时必须保守执行状态机（否则漏接线会静默丢 R1）")
+	}
+	var member models.SourceGroupMember
+	if err := db.Where("group_id = ?", group.ID).First(&member).Error; err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+	if member.LastSuccess == nil {
+		t.Fatalf("registry=nil 时 MarkSuccess 仍必须写 last_success（保守执行）")
+	}
+	queries = 0
+	gsvc.MarkFailure(ed.ID, TriggerDeviceOffline)
+	if got := atomic.LoadInt64(&queries); got == 0 {
+		t.Fatalf("registry=nil 时 MarkFailure 也必须保守执行")
 	}
 }
 
@@ -1000,15 +1030,16 @@ func TestGroupCooldownSuppressedEmitsNextZeroAndHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
-	found := false
+	// 去重断言（impl-core 观测点 2）：同一事实只落 1 行 degraded——事务内不再写，
+	// 由 afterAuthorityLost → RecordDegraded 单点写且 1min 节流，按行计数的看板不重复。
+	degenerateRows := 0
 	for _, h := range health {
 		if h.Event == "degraded" && containsSub(h.Message, "no_active_after_cooldown") {
-			found = true
-			break
+			degenerateRows++
 		}
 	}
-	if !found {
-		t.Fatalf("组健康表缺少 no_active_after_cooldown 降级行: %+v", health)
+	if degenerateRows != 1 {
+		t.Fatalf("no_active_after_cooldown 降级行必须恰 1 行（去重），got %d: %+v", degenerateRows, health)
 	}
 
 	// R10 语义未破：抑制期间不新增切换日志。

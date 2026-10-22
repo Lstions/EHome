@@ -269,16 +269,17 @@ func TestVerifyEvents_R10_CooldownSuppresses(t *testing.T) {
 	if m := f.reg.MatchFrame(b.ID, sourceref.GroupKindSourceGroup, g.ID); m.Accepts() {
 		t.Fatalf("组无权威后帧不得再驱动求值: %+v", m)
 	}
-	// 健康表：degraded 行（message 含 no_active_after_cooldown），不再是旧的 silent。
-	found := false
+	// 健康表：degraded 行（message 含 no_active_after_cooldown），不再是旧的 silent；
+	// 且必须**恰 1 行**——事务内不再写重复行，统一由 afterAuthorityLost → RecordDegraded
+	// 单点写（1min 节流），否则按行计数的看板会重复（impl-core 观测点 O-2）。
+	degradedRows := 0
 	for _, h := range f.healthEvents(g.ID) {
 		if h.Event == "degraded" && strings.Contains(h.Message, "no_active_after_cooldown") {
-			found = true
-			break
+			degradedRows++
 		}
 	}
-	if !found {
-		t.Fatalf("冷却抑制必须落 degraded 健康事件（含 no_active_after_cooldown）: %+v", f.healthEvents(g.ID))
+	if degradedRows != 1 {
+		t.Fatalf("冷却抑制应恰 1 行 degraded no_active_after_cooldown，got %d: %+v", degradedRows, f.healthEvents(g.ID))
 	}
 	f.expectNoMoreEvents(1)
 }

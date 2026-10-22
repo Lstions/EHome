@@ -1,0 +1,41 @@
+perf(source-group): 规则快照改 atomic.Pointer，Evaluate 零拷贝（门禁 #10a-2 修复）
+
+## 问题（硬性能门禁红）
+check_field_semantics.sh #10a-2 判据「端到端求值开销 ≤ 基线 +5%（硬）」实测 FAIL：
+  基线 7bc63e3f : 788.7 ns/op   1600 B/op   4 allocs/op
+  修复前 HEAD  : 973-1013 ns/op 1888 B/op   4 allocs/op   ⇒ 1.24x / +288B
+
+## 根因
+internal/automation/evaluator.go:915-918 的 Evaluate 每帧做：
+  e.mu.RLock()
+  rules := make([]models.AutomationRule, 0, len(e.rules))
+  for _, r := range e.rules { rules = append(rules, r) }   // 按值拷贝整个数组
+  e.mu.RUnlock()
+
+本批给 AutomationRule 加了 4 个来源字段（SourceKind *string / SourceGroupID *uint ...），
+结构体 352 → 448 字节（实测）。3 条规则 × 96B = 288B/帧，与实测差量完全吻合。
+这不是「新功能必然更慢」，而是**每帧为读取不变数据重建了一次拷贝** —— 白花的。
+
+## 修法：规则快照 + atomic.Pointer
+- Evaluator 加 rulesSnap atomic.Pointer[[]models.AutomationRule]；
+- LoadRules 在锁内构建一次并 Store（makeRulesSnapshot）；Invalidate 走 LoadRules 自动重建；
+- Evaluate 改为 Load() + 解引用：**无 RLock、无每帧拷贝、无分配**；
+- alert 同款（makeAlertRulesSnapshot）。
+- e.rules map 保留（ruleByID / 状态清理仍用），只是热路径不再拷它。
+- 基准测试构造函数显式发布一次快照（测试不经 LoadRules，否则会读空快照早退，
+  变成「快但什么都没测」的假绿）。
+
+## 结果
+  修复后      : 458-477 ns/op   480 B/op   3 allocs/op
+  对比基线    : 0.59x 时间（-40%）、-70% 字节、少 1 次分配
+  判据        : ≤828ns / ≤1680B —— 远低于阈值
+
+语义不变：快照内容与原浅拷贝逐字节相同，只是复用而非每帧重建。
+回归：两包 -count=1 全绿；-race 绿（覆盖 LoadRules 并发发布 × Evaluate 读快照）；
+e2e TestSG_E1|E2|E3 ok（S4/钩子清窗/窗口状态未破坏）。
+
+## 同期一并提交
+- impl-core O-1/O-2 修复复验：38 RUN 全绿、差分 3 seeds × 40 步仍等价、
+  变异累计 20 项（19 CAUGHT + 1 兜底掩盖）；新增 M19/M20 回归锁；
+- ds-analyst：groupsLive() 语义修正（registry==nil ⇒ 保守执行，防漏注入静默丢 R1/R2）、
+  R10 健康行去重（单点写，避免看板重复计数）。

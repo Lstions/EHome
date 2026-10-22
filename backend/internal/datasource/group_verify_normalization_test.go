@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sourceref"
 )
 
 // TestVerifyStalenessNormalization 钉死归一规则与「DB 永不落 0」不变量。
@@ -168,4 +169,90 @@ func TestVerifyRecordDegradedThrottle(t *testing.T) {
 	if after := len(f.degradedHealthRows(g.ID)); after != before {
 		t.Fatalf("已删除组不应新增健康行：before=%d after=%d", before, after)
 	}
+}
+
+// TestVerifyFastPath 验证 B-3 零组快速路径的语义边界（impl-core 观测点 O-1 修复锁）：
+//
+//   - registry == nil（装配缺失）⇒ **保守执行**：不能把"无法证明有组"当成"没有组"，
+//     否则漏注入会静默丢失 R1/R2（离线检测不再触发组切换）；
+//   - registry != nil 且 Len()==0（已发布为空）⇒ 零查询短路（热路径收益）。
+func TestVerifyFastPath(t *testing.T) {
+	newSvc := func(injectRegistry bool) *GroupService {
+		db := openVerifyDB(t)
+		svc := NewGroupService(db, Options{Now: func() time.Time { return testBase() }})
+		if injectRegistry {
+			svc.SetGroupRegistry(sourceref.NewRegistry())
+		} else {
+			svc.SetNotifier(func(models.Notification) {})
+		}
+		return svc
+	}
+	addDev := func(svc *GroupService, name string) *models.EdgeDevice {
+		t.Helper()
+		ed := models.EdgeDevice{Name: name, NodeID: "n", ChannelID: 1, IntervalMs: 5000, Enabled: true, Type: "prs3001"}
+		if err := svc.db.Create(&ed).Error; err != nil {
+			t.Fatalf("create device: %v", err)
+		}
+		if err := svc.db.Create(&models.SensorFieldObs{DeviceID: ed.ID, SensorName: "illuminance"}).Error; err != nil {
+			t.Fatalf("create obs: %v", err)
+		}
+		return &ed
+	}
+
+	t.Run("nil_registry_runs_conservatively", func(t *testing.T) {
+		svc := newSvc(false) // 不注入 registry
+		ed := addDev(svc, "fp-a")
+		g, err := svc.CreateGroup(CreateGroupInput{Name: "fp", Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+			Members: []GroupMemberInput{{EdgeDeviceID: ed.ID, Priority: 100}}})
+		if err != nil {
+			t.Fatalf("CreateGroup: %v", err)
+		}
+		if svc.groupsLive() != true {
+			t.Fatal("registry=nil 时 groupsLive 必须保守返回 true（漏注入不得静默丢状态机）")
+		}
+		svc.MarkSuccess(ed.ID, []string{"illuminance"}, testBase())
+		var m models.SourceGroupMember
+		if err := svc.db.Where("group_id = ?", g.ID).First(&m).Error; err != nil {
+			t.Fatalf("reload member: %v", err)
+		}
+		if m.LastSuccess == nil {
+			t.Fatal("registry=nil 时 MarkSuccess 必须真执行（last_success 应写入），不得静默 no-op")
+		}
+	})
+
+	t.Run("injected_empty_registry_short_circuits", func(t *testing.T) {
+		svc := newSvc(true) // 注入 registry，但未 PublishAll（Len=0）
+		ed := addDev(svc, "fp-b")
+		// 直写 DB 造组（不走 CreateGroup，避免 publish 后 Len>0）。
+		g := models.SourceGroup{Name: "fp-db", Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance", Enabled: true, StalenessSec: 30}
+		if err := svc.db.Create(&g).Error; err != nil {
+			t.Fatalf("create group row: %v", err)
+		}
+		m := models.SourceGroupMember{GroupID: g.ID, EdgeDeviceID: ed.ID, Priority: 100, Status: models.SourceMemberStatusActive, MaxFailCount: 3}
+		if err := svc.db.Create(&m).Error; err != nil {
+			t.Fatalf("create member row: %v", err)
+		}
+		if svc.groupsLive() {
+			t.Fatal("已注入但 Len=0 时 groupsLive 必须 false（零查询短路）")
+		}
+		svc.MarkSuccess(ed.ID, []string{"illuminance"}, testBase())
+		var after models.SourceGroupMember
+		if err := svc.db.First(&after, m.ID).Error; err != nil {
+			t.Fatalf("reload member: %v", err)
+		}
+		if after.LastSuccess != nil {
+			t.Fatal("已发布 0 组时 MarkSuccess 应短路（不写 DB）")
+		}
+		// PublishAll 后 Len>0 ⇒ 恢复正常执行。
+		if err := svc.PublishAll(); err != nil {
+			t.Fatalf("PublishAll: %v", err)
+		}
+		svc.MarkSuccess(ed.ID, []string{"illuminance"}, testBase())
+		if err := svc.db.First(&after, m.ID).Error; err != nil {
+			t.Fatalf("reload member: %v", err)
+		}
+		if after.LastSuccess == nil {
+			t.Fatal("PublishAll 后 MarkSuccess 必须真执行")
+		}
+	})
 }

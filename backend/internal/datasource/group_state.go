@@ -243,9 +243,9 @@ func (g *GroupService) maybeGroupFailover(tx *gorm.DB, groupID, failedMemberID u
 		}
 		seq := g.nextTransitionSeq(groupID)
 		msg := fmt.Sprintf("来源组 %d 冷却抑制且已无权威成员 (no_active_after_cooldown)", groupID)
-		if err := g.writeGroupHealth(tx, groupID, failedMemberID, "degraded", msg); err != nil {
-			return nil, false, err
-		}
+		// 健康行不在此处写：统一由调用方提交后的 afterAuthorityLost → RecordDegraded
+		// 写一条（1min 节流）。否则同一事实会落两行 degraded（事务内 1 行 + 节流行 1 行），
+		// 按行计数的看板重复计数（impl-core 观测点 2）。
 		*notes = append(*notes, g.newGroupNotification(notifyTypeWarning, "来源组切换被抑制（组已无权威）", msg, groupID))
 		return &ActiveChange{
 			PrevMemberID: failedMemberID, NextMemberID: 0,
