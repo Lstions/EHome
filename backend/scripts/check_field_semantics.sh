@@ -155,7 +155,15 @@ gate2() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 门禁 3：包级默认拒绝。允许 import sensorfield 的包 ONLY：
-# internal/automation、internal/alert、internal/api、cmd/server；其余出现即红。
+#   internal/automation、internal/alert、internal/api、internal/e2e、cmd/server
+# 其余出现即红。
+#
+# 为什么 internal/e2e 在白名单里（2026-10-22 补）：
+#   e2e 是 //go:build e2e 的端到端测试包，必须能构造真实链路（数据面→解析层→引擎），
+#   因此需要直接 import sensorfield 建 registry。它不是生产包，不违反「解析层只被
+#   允许的领域包依赖」这条红线。
+#   ⚠ 这个越界在**基线 7bc63e3f 上就已存在**（fieldresolver_e2e_test.go 早就 import 了
+#   sensorfield），属「新增包忘同步白名单」的既有缺口，不是本批引入。
 # ─────────────────────────────────────────────────────────────────────────────
 gate3() {
   local importers="$tmp_dir/g3.importers"
@@ -175,7 +183,7 @@ gate3() {
   : > "$bad"
   while IFS= read -r dir; do
     case "$dir" in
-      internal/automation|internal/alert|internal/api|cmd/server) ;;
+      internal/automation|internal/alert|internal/api|internal/e2e|cmd/server) ;;
       *) printf '%s\n' "$dir" >> "$bad" ;;
     esac
   done < "$importers"
