@@ -25,6 +25,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sourceref"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 )
 
@@ -253,6 +254,7 @@ func (e *Evaluator) matchSourceRule(rule models.AutomationRule, ref models.Sourc
 	edgeDeviceID uint, at time.Time) (sourceref.FrameMatch, bool) {
 	if e.sourceResolver == nil {
 		// E-6：未接线必须可见地 fail-closed，不得静默跳过。
+		e.recordFrameDiscarded(ref.GroupID, at, frameDiscardResolverUnset)
 		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultSourceResolverNotConfigured,
 			"source_resolver_not_configured")
 		return sourceref.FrameMatch{}, false
@@ -260,11 +262,19 @@ func (e *Evaluator) matchSourceRule(rule models.AutomationRule, ref models.Sourc
 	m := e.sourceResolver.MatchFrame(edgeDeviceID, string(ref.Kind), ref.GroupID)
 	if !m.Configured {
 		// 组不存在/未启用：spec 规则无法求值 ⇒ 审计（方案 §7.1 E-4/E-6）。
+		e.recordFrameDiscarded(ref.GroupID, at, frameDiscardReasonLabel(m.Reason))
 		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultSourceMemberChanged, m.Reason)
 		return m, false
 	}
 	if !m.Accepts() {
-		return m, false // 主备组的备成员帧：丢弃（S1 的前提）
+		// 主备组的备成员帧 / 非成员帧：丢弃（S1 的前提）。这是最常见也最容易被
+		// 误判成"规则坏了"的一类静默丢帧 ⇒ 必须进指标与健康事件。
+		reason := frameDiscardNotActive
+		if !m.IsMember {
+			reason = frameDiscardNotMember
+		}
+		e.recordFrameDiscarded(ref.GroupID, at, reason)
+		return m, false
 	}
 	return m, true
 }
@@ -390,6 +400,43 @@ func (e *Evaluator) recordSourceFailure(ruleID, groupID uint, at time.Time, resu
 		logger.Warn("automation: failed to record source event",
 			"rule_id", ruleID, "result", resultCode, "reason", reason, "error", err)
 	}
+}
+
+// 丢帧原因（有界枚举，直接进指标 label —— 禁止把 device/selector 放进来）。
+const (
+	frameDiscardNotMember      = "not_member"
+	frameDiscardNotActive      = "not_active_member"
+	frameDiscardGroupMissing   = "group_missing"
+	frameDiscardGroupDisabled  = "group_disabled"
+	frameDiscardResolverUnset  = "source_resolver_not_configured"
+	frameDiscardGroupUnavail   = "group_unavailable"
+)
+
+// frameDiscardReasonLabel 把 sourceref 的 Reason 收敛成有界指标 label。
+func frameDiscardReasonLabel(reason string) string {
+	switch reason {
+	case sourceref.ReasonGroupMissing:
+		return frameDiscardGroupMissing
+	case sourceref.ReasonGroupDisabled:
+		return frameDiscardGroupDisabled
+	case "":
+		return frameDiscardGroupUnavail
+	default:
+		return frameDiscardGroupUnavail
+	}
+}
+
+// recordFrameDiscarded 记录一次来源组丢帧（方案 §7.1 F-8 / §12.9.3 R-9）：
+//   ① 指标 counter（每帧累加，不写库）；
+//   ② 健康可见性回调（reason 前缀 source_frame_discarded，由数据源侧
+//      GroupService.RecordDegraded 做 (group_id,reason) 1min 节流 + 255B 截断）。
+//
+// 为什么必须两条都做：丢帧是"静默失效"的主要来源（备成员帧/组缺失/未接线），
+// 只有审计事件不够——运维要看的是"这个组现在有没有在供数"（health）与
+// "丢了多少"（metric）；且审计事件会被 5 分钟节流压掉。
+func (e *Evaluator) recordFrameDiscarded(groupID uint, at time.Time, reason string) {
+	metrics.SourceFrameDiscardedTotal.WithLabelValues(reason).Inc()
+	notifySourceHealth(e.sourceHealthFn, groupID, "source_frame_discarded", reason)
 }
 
 // sourceAuditKey 是来源失败审计去重键。

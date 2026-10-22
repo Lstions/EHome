@@ -375,6 +375,17 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 			}
 			return err
 		}
+		// B2 终审收口（I6）：被规则引用的组禁止 enabled=false；否则规则 resolver 读到
+		// Configured=false ⇒ 静默 unbound（本方案要消灭的静默失效类）。
+		if in.Enabled != nil && !*in.Enabled && row.Enabled {
+			refs, err := g.groupRuleReferences(tx, row.ID)
+			if err != nil {
+				return err
+			}
+			if refs > 0 {
+				return fmt.Errorf("%w: 组 %d 仍被 %d 条规则引用，禁止停用（I6），请先解除规则绑定", ErrConflict, row.ID, refs)
+			}
+		}
 		combine := row.Combine
 		if in.Combine != nil {
 			combine = strings.TrimSpace(*in.Combine)
@@ -458,6 +469,10 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 			}
 			ev, err := g.replaceMembers(tx, row, *in.Members)
 			if err != nil {
+				return err
+			}
+			// B3 终审收口（N-7）：成员集合/优先级变更后，同事务回写绑组规则的 legacy 锚点。
+			if err := g.reconcileRuleAnchors(tx, row.ID); err != nil {
 				return err
 			}
 			event = ev
@@ -636,6 +651,43 @@ func (g *GroupService) groupRuleReferences(tx *gorm.DB, groupID uint) (int64, er
 		return 0, err
 	}
 	return automation + alert, nil
+}
+
+// reconcileRuleAnchors 在成员变更的**同一事务**内回写引用本组规则的 legacy 锚点列（B3/N-7）。
+//
+// 为什么必须：锚点（回滚旧二进制时的退化目标）由规则保存期双写；成员/优先级变更后若
+// 不更新，锚点会指向"已不在组内"的设备 ⇒ 回滚旧二进制会用错误来源触发动作。
+//
+// 规则：
+//   - 新锚点 = priority DESC, id ASC 首成员（composite 同口径，见 AnchorMember）；
+//   - anchor==0（组已空）且仍有规则引用 ⇒ 返回 ErrConflict（禁止制造悬空锚点；
+//     调用方应在此之前拒绝"删除最后一个成员"）；
+//   - 只更新 source_group_id 指向本组的规则（存量规则 NULL 不受影响）。
+func (g *GroupService) reconcileRuleAnchors(tx *gorm.DB, groupID uint) error {
+	var members []models.SourceGroupMember
+	if err := tx.Where("group_id = ?", groupID).Find(&members).Error; err != nil {
+		return err
+	}
+	anchor, ok := AnchorMember(members)
+	if !ok {
+		refs, err := g.groupRuleReferences(tx, groupID)
+		if err != nil {
+			return err
+		}
+		if refs > 0 {
+			return fmt.Errorf("%w: 组 %d 仍有 %d 条规则引用，禁止删除最后一个成员（会产生悬空锚点）", ErrConflict, groupID, refs)
+		}
+		return nil
+	}
+	if err := tx.Model(&models.AutomationRule{}).Where("source_group_id = ?", groupID).
+		Update("trigger_edge_device_id", anchor.EdgeDeviceID).Error; err != nil {
+		return err
+	}
+	return tx.Model(&models.AlertRule{}).Where("source_group_id = ?", groupID).
+		Updates(map[string]interface{}{
+			"target_type": models.AlertTargetEdgeDevice,
+			"target_id":   anchor.EdgeDeviceID,
+		}).Error
 }
 
 // GroupRuleReferences 是 handler 用的导出包装（删除前置提示）。

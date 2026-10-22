@@ -1,0 +1,73 @@
+fix(source-group): 三方终审阻断项全部闭环（B1/B2/B3 + R10 + F-8 + H3/H5）
+
+## 背景
+三位评审对 sg-merge-prep @ 29934eea 做了独立终审（架构/契约/实现），共提出
+8 项阻断 + 16 项高优。本提交闭环其中**全部阻断**与关键高优。评审文件见
+docs/评审/来源组-终审-{架构,契约,实现}-2026-10-22.md。
+
+## 阻断项闭环
+
+### B1（契约）cooldown 下限只判 primary_backup ⇒ composite 可存 0
+source_group_guard.go 去掉 kind 限制，两种 kind 一律校 cooldown 下限（= 成员最大
+采集间隔）。复合组更需要：它有 N 个成员帧，cooldown=0 会让同一次物理变化被执行 N 次。
+测试：composite + cooldown=0 ⇒ 400；= 下限 ⇒ 200。
+
+### B2（契约）停用被规则引用的组/成员设备无守卫
+- UpdateGroup：enabled true→false 且 GroupRuleReferences>0 ⇒ ErrConflict(409)；
+- handler_edge_device PUT enabled:false：设备是组成员且所在组被规则引用 ⇒ 409
+  （guardEdgeDeviceDisable，文案含组名/规则名，与删除守卫同精神）。
+测试：引用时停用 409 / 移除规则后可停用。
+
+### B3（契约）回滚锚点只在规则保存时写，成员变更后不重算
+新增 reconcileRuleAnchors，在 UpdateGroup.replaceMembers **同一事务**内回写
+automation.trigger_edge_device_id 与 alert.target_type/target_id（新锚点 =
+priority DESC, id ASC 首成员）。anchor=0 且仍有规则引用 ⇒ 409（禁止删最后一个
+成员制造悬空锚点）。测试：优先级变更后 automation+alert 锚点跟随 / 删最后成员 409。
+
+### B2（实现）+ B-1（架构）—— 同一个洞：求值期丢帧完全不可观测
+两处修复：
+1. F-8 丢帧观测：6 个丢帧点统一 recordFrameDiscarded ⇒
+   指标 ehome_source_frame_discarded_total{reason}（有界枚举，无 device 高基数）
+   + 健康事件 source_frame_discarded:<reason>（节流复用 GroupService）。
+2. R10 冷却抑制的**真实失效链**（架构终审实测）：active 被置 error 但不切换、
+   不发 ActiveChange、不 bump revision ⇒ 组无权威 ⇒ MatchFrame 对所有成员
+   Accepts()=false ⇒ 引擎静默丢帧、规则停求值 5min+、告警停在 firing、零审计。
+   修法：抑制分支也要发 ActiveChange{Prev:failed, Next:0, Reason:cooldown_suppressed}
+   + bump revision + 取 TransitionSeq + degraded 健康行 + RecordDegraded
+   ("no_active_after_cooldown")。注意这不违反 R10 —— R10 抑制的是「切换动作」，
+   不是「通知组已失去权威」这个事实。测试断言：Next=0/reason/rev+1/DB+快照+
+   Accepts 三处一致无权威/health degraded/**切换日志仍 1 条**（R10 语义未破）。
+
+### B4 → 方案缺口（如实记录，不在本次代码修）
+source_frame_discarded 严格说不是「代码 bug」而是我在方案 §12.9.3 写的放行条件
+R-9 未落地。已在 B2/架构 B-1 中一并实现，故此项自然关闭。
+
+## 高优项闭环
+- H-1（实现）deviceIntervalFn 判定：每帧命中 = mutex+map ~50-100ns，可接受；
+  但 TTL miss 在帧回调内同步查 DB。列为合并后 P2（需共享实例 + stale-while-error）。
+- H-3（架构）非法 source_kind 加载期静默回落：新增 models.InvalidSourceKind，
+  两个 LoadRules 各加 Warn + ehome_rule_invalid_source_kind_total{kind}。
+  **不跳过、不 fail-closed** —— 规则静默不生效与静默错源同属不可接受，
+  保守回落 + 大声告警是唯一同时满足「行为可预测」与「问题可见」的选择。
+- H-5（架构）DirtySinceLastReload 无消费方（死安全阀）：新增 RunDirtyReloader，
+  main.go 接线每 5s 检查 dirty ⇒ PublishAll + ClearDirty + Warn +
+  SourceGroupDirtyReloadTotal。钩子通道溢出后这是唯一出口。
+- B-3（实现）0 组时 MarkSuccess/MarkFailure 仍白跑 JOIN：加 groupsLive() 短路
+  （registry atomic Len，O(1)，0→N 由 publish 自动翻转，无独立失效路径）。
+- H-1（架构）legacy R1–R11 未接共享 helper：注释改为如实描述（两套实现，
+  等价性由差分 3×40 步 + 20+ 组用例 + 35 RUN 独立验证锁定）。
+
+## H-4 E6 基线红对照（Lead）
+新增 scripts/check_e6_prefix_bug.sh + 两条成对探针：
+- 基线树只能编译 e6_baseline_probe（单参入口 checkConditionsStillSatisfied(rule)），
+  必红 —— 证明 F4 错源 bug 真实存在且用例能摸到；
+- 当前树只能编译 e6_prefix_bug_probe（带 source 证据入口），必绿。
+只测「修复后绿」无法区分「bug 修好了」与「测试压根没摸到 bug」，故做成对探针。
+（首次实跑发现基线"红"其实是编译失败 —— 未被骗过，改为真正可在基线运行的探针。）
+
+## 验证
+- go build ./... 绿；go vet ./internal/... ./cmd/... 干净
+- go test ./internal/... 全绿（32 包）
+- go test -tags=e2e ./internal/e2e/ ok
+- check_source_group.sh → RESULT: PASS（20 条全过）
+- 变异自证累计 18 项：17 CAUGHT + 1 被 commitGroupChange 兜底掩盖

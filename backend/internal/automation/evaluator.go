@@ -19,6 +19,7 @@ import (
 	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/sun"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
@@ -321,6 +322,15 @@ func (e *Evaluator) LoadRules() {
 	}
 	next := make(map[uint]models.AutomationRule, len(rules))
 	for _, r := range rules {
+		// H-3（Lead 2026-10-22 裁决）：非法 source_kind 是脏数据，但**不跳过规则、
+		// 不 fail-closed** —— 保持按老路 edge_device 求值，只 Warn + 计数。
+		// 理由：规则静默不生效与规则静默错源是同一类不可接受；这里每条规则只判
+		// 一次（加载循环），不进求值热路径。
+		if models.InvalidSourceKind(r.SourceKind) {
+			logger.Warn("automation: rule has invalid source_kind, falling back to edge_device",
+				"rule_id", r.ID, "source_kind", *r.SourceKind)
+			metrics.RuleInvalidSourceKindTotal.WithLabelValues("automation").Inc()
+		}
 		next[r.ID] = r
 	}
 	e.mu.Lock()

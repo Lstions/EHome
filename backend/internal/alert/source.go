@@ -18,6 +18,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sourceref"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 )
 
 // SourceResolver 是 sourceref.Registry 在本包的最小依赖（与 automation 同款接口，
@@ -207,6 +208,38 @@ func (s *alertSourceEvidence) apply(ev *models.AlertEvent) {
 	}
 }
 
+// 丢帧原因（有界枚举，与 automation 同值；指标 label 不可是设备/selector）。
+const (
+	frameDiscardNotMember     = "not_member"
+	frameDiscardNotActive     = "not_active_member"
+	frameDiscardGroupMissing  = "group_missing"
+	frameDiscardGroupDisabled = "group_disabled"
+	frameDiscardResolverUnset = "source_resolver_not_configured"
+	frameDiscardGroupUnavail  = "group_unavailable"
+)
+
+// frameDiscardReasonLabel 把 sourceref 的 Reason 收敛成有界指标 label。
+func frameDiscardReasonLabel(reason string) string {
+	switch reason {
+	case sourceref.ReasonGroupMissing:
+		return frameDiscardGroupMissing
+	case sourceref.ReasonGroupDisabled:
+		return frameDiscardGroupDisabled
+	default:
+		return frameDiscardGroupUnavail
+	}
+}
+
+// recordFrameDiscarded 记录一次告警侧来源组丢帧（方案 §7.1 F-8 / §12.9.3 R-9）。
+//
+// 与 automation 同构：指标每帧累加 + 健康回调（reason 前缀 source_frame_discarded）。
+// 告警侧丢帧同样会导致"看起来规则正常但永不告警"，必须可见。
+func (e *Evaluator) recordFrameDiscarded(groupID uint, at time.Time, reason string) {
+	_ = at // 保留时间参数与 automation 对齐（指标/健康侧不消费时间）
+	metrics.SourceFrameDiscardedTotal.WithLabelValues(reason).Inc()
+	notifySourceHealth(e.sourceHealthFn, groupID, "source_frame_discarded", reason)
+}
+
 // matchSourceRule 判断该帧是否驱动"绑来源组"的告警规则（按 kind 分流）。
 //
 // 返回 ok=false 时：组缺失/未启用/未接线 ⇒ 已记 Warn（fail-closed，不更新窗口）；
@@ -216,6 +249,7 @@ func (e *Evaluator) matchSourceRule(rule models.AlertRule, ref models.SourceRef,
 	if e.sourceResolver == nil {
 		logger.Warn("alert: source resolver not configured, group rule skipped (fail-closed)",
 			"rule_id", rule.ID, "group_id", ref.GroupID)
+		e.recordFrameDiscarded(ref.GroupID, at, frameDiscardResolverUnset)
 		notifySourceHealth(e.sourceHealthFn, ref.GroupID, "source_resolver_not_configured", "")
 		return sourceref.FrameMatch{}, false
 	}
@@ -223,10 +257,16 @@ func (e *Evaluator) matchSourceRule(rule models.AlertRule, ref models.SourceRef,
 	if !m.Configured {
 		logger.Warn("alert: source group unavailable, rule skipped (fail-closed)",
 			"rule_id", rule.ID, "group_id", ref.GroupID, "reason", m.Reason)
+		e.recordFrameDiscarded(ref.GroupID, at, frameDiscardReasonLabel(m.Reason))
 		notifySourceHealth(e.sourceHealthFn, ref.GroupID, "source_member_changed", m.Reason)
 		return m, false
 	}
 	if !m.Accepts() {
+		reason := frameDiscardNotActive
+		if !m.IsMember {
+			reason = frameDiscardNotMember
+		}
+		e.recordFrameDiscarded(ref.GroupID, at, reason)
 		return m, false
 	}
 	return m, true

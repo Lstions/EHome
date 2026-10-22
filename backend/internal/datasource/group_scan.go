@@ -138,6 +138,7 @@ func (g *GroupService) failStaleGroupMember(group models.SourceGroup, member mod
 	g.emitAll(notes)
 	// 注意：event != nil 时也必须 publish（maybeGroupFailover 已提交新的 active/无 active）。
 	g.commitGroupChange(group.ID, event)
+	g.afterAuthorityLost(group.ID, event)
 	return switched, nil
 }
 

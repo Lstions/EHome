@@ -97,6 +97,33 @@ func ValidateSourceRefColumns(kind *string, groupID *uint) error {
 	}
 }
 
+
+// InvalidSourceKind 报告规则加载期是否需要告警"非法 source_kind"（方案 N-6 / 架构终审 H-3）。
+//
+// 语义（Lead 2026-10-22 裁决）：
+//   - kind 为 nil / 空串 ⇒ false（存量老路，合法）；
+//   - kind ∈ {edge_device, source_group} ⇒ false；
+//   - 其它任何值（脏数据、手工 SQL、未来版本回退遗留）⇒ true。
+//
+// **调用方只做 Warn + 指标，不跳过规则、不改求值行为**：求值继续走 SourceRef() 的
+// 保守回落（edge_device + TriggerEdgeDeviceID）。为什么不是 fail-closed 跳过：
+// 「规则静默不生效」与「静默乱触发」同属静默失效，前者更难被发现；保守回落 + 可见告警
+// 是唯一能同时满足"行为可预测"与"问题可见"的选择（source_group_guard 的保存期 400 已挡住新写入）。
+//
+// 唯一实现纪律：automation/alert 的 LoadRules 必须调用本函数，禁止各自判断
+// source_kind 字符串（与 SourceRef()/ValidateSourceRefColumns 同源，防规则漂移）。
+func InvalidSourceKind(kind *string) bool {
+	if kind == nil || *kind == "" {
+		return false
+	}
+	switch SourceKind(*kind) {
+	case SourceKindEdgeDevice, SourceKindSourceGroup:
+		return false
+	default:
+		return true
+	}
+}
+
 // SourceRef 解析自动化规则的来源引用（唯一实现）。
 func (r AutomationRule) SourceRef() SourceRef {
 	if r.SourceKind != nil && *r.SourceKind == string(SourceKindSourceGroup) &&

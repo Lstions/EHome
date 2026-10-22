@@ -134,6 +134,12 @@ func (e *Evaluator) LoadRules() {
 	}
 	next := make(map[uint]models.AlertRule, len(rules))
 	for _, r := range rules {
+		// H-3：非法 source_kind ⇒ Warn + 计数，不跳过、不 fail-closed，保持老路求值。
+		if models.InvalidSourceKind(r.SourceKind) {
+			logger.Warn("alert: rule has invalid source_kind, falling back to edge_device",
+				"rule_id", r.ID, "source_kind", *r.SourceKind)
+			metrics.RuleInvalidSourceKindTotal.WithLabelValues("alert").Inc()
+		}
 		next[r.ID] = r
 	}
 	e.mu.Lock()

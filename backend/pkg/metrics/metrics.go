@@ -205,6 +205,37 @@ var (
 		Help: "DataEventBus consumer database write failures",
 	}, []string{"consumer", "table"})
 
+	// SourceFrameDiscardedTotal counts 来源组丢帧（方案 §7.1 F-8 / §12.9.3 R-9）。
+	//
+	// 为什么必须有：丢帧是"静默失效"的主要来源（主备组的备成员帧、组缺失/未启用、
+	// 解析器未接线），没有指标就只剩审计日志可查。reason 是**有界枚举**
+	//（not_member / not_active_member / group_missing / group_disabled /
+	// source_resolver_not_configured），禁止把 device/selector 放进 label（高基数）。
+	SourceFrameDiscardedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_source_frame_discarded_total",
+		Help: "Source-group frames discarded before evaluation, by bounded reason",
+	}, []string{"reason"})
+
+	// RuleInvalidSourceKindTotal counts 规则加载期发现的非法 source_kind（H-3）。
+	//
+	// 语义（Lead 2026-10-22 裁决 H-3）：加载期 Warn + 计数，**不跳过**规则、
+	// 保持回落老路（edge_device），避免"一个拼写错误让规则静默消失"。
+	// kind 是**有界枚举**（automation|alert），不是规则 ID / 非法值原文（高基数）。
+	RuleInvalidSourceKindTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_rule_invalid_source_kind_total",
+		Help: "Rules loaded with an invalid source_kind (warned, fell back to legacy)",
+	}, []string{"kind"})
+
+	// SourceGroupDirtyReloadTotal counts 来源组 dirty 全量重载（H-5）。
+	//
+	// datasource 的 dirty 标记由写路径置位（事务提交后），RunDirtyReloader 周期性
+	// PublishAll + ClearDirty；本计数用于发现"重载频繁"（写热/节流失效）与
+	// "重载完全没跑"（接线漏了）两种反向故障。
+	SourceGroupDirtyReloadTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_source_group_dirty_reload_total",
+		Help: "Source-group dirty full reloads (snapshot republish rounds)",
+	})
+
 	// DataEventBusDroppedTotal counts data reports dropped by the bounded
 	// DataEventBus input queue under backpressure.
 	DataEventBusDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{

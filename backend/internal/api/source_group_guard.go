@@ -129,7 +129,9 @@ func resolveRuleSourceBinding(db *gorm.DB, kind *string, groupID *uint, cooldown
 			Msg:  fmt.Sprintf("来源组「%s」(%d) 没有成员（锚点=0），不能绑定规则：请先添加成员", group.Name, group.ID),
 		}
 	}
-	if requireCooldownFloor && group.Kind == models.SourceGroupKindPrimaryBackup {
+	// B1 终审收口：cooldown 下限对**两种 kind** 都强制（方案 F-3 原文无 kind 限制）。
+	// 复合组更需要：N 个成员帧交错驱动，cooldown=0 会让同一次物理变化多次动作。
+	if requireCooldownFloor {
 		floor, err := svc.ResolveCooldownFloor(*groupID)
 		if err != nil {
 			return ruleSourceBinding{}, err
@@ -280,6 +282,27 @@ func guardReferences(c *gin.Context, info groupReferenceInfo, subject string) bo
 	ErrorWithCode(c, 409, SourceRefCodeDeleteGuard,
 		fmt.Sprintf("%s被来源组引用，禁止删除/合并：引用组=[%s]；引用规则=[%s]。请先解除成员关系或删除规则。",
 			subject, groups, rules))
+	return false
+}
+
+// guardEdgeDeviceDisable 停用边缘设备前的守卫（B2/I6 收口）：设备若是来源组成员，
+// 且其所在组被规则引用 ⇒ 409（与删除守卫同精神）。已是停用状态 ⇒ 无迁移，放行。
+func guardEdgeDeviceDisable(c *gin.Context, db *gorm.DB, edgeDeviceID uint) bool {
+	var dev models.EdgeDevice
+	if err := db.Select("id", "enabled").First(&dev, edgeDeviceID).Error; err != nil || !dev.Enabled {
+		return true
+	}
+	info, err := findGroupReferencesByEdgeDevices(db, []uint{edgeDeviceID})
+	if err != nil {
+		Error(c, 500, "检查来源组引用失败: "+err.Error())
+		return false
+	}
+	if len(info.RuleNames) == 0 {
+		return true
+	}
+	ErrorWithCode(c, 409, SourceRefCodeDeleteGuard,
+		fmt.Sprintf("边缘设备 %d 是来源组成员且该组被规则引用，禁止停用：引用组=[%s]；引用规则=[%s]。请先解除规则绑定。",
+			edgeDeviceID, strings.Join(info.GroupNames, "、"), strings.Join(info.RuleNames, "、")))
 	return false
 }
 

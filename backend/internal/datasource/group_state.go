@@ -22,12 +22,21 @@ const (
 	ReasonGroupReset            = "reset"
 	ReasonGroupDelete           = "delete"
 	ReasonGroupSelfHeal         = "selfheal"
+	// ReasonGroupCooldownSuppressed：R10 抑制切换但组已失去权威（active 已置 error 且无新 active）。
+	// 抑制的是"切换动作"，不是"失去权威"这个事实；消费方必须收到 Next=0。
+	ReasonGroupCooldownSuppressed = "cooldown_suppressed"
 )
 
 // MarkSuccess 是 R1 的组级适配：按 edge_device_id 定位所有组的成员，仅 category 命中时
 // 写 last_success/fail_count=0，error → standby；**不抢占 active、不 bump revision**
 // （F-1 白名单：运行态写不得改变窗口 identity）。
 func (g *GroupService) MarkSuccess(edgeDeviceID uint, categories []string, at time.Time) {
+	// 0 组快速路径（B-3 第 1 步）：生产 data_sources=0 / 组=0 时，每帧都白跑一次
+	// JOIN 查询。Registry.Len() 是 atomic load + len，O(1)；0→N 由 PublishAll/Publish
+	// 自动翻转，**不需要任何失效钩子**（impl-reviewer 已核）。
+	if !g.groupsLive() {
+		return
+	}
 	if edgeDeviceID == 0 || len(categories) == 0 {
 		return
 	}
@@ -88,6 +97,11 @@ func (g *GroupService) MarkSuccess(edgeDeviceID uint, categories []string, at ti
 // composite 组成员不参与 R2（I5：复合组无 active/failover）；仅记录 health failure 供观测，
 // 不改 status（否则部分成员会被主备状态机接管）。
 func (g *GroupService) MarkFailure(edgeDeviceID uint, trigger string) {
+	// 同 MarkSuccess 的 0 组快速路径（offline hook 低频，但保持一致性：
+	// 否则「无组时 MarkSuccess 短路、MarkFailure 仍查库」会形成两套行为）。
+	if !g.groupsLive() {
+		return
+	}
 	if edgeDeviceID == 0 {
 		return
 	}
@@ -172,6 +186,8 @@ func (g *GroupService) MarkFailure(edgeDeviceID uint, trigger string) {
 		g.emitAll(notes)
 		if event != nil {
 			g.commitGroupChange(row.GroupID, event)
+			// 组失去权威（含 R10 抑制路径）⇒ 补一条组健康事件（1min 节流）。
+			g.afterAuthorityLost(row.GroupID, event)
 		} else {
 			g.publishGroup(row.GroupID)
 		}
@@ -215,12 +231,27 @@ func (g *GroupService) maybeGroupFailover(tx *gorm.DB, groupID, failedMemberID u
 		return nil, false, err
 	}
 	if suppressed {
-		msg := fmt.Sprintf("来源组 %d 距上次切换不足冷却时间 (cooldown)，跳过切换", groupID)
-		if err := g.writeGroupHealth(tx, groupID, failedMemberID, "silent", msg); err != nil {
+		// B-2/架构终审：R10 抑制的是"切换动作"，不是"组失去权威"这个事实。
+		// active 成员已被调用方置 error ⇒ 组内已无 active ⇒ 必须：
+		//   ① bump revision（身份变了，窗口 identity 必须换）；
+		//   ② 写 degraded 健康事件（运维看板可见"当前无权威来源"）；
+		//   ③ 发 ActiveChange{Next:0}（消费方清窗、停止按旧 active 过滤）——Next=0 不是切换，
+		//      不违反"冷却窗内不再切换"的语义。
+		rev, err := g.bumpGroupRevision(tx, groupID)
+		if err != nil {
 			return nil, false, err
 		}
-		*notes = append(*notes, g.newGroupNotification(notifyTypeWarning, "来源组切换被抑制", msg, groupID))
-		return nil, false, nil
+		seq := g.nextTransitionSeq(groupID)
+		msg := fmt.Sprintf("来源组 %d 冷却抑制且已无权威成员 (no_active_after_cooldown)", groupID)
+		if err := g.writeGroupHealth(tx, groupID, failedMemberID, "degraded", msg); err != nil {
+			return nil, false, err
+		}
+		*notes = append(*notes, g.newGroupNotification(notifyTypeWarning, "来源组切换被抑制（组已无权威）", msg, groupID))
+		return &ActiveChange{
+			PrevMemberID: failedMemberID, NextMemberID: 0,
+			Reason: ReasonGroupCooldownSuppressed, Trigger: trigger,
+			Revision: rev, TransitionSeq: seq, Category: group.Category,
+		}, false, nil
 	}
 
 	// R3 候选：priority DESC, id ASC 的第一条 standby。
@@ -271,6 +302,17 @@ func (g *GroupService) maybeGroupFailover(tx *gorm.DB, groupID, failedMemberID u
 		Reason: ReasonGroupAuto, Trigger: trigger,
 		Revision: rev, TransitionSeq: seq, Category: group.Category,
 	}, true, nil
+}
+
+// afterAuthorityLost 是"组从有 active 变无 active"的统一收尾（在 commitGroupChange 之后调用）：
+// R10 冷却抑制路径额外写一条 RecordDegraded（R4 降级已在事务内写过 degraded 健康行，不重复）。
+func (g *GroupService) afterAuthorityLost(groupID uint, ev *ActiveChange) {
+	if ev == nil || ev.NextMemberID != 0 {
+		return
+	}
+	if ev.Reason == ReasonGroupCooldownSuppressed {
+		g.RecordDegraded(groupID, "no_active_after_cooldown")
+	}
 }
 
 // ActivateGroupMember 是 R7（手动切换/重新启用）：目标→active，原 active→standby。
