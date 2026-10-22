@@ -234,6 +234,45 @@ func processAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
+// productionDBNames 是**禁止测试连接**的库名（生产库白名单，精确匹配）。
+var productionDBNames = []string{"ehome"}
+
+// IsProductionDBName 报告 dbname 是否是生产库名（测试上下文的禁用名单）。
+//
+// 只做**精确匹配**：`ehome_test` / `ehome_e2e` / `ehome_merge_prod` 都放行，
+// 只有裸 `ehome` 被拦。刻意不用前缀匹配 —— 那会把所有合法测试库都误伤。
+func IsProductionDBName(dbname string) bool {
+	name := strings.TrimSpace(dbname)
+	for _, n := range productionDBNames {
+		if strings.EqualFold(name, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// GuardProductionDB 在测试连接疑似生产库时直接 fail-fast。
+//
+// 为什么必须有这道守卫（2026-10-22 实测事故）：
+// 有一次 PG 集成测试带着 `EHOME_DB_NAME=ehome` 跑，某个**自带 openDB 助手**的包
+// （绕过本包的 schema 隔离）直接把测试夹具写进了生产库 public schema，
+// 留下 2 条同键双 active 的孤儿行。危害不止脏数据：**后续部署的迁移自检会
+// fail-closed 拒绝启动**（该自检正是为这种双 active 设计的）。
+//
+// 逃生门 `EHOME_ALLOW_PROD_DB_TESTS=1` 只用于「在生产形状副本上验证迁移」，
+// 变量名带 PROD 且需显式设值，避免手滑。
+func GuardProductionDB(t *testing.T, dbname string) {
+	t.Helper()
+	if os.Getenv("EHOME_ALLOW_PROD_DB_TESTS") == "1" {
+		return
+	}
+	if IsProductionDBName(dbname) {
+		t.Fatalf("拒绝在疑似生产库 %q 上运行测试：请设 EHOME_DB_NAME=<专用测试库>（如 ehome_test）。\n"+"\t"+
+			"真要在生产形状副本上验证迁移：EHOME_ALLOW_PROD_DB_TESTS=1 并先确认已备份。\n"+"\t"+
+			"（2026-10-22 事故：EHOME_DB_NAME=ehome 曾把测试夹具写进生产库 data_sources）", dbname)
+	}
+}
+
 func openPostgres(t *testing.T) *gorm.DB {
 	t.Helper()
 
@@ -242,6 +281,8 @@ func openPostgres(t *testing.T) *gorm.DB {
 	user := envOr("EHOME_DB_USER", "ehome")
 	pass := envOr("EHOME_DB_PASSWORD", "ehome123")
 	dbname := envOr("EHOME_DB_NAME", "ehome_test")
+
+	GuardProductionDB(t, dbname)
 
 	// First connection: create the isolated schema
 	baseDSN := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",

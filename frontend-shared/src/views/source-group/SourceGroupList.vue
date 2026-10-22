@@ -92,6 +92,7 @@
               <el-switch
                 :model-value="row.enabled"
                 size="small"
+                :aria-label="'启用来源组 ' + row.name"
                 data-test="sg-enabled"
                 @change="(v: string | number | boolean) => onToggleEnabled(row, v === true)"
               />

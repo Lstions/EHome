@@ -7,6 +7,7 @@ import (
 
 	"ehome/backend/internal/dbschema"
 	"ehome/backend/internal/models"
+	"ehome/backend/testutil"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -18,10 +19,15 @@ import (
 func openDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	if os.Getenv("EHOME_TEST_DB") == "postgres" {
+		dbname := envOr("EHOME_DB_NAME", "ehome_e2e")
+		// 本助手**不走 testutil.OpenTestDB 的 schema 隔离**，直接连目标库的 public schema。
+		// 2026-10-22 事故：带着 EHOME_DB_NAME=ehome 跑，把 dup0/dup1 夹具写进了生产库。
+		// 因此这里必须显式挡住生产库名（production-name guard）。
+		testutil.GuardProductionDB(t, dbname)
 		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 			envOr("EHOME_DB_HOST", "127.0.0.1"), envOr("EHOME_DB_PORT", "5432"),
 			envOr("EHOME_DB_USER", "ehome"), envOr("EHOME_DB_PASSWORD", "ehome123"),
-			envOr("EHOME_DB_NAME", "ehome_e2e"))
+			dbname)
 		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormlogger.Discard})
 		if err != nil {
 			t.Fatalf("open postgres: %v", err)
@@ -157,6 +163,14 @@ func TestEnsureSourceGroupSchema_FailsClosedOnDuplicateActive(t *testing.T) {
 		t.Fatalf("automigrate: %v", err)
 	}
 	resetState(t, db)
+	// 纵深防御：即使有人真在生产形状副本上跑（EHOME_ALLOW_PROD_DB_TESTS=1），
+	// 也必须把自己种的 dup 行清掉 —— 上次事故就是「种子留下、用例还通过」。
+	t.Cleanup(func() {
+		if err := db.Unscoped().Where("device_id = ? AND category = ?", 42, "rsoc").
+			Delete(&models.DataSource{}).Error; err != nil {
+			t.Logf("WARN: 清理 dup 夹具失败（请手工删除 device_id=42/category=rsoc）: %v", err)
+		}
+	})
 	for i := 0; i < 2; i++ {
 		ds := models.DataSource{DeviceID: 42, Category: "rsoc", EdgeDeviceID: uint(i + 1),
 			SourceType: "edge_device", Status: servicesStatusActive, Name: fmt.Sprintf("dup%d", i)}

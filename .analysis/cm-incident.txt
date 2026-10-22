@@ -1,0 +1,45 @@
+fix(test+merge): 生产库污染事故处置 —— 测试守卫 + C1 可访问名 + C3 回滚检查
+
+## 事故（合并可行性审查期间，2026-10-22）
+跑 PG 集成测试时误用 `EHOME_DB_NAME=ehome`（生产库名），而
+`internal/dbschema/source_group_test.go::openDB` 是**自带 raw DSN 的本地助手**：
+不走 `testutil.OpenTestDB` 的 schema 隔离，直接连目标库 public schema，
+`resetState` 里还有 `DELETE FROM data_sources`。结果：
+  - public 里出现 2 条孤儿 `data_sources`（device 42/rsoc/active，同键双 active）；
+  - 8 条 `data_source_health` 垃圾行；
+  - 4 张 `source_group*` 空表 + 索引（迁移本来要建，保留）。
+危害不止脏数据：**同键双 active 会让下一次部署的迁移自检 fail-closed 拒绝启动**
+（那个自检正是为这种情况设计的）。
+
+## 处置
+1. **清理**（先备份再删，CSV 在 `.analysis/incident/`）：孤儿 data_sources 2 行、
+   data_source_health 8 行已删；`unified_data=179532`/`edge_devices=2`/规则数**未变**。
+2. **代码守卫（根因修复）**：
+   - `testutil`：新增 `IsProductionDBName()` + `GuardProductionDB()`，**精确匹配**
+     `ehome`（不做前缀匹配，避免误伤 ehome_test/e2e/merge_prod）；`openPostgres`
+     入口即拦；逃生门 `EHOME_ALLOW_PROD_DB_TESTS=1`（仅限"在生产形状副本上验证迁移"）。
+   - `dbschema::openDB`（事故入口）调用同一守卫；`dbname` 提出为局部变量显式传入。
+   - 泄漏用例加 `t.Cleanup` 删自种的 dup 行（纵深防御：即使逃生门放行也不留脏）。
+   - 新增 `testutil/db_guard_test.go` 钉住匹配口径（ehome/EHOME/" ehome " ⇒ true；
+     ehome_test/e2e/merge_prod/空 ⇒ false）。
+3. **实证**：带 `EHOME_DB_NAME=ehome` 跑 ⇒ FAIL「拒绝在疑似生产库 "ehome" 上运行测试」，
+   且跑前跑后 `data_sources` 均为 0 行（证明阻止了写入，不是仅报错）。
+
+## 合并前修复项（来自合并可行性审查）
+- **C1**：`SourceGroupList.vue:92` 的 `<el-switch>` 缺可访问名 ⇒ main 的
+  `SwitchAccessibleNameGate.spec.ts` 会确定性变红。补 `:aria-label`，门禁 2/2 PASS。
+- **C3**：`check_source_group_rollout.sh --rollback` 新增三项可执行检查 ——
+  `[index]`（ux_ds_one_active + 有 active 行 ⇒ 阻断，给 DROP 处置）、
+  `[confirm]`（pending_confirm 且 source_hash 非空 ⇒ 阻断，给 UPDATE 处置）、
+  `[anchor]`（列出组规则+锚点，要求人工确认锚点仍权威）。
+  已在生产只读实跑；并修掉第一版的 fail-open（列不存在被误报成"无规则"）。
+
+## 验证
+- 专用库 `ehome_test` 跑 `-tags=integration ./... -race`：**39 包全绿，exit=0，零失败**
+  （此前"39 包全绿"是在生产库上跑的，结果作废，以此为准）
+- `testutil` 守卫单测 PASS；`dbschema` vet 干净；`rollout --self-test` 8/8 PASS
+- 生产库复核：data_sources=0 / data_source_health=0 / unified_data=179532 / devices=2
+
+## 文档
+- `docs/评审/来源组-合并可行性-2026-10-22.md`：合并结论「有条件可合」→ 三项条件
+  C1/C0'/C3 现已全部闭环（详见文档 §11 事故记录与处置结果）。
