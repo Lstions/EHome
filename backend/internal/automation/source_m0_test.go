@@ -1,6 +1,6 @@
 package automation
 
-// M0（task-29）测试：窗口来源身份（S1/S2/S8）、复合整组求值（S6）、
+// M0（task-29）测试：窗口来源身份（S1/S2）、复合整组求值（S6）、
 // F4 钉住触发时成员（FC-1/2/4/5）、事件来源审计列。
 //
 // 测试用真实 *sourceref.Registry（不是 mock）：快照结构与生产一致，
@@ -84,7 +84,6 @@ func TestM0SourceWindowNoCrossMemberSplice(t *testing.T) {
 
 	ev := NewEvaluator(db, h)
 	ev.SetSourceResolver(reg)
-	ev.SetDeviceIntervalFn(func(uint) time.Duration { return 5 * time.Second })
 
 	base := time.Now()
 	// A 连续两帧（都在 active 期）。
@@ -99,7 +98,7 @@ func TestM0SourceWindowNoCrossMemberSplice(t *testing.T) {
 	if len(h.events) != 0 {
 		t.Fatalf("S1: 主备跨成员拼接不得触发（A t0/t30 + B t61 不得拼成 60s 连续），got %d 次", len(h.events))
 	}
-	// 正例：B 以 5s 节奏连续满足 60s（与采集间隔一致，S8 不误伤）。
+	// 正例：B 以 5s 节奏连续满足 60s（真实帧连续到达，无断流）。
 	for s := 66; s <= 121; s += 5 {
 		ev.Evaluate(102, illuminanceField(60), base.Add(time.Duration(s)*time.Second))
 	}
@@ -221,34 +220,37 @@ func TestM0InvalidSourceKindWarnedButLoadsAndEvaluates(t *testing.T) {
 	}
 }
 
-// ── S8：跨长断流不得拼接（直接断言窗口起点）──────────────────────────────
-
-func TestM0S8GapDropsStaleWindowStart(t *testing.T) {
+// ── 窗口截断仍成立：跨长断流由 durationSec cutoff 自然处理 ────────────────
+//
+// S8（gap 上限）已按 ADR 删除：它用配置 IntervalMs 判实际 gap，稀疏上报时会反复
+// 截断窗口 ⇒ 存量 DurationSec>0 规则可能永不触发（false negative 且无指标）。
+// 删除后窗口仍由 durationSec cutoff 截断（保留 cutoff 前最后一个样本作为起点），
+// 本用例钉住这一行为，防止将来误以为"断流没人处理"而重新引入 gap 判据。
+func TestM0WindowTruncatedByDurationCutoff(t *testing.T) {
 	db := newTestDB(t)
 	h := &captureHandler{}
-	r := automationRule(1, "illuminance", "gt", 50, 600)
+	r := automationRule(1, "illuminance", "gt", 50, 60)
 	r.CooldownSec = 0
 	if err := db.Create(&r).Error; err != nil {
 		t.Fatal(err)
 	}
 	ev := NewEvaluator(db, h)
-	ev.SetDeviceIntervalFn(func(uint) time.Duration { return 5 * time.Second }) // maxGap=10s
 
 	base := time.Now()
-	ev.Evaluate(1, illuminanceField(60), base)
-	ev.Evaluate(1, illuminanceField(60), base.Add(5*time.Second))
-	ev.Evaluate(1, illuminanceField(60), base.Add(100*time.Second)) // 断流 95s > 10s
+	ev.Evaluate(1, illuminanceField(60), base)                     // t0
+	ev.Evaluate(1, illuminanceField(60), base.Add(5*time.Second))  // t5
+	ev.Evaluate(1, illuminanceField(60), base.Add(100*time.Second)) // t100（断流 95s）
 
 	win := ev.windows[1]
-	if len(win) == 0 {
-		t.Fatal("窗口不应为空")
+	if len(win) != 2 {
+		t.Fatalf("窗口应按 durationSec cutoff 截断为 2 条（t5 起点 + t100），got %d: %+v", len(win), win)
 	}
-	if !win[0].at.Equal(base.Add(100 * time.Second)) {
-		t.Fatalf("S8: 断流前的样本不得作为窗口起点，got start=%v want %v",
-			win[0].at, base.Add(100*time.Second))
+	// cutoff = t100-60s = t40 ⇒ t0 被裁掉；"保留 cutoff 前最后一个样本"= t5 成为起点。
+	if !win[0].at.Equal(base.Add(5 * time.Second)) {
+		t.Fatalf("窗口起点应为 cutoff 前最后一个样本 t5，got %v", win[0].at)
 	}
-	if len(win) != 1 {
-		t.Fatalf("S8: 断流前样本应全部丢弃，got %d 条", len(win))
+	if !win[1].at.Equal(base.Add(100 * time.Second)) {
+		t.Fatalf("窗口末样本应为 t100，got %v", win[1].at)
 	}
 }
 
@@ -408,8 +410,14 @@ func TestM0F4ResolverNotConfiguredFailClosed(t *testing.T) {
 	if err := p.db.Where("rule_id = ?", 1).Order("id DESC").First(&row).Error; err != nil {
 		t.Fatal(err)
 	}
-	if row.Result != ResultSourceResolverNotConfigured {
-		t.Fatalf("FC-4: 未接线 ⇒ %s，got %s", ResultSourceResolverNotConfigured, row.Result)
+	// 结果码收敛（models 5→3）：未接线不再单独占一个 result 码，映射为
+	// unresolved_selector；原因字符串保留在 detail（诊断能力不丢）。
+	if row.Result != ResultUnresolvedSelector {
+		t.Fatalf("FC-4: 未接线 ⇒ %s，got %s (detail=%s)",
+			ResultUnresolvedSelector, row.Result, row.Detail)
+	}
+	if !strings.Contains(row.Detail, "source_resolver_not_configured") {
+		t.Fatalf("FC-4: detail 必须保留原因字符串 source_resolver_not_configured，got %q", row.Detail)
 	}
 	var cmds int64
 	p.db.Model(&models.CommandExecution{}).Count(&cmds)

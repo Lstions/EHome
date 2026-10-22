@@ -22,15 +22,13 @@ func evalStates(states map[uint]string, okValues map[uint]float64) EvalMemberFun
 
 // TestCombineTruthTable12_9_2 是方案 §12.9.2 权威真值表**逐行**单测（R-2 放行条件）。
 //
-// 六/七行（v0.3 最终版）：
+// 五条（2026-10-22 算子收敛为 avg/sum 后的最终版）：
 //
 //	① fail_closed + 任意缺席                    ⇒ unbound
 //	② use_available + 含 required=true 缺席     ⇒ unbound(required_missing)
 //	③ use_available + 仅 required=false 缺席且可用≥min ⇒ 合并 + degraded
 //	④ use_available + 仅 required=false 缺席且可用<min ⇒ unbound(below_min_members)
-//	⑤ first_available + 任意缺席且可用≥1        ⇒ 取 priority DESC,id ASC 首个可用 + degraded
-//	⑥ first_available + 可用=0                  ⇒ unbound
-//	⑦ 全部可用                                  ⇒ 按 combine 合并，无降级
+//	⑤ 全部可用                                  ⇒ 按 combine 合并，无降级
 func TestCombineTruthTable12_9_2(t *testing.T) {
 	// 统一成员集合：m1 required（priority 30），m2 optional（priority 20），m3 optional（priority 10）。
 	m1 := member(1, 101, 30, true)
@@ -50,7 +48,7 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 		{
 			// ① fail_closed + 任意缺席 ⇒ unbound（Required 不改变结果）。
 			name:       "row1_fail_closed_any_missing_unbound",
-			group:      newGroup(KindComposite, CombineMax, OnDegradeFailClosed, 1, 0, members...),
+			group:      newGroup(KindComposite, CombineAvg, OnDegradeFailClosed, 1, 0, members...),
 			eval:       evalStates(map[uint]string{1: StateOK, 2: StateMissing, 3: StateOK}, map[uint]float64{1: 10, 3: 30}),
 			wantOK:     false,
 			wantReason: ReasonNoAvailableMember,
@@ -66,7 +64,7 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 		{
 			// ② use_available + required=true 缺席 ⇒ unbound(required_missing)。
 			name:       "row2_use_available_required_missing_unbound",
-			group:      newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 1, 0, members...),
+			group:      newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 1, 0, members...),
 			eval:       evalStates(map[uint]string{1: StateMissing, 2: StateOK, 3: StateOK}, map[uint]float64{2: 20, 3: 30}),
 			wantOK:     false,
 			wantReason: ReasonRequiredMissing,
@@ -74,7 +72,7 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 		{
 			// ② 变体：required=true 成员 stale/not_eligible 同样按缺席处理（不得用旧值）。
 			name:       "row2b_use_available_required_stale_unbound",
-			group:      newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 1, 0, members...),
+			group:      newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 1, 0, members...),
 			eval:       evalStates(map[uint]string{1: StateStale, 2: StateOK, 3: StateOK}, map[uint]float64{2: 20, 3: 30}),
 			wantOK:     false,
 			wantReason: ReasonRequiredMissing,
@@ -82,10 +80,10 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 		{
 			// ③ use_available + 仅 required=false 缺席 + 可用≥min ⇒ 合并 + degraded。
 			name:        "row3_use_available_optional_missing_degraded_ok",
-			group:       newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 2, 0, members...),
+			group:       newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 2, 0, members...),
 			eval:        evalStates(map[uint]string{1: StateOK, 2: StateMissing, 3: StateOK}, map[uint]float64{1: 10, 3: 30}),
 			wantOK:      true,
-			wantValue:   30,
+			wantValue:   20, // avg(10,30)：只对可用分量求平均
 			wantDegrade: true,
 		},
 		{
@@ -100,47 +98,13 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 		{
 			// ④ use_available + 仅 optional 缺席 + 可用<min ⇒ unbound(below_min_members)。
 			name:       "row4_use_available_below_min_unbound",
-			group:      newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 3, 0, members...),
+			group:      newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 3, 0, members...),
 			eval:       evalStates(map[uint]string{1: StateOK, 2: StateMissing, 3: StateMissing}, map[uint]float64{1: 10}),
 			wantOK:     false,
 			wantReason: ReasonBelowMinMembers,
 		},
 		{
-			// ⑤ first_available：缺员但可用≥1 ⇒ 取 priority DESC,id ASC 首个可用 + degraded。
-			// D-4（方案 §12.3/§12.9.2）：first_available 组**所有成员 required=false**、
-			// min_members 强制 1、on_degrade 归一 use_available（保存期/快照构建期归一）。
-			name: "row5_first_available_picks_highest_priority_available",
-			// OnDegrade 留空：验证 CombineGroup 路径也走运行时归一（防御性归一）。
-			group: newGroup(KindComposite, CombineFirstAvailable, "", 5, 0,
-				m2, m3),
-			// m2（priority 20）缺席，m3（priority 10）可用 ⇒ 取 m3 的值 30。
-			eval:        evalStates(map[uint]string{2: StateMissing, 3: StateOK}, map[uint]float64{3: 30}),
-			wantOK:      true,
-			wantValue:   30,
-			wantDegrade: true,
-		},
-		{
-			// ⑤' first_available 全部可用时不降级，仍取 priority 首个。
-			name: "row5b_first_available_all_available_no_degrade",
-			group: newGroup(KindComposite, CombineFirstAvailable, OnDegradeUseAvailable, 0, 0,
-				member(4, 104, 30, false), member(5, 105, 20, false), member(6, 106, 10, false)),
-			eval: evalStates(map[uint]string{4: StateOK, 5: StateOK, 6: StateOK},
-				map[uint]float64{4: 11, 5: 22, 6: 33}),
-			wantOK:      true,
-			wantValue:   11,
-			wantDegrade: false,
-		},
-		{
-			// ⑥ first_available 可用=0 ⇒ unbound（当前实现原因码 below_min_members，min 强制 1）。
-			name: "row6_first_available_no_available_unbound",
-			group: newGroup(KindComposite, CombineFirstAvailable, "", 0, 0,
-				member(4, 104, 30, false), member(5, 105, 20, false), member(6, 106, 10, false)),
-			eval:       evalStates(map[uint]string{4: StateMissing, 5: StateMissing, 6: StateMissing}, nil),
-			wantOK:     false,
-			wantReason: ReasonBelowMinMembers,
-		},
-		{
-			// ⑦ 全部可用 ⇒ 按 combine 合并，无降级标记。
+			// ⑤ 全部可用 ⇒ 按 combine 合并，无降级标记。
 			name:        "row7_all_available_merge_no_degrade",
 			group:       newGroup(KindComposite, CombineAvg, OnDegradeFailClosed, 1, 0, m1, m2, m3),
 			eval:        evalStates(map[uint]string{1: StateOK, 2: StateOK, 3: StateOK}, map[uint]float64{1: 10, 2: 20, 3: 30}),
@@ -176,47 +140,6 @@ func TestCombineTruthTable12_9_2(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestFirstAvailableNormalization 钉死 §12.9.2 行⑤的运行时归一（Lead 2026-10-22 裁决 (c)）：
-//
-// first_available 的语义就是「任一台在就够」（方案 D-4），因此 NormalizedOnDegrade
-// **强制**归一 use_available，与 OnDegrade 字段取值无关（显式 fail_closed 也归一）。
-// 这是运行时最后防线；保存期（API/状态机）也会归一，双保险。
-func TestFirstAvailableNormalization(t *testing.T) {
-	m1 := member(1, 101, 30, false)
-	m2 := member(2, 102, 20, false)
-	eval := evalStates(map[uint]string{1: StateMissing, 2: StateOK}, map[uint]float64{2: 20})
-
-	for _, onDegrade := range []string{"", OnDegradeFailClosed, OnDegradeUseAvailable, "bogus"} {
-		t.Run("on_degrade_"+onDegrade, func(t *testing.T) {
-			g := newGroup(KindComposite, CombineFirstAvailable, onDegrade, 0, 0, m1, m2)
-			if got := g.NormalizedOnDegrade(); got != OnDegradeUseAvailable {
-				t.Fatalf("first_available normalized = %q want %q (OnDegrade=%q)", got, OnDegradeUseAvailable, onDegrade)
-			}
-			if got := g.EffectiveMinMembers(); got != 1 {
-				t.Fatalf("first_available EffectiveMinMembers = %d want 1", got)
-			}
-			got := CombineGroup(g, eval)
-			mustTrue(t, got.OK, "first_available should trigger with one missing member (OnDegrade=%q): %+v", onDegrade, got)
-			mustTrue(t, got.Degraded, "first_available with missing member must be Degraded (OnDegrade=%q): %+v", onDegrade, got)
-			mustTrue(t, got.Value == 20, "first_available value = %v want 20 (highest-priority available)", got.Value)
-		})
-	}
-
-	// 全部可用：不降级，取 priority 最高的可用成员。
-	all := newGroup(KindComposite, CombineFirstAvailable, OnDegradeFailClosed, 0, 0,
-		member(3, 103, 30, false), member(4, 104, 20, false))
-	got := CombineGroup(all, evalStates(map[uint]string{3: StateOK, 4: StateOK}, map[uint]float64{3: 11, 4: 22}))
-	mustTrue(t, got.OK && !got.Degraded && got.Value == 11, "first_available all-available = %+v", got)
-
-	// 聚合类 combine 不受归一影响：显式 fail_closed 仍 fail_closed。
-	avg := newGroup(KindComposite, CombineAvg, OnDegradeFailClosed, 2, 0, m1, m2)
-	if got := avg.NormalizedOnDegrade(); got != OnDegradeFailClosed {
-		t.Fatalf("avg normalized = %q want fail_closed", got)
-	}
-	got = CombineGroup(avg, eval)
-	mustTrue(t, !got.OK, "avg + fail_closed with missing member must be unbound: %+v", got)
 }
 
 // TestCombineGroupPrimaryBackup 覆盖主备组：只看权威成员。
@@ -311,7 +234,7 @@ func TestCombineGroupGuards(t *testing.T) {
 	mustTrue(t, len(got.Components) == 0, "nil group should have no components")
 
 	// 禁用组：group_disabled（即使成员全可用）。
-	disabled := newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 1, 0, member(1, 101, 10, false))
+	disabled := newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 1, 0, member(1, 101, 10, false))
 	disabled.Enabled = false
 	got = CombineGroup(disabled, evalAllOK(map[uint]float64{1: 5}))
 	mustTrue(t, !got.OK && got.Reason == ReasonGroupDisabled, "disabled group = %+v", got)
@@ -319,17 +242,18 @@ func TestCombineGroupGuards(t *testing.T) {
 		"disabled result should still carry revision identity")
 
 	// 空成员：no_available_member。
-	empty := newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 1, 0)
+	empty := newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 1, 0)
 	got = CombineGroup(empty, evalAllOK(nil))
 	mustTrue(t, !got.OK && got.Reason == ReasonNoAvailableMember, "empty group = %+v", got)
 
 	// 未知 kind：fail-closed（group_missing）。
-	unknown := newGroup("bogus", CombineMax, OnDegradeUseAvailable, 1, 0, member(1, 101, 10, false))
+	unknown := newGroup("bogus", CombineAvg, OnDegradeUseAvailable, 1, 0, member(1, 101, 10, false))
 	got = CombineGroup(unknown, evalAllOK(map[uint]float64{1: 5}))
 	mustTrue(t, !got.OK && got.Reason == ReasonGroupMissing, "unknown kind = %+v", got)
 }
 
-// TestCombineOperators 覆盖 5 个合并算子的取值（全部可用路径）。
+// TestCombineOperators 覆盖保留算子 avg/sum 的取值，并钉住
+// 「已移除算子（max/min/first_available）按未知算子 fail-closed」。
 func TestCombineOperators(t *testing.T) {
 	members := []MemberSnapshot{member(1, 101, 30, false), member(2, 102, 20, false), member(3, 103, 10, false)}
 	values := map[uint]float64{1: 10, 2: 20, 3: 30}
@@ -338,10 +262,7 @@ func TestCombineOperators(t *testing.T) {
 		combine string
 		want    float64
 	}{
-		{CombineFirstAvailable, 10}, // members 顺序 = priority DESC ⇒ 首个
 		{CombineAvg, 20},
-		{CombineMax, 30},
-		{CombineMin, 10},
 		{CombineSum, 60},
 	}
 	for _, tc := range tests {
@@ -355,17 +276,22 @@ func TestCombineOperators(t *testing.T) {
 		})
 	}
 
-	// 未知算子：即使全部可用也 fail-closed。
-	unknown := newGroup(KindComposite, "bogus", OnDegradeFailClosed, 1, 0, members...)
-	got := CombineGroup(unknown, evalAllOK(values))
-	mustTrue(t, !got.OK && got.Reason == ReasonNoAvailableMember, "unknown combine = %+v", got)
+	// 已移除算子 + 未知算子：即使全部可用也 fail-closed（不静默退化成别的语义）。
+	for _, removed := range []string{"max", "min", "first_available", "bogus"} {
+		t.Run("rejected_"+removed, func(t *testing.T) {
+			g := newGroup(KindComposite, removed, OnDegradeFailClosed, 1, 0, members...)
+			got := CombineGroup(g, evalAllOK(values))
+			mustTrue(t, !got.OK && got.Reason == ReasonNoAvailableMember,
+				"removed/unknown combine %q must be fail-closed, got %+v", removed, got)
+		})
+	}
 }
 
 // TestCombineComponentNormalization 覆盖 eval 责任边界：身份字段以快照为准，
 // 空 State 归一为 missing，eval==nil ⇒ 全部 missing。
 func TestCombineComponentNormalization(t *testing.T) {
 	m1 := member(1, 101, 10, true)
-	g := newGroup(KindComposite, CombineMax, OnDegradeUseAvailable, 1, 0, m1)
+	g := newGroup(KindComposite, CombineAvg, OnDegradeUseAvailable, 1, 0, m1)
 
 	// eval 返回错误身份字段：必须被快照回填（防串成员）。
 	evil := func(m MemberSnapshot) Component {
@@ -448,7 +374,7 @@ func TestCombineAvgPrecision(t *testing.T) {
 // 边界值本身由 EvalMemberFunc 负责，Combine 只透传），并钉住 stale 不得回退为有效值。
 func TestCombineStalenessBoundary(t *testing.T) {
 	m := member(1, 101, 10, false)
-	g := newGroup(KindComposite, CombineMax, OnDegradeFailClosed, 1, 0, m)
+	g := newGroup(KindComposite, CombineAvg, OnDegradeFailClosed, 1, 0, m)
 	_ = time.Second // 时间语义由 eval 负责；Combine 无 time.Now
 
 	got := CombineGroup(g, func(mm MemberSnapshot) Component {

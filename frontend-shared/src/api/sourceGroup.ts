@@ -17,7 +17,7 @@ import client, { type ApiEnvelope } from './client'
 export type SourceGroupKind = 'primary_backup' | 'composite'
 
 /** 复合合并算子（仅 composite；primary_backup 必须为空串） */
-export type SourceGroupCombine = 'first_available' | 'avg' | 'max' | 'min' | 'sum'
+export type SourceGroupCombine = 'avg' | 'sum'
 
 /** 缺员处置（仅 composite；空串 = fail_closed） */
 export type SourceGroupOnDegrade = 'fail_closed' | 'use_available' | ''
@@ -52,7 +52,7 @@ export interface SourceGroup {
   /** 组读取的物理名（= unified_data.sensor_name） */
   category: string
   combine?: SourceGroupCombine | ''
-  /** composite 最少可用成员数；0 由后端归一（first_available 强制 1，P-2） */
+  /** composite 最少可用成员数；0 由后端归一（默认 1） */
   min_members: number
   /** 成员值年龄上限（秒）；0 = 由采集间隔推导 */
   staleness_sec: number

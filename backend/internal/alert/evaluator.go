@@ -89,8 +89,6 @@ type Evaluator struct {
 	sourceResolver SourceResolver
 	// latestValueBySensorFn 复合组逐成员取值注入点（生产=api.LatestValueBySensor）。
 	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
-	// deviceIntervalFn 设备采集间隔（S8 gap 上限=2×间隔；nil/0 ⇒ 不启用）。
-	deviceIntervalFn func(edgeDeviceID uint) time.Duration
 	// rulesByGroup groupID → ruleID 反向索引（切换钩子按组清窗/关卡）。
 	rulesByGroup map[uint][]uint
 	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
@@ -348,7 +346,7 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 				if !okc {
 					continue
 				}
-				e.applyTransition(r, at, value, satisfied, identityForFrame(m, target), src, e.groupGap(m.Group))
+				e.applyTransition(r, at, value, satisfied, identityForFrame(m, target), src)
 				continue
 			}
 			e.evalRuleWithSource(r, target, fields, at, identityForFrame(m, target),
@@ -404,7 +402,7 @@ func (e *Evaluator) evalRule(rule models.AlertRule, deviceID uint, fields []pars
 	if !ok {
 		return // 本批无该字段 / 特殊 selector unbound / kill switch，不影响窗口
 	}
-	e.applyTransition(rule, at, value, satisfied, legacyIdentity(deviceID), nil, e.sourceGap(deviceID))
+	e.applyTransition(rule, at, value, satisfied, legacyIdentity(deviceID), nil)
 }
 
 // evalRuleWithSource 是 primary_backup 规则的单帧路径（active 成员帧）：
@@ -415,23 +413,22 @@ func (e *Evaluator) evalRuleWithSource(rule models.AlertRule, deviceID uint, fie
 	if !ok {
 		return
 	}
-	e.applyTransition(rule, at, value, satisfied, ident, src, e.sourceGap(deviceID))
+	e.applyTransition(rule, at, value, satisfied, ident, src)
 }
 
 // applyTransition 是 normal → firing → resolved 状态机的唯一实现（三路复用：存量帧、
 // 主备组成员帧、复合整组结果）。
 //
 // S1：写样本前 identity 与窗口最后一条不一致 ⇒ 丢弃旧段（不依赖切换钩子，S3）。
-// S8：pruneWindow 增加跨长断流判据（maxGap=2×采集间隔；0=不启用）。
 func (e *Evaluator) applyTransition(rule models.AlertRule, at time.Time, value float64,
-	satisfied bool, ident sourceIdentity, src *alertSourceEvidence, maxGap time.Duration) {
+	satisfied bool, ident sourceIdentity, src *alertSourceEvidence) {
 	e.mu.Lock()
 	win := e.windows[rule.ID]
 	if len(win) > 0 && !win[len(win)-1].identity.equal(ident) {
 		win = nil
 	}
 	win = append(win, sample{at: at, value: value, satisfied: satisfied, identity: ident})
-	win = pruneWindow(win, rule.DurationSec, at, maxGap)
+	win = pruneWindow(win, rule.DurationSec, at)
 	e.windows[rule.ID] = win
 
 	isFiring := e.firing[rule.ID]
@@ -659,7 +656,7 @@ func compare(op string, value, threshold float64) bool {
 }
 
 // pruneWindow 仅保留 [now-DurationSec, now] 内的样本并限制上限。
-func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Duration) []sample {
+func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
 	if len(win) == 0 {
 		return win
 	}
@@ -670,18 +667,6 @@ func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Durat
 	}
 	if i > 0 {
 		win = append(win[:0], win[i:]...)
-	}
-	// S8（方案 F-7 写死算法）：跨长断流不得拼接 —— 相邻样本间隔 > maxGap
-	// （2×采集间隔）时，更早样本不能作为窗口起点。maxGap<=0 ⇒ 不启用。
-	if maxGap > 0 {
-		start := 0
-		for i := len(win) - 1; i > 0; i-- {
-			if win[i].at.Sub(win[i-1].at) > maxGap {
-				start = i
-				break
-			}
-		}
-		win = win[start:]
 	}
 	// ring buffer 上限保护: 超出丢最旧。
 	if len(win) > maxWindowSamples {

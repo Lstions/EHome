@@ -20,12 +20,6 @@ func member(memberID, edgeDeviceID uint, priority int, required bool) MemberSnap
 	}
 }
 
-// withStatus 返回改运行态后的成员副本。
-func withStatus(m MemberSnapshot, status string) MemberSnapshot {
-	m.Status = status
-	return m
-}
-
 // okComponent 返回 StateOK 分量。
 func okComponent(m MemberSnapshot, value float64) Component {
 	return Component{
@@ -35,22 +29,6 @@ func okComponent(m MemberSnapshot, value float64) Component {
 		Value:        value,
 		At:           baseTime,
 		State:        StateOK,
-	}
-}
-
-// evalFromComponents 按 memberID 查表返回分量；表里没有 ⇒ 默认 StateMissing。
-func evalFromComponents(table map[uint]Component) EvalMemberFunc {
-	return func(m MemberSnapshot) Component {
-		if c, ok := table[m.MemberID]; ok {
-			c.MemberID = m.MemberID
-			c.EdgeDeviceID = m.EdgeDeviceID
-			c.Required = m.Required
-			if c.State == "" {
-				c.State = StateMissing
-			}
-			return c
-		}
-		return Component{State: StateMissing}
 	}
 }
 

@@ -25,13 +25,10 @@ const (
 	KindComposite     = "composite"
 )
 
-// 合并算子（与 models.Combine* 同值）。
+// 合并算子（与 models.Combine* 同值；只保留 avg/sum，收敛理由见 models 侧）。
 const (
-	CombineFirstAvailable = "first_available"
-	CombineAvg            = "avg"
-	CombineMax            = "max"
-	CombineMin            = "min"
-	CombineSum            = "sum"
+	CombineAvg = "avg"
+	CombineSum = "sum"
 )
 
 // 缺员处置（与 models.OnDegrade* 同值）。
@@ -168,17 +165,11 @@ func (g *GroupSnapshot) Staleness() time.Duration {
 
 // NormalizedOnDegrade 返回归一后的缺员处置（空串/未知值 = fail_closed）。
 //
-// first_available 语义就是「任一台在就够」（方案 §12.3 D-4 / §12.9.2 行⑤），
-// 因此**强制归一为 use_available**，与 OnDegrade 字段取值无关（显式
-// fail_closed 也不行 —— first_available 优先级更高，与 min_members 强制 1 同理）。
-// 这是运行时最后防线：保存期（API/状态机）也会归一，但快照可能来自历史数据、
-// 扫描器重建或手工修库，不能把正确性押在"每个发布方都记得归一"上。
+// 只有两个合法取值；未知值一律按 fail_closed —— 保守方向：
+// 宁可不触发，也不能用半边数据触发物理动作。
 func (g *GroupSnapshot) NormalizedOnDegrade() string {
 	if g == nil {
 		return OnDegradeFailClosed
-	}
-	if g.Combine == CombineFirstAvailable {
-		return OnDegradeUseAvailable
 	}
 	switch g.OnDegrade {
 	case OnDegradeUseAvailable:
@@ -190,14 +181,9 @@ func (g *GroupSnapshot) NormalizedOnDegrade() string {
 
 // EffectiveMinMembers 返回生效的最少可用成员数（>=1）。
 //
-// 规则（方案 §12.9.2 / D-4）：first_available 强制 1（其语义是"任一台可用即可"，
-// 与 NormalizedOnDegrade 的 first_available ⇒ use_available 归一同源）；其余取
-// max(1, MinMembers)。
+// 取 max(1, MinMembers)：配置里的 0/负数视为 1（至少一个可用才算数）。
 func (g *GroupSnapshot) EffectiveMinMembers() int {
 	if g == nil {
-		return 1
-	}
-	if g.Combine == CombineFirstAvailable {
 		return 1
 	}
 	if g.MinMembers < 1 {

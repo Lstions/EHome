@@ -153,14 +153,12 @@ type Evaluator struct {
 	plans *planCache
 
 	// sourceResolver 来源组解析器（sourceref.Registry 注入；nil=未接线）。
-	// 来源组规则在 nil 时 fail-closed 并落 source_resolver_not_configured 审计，
+	// 来源组规则在 nil 时 fail-closed 并落 unresolved_selector 审计（detail 记原因），
 	// **不得**静默跳过（否则上线顺序错误=静默失效）。存量规则不依赖它。
 	sourceResolver SourceResolver
 	// latestValueBySensorFn 是复合组逐成员取值的注入点（生产=api.LatestValueBySensor）。
 	// 与 planner 的同名注入点语义一致；求值器只用它做 composite 分量读取。
 	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
-	// deviceIntervalFn 设备采集间隔（S8 gap 上限=2×间隔；nil/0 ⇒ 不启用 S8）。
-	deviceIntervalFn func(edgeDeviceID uint) time.Duration
 	// rulesByGroup 是 groupID → ruleID 反向索引（切换钩子按组清窗）。
 	rulesByGroup map[uint][]uint
 	// sourceAudit 是来源失败审计节流表（key: ruleID+result+reason）。
@@ -1016,7 +1014,7 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields [
 		return
 	}
 	e.applyTrigger(rule, at, value, satisfied, legacyIdentity(deviceID),
-		legacyTriggerSource(deviceID, at), e.sourceGap(deviceID))
+		legacyTriggerSource(deviceID, at))
 }
 
 // evalRuleWithSource 是 primary_backup 规则的单帧路径：selector 在本帧求值，
@@ -1031,7 +1029,7 @@ func (e *Evaluator) evalRuleWithSource(rule models.AutomationRule, deviceID uint
 	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
 		return
 	}
-	e.applyTrigger(rule, at, value, satisfied, ident, src, e.sourceGap(deviceID))
+	e.applyTrigger(rule, at, value, satisfied, ident, src)
 }
 
 // conditionsSatisfied 求值附加条件（全部 AND；任一无法判定/不满足 ⇒ false）。
@@ -1058,9 +1056,8 @@ func (e *Evaluator) conditionsSatisfied(rule models.AutomationRule, deviceID uin
 //
 // S1/S3：写样本前若 identity 与窗口最后一条不一致 ⇒ 丢弃旧段（**不依赖切换钩子**，
 // 钩子丢失只影响清窗时延，不影响正确性）。S4：清窗保留 triggered 冷却锚。
-// S8：pruneWindow 增加跨长断流判据（maxGap=2×采集间隔；0=不启用）。
 func (e *Evaluator) applyTrigger(rule models.AutomationRule, at time.Time, value float64,
-	satisfied bool, ident sourceIdentity, src *triggerSource, maxGap time.Duration) {
+	satisfied bool, ident sourceIdentity, src *triggerSource) {
 	cooldown := cooldownFor(rule) // 0 = 不冷却 (cooldownFor 是唯一判定处)
 
 	e.mu.Lock()
@@ -1082,7 +1079,7 @@ func (e *Evaluator) applyTrigger(rule models.AutomationRule, at time.Time, value
 		win = nil
 	}
 	win = append(win, sample{at: at, satisfied: satisfied, identity: ident})
-	win = pruneWindow(win, rule.TriggerDurationSec, at, maxGap)
+	win = pruneWindow(win, rule.TriggerDurationSec, at)
 	e.windows[rule.ID] = win
 
 	continuous := satisfied && windowSatisfied(win, rule.TriggerDurationSec, at)
@@ -1171,7 +1168,7 @@ func compare(op string, value, threshold float64) bool {
 // 起点 —— 否则稀疏采样 (如每 5s 一点, duration=30s) 时窗口恰跨满 duration 的
 // 边界样本被裁, windowSatisfied 的 span 判定 (now-win[0].at >= duration) 永不满足。
 // 对照 alert pruneWindow 同位置缺陷 (alert 测试用密集采样未暴露)。
-func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Duration) []sample {
+func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
 	if len(win) == 0 {
 		return win
 	}
@@ -1189,20 +1186,6 @@ func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Durat
 		keep--
 	}
 	win = win[keep:]
-	// S8（方案 F-7 写死算法）：跨长断流不得拼接 —— 相邻样本间隔 > maxGap
-	// （2×采集间隔）时，更早的样本不能作为窗口起点。实现取"最近一次断流之后"
-	// 的那一段（从尾部向前找第一个断点），而不是只比较首对样本。
-	// maxGap<=0 表示采集间隔取不到 ⇒ 不启用该判据（保持存量行为）。
-	if maxGap > 0 {
-		start := 0
-		for i := len(win) - 1; i > 0; i-- {
-			if win[i].at.Sub(win[i-1].at) > maxGap {
-				start = i
-				break
-			}
-		}
-		win = win[start:]
-	}
 	if len(win) > maxWindowSamples {
 		win = win[len(win)-maxWindowSamples:]
 	}

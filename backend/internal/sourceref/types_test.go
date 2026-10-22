@@ -11,14 +11,11 @@ func TestConstantsAreStable(t *testing.T) {
 	// 组 kind
 	mustTrue(t, KindPrimaryBackup == "primary_backup", "KindPrimaryBackup=%q", KindPrimaryBackup)
 	mustTrue(t, KindComposite == "composite", "KindComposite=%q", KindComposite)
-	// 合并算子
-	wantCombine := map[string]bool{
-		"first_available": true, "avg": true, "max": true, "min": true, "sum": true,
-	}
-	gotCombine := []string{CombineFirstAvailable, CombineAvg, CombineMax, CombineMin, CombineSum}
-	for _, c := range gotCombine {
-		mustTrue(t, wantCombine[c], "unexpected combine constant %q", c)
-	}
+	// 合并算子（2026-10-22 收敛：只保留 avg/sum；其它算子已从实现与常量表移除）
+	mustTrue(t, CombineAvg == "avg", "CombineAvg=%q", CombineAvg)
+	mustTrue(t, CombineSum == "sum", "CombineSum=%q", CombineSum)
+	// 已移除算子不再是常量（编译期保证）；其字符串必须被 CombineGroup 当未知算子 fail-closed，
+	// 由 combine_test.go 的 TestCombineOperators 覆盖。
 	// 缺员处置
 	mustTrue(t, OnDegradeFailClosed == "fail_closed", "OnDegradeFailClosed=%q", OnDegradeFailClosed)
 	mustTrue(t, OnDegradeUseAvailable == "use_available", "OnDegradeUseAvailable=%q", OnDegradeUseAvailable)
@@ -138,15 +135,8 @@ func TestNormalizedOnDegrade(t *testing.T) {
 		}
 	}
 
-	// first_available ⇒ 强制 use_available（方案 D-4；与 OnDegrade 字段无关）。
-	for _, in := range []string{"", OnDegradeFailClosed, OnDegradeUseAvailable, "bogus"} {
-		g := &GroupSnapshot{Combine: CombineFirstAvailable, OnDegrade: in}
-		if got := g.NormalizedOnDegrade(); got != OnDegradeUseAvailable {
-			t.Fatalf("first_available OnDegrade=%q normalized=%q want %q", in, got, OnDegradeUseAvailable)
-		}
-	}
-	// 其它 combine 不受影响。
-	for _, combine := range []string{CombineAvg, CombineMax, CombineMin, CombineSum, "", "bogus"} {
+	// combine 不影响缺员处置归一：保留算子 / 未知组合都只看 OnDegrade 字段。
+	for _, combine := range []string{CombineAvg, CombineSum, "", "bogus"} {
 		g := &GroupSnapshot{Combine: combine, OnDegrade: OnDegradeFailClosed}
 		if got := g.NormalizedOnDegrade(); got != OnDegradeFailClosed {
 			t.Fatalf("combine=%q normalized=%q want fail_closed", combine, got)
@@ -154,8 +144,8 @@ func TestNormalizedOnDegrade(t *testing.T) {
 	}
 }
 
-// TestEffectiveMinMembers 覆盖 min_members 生效口径：
-// first_available 强制 1；其余 max(1, MinMembers)。
+// TestEffectiveMinMembers 覆盖 min_members 生效口径：一律 max(1, MinMembers)，
+// 与 combine 取值无关（0/负数视为 1，至少一个可用才算数）。
 func TestEffectiveMinMembers(t *testing.T) {
 	var nilGroup *GroupSnapshot
 	if got := nilGroup.EffectiveMinMembers(); got != 1 {
@@ -167,12 +157,10 @@ func TestEffectiveMinMembers(t *testing.T) {
 		min     int
 		want    int
 	}{
-		{"first_available_ignores_min", CombineFirstAvailable, 5, 1},
-		{"first_available_zero_min", CombineFirstAvailable, 0, 1},
 		{"avg_min_3", CombineAvg, 3, 3},
 		{"sum_min_2", CombineSum, 2, 2},
-		{"max_min_0", CombineMax, 0, 1},
-		{"min_min_negative", CombineMin, -2, 1},
+		{"avg_zero_min", CombineAvg, 0, 1},
+		{"sum_negative_min", CombineSum, -2, 1},
 		{"unknown_combine_min_2", "bogus", 2, 2},
 	}
 	for _, tc := range tests {

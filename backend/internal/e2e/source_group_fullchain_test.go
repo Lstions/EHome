@@ -157,7 +157,6 @@ func newSGFullChain(t *testing.T, rules ...*models.AutomationRule) *sgFullChain 
 	c.eval = automation.NewEvaluator(db, planner)
 	c.eval.SetSourceResolver(c.reg)
 	c.eval.SetLatestValueBySensorFn(api.LatestValueBySensor)
-	c.eval.SetDeviceIntervalFn(func(uint) time.Duration { return time.Second })
 	// 求值期降级可见性（对齐 main.go）：sourceref 的缺席/陈旧判定发生在求值侧，
 	// 不接这个回调，规则会正确 fail-closed 但 source_group_health 一片空白 ——
 	// 运维看「来源组健康」会以为一切正常，而该组实际已不可用。

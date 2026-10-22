@@ -55,10 +55,10 @@ type UpdateGroupInput struct {
 
 // ListGroupFilter 是列表过滤条件。
 type ListGroupFilter struct {
-	Kind    string
-	Enabled *bool
+	Kind     string
+	Enabled  *bool
 	Category string
-	Page    int
+	Page     int
 	PageSize int
 }
 
@@ -100,17 +100,13 @@ func validateGroupConfig(kind, category, combine string, minMembers int, onDegra
 		if minMembers < 0 || minMembers > 64 {
 			return fmt.Errorf("%w: min_members 越界: %d", ErrInvalidRequest, minMembers)
 		}
-		// V-3：first_available 与 min_members>1 自相矛盾（D-4）。
-		if combine == models.CombineFirstAvailable && minMembers > 1 {
-			return fmt.Errorf("%w: combine=first_available 时 min_members 必须为 1（V-3）", ErrInvalidRequest)
-		}
 	default:
 		return fmt.Errorf("%w: kind 非法: %q（允许 primary_backup|composite）", ErrInvalidRequest, kind)
 	}
 	return nil
 }
 
-// validateMemberConfig 校验 V-3（first_available 自相矛盾）/ V-4（设备存在+Enabled）/ 重复。
+// validateMemberConfig 校验 V-4（设备存在+Enabled）/ V-5（category 已观测）/ 重复成员。
 //
 // db 参数显式传入：UpdateGroup 在事务内调用时必须传 tx —— 否则 SQLite :memory:
 // 单连接库下事务占住连接、校验另开连接会看不到表（impl-core 验证报告 F-3）。
@@ -142,11 +138,6 @@ func (g *GroupService) validateMemberConfig(db *gorm.DB, kind, combine string, c
 			return fmt.Errorf("%w: 边缘设备 %d 尚未上报字段 %s（V-5 category_not_observed）",
 				ErrInvalidRequest, m.EdgeDeviceID, category)
 		}
-		if kind == models.SourceGroupKindComposite && combine == models.CombineFirstAvailable {
-			if m.Required != nil && *m.Required {
-				return fmt.Errorf("%w: combine=first_available 且存在 required=true 成员（V-3 自相矛盾）", ErrInvalidRequest)
-			}
-		}
 	}
 	return nil
 }
@@ -166,7 +157,6 @@ func (g *GroupService) categoryObserved(db *gorm.DB, edgeDeviceID uint, category
 	}
 	return false
 }
-
 
 // normalizeStalenessSec 把 StalenessSec=0 归一为**推导值**（Lead 裁决 2026-10-22：
 // 「0 = 不过期」不是合法语义——它会让 GroupSnapshot.Staleness()=0 ⇒ at.Sub(ts)>0 恒真
@@ -249,16 +239,6 @@ func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, er
 	if err := g.validateMemberConfig(g.db, in.Kind, in.Combine, strings.TrimSpace(in.Category), in.Members); err != nil {
 		return nil, err
 	}
-	// D-4 保存期归一：first_available ⇒ on_degrade=use_available、min_members=1、
-	// 所有成员 required=false（即使快照侧有运行时防御，也不允许 DB 里存自相矛盾配置）。
-	if in.Combine == models.CombineFirstAvailable {
-		in.OnDegrade = models.OnDegradeUseAvailable
-		in.MinMembers = 1
-		for i := range in.Members {
-			f := false
-			in.Members[i].Required = &f
-		}
-	}
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
@@ -334,9 +314,6 @@ func (g *GroupService) createMembers(tx *gorm.DB, group models.SourceGroup, inpu
 		if group.Kind == models.SourceGroupKindPrimaryBackup {
 			required = false // I2：主备组的 required 无意义
 		}
-		if group.Combine == models.CombineFirstAvailable {
-			required = false // D-4：first_available 归一
-		}
 		row := models.SourceGroupMember{
 			GroupID:      group.ID,
 			EdgeDeviceID: m.EdgeDeviceID,
@@ -400,11 +377,6 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 		}
 		if err := validateGroupConfig(row.Kind, row.Category, combine, minMembers, onDegrade); err != nil {
 			return err
-		}
-		if combine == models.CombineFirstAvailable {
-			// D-4 归一（与 CreateGroup 同口径）。
-			onDegrade = models.OnDegradeUseAvailable
-			minMembers = 1
 		}
 
 		// StalenessSec=0（含"本次不传但库里本来就是 0"的历史脏值）⇒ 归一为推导值，
@@ -527,9 +499,6 @@ func (g *GroupService) replaceMembers(tx *gorm.DB, group models.SourceGroup, inp
 		}
 		if group.Kind == models.SourceGroupKindPrimaryBackup {
 			required = false
-		}
-		if group.Combine == models.CombineFirstAvailable {
-			required = false // D-4
 		}
 		if old, ok := byEdge[in.EdgeDeviceID]; ok {
 			if err := tx.Model(&models.SourceGroupMember{}).Where("id = ?", old.ID).

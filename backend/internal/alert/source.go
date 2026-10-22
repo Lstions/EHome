@@ -31,11 +31,6 @@ type SourceResolver interface {
 // SetSourceResolver 注入来源组解析器（nil = 未接线，组规则 fail-closed）。
 func (e *Evaluator) SetSourceResolver(r SourceResolver) { e.sourceResolver = r }
 
-// SetDeviceIntervalFn 注入设备采集间隔（S8 gap 上限 = 2×间隔；nil/0 ⇒ 不启用）。
-func (e *Evaluator) SetDeviceIntervalFn(fn func(edgeDeviceID uint) time.Duration) {
-	e.deviceIntervalFn = fn
-}
-
 // SetSourceHealthFn 注入「来源降级可见性」回调（写 source_group_health）。
 //
 // 与 automation 同签名同语义：每次求值期判定组来源失败都会调用（含日志节流），
@@ -145,33 +140,6 @@ func membersHashOf(g *sourceref.GroupSnapshot) string {
 		return ""
 	}
 	return g.MembersHash
-}
-
-// sourceGap / groupGap：S8 的 gap 上限（2×采集间隔；取不到 ⇒ 0=不启用）。
-func (e *Evaluator) sourceGap(edgeDeviceID uint) time.Duration {
-	if e.deviceIntervalFn == nil {
-		return 0
-	}
-	if d := e.deviceIntervalFn(edgeDeviceID); d > 0 {
-		return 2 * d
-	}
-	return 0
-}
-
-func (e *Evaluator) groupGap(g *sourceref.GroupSnapshot) time.Duration {
-	if e.deviceIntervalFn == nil || g == nil {
-		return 0
-	}
-	var max time.Duration
-	for _, m := range g.Members {
-		if d := e.deviceIntervalFn(m.EdgeDeviceID); d > max {
-			max = d
-		}
-	}
-	if max > 0 {
-		return 2 * max
-	}
-	return 0
 }
 
 // alertSourceEvidence 是写进 AlertEvent 的来源快照。

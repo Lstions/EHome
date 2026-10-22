@@ -3,18 +3,18 @@ package automation
 // 规则「数据来源」求值接入（方案《规则数据来源与复合来源》§5 / §12.2 / §12.9）。
 //
 // M0 批次（task-29）在本包落四件事：
-//   1. 窗口来源身份 sourceIdentity（S1/S2：窗口不得跨身份拼接；S8 见 pruneWindow）；
+//   1. 窗口来源身份 sourceIdentity（S1/S2：窗口不得跨身份拼接）；
 //   2. TriggerEvent 的触发证据（SourceEdgeDeviceID/SourceGroupID/SourceKind/
 //      TransitionSeq/SourceAt）+ 唯一构造 helper（生产 3 个构造点全走它）；
 //   3. evaluator 的 active 过滤与复合整组求值（primary_backup 只收 active 帧，
 //      composite 任一成员帧驱动整组 CombineGroup）；
-//   4. 求值期的来源失败审计（source_member_changed / source_stale /
-//      source_degraded / source_resolver_not_configured）。
+//   4. 求值期的来源失败审计（source_member_changed / source_stale / source_degraded；
+//      解析器未接线映射为 unresolved_selector，原因字符串保留在 detail 里）。
 //
 // 红线（方案 §5.1）：
 //   - literal 路径与历史 matchField 逐字节等价（G-6）；来源组只是**匹配与取值**的
 //     上层分派，不改变单帧 selector 求值语义；
-//   - source_kind 为 NULL 的存量规则除 F4 缺陷修复与 S8 gap 上限外行为不变（G-1）；
+//   - source_kind 为 NULL 的存量规则除 F4 缺陷修复外行为不变（G-1）；
 //   - resolver 未接线时 spec source_group 规则必须 fail-closed 并落审计，
 //     不得静默跳过（否则上线顺序错误=静默失效）。
 
@@ -29,11 +29,10 @@ import (
 	"ehome/backend/pkg/parser"
 )
 
-// automation_events.result：来源组专用结果码（方案 §12.9 / N-18 的 5 个码）。
+// automation_events.result：来源组专用结果码（与 models.AutomationResultSource* 同值）。
 //
-// models 常量表、仿真白名单（simulation/catalog/audit.go）与前端枚举的同步由
-// Lead 的 models/前端批次负责（models 不在本任务写入范围）——本包常量承载同一
-// 字符串值，与既有 ResultUnresolvedSelector 同款约定。
+// 与 models 常量表保持一致（models 为权威）；本包常量承载同一字符串值，供求值期
+// 内部使用（与既有 ResultUnresolvedSelector 同款约定）。
 const (
 	// ResultSourceMemberChanged 触发成员已非 active / 组已删改（F4 FC-1/FC-5）。
 	ResultSourceMemberChanged = "source_member_changed"
@@ -41,10 +40,6 @@ const (
 	ResultSourceStale = "source_stale"
 	// ResultSourceDegraded 复合组带降级求值（有成员缺席但策略允许继续）。
 	ResultSourceDegraded = "source_degraded"
-	// ResultSourceResolverNotConfigured 来源解析器未接线（F4 FC-4 / 求值期 E-6）。
-	ResultSourceResolverNotConfigured = "source_resolver_not_configured"
-	// ResultSourceGroupShadow 灰度 audit_only 模式（只落审计、零下发）。
-	ResultSourceGroupShadow = "source_group_shadow"
 )
 
 // sourceAuditInterval 是来源失败审计的节流周期。与 selector 审计同款 5 分钟，
@@ -88,15 +83,6 @@ func notifySourceHealth(fn func(groupID uint, reason string), groupID uint, resu
 		detail = resultCode + ":" + reason
 	}
 	fn(groupID, detail)
-}
-
-// SetDeviceIntervalFn 注入设备采集间隔查询（S8 gap 上限 = 2×采集间隔）。
-//
-// 为什么用注入而不是查库：Evaluate 是每帧热路径，查 edge_devices 会把 5s 上报
-// 放大成一次 DB 往返。main.go 接线时用进程内设备缓存/读取器实现；nil 或返回 0
-// 表示"间隔取不到"⇒ 不启用 S8（方案 F-7：保持现状，不猜）。
-func (e *Evaluator) SetDeviceIntervalFn(fn func(edgeDeviceID uint) time.Duration) {
-	e.deviceIntervalFn = fn
 }
 
 // OnSourceTransition 是来源组切换钩子的引擎侧入口（清窗加速，见方案 §12.2.2）。
@@ -216,34 +202,6 @@ func snapshotMembersHash(g *sourceref.GroupSnapshot) string {
 	return g.MembersHash
 }
 
-// sourceGap 返回该帧所属来源的 S8 gap 上限（2×采集间隔；取不到 ⇒ 0=不启用）。
-func (e *Evaluator) sourceGap(edgeDeviceID uint) time.Duration {
-	if e.deviceIntervalFn == nil {
-		return 0
-	}
-	if d := e.deviceIntervalFn(edgeDeviceID); d > 0 {
-		return 2 * d
-	}
-	return 0
-}
-
-// groupGap 返回组内成员的 S8 gap 上限（取成员间隔最大值；全 0 ⇒ 不启用）。
-func (e *Evaluator) groupGap(g *sourceref.GroupSnapshot) time.Duration {
-	if e.deviceIntervalFn == nil || g == nil {
-		return 0
-	}
-	var max time.Duration
-	for _, m := range g.Members {
-		if d := e.deviceIntervalFn(m.EdgeDeviceID); d > max {
-			max = d
-		}
-	}
-	if max > 0 {
-		return 2 * max
-	}
-	return 0
-}
-
 // ── 求值期：来源帧分派与复合整组求值 ──────────────────────────────────────
 
 // matchSourceRule 把一个上报帧与一条"绑来源组"的规则做匹配。
@@ -255,7 +213,9 @@ func (e *Evaluator) matchSourceRule(rule models.AutomationRule, ref models.Sourc
 	if e.sourceResolver == nil {
 		// E-6：未接线必须可见地 fail-closed，不得静默跳过。
 		e.recordFrameDiscarded(ref.GroupID, at, frameDiscardResolverUnset)
-		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultSourceResolverNotConfigured,
+		// 结果码收敛：models 只保留 3 个 source_* 码，未接线映射为 unresolved_selector，
+		// 原因字符串保留在 detail 里（诊断能力不丢；red 判据见单测）。
+		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultUnresolvedSelector,
 			"source_resolver_not_configured")
 		return sourceref.FrameMatch{}, false
 	}
@@ -332,7 +292,7 @@ func (e *Evaluator) evalCompositeRule(rule models.AutomationRule, m sourceref.Fr
 		sourceAt:      at,
 		membersJSON:   componentsJSON(res.Components),
 	}
-	e.applyTrigger(rule, at, res.Value, satisfied, identityForFrame(m, deviceID), src, e.groupGap(g))
+	e.applyTrigger(rule, at, res.Value, satisfied, identityForFrame(m, deviceID), src)
 }
 
 // componentsJSON 序列化复合分量快照（automation_events.members_json）。

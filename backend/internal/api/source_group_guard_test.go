@@ -125,15 +125,15 @@ func guardErrCode(env map[string]any) string {
 // automationRuleBody 是合法的 sensor_threshold 规则体（动作=notification）。
 func guardAutomationRuleBody() map[string]any {
 	return map[string]any{
-		"name":                "guard-rule",
-		"trigger_type":        models.AutomationTriggerSensorThreshold,
-		"trigger_sensor_name": "illuminance",
-		"trigger_comparator":  models.AlertComparatorGT,
-		"trigger_threshold":   500,
+		"name":                 "guard-rule",
+		"trigger_type":         models.AutomationTriggerSensorThreshold,
+		"trigger_sensor_name":  "illuminance",
+		"trigger_comparator":   models.AlertComparatorGT,
+		"trigger_threshold":    500,
 		"trigger_duration_sec": 0,
-		"action_type":         models.AutomationActionNotification,
-		"action_level":        models.AlertLevelInfo,
-		"cooldown_sec":        30,
+		"action_type":          models.AutomationActionNotification,
+		"action_level":         models.AlertLevelInfo,
+		"cooldown_sec":         30,
 	}
 }
 
@@ -225,7 +225,7 @@ func TestSourceGroupReferenceValidationGroupState(t *testing.T) {
 	t.Run("empty group anchor is zero", func(t *testing.T) {
 		emptyGroup, err := gsvc.CreateGroup(datasource.CreateGroupInput{
 			Name: "组-空", Kind: models.SourceGroupKindComposite, Category: "illuminance",
-			Combine: models.CombineMax, Members: []datasource.GroupMemberInput{{EdgeDeviceID: ed.ID}},
+			Combine: models.CombineAvg, Members: []datasource.GroupMemberInput{{EdgeDeviceID: ed.ID}},
 		})
 		if err != nil {
 			t.Fatalf("create composite group: %v", err)

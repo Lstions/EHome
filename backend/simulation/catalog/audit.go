@@ -339,8 +339,7 @@ func auditIsDefinedResult(result string) bool {
 		"partial_failure", "suppressed_no_solar_event", "notification", "expired",
 		// 来源组结果码（方案 N-18；与 models.AutomationResultSource* 逐项一致，
 		// 由 TestAutomationResultWhitelistMatchesModelConstants 双向钉住）
-		"source_member_changed", "source_stale", "source_degraded",
-		"source_resolver_not_configured", "source_group_shadow":
+		"source_member_changed", "source_stale", "source_degraded":
 		return true
 	default:
 		return false

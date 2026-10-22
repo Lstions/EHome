@@ -17,17 +17,26 @@ const (
 	SourceGroupKindComposite     = "composite"
 )
 
-// 复合组合并算子白名单（方案 §4.1 / V-1）。first_available = 取优先级最高的可用成员。
+// 复合组合并算子白名单（方案 §4.1 / V-1）。
+//
+// 只保留 avg / sum（2026-10-22 收敛）：
+//   - avg：多个同类传感器的共识值（原始需求「两个光照传感器合成一个光照数据源」）
+//   - sum：累加类物理量（多路雨量计合计降雨量）
+//
+// 砍掉 max/min/first_available 的理由不是「用不上」，而是**收益成本比不成立**：
+// 每多一个算子要同步 5 处（常量白名单 / CombineGroup case / 真值表测试 /
+// 前端下拉项 / 门禁 SG-03），而后端实际只多 6 行 case。
+// first_available 另有独立理由：它与 on_degrade=use_available 语义重叠（N-8），
+// 已由缺员处置完整表达，不需要第二个入口。
+//
+// ⚠ 删除安全：生产 source_groups 表 0 行，无历史取值需要兼容。
 const (
-	CombineFirstAvailable = "first_available"
-	CombineAvg            = "avg"
-	CombineMax            = "max"
-	CombineMin            = "min"
-	CombineSum            = "sum"
+	CombineAvg = "avg"
+	CombineSum = "sum"
 )
 
 // CombineWhitelist 是 composite 组允许的 combine 取值集合。
-var CombineWhitelist = []string{CombineFirstAvailable, CombineAvg, CombineMax, CombineMin, CombineSum}
+var CombineWhitelist = []string{CombineAvg, CombineSum}
 
 // 缺员处置（方案 §4.1 / D-5）。空串归一为 fail_closed。
 const (
@@ -58,9 +67,10 @@ type SourceGroup struct {
 	// 与 data_sources.category 同口径同宽 :64）。
 	Category string `gorm:"size:64;not null;index" json:"category"`
 
-	// Combine 仅 composite 必填：first_available|avg|max|min|sum。
+	// Combine 仅 composite 必填：avg|sum（v0.4 收敛，见 ADR）。
 	//   primary_backup 必须为空串（V-2）。
-	Combine string `gorm:"size:20;not null;default:'';check:chk_sg_combine,combine IN ('first_available','avg','max','min','sum','')" json:"combine,omitempty"`
+	//   CHECK 与 models.CombineWhitelist 必须一致（门禁 SG-03 断言两者相等）。
+	Combine string `gorm:"size:20;not null;default:'';check:chk_sg_combine,combine IN ('avg','sum','')" json:"combine,omitempty"`
 	// MinMembers composite 最少可用成员数；0 = 归一为 1。
 	//   语义见 §12.9.2：只统计 required=false 成员的缺席。
 	MinMembers int `gorm:"not null;default:0" json:"min_members"`

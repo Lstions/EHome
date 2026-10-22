@@ -59,7 +59,7 @@ func applySourceColumns(ev *models.AutomationEvent, src *TriggerEvent) {
 //	FC-1 触发成员已非 active（主备组切走）⇒ source_member_changed
 //	FC-2 触发证据过期（now-SourceAt > staleness）⇒ source_stale
 //	FC-3 值取不到 / unbound / kill switch ⇒ unresolved_selector / field_resolver_disabled（既有）
-//	FC-4 解析器未接线 ⇒ source_resolver_not_configured
+//	FC-4 解析器未接线 ⇒ unresolved_selector（detail 保留 f4_fail_reason=source_resolver_not_configured）
 //	FC-5 组/成员行在 F4 时已不存在 ⇒ source_member_changed（f4_fail_reason=member_row_missing）
 func (p *Planner) checkConditionsStillSatisfiedWithSource(rule models.AutomationRule, ev TriggerEvent) (string, string, bool) {
 	// 未接线（旧构造/单测）：跳过复核，保持既有行为（G-1）。
@@ -86,7 +86,7 @@ func (p *Planner) checkConditionsStillSatisfiedWithSource(rule models.Automation
 	if ref.IsGroup() {
 		// FC-4：未接线必须可见地 fail-closed（不能静默跳过组规则）。
 		if p.sourceResolver == nil {
-			return health(ResultSourceResolverNotConfigured, "f4_fail_reason=source_resolver_not_configured")
+			return health(ResultUnresolvedSelector, "f4_fail_reason=source_resolver_not_configured")
 		}
 		g, ok := p.sourceResolver.Group(ref.GroupID)
 		if !ok || g == nil {

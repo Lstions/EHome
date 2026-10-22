@@ -174,30 +174,12 @@ func combineValues(combine string, avail []Component) (float64, bool) {
 		return 0, false
 	}
 	switch combine {
-	case CombineFirstAvailable:
-		return avail[0].Value, true
 	case CombineAvg:
 		var sum float64
 		for _, c := range avail {
 			sum += c.Value
 		}
 		return sum / float64(len(avail)), true
-	case CombineMax:
-		v := avail[0].Value
-		for _, c := range avail[1:] {
-			if c.Value > v {
-				v = c.Value
-			}
-		}
-		return v, true
-	case CombineMin:
-		v := avail[0].Value
-		for _, c := range avail[1:] {
-			if c.Value < v {
-				v = c.Value
-			}
-		}
-		return v, true
 	case CombineSum:
 		var sum float64
 		for _, c := range avail {

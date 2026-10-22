@@ -214,10 +214,14 @@ func TestSourceGroupPrimaryBackupAcceptsOnlyActive(t *testing.T) {
 	}
 }
 
-// TestSourceGroupCombineWhitelistDegenerate 对应 E11 的纯函数层：combine 退化不得静默。
+// TestSourceGroupCombineWhitelistDegenerate 对应 E11 的纯函数层：use_available 缺员不得静默。
+//
+// 过度设计裁剪后 combine 只剩 avg/sum（first_available 已删除）；本用例改测 sum 的
+// 缺员降级路径，被测行为不变：缺 required=false 成员 ⇒ 合并 + Degraded=true（可观测），
+// 不得把「1+2 融合」静默降成「只有 1 号在供数」。
 func TestSourceGroupCombineWhitelistDegenerate(t *testing.T) {
 	now := time.Now()
-	g := sgSnapshot(4, sourceref.KindComposite, "illuminance", sourceref.CombineFirstAvailable, 1, 60, sourceref.OnDegradeUseAvailable,
+	g := sgSnapshot(4, sourceref.KindComposite, "illuminance", sourceref.CombineSum, 1, 60, sourceref.OnDegradeUseAvailable,
 		sgMember(1, 401, 10, false, sourceref.MemberStatusStandby, now),
 		sgMember(2, 402, 5, false, sourceref.MemberStatusStandby, now),
 	)
@@ -228,7 +232,7 @@ func TestSourceGroupCombineWhitelistDegenerate(t *testing.T) {
 		return sourceref.Component{MemberID: m.MemberID, EdgeDeviceID: m.EdgeDeviceID, Value: 800, At: now, State: sourceref.StateOK}
 	})
 	if !res.OK || res.Value != 800 {
-		t.Fatalf("E11 前置: first_available 应取到 402 的值 800，实得 ok=%v value=%v", res.OK, res.Value)
+		t.Fatalf("E11 前置: sum 缺员应取到可用值 800，实得 ok=%v value=%v", res.OK, res.Value)
 	}
 	if !res.Degraded {
 		t.Fatalf("E11 红判据: use_available 下缺 1 成员却无 Degraded 标记（静默退化）")
@@ -361,7 +365,6 @@ func (c *sgChain) start(t *testing.T) {
 	eval.SetPlanProvider(c.registry)
 	eval.SetSourceResolver(c.reg)
 	eval.SetLatestValueBySensorFn(api.LatestValueBySensor)
-	eval.SetDeviceIntervalFn(func(uint) time.Duration { return 5 * time.Second })
 	c.eval, c.planner = eval, planner
 	if err := c.gsvc.PublishAll(); err != nil {
 		t.Fatalf("publish group snapshots: %v", err)

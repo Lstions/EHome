@@ -4,7 +4,7 @@ package datasource
 //
 // 重点（对应放行条件）：
 //   - R-1 F-1 revision 白名单：连续 MarkSuccess 不 bump；active 迁移必须 +1；
-//   - R-2 F-2/V-3：first_available 归一 + 自相矛盾 400；
+//   - R-2 F-2/V-1：composite 算子白名单（avg/sum）+ 已移除算子 400；
 //   - R-4 F-5：被规则引用的组删除 409；
 //   - N-21：R4 降级后无 active 的组必须能被 60s 扫描自愈；
 //   - 快照：唯一发布者（组变化后 registry 立即可见）。
@@ -326,7 +326,7 @@ func TestGroupScanSelfHealsDegradedGroup(t *testing.T) {
 	}
 }
 
-// ── 6. V-1/V-2/V-3/D-4：composite 校验、归一、禁 active ────────────────────
+// ── 6. V-1/V-2：composite 校验（avg/sum 白名单）、禁 active ──────────────
 func TestGroupCompositeRules(t *testing.T) {
 	f := newGroupFixture(t)
 	d1 := f.addEdgeDevice(t, "light-1")
@@ -338,39 +338,26 @@ func TestGroupCompositeRules(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("composite 缺 combine 应 400，got %v", err)
 	}
-	// V-3：first_available + required=true 成员 ⇒ 400。
-	required := true
-	if _, err := f.gsvc.CreateGroup(CreateGroupInput{
-		Kind: models.SourceGroupKindComposite, Category: "illuminance",
-		Combine: models.CombineFirstAvailable,
-		Members: []GroupMemberInput{{EdgeDeviceID: d1.ID, Required: &required}},
-	}); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("first_available+required 应 400（V-3），got %v", err)
+	// V-1：已移除算子（max/min/first_available）不再是合法 combine ⇒ 400。
+	for _, removed := range []string{"max", "min", "first_available"} {
+		if _, err := f.gsvc.CreateGroup(CreateGroupInput{
+			Kind: models.SourceGroupKindComposite, Category: "illuminance", Combine: removed,
+			Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}},
+		}); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("已移除算子 %q 应 400（V-1），got %v", removed, err)
+		}
 	}
-	// V-3：first_available + min_members>1 ⇒ 400。
-	if _, err := f.gsvc.CreateGroup(CreateGroupInput{
-		Kind: models.SourceGroupKindComposite, Category: "illuminance",
-		Combine: models.CombineFirstAvailable, MinMembers: 2,
-		Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}},
-	}); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("first_available+min_members=2 应 400（V-3），got %v", err)
-	}
-	// D-4 归一：合法 first_available ⇒ on_degrade=use_available、min_members=1、required=false。
+	// 合法 composite：保留算子 avg 可创建（sum 由下面的等价性/差分用例覆盖）。
 	group, err := f.gsvc.CreateGroup(CreateGroupInput{
 		Kind: models.SourceGroupKindComposite, Category: "illuminance",
-		Combine: models.CombineFirstAvailable, OnDegrade: models.OnDegradeFailClosed,
+		Combine: models.CombineAvg, OnDegrade: models.OnDegradeFailClosed,
 		Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}, {EdgeDeviceID: d2.ID}},
 	})
 	if err != nil {
-		t.Fatalf("CreateGroup first_available: %v", err)
+		t.Fatalf("CreateGroup composite avg: %v", err)
 	}
-	if group.OnDegrade != models.OnDegradeUseAvailable || group.MinMembers != 1 {
-		t.Fatalf("D-4 归一失败: on_degrade=%q min_members=%d", group.OnDegrade, group.MinMembers)
-	}
-	for _, m := range f.members(t, group.ID) {
-		if m.Required {
-			t.Fatalf("D-4：first_available 成员 required 必须归一为 false，member=%d", m.ID)
-		}
+	if group.Combine != models.CombineAvg || group.OnDegrade != models.OnDegradeFailClosed {
+		t.Fatalf("composite 配置落库错误: combine=%q on_degrade=%q", group.Combine, group.OnDegrade)
 	}
 	// I5：composite 无 active，activate ⇒ 400。
 	ms := f.members(t, group.ID)
@@ -924,8 +911,9 @@ func TestGroupFastPathZeroGroupsSkipsQueries(t *testing.T) {
 //
 // impl-core 探针发现：nil 若短路，漏注入 registry 的装配会静默丢 R1/R2
 // （last_success 不写、永不切换）。因此语义修正为：
-//   registry==nil ⇒ 照常执行状态机（只是无法发布快照）；
-//   仅"已注入且 Len()==0"才短路为零查询（生产 0 组场景）。
+//
+//	registry==nil ⇒ 照常执行状态机（只是无法发布快照）；
+//	仅"已注入且 Len()==0"才短路为零查询（生产 0 组场景）。
 func TestGroupFastPathNilRegistryRunsConservatively(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	gsvc := NewGroupService(db, Options{Now: func() time.Time { return testBase() }})
@@ -1094,9 +1082,3 @@ func snapshotRevision(s *sourceref.GroupSnapshot) int64 {
 	}
 	return s.Revision
 }
-
-
-
-
-
-

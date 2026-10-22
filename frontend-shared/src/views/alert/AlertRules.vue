@@ -526,10 +526,7 @@ const editingSourceWasGroup = ref(false)
 const sourceGroupOptions = computed(() => sourceGroups.value.filter(g => g.enabled !== false))
 const selectedSourceGroup = computed(() => sourceGroups.value.find(g => g.id === form.source_group_id))
 const COMBINE_LABELS: Record<string, string> = {
-  first_available: '首个可用',
   avg: '平均',
-  max: '最大',
-  min: '最小',
   sum: '求和',
 }
 function groupOptionLabel(g: SourceGroup): string {
@@ -537,7 +534,7 @@ function groupOptionLabel(g: SourceGroup): string {
 }
 function groupSummary(g: SourceGroup): string {
   if (g.kind === 'primary_backup') return `主备组 · 类别 ${g.category} · active 成员由数据源状态机决定`
-  const n = g.combine === 'first_available' ? 1 : (g.min_members || 1)
+  const n = g.min_members || 1
   return `复合组 · ${COMBINE_LABELS[g.combine || ''] ?? g.combine ?? '—'} · 最少 ${n} 个成员`
 }
 function onSourceKindChange(kind: 'edge_device' | 'source_group') {

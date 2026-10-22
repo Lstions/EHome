@@ -100,11 +100,6 @@ const (
 	// AutomationResultSourceDegraded 复合组带降级求值（有成员缺席但策略允许继续）。
 	//   必须与 Degraded=true 一起落 members_json，否则用户以为"1+2 融合"其实只有一台。
 	AutomationResultSourceDegraded = "source_degraded"
-	// AutomationResultSourceResolverNotConfigured 来源解析器未接线（F4 FC-4 / 求值期 E-6）。
-	//   出现即说明上线顺序错了 —— 必须显式红，不得静默跳过。
-	AutomationResultSourceResolverNotConfigured = "source_resolver_not_configured"
-	// AutomationResultSourceGroupShadow 灰度 audit_only：只落审计、零下发（方案 §9.4 G1）。
-	AutomationResultSourceGroupShadow = "source_group_shadow"
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)

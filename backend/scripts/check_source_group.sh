@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# check_source_group.sh —— 来源组（source_group）门禁 SG-01…SG-21（方案《规则数据来源与复合来源》§12.6 + §12.9.1 F-9/F-5）。
+# check_source_group.sh —— 来源组（source_group）门禁 SG-01…SG-16。
+# 过度设计裁剪后：combine 仅 avg/sum、result 码仅 3 个；原 SG-02/11/17/19/21 已删除或合并（见 commit 说明）。
 #
 # 定位：门禁的价值在于能变红。三态 PASS/FAIL/SKIP：
 #   - SKIP 只用于「依赖尚未落地」（PG 不可达、代码批次未完成但目标已登记）；
@@ -11,7 +12,7 @@
 #   ./scripts/check_source_group.sh --strict        # 发布口径（SKIP 也红）
 #   ./scripts/check_source_group.sh --self-test     # 反假绿自证：证明每类 helper 能变红
 #   ./scripts/check_source_group.sh --mutation      # 变异自证（apply→跑→必须非零→restore→md5）
-#   ./scripts/check_source_group.sh --only SG-14    # 单条
+#   ./scripts/check_source_group.sh --only SG-12    # 单条
 #   ./scripts/check_source_group.sh --list          # 列出编号与一句话判据
 #
 # 纪律：只读仓库；--mutation 临时改源码必须备份-改-跑-还原并核对 md5。
@@ -58,11 +59,13 @@ record_skip() { append_result SKIP "$1" "$2" "$3"; }
 record_warn() { append_result WARN "$1" "$2" "$3"; }
 
 GATE_HEAD=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+BANNER=1
+if [ "$LIST" -eq 1 ]; then BANNER=0; fi
 GATE_DIRTY=$(git -C "$REPO_DIR" status --porcelain -- backend .github 2>/dev/null | wc -l | tr -d ' ')
-if [ "$GATE_DIRTY" -gt 0 ]; then
+if [ "$BANNER" -eq 1 ] && [ "$GATE_DIRTY" -gt 0 ]; then
   echo "WARN: dirty worktree, results may be flaky (HEAD=$GATE_HEAD, $GATE_DIRTY files)"
 fi
-echo "HEAD: $GATE_HEAD (dirty files: $GATE_DIRTY)"
+if [ "$BANNER" -eq 1 ]; then echo "HEAD: $GATE_HEAD (dirty files: $GATE_DIRTY)"; fi
 RESULT_SUFFIX=" (HEAD=$GATE_HEAD)"
 
 # ── 通用 helpers ──────────────────────────────────────────────────────────────
@@ -102,7 +105,7 @@ pg_available() {
   return 1
 }
 
-# ── 门禁临时 PG 库（SG-04/SG-08）：不能用 -d postgres 查，那库里没有我们的表 ──
+# ── 门禁临时 PG 库（SG-03/SG-07）：不能用 -d postgres 查，那库里没有我们的表 ──
 GATE_DB=""
 setup_gate_db() {
   pg_available || return 1
@@ -118,7 +121,7 @@ migrate_gate_db() {
     "$GO" test ./internal/dbschema/ -count=1 -v \
     -run 'TestEnsureSourceGroupSchema_CreatesPartialUniqueIndexes|TestSourceGroupMember_SecondActiveRejected|TestDataSource_SecondActiveRejected' ) > "$tmp_dir/gatedb.out" 2>&1
 }
-# migrate_gate_db_events：在临时库里 AutoMigrate 两张事件表（SG-08 需要 automation_events/alert_events
+# migrate_gate_db_events：在临时库里 AutoMigrate 两张事件表（SG-07 需要 automation_events/alert_events
 # 的真实列）。testutil.OpenTestDB 的 PG 分支用「临时 schema + Cleanup 删除」隔离，
 # 进程结束后列查不到，所以不能用它；这里用多行 Go 程序显式迁移到 public schema。
 GATE_TMP_PKG=""
@@ -217,25 +220,29 @@ gate_SG_01() {
 }
 
 gate_SG_02() {
-  record_skip SG-02 '成员 category=组 category（已删除）' 'N-8 裁决删除：无字段载体，由 source_groups.category 单一权威替代'
-}
-
-gate_SG_03() {
-  local reasons=""
+  local reasons="" wl="" rc=0
   file_has internal/models/source_group.go 'chk_sg_combine' || reasons="$reasons DB CHECK chk_sg_combine 缺失;"
-  file_has internal/models/source_group.go 'CombineWhitelist' || reasons="$reasons CombineWhitelist 常量缺失;"
+  wl=$(grep -m1 'var CombineWhitelist' internal/models/source_group.go | grep -oE 'Combine(Avg|Sum|Max|Min|FirstAvailable)' | sort -u | tr '\n' ' ')
+  case "$wl" in
+    "CombineAvg CombineSum "|"CombineSum CombineAvg ") ;;
+    *) reasons="$reasons CombineWhitelist 必须恰好 {avg,sum}（过度设计裁剪），实得 [$wl];" ;;
+  esac
+  if grep -qE 'CombineMax|CombineMin|CombineFirstAvailable' internal/models/source_group.go internal/sourceref/types.go 2>/dev/null; then
+    reasons="$reasons 已裁剪的 combine 常量(max/min/first_available)仍存在;"
+  fi
   if ! run_go_test 'TestGroupCompositeRules' ./internal/datasource; then
     reasons="$reasons combine/kind 白名单测试不存在或未通过;"
   fi
   if ! grep_present 'CombineWhitelist|ValidateSourceGroup|SourceGroupValidation' ./internal/api ./internal/datasource; then
     reasons="$reasons API/service 保存期 400 校验未接线;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-03 'combine 白名单 + kind 语义' "$reasons"; else
-    record_pass SG-03 'combine 白名单 + kind 语义' 'DB CHECK + 常量白名单 + 保存期 400 校验齐备'
+  if [ -n "$reasons" ]; then record_fail SG-02 'combine 白名单（仅 avg/sum）+ kind 语义' "$reasons"; else
+    record_pass SG-02 'combine 白名单（仅 avg/sum）+ kind 语义' '白名单恰为 {avg,sum} + 旧算子已删 + DB CHECK + 保存期 400'
   fi
 }
 
-gate_SG_04() {
+
+gate_SG_03() {
   local reasons="" n=0
   if ! run_go_test 'TestEnsureSourceGroupSchema_CreatesPartialUniqueIndexes|TestSourceGroupMember_SecondActiveRejected|TestDataSource_SecondActiveRejected' ./internal/dbschema; then
     reasons="$reasons SQLite 索引/第二 active 拒绝测试未通过；"
@@ -252,50 +259,78 @@ gate_SG_04() {
   else
     reasons="$reasons SKIP(pg-unavailable)：PG 侧索引断言未执行;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-04 '两处部分唯一索引 + 第二 active 必拒' "$reasons"; else
-    record_pass SG-04 '两处部分唯一索引 + 第二 active 必拒' 'SQLite 行为测试 PASS；临时 PG 库两索引存在'
+  if [ -n "$reasons" ]; then record_fail SG-03 '两处部分唯一索引 + 第二 active 必拒' "$reasons"; else
+    record_pass SG-03 '两处部分唯一索引 + 第二 active 必拒' 'SQLite 行为测试 PASS；临时 PG 库两索引存在'
   fi
 }
 
-gate_SG_05() {
+gate_SG_04() {
   local reasons=""
   if ! file_has internal/automation/evaluator.go 'SourceEdgeDeviceID|Identity|Revision'; then
     reasons="$reasons automation 窗口样本未携带来源身份;"
   fi
-  if ! run_go_test 'TestM0SourceWindowNoCrossMemberSplice|TestM0AlertWindowNoCrossMemberSplice|TestM0S8GapDropsStaleWindowStart|TestM0StandbyFrameDiscarded' ./internal/automation ./internal/alert; then
-    reasons="$reasons 窗口 identity/S1/S2/S7/S8 行为测试不存在或未通过;"
+  if ! run_go_test 'TestM0SourceWindowNoCrossMemberSplice|TestM0AlertWindowNoCrossMemberSplice|TestM0StandbyFrameDiscarded' ./internal/automation ./internal/alert; then
+    reasons="$reasons 窗口 identity/S1/S2/S7 行为测试不存在或未通过;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-05 '窗口 identity + S1/S2/S7/S8' "$reasons"; else
-    record_pass SG-05 '窗口 identity + S1/S2/S7/S8' '结构断言与四类行为用例 PASS'
+  if [ -n "$reasons" ]; then record_fail SG-04 '窗口 identity + S1/S2/S7' "$reasons"; else
+    record_pass SG-04 '窗口 identity + S1/S2/S7' '结构断言与三类行为用例 PASS（S8 gap 上限已随过度设计裁剪删除）'
   fi
 }
 
-gate_SG_06() {
-  local rc=0
+
+# 依赖边界：resolver 唯一性（automation/alert 经 sourceref、禁直查 source_groups）
+# + 传递依赖红线（datasource/databus 不含 sensorfield）+ databus 零来源依赖。
+gate_SG_05() {
+  local reasons="" rc=0
+  # a) resolver 唯一性：automation/alert 不得直查 source_groups，且必须经 sourceref。
   grep_absent 'source_groups' ./internal/automation ./internal/alert
   rc=$?
-  if [ "$rc" -eq 2 ]; then record_fail SG-06 'resolver 唯一性' '目标目录不存在'; return; fi
-  if [ "$rc" -eq 1 ]; then record_fail SG-06 'resolver 唯一性' 'automation/alert 直查 source_groups（应为 0 处，必须经 sourceref）'; return; fi
-  if [ ! -d internal/sourceref ]; then record_fail SG-06 'resolver 唯一性' 'internal/sourceref 不存在'; return; fi
-  go_list_contains 'ehome/backend/internal/sourceref' ./internal/automation ./internal/alert
+  case "$rc" in
+    2) reasons="$reasons automation/alert 目录不存在;";;
+    1) reasons="$reasons automation/alert 直查 source_groups（必须经 sourceref）;";;
+  esac
+  if [ ! -d internal/sourceref ]; then
+    reasons="$reasons internal/sourceref 不存在;"
+  else
+    go_list_contains 'ehome/backend/internal/sourceref' ./internal/automation ./internal/alert
+    rc=$?
+    case "$rc" in
+      2) reasons="$reasons go list 失败（不得当作通过）;";;
+      1) reasons="$reasons automation/alert 未依赖 sourceref;";;
+    esac
+  fi
+  # b) 传递依赖红线：datasource/databus 不得含 sensorfield。
+  go_list_contains 'ehome/backend/internal/sensorfield' ./internal/datasource ./internal/databus
   rc=$?
-  if [ "$rc" -eq 2 ]; then record_fail SG-06 'resolver 唯一性' 'go list 失败（不得当通过）'; return; fi
-  if [ "$rc" -eq 1 ]; then record_fail SG-06 'resolver 唯一性' 'automation/alert 未依赖 sourceref'; return; fi
-  record_pass SG-06 'resolver 唯一性' '两引擎均经 sourceref，且无直查 source_groups'
+  case "$rc" in
+    2) reasons="$reasons go list(datasource/databus) 失败;";;
+    0) reasons="$reasons datasource/databus 传递依赖含 sensorfield;";;
+  esac
+  # c) databus 零来源依赖。
+  grep_absent 'SourceGroup|SourceRef|sourceref' ./internal/databus
+  rc=$?
+  case "$rc" in
+    2) reasons="$reasons internal/databus 不存在;";;
+    1) reasons="$reasons databus 出现 SourceGroup/SourceRef/sourceref;";;
+  esac
+  if [ -n "$reasons" ]; then record_fail SG-05 '依赖边界（resolver 唯一 + 传递依赖 + databus）' "$reasons"; else
+    record_pass SG-05 '依赖边界（resolver 唯一 + 传递依赖 + databus）' '两引擎经 sourceref；datasource/databus 不含 sensorfield；databus 零来源依赖'
+  fi
 }
 
-gate_SG_07() {
+
+gate_SG_06() {
   local reasons=""
   file_has internal/automation/planner.go 'SourceEdgeDeviceID' || reasons="$reasons planner.go 未使用 SourceEdgeDeviceID;"
   if ! run_go_test 'TestM0F4MemberChangedFailClosed|TestM0F4StaleEvidenceFailClosed|TestM0F4ResolverNotConfiguredFailClosed' ./internal/automation; then
     reasons="$reasons F4 钉成员行为测试不存在或未通过;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-07 'F4 钉住触发时成员' "$reasons"; else
-    record_pass SG-07 'F4 钉住触发时成员' 'planner 使用事件来源成员且行为测试 PASS'
+  if [ -n "$reasons" ]; then record_fail SG-06 'F4 钉住触发时成员' "$reasons"; else
+    record_pass SG-06 'F4 钉住触发时成员' 'planner 使用事件来源成员且行为测试 PASS'
   fi
 }
 
-gate_SG_08() {
+gate_SG_07() {
   local reasons="" col n=0
   for col in SourceKind SourceGroupID SourceEdgeDeviceID MembersJSON; do
     grep -q "$col" internal/models/automation.go || reasons="$reasons automation 事件缺列 $col;"
@@ -321,12 +356,12 @@ gate_SG_08() {
   else
     reasons="$reasons SKIP(pg-unavailable)：实库列断言未执行;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-08 '审计列（4 表 + 2 旧表列）' "$reasons"; else
-    record_pass SG-08 '审计列（4 表 + 2 旧表列）' 'struct + 临时 PG 库实表/实列齐备'
+  if [ -n "$reasons" ]; then record_fail SG-07 '审计列（4 表 + 2 旧表列）' "$reasons"; else
+    record_pass SG-07 '审计列（4 表 + 2 旧表列）' 'struct + 临时 PG 库实表/实列齐备'
   fi
 }
 
-gate_SG_09() {
+gate_SG_08() {
   local reasons=""
   # 方案原文要求 match_cases.jsonl 三消费者；实现选择了「同一真值表+三处行为测试」，
   # 门禁按实现契约断言：三消费者各自的行为测试必须存在且通过（缺一即红）。
@@ -339,12 +374,12 @@ gate_SG_09() {
   if ! run_go_test 'TestVerifyDiff_LegacyVsGroupEquivalence' ./internal/datasource; then
     reasons="$reasons legacy↔group 等价性测试不存在或未通过;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-09 '两引擎 parity' "$reasons"; else
-    record_pass SG-09 '两引擎 parity' '同一用例表驱动 automation/alert 一致'
+  if [ -n "$reasons" ]; then record_fail SG-08 '两引擎 parity（三消费者）' "$reasons"; else
+    record_pass SG-08 '两引擎 parity（三消费者）' '同一用例表驱动 automation/alert 一致'
   fi
 }
 
-gate_SG_10() {
+gate_SG_09() {
   local reasons="" n=0
   if ! grep_present 'SourceGroupKindComposite|composite' ./internal/api ./internal/datasource; then
     reasons="$reasons API/service 未对 composite 置 active 做拒绝;"
@@ -358,44 +393,33 @@ gate_SG_10() {
     if [ -z "$n" ]; then n=0; fi
     if [ "$n" -ne 0 ]; then reasons="$reasons PG 存在 composite active 行=$n;"; fi
   fi
-  if [ -n "$reasons" ]; then record_fail SG-10 'composite 无 active' "$reasons"; else
-    record_pass SG-10 'composite 无 active' 'API 拒绝 + 启动自检 + 负例测试 PASS'
+  if [ -n "$reasons" ]; then record_fail SG-09 'composite 无 active' "$reasons"; else
+    record_pass SG-09 'composite 无 active' 'API 拒绝 + 启动自检 + 负例测试 PASS'
   fi
+}
+
+gate_SG_10() {
+  local rollout="scripts/check_source_group_rollout.sh" n=0
+  if [ ! -f "$rollout" ]; then record_fail SG-10 '回滚盘点脚本' "缺少 $rollout"; return; fi
+  bash -n "$rollout" 2>/dev/null || { record_fail SG-10 '回滚盘点脚本' "$rollout 语法错误"; return; }
+  n=$(grep -c '^-- audit:' "$rollout" 2>/dev/null || true)
+  if [ "$n" -lt 4 ]; then record_fail SG-10 '回滚盘点脚本' "盘点 SQL 数=$n（期望 ≥4）"; return; fi
+  if ! "$rollout" --self-test >/dev/null 2>&1; then record_fail SG-10 '回滚盘点脚本' "$rollout --self-test 未通过"; return; fi
+  record_pass SG-10 '回滚盘点脚本' "4 条 SQL + --self-test 通过"
 }
 
 gate_SG_11() {
-  local reasons=""
-  file_has internal/models/source_group.go 'SourceMemberStatusActive' || reasons="$reasons 成员状态常量缺失;"
-  if ! run_go_test 'TestGroupCreateFirstMemberActiveAndSnapshot' ./internal/datasource; then
-    reasons="$reasons 状态词表/默认值测试不存在或未通过;"
-  fi
-  if [ -n "$reasons" ]; then record_fail SG-11 '状态词表/默认值' "$reasons"; else
-    record_pass SG-11 '状态词表/默认值' '成员创建状态与 kind 对照测试 PASS'
-  fi
-}
-
-gate_SG_12() {
-  local rollout="scripts/check_source_group_rollout.sh" n=0
-  if [ ! -f "$rollout" ]; then record_fail SG-12 '回滚盘点脚本' "缺少 $rollout"; return; fi
-  bash -n "$rollout" 2>/dev/null || { record_fail SG-12 '回滚盘点脚本' "$rollout 语法错误"; return; }
-  n=$(grep -c '^-- audit:' "$rollout" 2>/dev/null || true)
-  if [ "$n" -lt 4 ]; then record_fail SG-12 '回滚盘点脚本' "盘点 SQL 数=$n（期望 ≥4）"; return; fi
-  if ! "$rollout" --self-test >/dev/null 2>&1; then record_fail SG-12 '回滚盘点脚本' "$rollout --self-test 未通过"; return; fi
-  record_pass SG-12 '回滚盘点脚本' "4 条 SQL + --self-test 通过"
-}
-
-gate_SG_13() {
   local reasons=""
   file_has internal/models/source_group.go 'Revision' || reasons="$reasons 组 Revision 列缺失;"
   if ! run_go_test 'TestVerifyRevision_|TestGroupMarkSuccessDoesNotBumpRevision' ./internal/datasource; then
     reasons="$reasons revision 单调/白名单测试不存在或未通过;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-13 'revision 单调 + 白名单' "$reasons"; else
-    record_pass SG-13 'revision 单调 + 白名单' '100 次 MarkSuccess 不变 + 一次 active 迁移 +1'
+  if [ -n "$reasons" ]; then record_fail SG-11 'revision 单调 + 白名单' "$reasons"; else
+    record_pass SG-11 'revision 单调 + 白名单' '100 次 MarkSuccess 不变 + 一次 active 迁移 +1'
   fi
 }
 
-gate_SG_14() {
+gate_SG_12() {
   local bad=0 f out
   : > "$tmp_dir/sg14.txt"
   for f in internal/automation/evaluator.go internal/alert/evaluator.go; do
@@ -413,48 +437,44 @@ gate_SG_14() {
     fi
   done
   if [ "$bad" -eq 1 ]; then
-    record_fail SG-14 '锁内无 DB（静态）' "$(head -3 "$tmp_dir/sg14.txt" | tr '\n' ' ')"
+    record_fail SG-12 '锁内无 DB（静态）' "$(head -3 "$tmp_dir/sg14.txt" | tr '\n' ' ')"
   else
-    record_pass SG-14 '锁内无 DB（静态）' 'automation/alert evaluator 的 RLock 区间内无 e.db./resolveLogicalID'
+    record_pass SG-12 '锁内无 DB（静态）' 'automation/alert evaluator 的 RLock 区间内无 e.db./resolveLogicalID'
   fi
 }
 
-gate_SG_15() {
+gate_SG_13() {
   if ! run_go_test 'TestVerifyEvents_' ./internal/datasource; then
-    record_fail SG-15 '迁移数==ActiveChange 数' '测试不存在或未通过'
+    record_fail SG-13 '迁移数==ActiveChange 数' '测试不存在或未通过'
   else
-    record_pass SG-15 '迁移数==ActiveChange 数' '逐条造迁移后计数一致'
+    record_pass SG-13 '迁移数==ActiveChange 数' '逐条造迁移后计数一致'
   fi
 }
 
-gate_SG_16() {
-  local reasons="" m="" s="" f=""
-  m=$(grep -rhoE 'AutomationResultSource[A-Za-z]+' internal/models/*.go 2>/dev/null | sort -u)
-  s=$(grep -lq 'source_group' simulation/catalog/audit.go 2>/dev/null && echo has || echo missing)
-  f=$(grep -rhoE 'source_[a-z_]+' ../frontend-shared/src/api/*.ts 2>/dev/null | sort -u)
+gate_SG_14() {
+  local reasons="" m="" s="" f="" old="" expected="source_degraded source_member_changed source_stale"
+  # 只取「result 码」口径：models 的 AutomationResultSource* 常量、simulation 的 result 白名单行、
+  # 前端 AutomationEventResult union 中的 source_* 成员（排除表名/列名/source_kind 等无关字符串）。
+  m=$(grep -hoE '"source_(member_changed|stale|degraded)"' internal/models/automation.go 2>/dev/null | tr -d '"' | sort -u | tr '\n' ' ')
+  s=$(grep -hoE '"source_(member_changed|stale|degraded)"' simulation/catalog/audit.go 2>/dev/null | tr -d '"' | sort -u | tr '\n' ' ')
+  f=$(grep -hoE "'source_(member_changed|stale|degraded)'" ../frontend-shared/src/api/automation.ts 2>/dev/null | tr -d "'" | sort -u | tr '\n' ' ')
+  old=$(grep -rhoE 'source_resolver_not_configured|source_group_shadow' internal/models/*.go simulation/catalog/audit.go ../frontend-shared/src/api/automation.ts 2>/dev/null | sort -u | tr '\n' ' ')
   if ! run_go_test 'TestAutomationResultCodesThreeWayConsistency' ./internal/models; then
     reasons="$reasons result 码三向一致性测试未通过;"
   fi
-  if [ -z "$m" ]; then reasons="$reasons models 未定义 source 相关 result 码;"; fi
-  if [ "$s" = missing ]; then reasons="$reasons simulation audit 白名单未见 source 码;"; fi
-  if [ -z "$f" ]; then reasons="$reasons 前端 union 未见 source 码;"; fi
-  if [ -n "$reasons" ]; then record_fail SG-16 'result 码三向一致' "$reasons"; else
-    record_pass SG-16 'result 码三向一致' 'models/simulation/frontend 三处 source 码一致'
+  if [ "$m" != "$expected " ]; then reasons="$reasons models source 码必须恰好 3 个 [$expected]，实得 [$m];"; fi
+  if [ "$s" != "$expected " ]; then reasons="$reasons simulation 白名单必须恰好 3 个 [$expected]，实得 [$s];"; fi
+  if [ "$f" != "$expected " ]; then reasons="$reasons 前端 union 必须恰好 3 个 [$expected]，实得 [$f];"; fi
+  if [ -n "$old" ]; then reasons="$reasons 已裁剪的 result 码仍存在: [$old];"; fi
+  if [ -n "$reasons" ]; then record_fail SG-14 'result 码三向一致（恰好 3 个）' "$reasons"; else
+    record_pass SG-14 'result 码三向一致（恰好 3 个）' 'models/simulation/frontend 均为 {source_degraded,source_member_changed,source_stale}'
   fi
 }
 
-gate_SG_17() {
-  local rc=0
-  go_list_contains 'ehome/backend/internal/sensorfield' ./internal/datasource ./internal/databus
-  rc=$?
-  if [ "$rc" -eq 2 ]; then record_fail SG-17 '传递依赖红线' 'go list 失败（不得当作通过）'; return; fi
-  if [ "$rc" -eq 0 ]; then record_fail SG-17 '传递依赖红线' 'datasource/databus 传递依赖含 sensorfield'; return; fi
-  record_pass SG-17 '传递依赖红线' 'datasource/databus 的 go list -deps 均不含 sensorfield'
-}
 
-gate_SG_18() {
+gate_SG_15() {
   local bad="" dep=""
-  dep=$("$GO" list -deps ./internal/sourceref 2>/dev/null) || { record_fail SG-18 'sourceref 纯净性' 'go list 失败（不得当作通过）'; return; }
+  dep=$("$GO" list -deps ./internal/sourceref 2>/dev/null) || { record_fail SG-15 'sourceref 纯净性' 'go list 失败（不得当作通过）'; return; }
   if printf '%s\n' "$dep" | grep -qE 'gorm\.io|internal/(databus|notify|websocket|sensorfield)'; then
     bad="$bad 依赖含黑名单包;"
   fi
@@ -463,21 +483,12 @@ gate_SG_18() {
   else
     bad="$bad combine.go 不存在;"
   fi
-  if [ -n "$bad" ]; then record_fail SG-18 'sourceref 纯净性' "$bad"; else
-    record_pass SG-18 'sourceref 纯净性' '无 gorm/databus/notify/sensorfield 依赖；combine.go 纯函数'
+  if [ -n "$bad" ]; then record_fail SG-15 'sourceref 纯净性' "$bad"; else
+    record_pass SG-15 'sourceref 纯净性' '无 gorm/databus/notify/sensorfield 依赖；combine.go 纯函数'
   fi
 }
 
-gate_SG_19() {
-  local rc=0
-  grep_absent 'SourceGroup|SourceRef|sourceref' ./internal/databus
-  rc=$?
-  if [ "$rc" -eq 2 ]; then record_fail SG-19 'databus 零来源依赖' 'internal/databus 不存在'; return; fi
-  if [ "$rc" -eq 1 ]; then record_fail SG-19 'databus 零来源依赖' 'databus 出现 SourceGroup/SourceRef/sourceref'; return; fi
-  record_pass SG-19 'databus 零来源依赖' 'grep SourceGroup|SourceRef|sourceref = 0'
-}
-
-gate_SG_20() {
+gate_SG_16() {
   local reasons=""
   if ! grep_present 'SourceGroupReference|deletionGuard|source_group' ./internal/api; then
     reasons="$reasons API 删除守卫未接线（被引用 ⇒ 409）;"
@@ -485,29 +496,9 @@ gate_SG_20() {
   if ! run_go_test 'TestSourceGroupAPI_DeleteReferenced' ./internal/api; then
     reasons="$reasons 删除守卫负例测试不存在或未通过;"
   fi
-  if [ -n "$reasons" ]; then record_fail SG-20 '删除守卫 409' "$reasons"; else
-    record_pass SG-20 '删除守卫 409' '5 个调用点守卫 + 负例测试 PASS'
+  if [ -n "$reasons" ]; then record_fail SG-16 '删除守卫 409' "$reasons"; else
+    record_pass SG-16 '删除守卫 409' '5 个调用点守卫 + 负例测试 PASS'
   fi
-}
-
-gate_SG_21() {
-  local hits=""
-  hits=$(awk '
-    /func newTriggerEvent\(/ { skip=1; depth=0; opened=0 }
-    skip {
-      a=gsub(/{/, "{"); b=gsub(/}/, "}"); depth+=a-b
-      if (depth > 0) { opened=1 }
-      if (opened && depth == 0) { skip=0 }
-      next
-    }
-    /^[[:space:]]*\/\// { next }
-    /TriggerEvent\{/ { print FILENAME ":" FNR ": " $0 }
-  ' internal/automation/*.go 2>/dev/null | grep -v '_test.go' | head -5)
-  if [ -n "$hits" ]; then record_fail SG-21 'TriggerEvent 唯一构造' "newTriggerEvent 函数体之外出现字面量构造：$hits"; return; fi
-  if ! grep -rq 'func newTriggerEvent' internal/automation --include=*.go; then
-    record_fail SG-21 'TriggerEvent 唯一构造' 'newTriggerEvent helper 不存在'; return
-  fi
-  record_pass SG-21 'TriggerEvent 唯一构造' '生产代码无字面量 TriggerEvent{（helper 函数体内除外）'
 }
 
 summary() {
@@ -618,36 +609,30 @@ if [ "$MUTATION" -eq 1 ]; then mutation_test; exit $?; fi
 if [ "$LIST" -eq 1 ]; then
   cat <<'EOF'
 SG-01 双指针五态一致性（模型测试 + 保存/加载接线）
-SG-02 已删除（N-8：成员 category 无字段载体）——SKIP
-SG-03 combine 白名单 + kind 语义（DB CHECK + API 400）
-SG-04 两处部分唯一索引 + 第二 active 必拒（SQLite+PG）
-SG-05 窗口 identity + S1/S2/S7/S8 行为
-SG-06 resolver 唯一性（禁止直查 source_groups）
-SG-07 F4 钉住触发时成员（grep + 行为）
-SG-08 审计列（4 新表 + 2 旧表列）
-SG-09 automation/alert parity（match_cases.jsonl）
-SG-10 composite 无 active（API + 启动自检 + 负例）
-SG-11 状态词表/默认值对照
-SG-12 回滚盘点脚本（4 条 SQL 入 CI）
-SG-13 revision 单调（MarkSuccess 不 bump 反向断言）
-SG-14 evaluator 锁内无 DB（静态）
-SG-15 状态迁移数 == ActiveChange 事件数
-SG-16 result 码三向一致
-SG-17 传递依赖：datasource/databus 不含 sensorfield
-SG-18 sourceref 依赖黑名单 + combine 纯函数
-SG-19 databus 零来源依赖
-SG-20 删除守卫 409
-SG-21 TriggerEvent 唯一构造
+SG-02 combine 白名单（仅 avg/sum）+ kind 语义（DB CHECK + API 400）
+SG-03 两处部分唯一索引 + 第二 active 必拒（SQLite+PG）
+SG-04 窗口 identity + S1/S2/S7 行为
+SG-05 依赖边界（resolver 唯一 + 传递依赖红线 + databus 零来源）
+SG-06 F4 钉住触发时成员（grep + 行为）
+SG-07 审计列（4 新表 + 2 旧表列）
+SG-08 automation/alert parity（三消费者行为测试）
+SG-09 composite 无 active（API + 启动自检 + 负例）
+SG-10 回滚盘点脚本（4 条 SQL 入 CI）
+SG-11 revision 单调（MarkSuccess 不 bump 反向断言）
+SG-12 evaluator 锁内无 DB（静态）
+SG-13 状态迁移数 == ActiveChange 事件数
+SG-14 result 码三向一致（恰好 3 个）
+SG-15 sourceref 依赖黑名单 + combine 纯函数
+SG-16 删除守卫 409
 EOF
   exit 0
 fi
 
-# SG-02 是 v0.3 N-8 删除项（无字段载体），不列入默认清单；只在 --list 里说明。
-gate_list="01 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21"
+gate_list="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16"
 if [ -n "$ONLY" ]; then
   gate_list=$(printf '%s' "$ONLY" | sed -E 's/^SG-//; s/^0*//')
   case ",$gate_list," in
-    ',1,'|',2,'|',3,'|',4,'|',5,'|',6,'|',7,'|',8,'|',9,'|',10,'|',11,'|',12,'|',13,'|',14,'|',15,'|',16,'|',17,'|',18,'|',19,'|',20,'|',21,') ;;
+    ',1,'|',2,'|',3,'|',4,'|',5,'|',6,'|',7,'|',8,'|',9,'|',10,'|',11,'|',12,'|',13,'|',14,'|',15,'|',16,') ;;
     *) echo "未知门禁编号: $ONLY" >&2; exit 2 ;;
   esac
 fi

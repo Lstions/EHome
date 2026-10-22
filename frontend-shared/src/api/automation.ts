@@ -61,8 +61,6 @@ export type AutomationEventResult =
   | 'source_member_changed'    // 触发成员已非 active / 组已删改 → 安全拦截，不执行
   | 'source_stale'             // 触发证据过期（仅来源组规则；存量单设备规则豁免）
   | 'source_degraded'          // 复合组带降级求值（有成员缺席但策略允许继续），必须看 members_json
-  | 'source_resolver_not_configured' // 来源解析器未接线 → 上线顺序错误，显式红不静默
-  | 'source_group_shadow'      // 灰度 audit_only：只落审计、零下发
 
 /** 自动化策略规则 */
 export interface AutomationRule {

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -465,8 +464,8 @@ func main() {
 	// ── 来源组接线（方案 §5.2 / §6.1 / §12.2.2）──
 	//
 	// 注入顺序有硬约束：两引擎的 SetSourceResolver 必须在**开始接收帧之前**完成，
-	// 否则最早几帧会走「resolver 未接线 ⇒ fail-closed」路径（安全但会产生
-	// source_resolver_not_configured 噪声审计）。
+	// 否则最早几帧会走「resolver 未接线」路径（安全但会产生 unresolved_selector
+	// 噪声审计，detail 里带 f4_fail_reason=source_resolver_not_configured）。
 	//
 	// 两引擎 + planner 共用同一份快照：帧求值（MatchFrame）与 F4 复核读的必须是
 	// 同一个 revision，否则会出现「求值时是 A 供数、复核时快照已切到 B」的口径分裂。
@@ -474,10 +473,8 @@ func main() {
 	automationPlanner.SetSourceResolver(sourceGroupReg)
 	automationEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
 	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
-	automationEvaluator.SetDeviceIntervalFn(deviceIntervalFn(db))
 	alertEvaluator.SetSourceResolver(sourceGroupReg)
 	alertEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
-	alertEvaluator.SetDeviceIntervalFn(deviceIntervalFn(db))
 
 	// 切换钩子：ActiveChange 只在**事务提交后**发射（datasource 侧保证）。三件事 ——
 	//   ① 两引擎立即清窗：**加速**，不是正确性前提（窗口 identity 不匹配即清，S3）；
@@ -722,47 +719,6 @@ func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {
 		}
 	}
 	return configs
-}
-
-// deviceIntervalFn 返回「按边缘设备取采集间隔」的回调，供两引擎的 S8 窗口 gap 上限
-// 与来源组 staleness 推导使用（方案 §5.6 S8 / F-3）。
-//
-// 缓存策略：采集间隔是**低频变更的配置**（改配置会走 API 且极少发生），而回调在
-// 每帧求值路径上调用。这里用 10 分钟 TTL 的内存缓存 + 主键查询兜底：
-//   - 未配置 / 查询失败 ⇒ 返回 0 ⇒ 调用方**不启用** gap 判据
-//     （宁可少一道保护，也不要因为拿不到 interval 就让所有规则停止触发）；
-//   - 不做无上限缓存，避免长跑进程持有过期配置。
-func deviceIntervalFn(db *gorm.DB) func(edgeDeviceID uint) time.Duration {
-	type entry struct {
-		d  time.Duration
-		at time.Time
-	}
-	var (
-		mu    sync.Mutex
-		cache = map[uint]entry{}
-	)
-	const ttl = 10 * time.Minute
-	return func(edgeDeviceID uint) time.Duration {
-		if edgeDeviceID == 0 {
-			return 0
-		}
-		mu.Lock()
-		if e, ok := cache[edgeDeviceID]; ok && time.Since(e.at) < ttl {
-			mu.Unlock()
-			return e.d
-		}
-		mu.Unlock()
-
-		var dev models.EdgeDevice
-		var d time.Duration
-		if err := db.Select("id", "interval_ms").First(&dev, edgeDeviceID).Error; err == nil && dev.IntervalMs > 0 {
-			d = time.Duration(dev.IntervalMs) * time.Millisecond
-		}
-		mu.Lock()
-		cache[edgeDeviceID] = entry{d: d, at: time.Now()}
-		mu.Unlock()
-		return d
-	}
 }
 
 func runCommandDispatcher(ctx context.Context, dispatcher *commandexec.Dispatcher, service *commandexec.Service, wsHub *websocket.Hub) {

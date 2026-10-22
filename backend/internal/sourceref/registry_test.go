@@ -109,7 +109,7 @@ func TestMatchFramePrimaryBackup(t *testing.T) {
 // TestMatchFrameComposite 覆盖复合组：任一成员帧都驱动整组求值（无 active 概念）。
 func TestMatchFrameComposite(t *testing.T) {
 	r := NewRegistry()
-	g := compositeGroup(CombineMax)
+	g := compositeGroup(CombineAvg)
 	r.Publish(g)
 
 	for _, edge := range []uint{101, 102} {
@@ -156,7 +156,7 @@ func TestRegistryPublishGroupRemoveLen(t *testing.T) {
 		t.Fatal("empty registry should not contain group 1")
 	}
 
-	g1 := compositeGroup(CombineMax)
+	g1 := compositeGroup(CombineAvg)
 	g1.ID = 1
 	r.Publish(g1)
 	mustTrue(t, r.Len() == 1, "Len after publish = %d", r.Len())
@@ -202,7 +202,7 @@ func TestRegistryPublishGroupRemoveLen(t *testing.T) {
 // TestRegistryReplaceAll 覆盖启动/全量重载。
 func TestRegistryReplaceAll(t *testing.T) {
 	r := NewRegistry()
-	g1 := compositeGroup(CombineMax)
+	g1 := compositeGroup(CombineAvg)
 	g1.ID = 1
 	r.Publish(g1)
 
@@ -265,7 +265,7 @@ func TestMatchFrameZeroAllocs(t *testing.T) {
 // TestRegistryConcurrentAccess 是 -race 门禁：发布（冷）与读（热）并发安全。
 func TestRegistryConcurrentAccess(t *testing.T) {
 	r := NewRegistry()
-	base := compositeGroup(CombineMax)
+	base := compositeGroup(CombineAvg)
 	base.ID = 1
 	r.Publish(base)
 
@@ -302,7 +302,7 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			g := compositeGroup(CombineMax)
+			g := compositeGroup(CombineAvg)
 			g.ID = 1
 			g.Revision = int64(i)
 			r.Publish(g)
@@ -341,7 +341,7 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 func TestRegistryPublishVisibility(t *testing.T) {
 	r := NewRegistry()
 	for i := 0; i < 100; i++ {
-		g := compositeGroup(CombineMax)
+		g := compositeGroup(CombineAvg)
 		g.ID = uint(i + 1)
 		r.Publish(g)
 		if cur, ok := r.Group(uint(i + 1)); !ok || cur != g {

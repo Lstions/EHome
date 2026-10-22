@@ -163,11 +163,10 @@
               v-model="form.min_members"
               :min="1"
               :max="64"
-              :disabled="form.combine === 'first_available'"
               data-test="field-sg-min-members"
             />
             <span class="hint" data-test="sg-min-members-hint">
-              少于该数量 ⇒ 组装不可用（unbound）；first_available 固定为 1
+              少于该数量 ⇒ 组装不可用（unbound）
             </span>
           </el-form-item>
           <el-form-item label="缺员处置">
@@ -243,10 +242,7 @@ const store = useSourceGroupStore()
 const { isMobile } = useResponsive()
 
 const combines: Array<{ value: SourceGroupCombine; label: string }> = [
-  { value: 'first_available', label: '首个可用（first_available）' },
   { value: 'avg', label: '平均（avg）' },
-  { value: 'max', label: '最大（max）' },
-  { value: 'min', label: '最小（min）' },
   { value: 'sum', label: '求和（sum）' },
 ]
 
@@ -261,7 +257,7 @@ function combineText(group: SourceGroup): string {
 }
 function minMembersText(group: SourceGroup): string {
   if (group.kind !== 'composite') return '—'
-  const n = group.combine === 'first_available' ? 1 : (group.min_members || 1)
+  const n = group.min_members || 1
   return `≥ ${n}`
 }
 function memberRows(group: SourceGroup) {
@@ -435,7 +431,7 @@ async function onSave() {
     const mutable = {
       name: form.name.trim(),
       combine: form.kind === 'composite' ? form.combine : '',
-      min_members: form.kind === 'composite' ? (form.combine === 'first_available' ? 1 : form.min_members) : 0,
+      min_members: form.kind === 'composite' ? form.min_members : 0,
       staleness_sec: form.staleness_sec,
       on_degrade: form.kind === 'composite' ? form.on_degrade : 'fail_closed',
       enabled: form.enabled,

@@ -122,7 +122,7 @@ func TestSourceGroupMember_SecondActiveRejected(t *testing.T) {
 	}
 
 	// 不同组同设备允许（主备跨组件复用设备是合法拓扑）。
-	g2 := models.SourceGroup{Name: "g2", Kind: models.SourceGroupKindComposite, Category: "rainfall", Combine: models.CombineMax, Enabled: true}
+	g2 := models.SourceGroup{Name: "g2", Kind: models.SourceGroupKindComposite, Category: "rainfall", Combine: models.CombineSum, Enabled: true}
 	if err := db.Create(&g2).Error; err != nil {
 		t.Fatalf("create g2: %v", err)
 	}
