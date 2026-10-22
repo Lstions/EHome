@@ -512,6 +512,18 @@ func (e *Evaluator) StartWindowTicker(ctx context.Context) {
 	}()
 }
 
+// EvaluateClockRulesAt 以**注入时刻**执行一次时钟驱动规则求值 (time_window + sun_event)。
+//
+// 与 StartWindowTicker 走的是**同一条** evalTimeWindows 路径、同一个状态机，唯一差别
+// 是时间源由调用方给定。存在的理由与 windowTickEnvVar 同族 (见 WindowTickInterval 注释):
+// 时钟驱动规则要么真等 1 分钟 tick、要么等到真实日出时刻，端到端/仿真测试无法承受。
+// 注入时刻只影响"何时看一眼"，不改变任何判据（边沿仍只触发一次、每日本地日仍限一次）。
+//
+// 生产代码不得调用它 —— 生产路径的唯一入口是 StartWindowTicker。
+func (e *Evaluator) EvaluateClockRulesAt(now time.Time) {
+	e.evalTimeWindows(now)
+}
+
 // evalTimeWindows 对所有时钟驱动规则 (time_window + sun_event) 执行一次 tick 求值。
 // 由 StartWindowTicker 每 1min 调用; 时间源一律用后端本地时间 (time.Now())。
 //

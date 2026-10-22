@@ -25,9 +25,11 @@ import (
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/databus"
+	"errors"
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
 	"ehome/backend/pkg/parser"
@@ -149,14 +151,25 @@ type e2eChain struct {
 	bus        *databus.DataEventBus
 	consumer   *signalingConsumer
 	eval       *automation.Evaluator
+	pub        downlink.Publisher
+	cmdSvc     *commandexec.Service
+	disp       *commandexec.Dispatcher
 }
 
 func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
+	return newE2EChainWithPublisher(t, nil, rules...)
+}
+
+// newE2EChainWithPublisher 额外注入下行 Publisher（用于验证命令真正被编成 wire 帧）。
+// pub 为 nil 时使用拒绝型 stub（无 session 语义），与生产"节点不在线"一致。
+func newE2EChainWithPublisher(t *testing.T, pub downlink.Publisher, rules ...*models.AutomationRule) *e2eChain {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
 	c := &e2eChain{db: db}
 
-	c.node = models.Node{NodeID: "3001-e2e", Model: "ESP32S3", FirmwareVersion: "1.0.0", Status: "online"}
+	// 节点夹具必须带齐 commandexec 九道门禁读取的字段。
+	reported := time.Now().UTC()
+	c.node = models.Node{NodeID: "3001-e2e", Model: "ESP32S3", FirmwareVersion: "1.0.0", Status: "online", ConfigVersion: "manifest-e2e", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-e2e", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: E2ECapabilitiesJSON}
 	if err := db.Create(&c.node).Error; err != nil {
 		t.Fatalf("create node: %v", err)
 	}
@@ -164,11 +177,23 @@ func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
 	if err := db.Create(&c.channel).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
+	// 通道必须出现在节点上报的 hardware_info 里（gateReportedActionChannel）。
+	hw := fmt.Sprintf("{\"channels\":[{\"id\":%d,\"enabled\":true}]}", c.channel.ID)
+	if err := db.Model(&models.Node{}).Where("id = ?", c.node.ID).Update("hardware_info", hw).Error; err != nil {
+		t.Fatalf("set hardware_info: %v", err)
+	}
+
+	// 系统管理员：自动化 device_action 需要 system actor（resolveSystemActorID）。
+	adminNow := time.Now().UTC()
+	sk := models.SystemAdminSubjectKey
+	if err := db.Create(&models.User{Username: "e2e-admin", PasswordHash: "hash", Enabled: true, SubjectKey: &sk, SessionVersion: 1, LastLoginAt: &adminNow}).Error; err != nil {
+		t.Fatalf("create system admin: %v", err)
+	}
 	c.logical = models.LogicalDevice{IdentityKey: "jiabaida_bms:3001-e2e:1:1", Name: "BMS-e2e", DeviceType: "jiabaida_bms", RetentionDays: 90}
 	if err := db.Create(&c.logical).Error; err != nil {
 		t.Fatalf("create logical device: %v", err)
 	}
-	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms", LogicalDeviceID: &c.logical.ID}
+	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms", Enabled: true, Status: "active", LogicalDeviceID: &c.logical.ID}
 	if err := db.Create(&c.device).Error; err != nil {
 		t.Fatalf("create edge device: %v", err)
 	}
@@ -208,13 +233,25 @@ func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
 			t.Fatalf("create rule: %v", err)
 		}
 	}
-	cmdSvc := commandexec.NewService(db, deviceaction.NewRegistry())
-	planner := automation.NewPlanner(db, cmdSvc, func(string, any) {}, 0)
+	// 动作目录用真实内置注册表（含 jiabaida set_mos_policy）
+	actions := deviceaction.NewBuiltInRegistry(drvReg)
+	c.cmdSvc = commandexec.NewService(db, actions)
+	c.cmdSvc.SetDispatchEnabled(true)
+	planner := automation.NewPlanner(db, c.cmdSvc, func(string, any) {}, 0)
 	planner.SetLatestValueBySensorFn(api.LatestValueBySensor)
 	planner.SetLatestValuesFn(api.LatestValues)
 	planner.SetPlanProvider(c.registry)
 	c.eval = automation.NewEvaluator(db, planner)
 	c.eval.SetPlanProvider(c.registry)
+	c.disp = nil
+
+	// 下行 Publisher：默认拒绝型（无 live session ⇒ 生产语义），测试可注入捕获型。
+	if pub == nil {
+		pub = rejectingPublisher{}
+	}
+	c.pub = pub
+	transport := commandexec.NewChannelCmdV2Transport(db, c.pub, actions)
+	c.disp = commandexec.NewDispatcher(db, transport, commandexec.NewDispatcherOwner("e2e"))
 
 	// ── 数据面：真实消费者 + 真实 sink 注入（对齐 main.go） ──
 	inner := databus.NewSensorParserConsumerWithRegistry(db, nil, passthroughReassembler{}, drvReg, func(uint) {})
@@ -448,3 +485,35 @@ func (c *e2eChain) flushAndReloadObs(t *testing.T) {
 	}
 	c.registry.SetObservations(c.device.ID, fields)
 }
+
+// rejectingPublisher 模拟"节点没有 live session"：Publish 返回错误。
+// 与生产一致（downlink.Bridge 无 session 时返回 error，绝不假装成功）。
+type rejectingPublisher struct{}
+
+func (rejectingPublisher) Publish(string, []byte) error {
+	return errNoLiveSession
+}
+
+var errNoLiveSession = errors.New("e2e: node has no live session")
+
+// attachPlanner 让 Planner 重新装载规则（规则通常在 chain 构造后创建）。
+func (c *e2eChain) attachPlanner(rules ...*models.AutomationRule) {
+	c.eval.LoadRules()
+	for _, r := range rules {
+		_ = r
+	}
+}
+
+// dispatchOnce 驱动一次 dispatcher 出队，返回是否有记录被处理。
+func (c *e2eChain) dispatchOnce(t *testing.T) bool {
+	t.Helper()
+	ok, err := c.disp.ProcessOnce(context.Background())
+	if err != nil {
+		t.Fatalf("dispatcher ProcessOnce: %v", err)
+	}
+	return ok
+}
+
+
+// E2ECapabilitiesJSON 节点上报的命令引擎能力（commandexec 门禁读取）。
+const E2ECapabilitiesJSON = `{"supports_channel_cmd_v2":true,"supports_bounded_batch":true,"supports_finally":true,"max_batch_steps":8,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`
