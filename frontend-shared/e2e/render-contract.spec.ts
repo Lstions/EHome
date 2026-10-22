@@ -58,10 +58,36 @@ const AUTOMATION_RULES = [
     id: 22, name: '低电量断开负载', enabled: true,
     trigger_type: 'sensor_threshold', trigger_sensor_name: '@soc',
     trigger_comparator: 'lt', trigger_threshold: 30,
+    // 来源组规则（方案 v0.3）：trigger_edge_device_id 是后端双写的锚点，前端摘要必须标注来源组
+    source_kind: 'source_group', source_group_id: 7, trigger_edge_device_id: 2,
     action_type: 'notification', action_level: 'warning',
     require_confirmed: false, cooldown_sec: 600, max_daily_exec: 0,
   },
 ]
+
+/** 主备组：active_member_id=11（后端必须返回；复合组为 0/null，见契约裁决）。 */
+const PRIMARY_GROUP = {
+  id: 7, name: '客厅光照主备', kind: 'primary_backup', category: 'illumination',
+  combine: '', min_members: 0, staleness_sec: 0, on_degrade: '',
+  enabled: true, revision: 7, description: '', active_member_id: 11,
+  members: [
+    { id: 11, group_id: 7, edge_device_id: 2, priority: 100, required: false, status: 'active', fail_count: 0, max_fail_count: 3, last_success: '2026-10-22T05:00:00Z', last_failure: null },
+    { id: 12, group_id: 7, edge_device_id: 3, priority: 50, required: false, status: 'standby', fail_count: 0, max_fail_count: 3, last_success: null, last_failure: null },
+  ],
+}
+
+/** 复合组：combine=avg / min_members=1；**没有 active 概念**（active_member_id=0）。 */
+const COMPOSITE_GROUP = {
+  id: 8, name: '1+2 光照合成', kind: 'composite', category: 'illumination',
+  combine: 'avg', min_members: 1, staleness_sec: 30, on_degrade: 'fail_closed',
+  enabled: true, revision: 3, description: '', active_member_id: 0,
+  members: [
+    { id: 21, group_id: 8, edge_device_id: 2, priority: 100, required: true, status: '', fail_count: 0, max_fail_count: 3, last_success: null, last_failure: null },
+    { id: 22, group_id: 8, edge_device_id: 3, priority: 50, required: true, status: '', fail_count: 0, max_fail_count: 3, last_success: null, last_failure: null },
+  ],
+}
+
+const SOURCE_GROUPS = { items: [PRIMARY_GROUP, COMPOSITE_GROUP], total: 2, page: 1, page_size: 20 }
 
 const SENSOR_FIELDS = {
   edge_device_id: 2,
@@ -90,6 +116,8 @@ async function mockAPI(page: Page) {
     const url = route.request().url()
     const json = (data: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: ENVELOPE(data) })
 
+    if (/\/api\/v1\/source-groups\/\d+\/(health|failover-logs)/.test(url)) return json([])
+    if (url.includes('/api/v1/source-groups')) return json(SOURCE_GROUPS)
     if (url.includes('/api/v1/data-sources/failover-logs')) return json([])
     if (url.includes('/api/v1/data-sources/') && url.includes('/health')) return json([])
     if (url.includes('/api/v1/data-sources')) return json(DATA_SOURCES)
@@ -103,6 +131,14 @@ async function mockAPI(page: Page) {
     if (url.includes('/api/v1/overview')) return json({ node_total: 1, node_online: 1, edge_device_total: 1 })
     return json({ items: [], total: 0, page: 1, page_size: 20 })
   })
+}
+
+/** 选择 Element Plus 下拉项（按可见文本；只用于本门禁新增的来源选择器）。 */
+async function pickOption(page: Page, selectTestId: string, optionText: string | RegExp) {
+  await page.locator(`[data-test="${selectTestId}"]`).click()
+  const item = page.locator('.el-select-dropdown__item', { hasText: optionText }).first()
+  await expect(item).toBeVisible({ timeout: 5000 })
+  await item.click()
 }
 
 async function gotoPage(page: Page, path: string, ready: RegExp) {
@@ -196,6 +232,132 @@ test.describe('前端渲染：数据源 / 告警 / 自动化', () => {
     const real = errors.filter(
       (e) => !/favicon|ResizeObserver|WebSocket|ERR_CONNECTION|Authentication failed/i.test(e),
     )
+    expect(real, `控制台错误：\n${real.join('\n')}`).toHaveLength(0)
+  })
+})
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 来源组（规则数据来源，方案 v0.3 / 契约 M0）—— 与上面同一门禁、同一注入范式。
+//
+// 为什么单独一个 describe 而不是塞进上一组：这批断言的"分母"是新增的两个对象
+// （source_group / source_group_member），失败时能直接定位是哪一批契约漂移。
+// 覆盖：列表逐元素、**composite 无激活按钮的负例（SG-10 UI 对偶）**、
+//       自动化/告警编辑器的数据来源二选一、控制台无异常。
+// ─────────────────────────────────────────────────────────────────────────────
+test.describe('前端渲染：来源组（规则数据来源）', () => {
+  test.beforeEach(async ({ page }) => {
+    await seedSession(page)
+    await mockAPI(page)
+  })
+
+  test('来源组列表：kind / combine / min_members / 成员 / active / revision 逐元素渲染', async ({ page }) => {
+    await gotoPage(page, '/source-groups', /来源组/)
+
+    const rows = page.locator('[data-test="sg-table"] .el-table__row')
+    await expect(rows).toHaveCount(2)
+
+    // 行 1：主备组
+    const primary = rows.nth(0)
+    await expect(primary.locator('[data-test="sg-name"]')).toHaveText('客厅光照主备')
+    await expect(primary.locator('[data-test="sg-kind"]')).toHaveText('主备')
+    await expect(primary.locator('[data-test="sg-category"]')).toHaveText('illumination')
+    await expect(primary.locator('[data-test="sg-combine"]')).toHaveText('—')
+    await expect(primary.locator('[data-test="sg-min-members"]')).toHaveText('—')
+    await expect(primary.locator('[data-test="sg-members"]')).toHaveText('2 个成员')
+    // active 必须来自 active_member_id（后端契约字段），不是 members.status 扫描的巧合
+    await expect(primary.locator('[data-test="sg-active"]')).toHaveText('成员 #11（设备 2）')
+    await expect(primary.locator('[data-test="sg-revision"]')).toHaveText('r7')
+
+    // 行 2：复合组（combine/min_members 只在 composite 有意义）
+    const composite = rows.nth(1)
+    await expect(composite.locator('[data-test="sg-name"]')).toHaveText('1+2 光照合成')
+    await expect(composite.locator('[data-test="sg-kind"]')).toHaveText('复合')
+    await expect(composite.locator('[data-test="sg-combine"]')).toHaveText('平均（avg）')
+    await expect(composite.locator('[data-test="sg-min-members"]')).toHaveText('≥ 1')
+    await expect(composite.locator('[data-test="sg-members"]')).toHaveText('2 个成员')
+    await expect(composite.locator('[data-test="sg-no-active"]')).toHaveText('复合组无 active')
+    await expect(composite.locator('[data-test="sg-revision"]')).toHaveText('r3')
+  })
+
+  test('负例（SG-10 UI 对偶）：composite 组不得出现激活按钮，主备组必须有', async ({ page }) => {
+    await gotoPage(page, '/source-groups', /来源组/)
+    const rows = page.locator('[data-test="sg-table"] .el-table__row')
+    await expect(rows).toHaveCount(2)
+    // 主备组：激活入口存在（唯一）
+    await expect(rows.nth(0).locator('[data-test="sg-activate"]')).toHaveCount(1)
+    // 复合组：**硬断言 0** —— 语义上不存在"哪个成员权威"，后端 activate 亦返回 400
+    await expect(rows.nth(1).locator('[data-test="sg-activate"]')).toHaveCount(0)
+  })
+
+  test('自动化规则编辑器：数据来源二选一 + 复合组 combine/min_members + 冷却提示', async ({ page }) => {
+    await gotoPage(page, '/automation', /自动化|策略/)
+    await page.locator('[data-test="create-rule"]').click()
+    await expect(page.locator('[data-test="rule-dialog"]')).toBeVisible()
+
+    // 默认（存量语义）：边缘设备下拉可见，来源组下拉不存在
+    await expect(page.locator('[data-test="field-trigger-device"]')).toBeVisible()
+    await expect(page.locator('[data-test="field-source-group"]')).toHaveCount(0)
+
+    // 切到来源组
+    await pickOption(page, 'field-source-kind', '来源组（主备 / 复合）')
+    await expect(page.locator('[data-test="field-source-group"]')).toBeVisible()
+    await expect(page.locator('[data-test="field-trigger-device"]')).toHaveCount(0)
+    // 冷却下限提示（P-2：来源组规则 cooldown ≥ 成员采集间隔）
+    await expect(page.locator('[data-test="cooldown-hint"]')).toContainText('冷却')
+
+    // 选复合组：组语义显示 kind/combine/min_members
+    await pickOption(page, 'field-source-group', '1+2 光照合成（复合）')
+    const summary = page.locator('[data-test="source-group-summary"]')
+    await expect(summary).toBeVisible()
+    await expect(summary).toContainText('复合组')
+    await expect(summary).toContainText('平均')
+    await expect(summary).toContainText('最少 1 个成员')
+    // 传感器名自动同步为组的数据类别（用户不需要再手打物理名）
+    await expect(page.locator('input[data-test="field-sensor"]')).toHaveValue('illumination')
+
+    // 切回边缘设备：设备下拉回来、组下拉消失
+    await pickOption(page, 'field-source-kind', '边缘设备')
+    await expect(page.locator('[data-test="field-trigger-device"]')).toBeVisible()
+    await expect(page.locator('[data-test="field-source-group"]')).toHaveCount(0)
+  })
+
+  test('告警规则编辑器：选择来源组后目标设备字段隐藏、组选择可见', async ({ page }) => {
+    await gotoPage(page, '/alerts', /告警/)
+    await page.locator('[data-test="create-rule"]').click()
+    await expect(page.locator('[data-test="rule-dialog"]')).toBeVisible()
+
+    // 默认：存量目标字段可见
+    await expect(page.locator('[data-test="field-target-id"]')).toBeVisible()
+
+    await pickOption(page, 'field-source-kind', '来源组（主备 / 复合）')
+    await expect(page.locator('[data-test="field-source-group"]')).toBeVisible()
+    // 来源组规则不再要求用户选"目标设备"（成员由组定义）
+    await expect(page.locator('[data-test="field-target-id"]')).toHaveCount(0)
+
+    await pickOption(page, 'field-source-group', '客厅光照主备（主备）')
+    await expect(page.locator('[data-test="source-group-summary"]')).toContainText('主备组')
+  })
+
+  test('自动化规则列表：来源组规则行标注来源组，不把双写锚点误显示成设备', async ({ page }) => {
+    await gotoPage(page, '/automation', /自动化|策略/)
+    const table = page.locator('[data-test="rules-table"]')
+    await expect(table).toBeVisible()
+    const rows = table.locator('.el-table__row')
+    await expect(rows).toHaveCount(2)
+    // 第 2 行 = 来源组规则（fixture AUTOMATION_RULES[1].source_group_id=7）
+    await expect(rows.nth(1)).toContainText('来源组 #7')
+    await expect(rows.nth(1)).toContainText('@soc')
+  })
+
+  test('渲染无未捕获异常：/source-groups 控制台无 error', async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (e) => errors.push(String(e)))
+    page.on('console', (m) => {
+      if (m.type() === 'error') errors.push(m.text())
+    })
+    await gotoPage(page, '/source-groups', /来源组/)
+    const real = errors.filter((e) => !/favicon|ResizeObserver|WebSocket|ERR_CONNECTION|Authentication failed/i.test(e))
     expect(real, `控制台错误：\n${real.join('\n')}`).toHaveLength(0)
   })
 })

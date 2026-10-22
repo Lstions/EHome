@@ -101,9 +101,9 @@ function attach<T extends HTMLElement>(el: T): T {
 }
 
 describe('Phase 0.3 菜单门禁工具自证', () => {
-  it('模型自身：14 个导航目标、路径唯一', () => {
-    expect(NAV_DESTINATIONS).toHaveLength(14)
-    expect(new Set(ALL).size).toBe(14)
+  it('模型自身：15 个导航目标、路径唯一', () => {
+    expect(NAV_DESTINATIONS).toHaveLength(15)
+    expect(new Set(ALL).size).toBe(15)
     expect(expectedNavPathsInOrder()).toEqual(ALL)
   })
 
@@ -172,7 +172,7 @@ describe('Phase 0.3 菜单门禁工具自证', () => {
     // 组标题文本不应混进路径集合
     expect(paths).not.toContain('设备')
     expect(paths).not.toContain('数据')
-    expect(paths).toHaveLength(14)
+    expect(paths).toHaveLength(15)
   })
 
   it('有牙：无 data-index 的 .el-menu-item 必须被排除（如 sub-menu 标题复用同类名时）', () => {

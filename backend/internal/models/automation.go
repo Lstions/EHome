@@ -82,6 +82,29 @@ const (
 	//
 	// 每节点每日本事件只落一次 (与 recordSuppressed 同款同窗节流, 防刷量)。
 	AutomationResultSuppressedNoSolarEvent = "suppressed_no_solar_event"
+
+	// ── 来源组结果码（方案《规则数据来源与复合来源》N-18 / D-7；共 5 个）──
+	//
+	// 为什么单列一组：来源失败与动作失败**语义不同**（前者是"没拿到可信数据"，
+	// 后者是"拿到了但执行失败"）。混进 detail 文本前缀会让运维无法按 result 聚合
+	// 统计，也无法在仿真/门禁里做枚举一致性校验。代价是必须同步三处：
+	// 本文件常量、simulation/catalog/audit.go 白名单、前端 AutomationEventResult。
+	// 三向一致性由 TestAutomationResultWhitelistMatchesModelConstants（models↔sim）
+	// 与 scripts/check_source_group.sh SG-16（含前端 union）共同钉住。
+	//
+	// AutomationResultSourceMemberChanged 触发成员已非 active / 组已删改（F4 FC-1/FC-5）。
+	//   这是**安全拦截**：决策所依据的权威成员已经换了人，不能用新成员的值给旧决策背书。
+	AutomationResultSourceMemberChanged = "source_member_changed"
+	// AutomationResultSourceStale 触发证据过期（F4 FC-2；仅来源组规则启用，存量豁免）。
+	AutomationResultSourceStale = "source_stale"
+	// AutomationResultSourceDegraded 复合组带降级求值（有成员缺席但策略允许继续）。
+	//   必须与 Degraded=true 一起落 members_json，否则用户以为"1+2 融合"其实只有一台。
+	AutomationResultSourceDegraded = "source_degraded"
+	// AutomationResultSourceResolverNotConfigured 来源解析器未接线（F4 FC-4 / 求值期 E-6）。
+	//   出现即说明上线顺序错了 —— 必须显式红，不得静默跳过。
+	AutomationResultSourceResolverNotConfigured = "source_resolver_not_configured"
+	// AutomationResultSourceGroupShadow 灰度 audit_only：只落审计、零下发（方案 §9.4 G1）。
+	AutomationResultSourceGroupShadow = "source_group_shadow"
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -155,6 +178,16 @@ type AutomationRule struct {
 	TriggerWindowEnd    string  `gorm:"size:5" json:"trigger_window_end,omitempty"`   // "HH:MM"
 	TriggerWindowEdge   string  `gorm:"size:8" json:"trigger_window_edge,omitempty"`
 	TriggerEdgeDeviceID uint    `gorm:"index" json:"trigger_edge_device_id,omitempty"` // sensor_threshold 目标设备 (0=任意设备上报该字段即触发, 不推荐)
+
+	// ── 数据来源引用（方案《规则数据来源与复合来源》§4.3；NULL = 存量老路）──
+	//
+	// SourceKind edge_device | source_group；SourceGroupID 指向 source_groups.id。
+	// 两列必须用指针承载 SQL NULL（五态校验见 models/source_ref.go）。
+	// 回退铁律（方案 N-7）：绑来源组时必须同时双写非 0 的 TriggerEdgeDeviceID
+	//（= 组锚点成员），旧二进制忽略新列后退化为「只看锚点成员」，而不是
+	//「任意设备上报即触发」—— 后者是静默乱触发，不可接受。
+	SourceKind    *string `gorm:"size:20;index" json:"source_kind,omitempty"`
+	SourceGroupID *uint   `gorm:"index" json:"source_group_id,omitempty"`
 
 	// ── Trigger: sun_event (日出/日落, 用户裁决 O-3/O-4) ──
 	//
@@ -298,7 +331,22 @@ type AutomationEvent struct {
 	// 为什么可空: 规则级事件 (suppressed_daily_limit / pending_confirm / 纯通知等)
 	// 没有动作维度, NULL 表达"无动作维度", 而不是用 0 冒充"第 0 个动作"。
 	// 多动作下的失败事件才填 seq (1 起, 与 automation_rule_actions.seq 同域)。
-	ActionSeq *int      `json:"action_seq,omitempty"`
+	ActionSeq *int `json:"action_seq,omitempty"`
+
+	// ── 来源快照（方案 §4.4；NULL = 存量事件）──
+	//
+	// 为什么必须有：规则绑来源组后，「这次触发到底谁供的数、各成员值多少、
+	// 哪个缺席」无法从触发值反推（方案 E8 可追溯性）。MembersJSON 是
+	// [{member_id,edge_device_id,value,age_ms,state}] 的序列化快照。
+	SourceKind         *string `gorm:"size:20" json:"source_kind,omitempty"`
+	SourceGroupID      *uint   `json:"source_group_id,omitempty"`
+	SourceEdgeDeviceID *uint   `json:"source_edge_device_id,omitempty"`
+	MembersJSON        string  `gorm:"type:text" json:"members_json,omitempty"`
+	// SourceHash / SourceEvidence 是 Y5 pending_confirm 的来源快照（方案 D-8）：
+	// pending 期间 active 可能切换，confirm 时比对不一致即拒绝执行（TOCTOU）。
+	SourceHash     string `gorm:"size:64" json:"source_hash,omitempty"`
+	SourceEvidence string `gorm:"type:text" json:"source_evidence,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 

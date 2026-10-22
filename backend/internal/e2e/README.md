@@ -62,3 +62,39 @@ CHROME_BIN=~/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome \
 ## 未覆盖（诚实边界）
 
 TLS 握手与设备证书、WebSocket 客户端推送、节点侧真实固件执行（ACK/Final 回传）、前端在**真实后端**上的渲染（当前渲染门禁注入确定性响应；真实后端受登录限流 429 与审计库差异影响）。
+## 来源组（source_group）场景 —— task-30（E1–E11，进行中）
+
+文件：`source_group_e2e_test.go`（`//go:build e2e`）。跑法：
+
+~~~bash
+cd backend
+# SQLite 快速回归
+go test -tags=e2e ./internal/e2e/ -run 'TestSourceGroup|TestE1|TestE2|TestE5|TestE6|TestE7|TestE8|TestE9|TestE10|TestE11' -count=1 -v
+# PG（与生产同构；e2e 库需先建）
+EHOME_TEST_DB=postgres EHOME_DB_HOST=127.0.0.1 EHOME_DB_PORT=5432 \
+EHOME_DB_USER=ehome EHOME_DB_PASSWORD=ehome123 EHOME_DB_NAME=ehome_e2e \
+  go test -tags=e2e ./internal/e2e/ -run 'TestSourceGroup|TestE' -count=1 -v
+~~~
+
+| # | 场景 | 本文件状态 | 说明 |
+|---|---|---|---|
+| E1 | 三种组合各触发一次 | **PASS** | 三规则各 1 条事件，复合值 avg=650±1 |
+| E2 | 主备跟随且不双计 | **FAIL（真实红）** | 切换后第 2 条事件 source_edge_device_id 为空（疑似切换后走 source_degraded 分支/快照未带上来源） |
+| E3 | 复合缺员 unbound | **PASS** | sum + min_members=2 + fail_closed ⇒ unbound |
+| E4 | 陈旧剔除 | **PASS** | CombineGroup 对 StateStale 严格 unbound（适配层时钟注入依赖引擎接线，本层已锁契约） |
+| E5 | 跨成员交替不伪连续 | **PASS** | 交替帧 4 条、0 事件（identity/S8 生效） |
+| E6 | F4 断链回归（ID 分歧夹具） | **PASS** | 逻辑 ID 与 edge ID 显式错位后，绑逻辑设备的规则恰 1 条 executed |
+| E7 | 切换瞬间不双计 | **PASS** | 动作事件 1 条 + suppressed_cooldown 审计 1 条（压制可见）；failover_logs 1 条 |
+| E8 | 审计可追溯 | **PASS** | source_kind/source_group_id/source_edge_device_id/members_json 全非空 |
+| E9 | pending 期间切换 confirm 409 | **SKIP（能力缺口）** | prs3001 在 deviceaction 无风险动作 ⇒ 无法经产品路径产生 pending_confirm；需 BMS 链夹具（设计见 src-risk-view E9）；不伪造 pending 行 |
+| E10 | 组自愈 | **PASS** | 主失败→切备→备 stale→备恢复上报→ScanGroups 自愈回 active |
+| E11 | 复合交错帧冷却内至多 1 次动作 | **PASS** | 交错 4 帧仅 1 条事件 |
+
+**夹具纪律**：两台 prs3001 光照设备**跨逻辑设备**（各自 logical_device）；设备/逻辑行可 fixture 直写（与既有 newE2EChain 先例一致），来源组/规则必须走产品路径；E6 允许直写 logical/edge 造 ID 分歧（方案 F-6 豁免）。
+
+**反假绿**：SKIP(BLOCKED) 一律不计 PASS；报告必须区分 PASS/SKIP。
+**事件口径（诊断教训，勿再踩）**：automation_events 同时写动作事件与规则级审计事件。
+suppressed_cooldown / source_degraded / suppressed_daily_limit 证明「压制发生了且可见」（方案 §7.1），
+**不是又执行了一次动作**；按全表计数会把冷却审计误判为重复动作。
+E2/E7/E11 一律用 `actionEventsForRule`（只数 executed/notification/pending_confirm/partial_failure/
+confirmation_required/failed_gate/failed_dispatch），审计事件单独正向断言存在。

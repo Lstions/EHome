@@ -21,7 +21,7 @@
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
         <el-table-column label="目标" min-width="120">
           <template #default="{ row }">
-            <span class="mono">{{ row.target_type === 'edge_device' ? '边缘设备' : '逻辑设备' }} #{{ row.target_id }}</span>
+            <span class="mono">{{ targetText(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="sensor_name" label="传感器" min-width="120" show-overflow-tooltip />
@@ -91,7 +91,7 @@
             <dl class="rule-card__meta">
               <div>
                 <dt>目标</dt>
-                <dd class="mono">{{ row.target_type === 'edge_device' ? '边缘设备' : '逻辑设备' }} #{{ row.target_id }}</dd>
+                <dd class="mono">{{ targetText(row) }}</dd>
               </div>
               <div>
                 <dt>传感器</dt>
@@ -277,17 +277,40 @@
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="如：电池过压告警" data-test="field-name" />
         </el-form-item>
-        <el-form-item label="目标类型" required>
-          <el-select v-model="form.target_type" data-test="field-target-type">
-            <el-option label="边缘设备" value="edge_device" />
-            <el-option label="逻辑设备" value="logical_device" />
+        <!-- 数据来源（方案 v0.3 §4.3）：
+             ① 边缘/逻辑设备 = 存量 target_type+target_id 老路（source_kind 为 NULL）；
+             ② 来源组 = 跨逻辑设备的数据来源（主备自动跟 active / 复合按 combine 合成）。 -->
+        <el-form-item label="数据来源" required>
+          <el-select v-model="form.source_kind" data-test="field-source-kind" @change="onSourceKindChange">
+            <el-option label="边缘 / 逻辑设备" value="edge_device" />
+            <el-option label="来源组（主备 / 复合）" value="source_group" />
           </el-select>
         </el-form-item>
-        <el-form-item label="目标设备" required>
-          <el-select v-model="form.target_id" filterable data-test="field-target-id">
-            <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
-          </el-select>
-        </el-form-item>
+        <template v-if="form.source_kind === 'source_group'">
+          <el-form-item label="来源组" required>
+            <el-select v-model="form.source_group_id" filterable data-test="field-source-group" @change="onSourceGroupChange">
+              <el-option v-for="g in sourceGroupOptions" :key="g.id" :label="groupOptionLabel(g)" :value="g.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="组语义">
+            <span class="hint" data-test="source-group-summary">
+              {{ selectedSourceGroup ? groupSummary(selectedSourceGroup) : '选择来源组后按其数据类别求值' }}
+            </span>
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="目标类型" required>
+            <el-select v-model="form.target_type" data-test="field-target-type">
+              <el-option label="边缘设备" value="edge_device" />
+              <el-option label="逻辑设备" value="logical_device" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="目标设备" required>
+            <el-select v-model="form.target_id" filterable data-test="field-target-id">
+              <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
+            </el-select>
+          </el-form-item>
+        </template>
         <el-form-item label="传感器" required>
           <!-- G2：候选项来自目标设备已上报的类别；allow-create 保留手输（未上报时不阻塞建规则）。 -->
           <el-select
@@ -355,7 +378,8 @@ import { UNKNOWN } from '@/utils/format'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { logger } from '@/utils/logger'
-import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
+import { sourceGroupApi, type SourceGroup } from '@/api/sourceGroup'
+import type { AlertRule, AlertComparator, AlertLevel, CreateAlertRuleRequest, UpdateAlertRuleRequest } from '@/api/alert'
 
 /** 后端已上报的测量类别（`GET /api/v1/unified-data/categories`）。 */
 interface MeasurementCategory {
@@ -441,6 +465,14 @@ function ruleName(ruleId: number): string {
   const hit = store.rules.find(r => r.id === ruleId)
   return hit ? hit.name : `#${ruleId}`
 }
+/** 规则目标显示：来源组规则显示组名（target_* 只是锚点占位，对用户无意义）。 */
+function targetText(rule: AlertRule): string {
+  if (rule.source_kind === 'source_group') {
+    const g = sourceGroups.value.find(x => x.id === rule.source_group_id)
+    return `来源组 · ${g ? g.name : `#${rule.source_group_id}`}`
+  }
+  return `${rule.target_type === 'edge_device' ? '边缘设备' : '逻辑设备'} #${rule.target_id}`
+}
 function comparatorText(c: AlertComparator): string {
   return comparators.find(x => x.value === c)?.label ?? c
 }
@@ -469,6 +501,9 @@ const emptyForm = () => ({
   // 用户会以为已经选中了编号 0 的设备（2026-10-21 审计实测 /alerts 弹窗）。
   // 只有 undefined 才是真正的空：显示 placeholder「请选择」。
   target_id: undefined as number | undefined,
+  // 数据来源（方案 v0.3 §4.3）：edge_device=存量 target_type 老路；source_group=来源组
+  source_kind: 'edge_device' as 'edge_device' | 'source_group',
+  source_group_id: undefined as number | undefined,
   sensor_name: '',
   comparator: 'gt' as AlertComparator,
   threshold: 0,
@@ -483,8 +518,59 @@ const form = reactive(emptyForm())
 // （实测：放在 form 之前会在挂载时抛 "Cannot access 'form' before initialization"）。
 watchTargetDeviceForCategories()
 
+// ── 来源组（方案 v0.3 §4.3）──
+// 前端只负责选择与展示；active/combine/缺员语义由后端 sourceref 求值，前端不重算。
+const sourceGroups = ref<SourceGroup[]>([])
+/** 编辑中的规则原本是否绑来源组：决定「切回设备路径」时是否显式清空来源列。 */
+const editingSourceWasGroup = ref(false)
+const sourceGroupOptions = computed(() => sourceGroups.value.filter(g => g.enabled !== false))
+const selectedSourceGroup = computed(() => sourceGroups.value.find(g => g.id === form.source_group_id))
+const COMBINE_LABELS: Record<string, string> = {
+  first_available: '首个可用',
+  avg: '平均',
+  max: '最大',
+  min: '最小',
+  sum: '求和',
+}
+function groupOptionLabel(g: SourceGroup): string {
+  return `${g.name}（${g.kind === 'primary_backup' ? '主备' : '复合'}）`
+}
+function groupSummary(g: SourceGroup): string {
+  if (g.kind === 'primary_backup') return `主备组 · 类别 ${g.category} · active 成员由数据源状态机决定`
+  const n = g.combine === 'first_available' ? 1 : (g.min_members || 1)
+  return `复合组 · ${COMBINE_LABELS[g.combine || ''] ?? g.combine ?? '—'} · 最少 ${n} 个成员`
+}
+function onSourceKindChange(kind: 'edge_device' | 'source_group') {
+  if (kind === 'edge_device') {
+    form.source_group_id = undefined
+    return
+  }
+  // 切到来源组：目标设备不再是配置项（组内成员由后端解析）。
+  form.target_id = undefined
+  if (form.source_group_id) onSourceGroupChange()
+}
+function onSourceGroupChange() {
+  const g = selectedSourceGroup.value
+  if (g) form.sensor_name = g.category
+}
+/** 组锚点成员 = priority DESC, id ASC 首个（契约 #7；后端保存期会再双写一次，这里只做展示/提交占位）。 */
+function anchorDeviceID(g: SourceGroup | undefined): number {
+  if (!g || !Array.isArray(g.members) || g.members.length === 0) return 0
+  const sorted = [...g.members].sort((a, b) => b.priority - a.priority || a.id - b.id)
+  return sorted[0]?.edge_device_id ?? 0
+}
+async function loadSourceGroups() {
+  try {
+    const res = await sourceGroupApi.list({ page: 1, page_size: 200 })
+    sourceGroups.value = Array.isArray(res.items) ? res.items : []
+  } catch {
+    sourceGroups.value = []
+  }
+}
+
 function openCreate() {
   editingId.value = null
+  editingSourceWasGroup.value = false
   Object.assign(form, emptyForm())
   // G2：清掉上一轮候选（watch 只在 target_id **变化**时触发，新建时 id 可能恰好同值）。
   sensorCategories.value = []
@@ -493,8 +579,11 @@ function openCreate() {
 }
 function openEdit(rule: AlertRule) {
   editingId.value = rule.id
+  editingSourceWasGroup.value = rule.source_kind === 'source_group'
   Object.assign(form, {
     name: rule.name,
+    source_kind: (rule.source_kind === 'source_group' ? 'source_group' : 'edge_device') as 'edge_device' | 'source_group',
+    source_group_id: rule.source_group_id ?? undefined,
     target_type: rule.target_type,
     target_id: rule.target_id,
     sensor_name: rule.sensor_name,
@@ -514,7 +603,11 @@ function openEdit(rule: AlertRule) {
 
 function validate(): string | null {
   if (!form.name.trim()) return '请填写规则名称'
-  if (!form.target_id) return '请选择目标设备'
+  if (form.source_kind === 'source_group') {
+    if (!form.source_group_id) return '请选择来源组'
+  } else if (!form.target_id) {
+    return '请选择目标设备'
+  }
   if (!form.sensor_name.trim()) return '请填写传感器名称'
   return null
 }
@@ -527,12 +620,11 @@ async function onSave() {
   }
   saving.value = true
   try {
-    const req = {
+    // 来源组规则：target_* 只是"锚点成员"占位（契约 #7，后端保存期会按组锚点重写）；
+    // 设备路径：保持原 target_type+target_id 语义逐字节不变。
+    const isGroup = form.source_kind === 'source_group'
+    const base = {
       name: form.name.trim(),
-      target_type: form.target_type,
-      // 表单初值是 undefined（为了显示 placeholder），提交前校验已保证已选设备；
-      // 这里显式转 number 满足 CreateAlertRuleRequest 类型。
-      target_id: Number(form.target_id),
       sensor_name: form.sensor_name.trim(),
       comparator: form.comparator,
       threshold: form.threshold,
@@ -541,11 +633,26 @@ async function onSave() {
       level: form.level,
       enabled: form.enabled,
     }
+    const req = (isGroup
+      ? {
+          ...base,
+          target_type: 'edge_device' as const,
+          target_id: anchorDeviceID(selectedSourceGroup.value),
+          source_kind: 'source_group' as const,
+          source_group_id: form.source_group_id,
+        }
+      : {
+          ...base,
+          target_type: form.target_type,
+          target_id: Number(form.target_id),
+          // 编辑「来源组规则」后切回设备路径：显式清空来源列（后端按指针区分 NULL）。
+          ...(editingSourceWasGroup.value ? { source_kind: 'edge_device' as const, source_group_id: null } : {}),
+        }) as CreateAlertRuleRequest | UpdateAlertRuleRequest
     if (editingId.value) {
-      await store.updateRule(editingId.value, req)
+      await store.updateRule(editingId.value, req as UpdateAlertRuleRequest)
       ElMessage.success('规则已更新')
     } else {
-      await store.createRule(req)
+      await store.createRule(req as CreateAlertRuleRequest)
       ElMessage.success('规则已创建')
     }
     dialogVisible.value = false
@@ -667,6 +774,7 @@ watch(() => store.eventsTotal, total => {
 })
 
 onMounted(async () => {
+  void loadSourceGroups()
   await Promise.all([store.fetchRules(), store.fetchEvents({ page: 1 })])
   try {
     const list = await edgeDeviceApi.getList()

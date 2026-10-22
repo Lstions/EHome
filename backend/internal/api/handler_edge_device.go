@@ -1059,6 +1059,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// V-13 / SG-20：被来源组引用（或引用组上有规则）的边缘设备禁止删除。
+		if !guardEdgeDeviceDelete(c, db, d.ID) {
+			return
+		}
 		// Find node before deletion for event emission
 		var ch models.Channel
 		hasNode := db.First(&ch, d.ChannelID).Error == nil
@@ -1129,6 +1133,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		// V-13 / SG-20：批量删除前**整体**守卫（任一台被来源组引用 ⇒ 409，不做部分删除）。
+		if !guardEdgeDevicesBatchDelete(c, db, req.IDs) {
 			return
 		}
 

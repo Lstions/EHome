@@ -1,6 +1,7 @@
 package database
 
 import (
+	"ehome/backend/internal/dbschema"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"fmt"
@@ -137,6 +138,14 @@ func AutoMigrate() error {
 		// MigrateAutomationRuleActions (本文件尾部调用) 幂等完成。
 		&models.AutomationRuleAction{},
 
+		// 规则数据来源与复合来源 (设计/规则数据来源与复合来源-方案-2026-10-22.md §4):
+		// 来源组 + 成员 + 组级切换日志 + 组级健康事件（4 张新表）。
+		// ⚠ 与 testutil/db.go 的 allModels **两处清单必须同步**（本仓既有纪律）。
+		&models.SourceGroup{},
+		&models.SourceGroupMember{},
+		&models.SourceGroupFailoverLog{},
+		&models.SourceGroupHealth{},
+
 		// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md v0.2 §4.2/§4.3):
 		// sensor_field_obs 观测投影表 + sensor_field_meta 丰富层。
 		// ⚠ 与 testutil/db.go 的 allModels **两处清单必须同步**（本仓既有纪律）。
@@ -153,6 +162,11 @@ func AutoMigrate() error {
 		return err
 	}
 	if err := ensureDeviceConfigDefaultConstraint(DB); err != nil {
+		return err
+	}
+	// 来源组部分唯一索引 + 旧表补洞（方案 §6.2 / N-23）：
+	// 必须在 AutoMigrate 之后（表已存在）执行；冲突时 fail-closed。
+	if err := dbschema.EnsureSourceGroupSchema(DB); err != nil {
 		return err
 	}
 	if _, err = MigrateGPIOChannels(DB); err != nil {

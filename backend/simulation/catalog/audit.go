@@ -336,7 +336,11 @@ func auditIsDefinedResult(result string) bool {
 	switch result {
 	case "executed", "pending_confirm", "suppressed_cooldown", "suppressed_daily_limit",
 		"condition_changed", "failed_gate", "failed_dispatch", "confirmation_required",
-		"partial_failure", "suppressed_no_solar_event", "notification", "expired":
+		"partial_failure", "suppressed_no_solar_event", "notification", "expired",
+		// 来源组结果码（方案 N-18；与 models.AutomationResultSource* 逐项一致，
+		// 由 TestAutomationResultWhitelistMatchesModelConstants 双向钉住）
+		"source_member_changed", "source_stale", "source_degraded",
+		"source_resolver_not_configured", "source_group_shadow":
 		return true
 	default:
 		return false

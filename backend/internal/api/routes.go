@@ -47,6 +47,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// datasourceSvc 数据源主备领域服务 (设计/数据源主备与故障转移.md v1.0 §7):
 	// 经 *datasource.Service option 注入 (main.go); 测试未注入时为 nil。
 	var datasourceSvc *datasource.Service
+	// sourceGroupSvc 来源组领域服务（设计/规则数据来源与复合来源-方案 §7.3）:
+	// 经 *datasource.GroupService option 注入 (main.go)；未注入时 /source-groups
+	// 九条路由注册显式 503 占位（不 nil 解引用、不静默 404）。
+	var sourceGroupSvc *datasource.GroupService
 	// notifyDispatcher 外发通知投递器 (设计/外发通知通道.md §4): 经 *notify.Dispatcher
 	// option 注入 (main.go), 供 POST /notification-channels/:id/test 真发一条测试消息。
 	// 与 datasourceSvc 同规矩: 未注入时 /test 显式 503, 而不是 nil 解引用 panic。
@@ -71,6 +75,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			automationManualTriggerOpt = value
 		case *datasource.Service:
 			datasourceSvc = value
+		case *datasource.GroupService:
+			sourceGroupSvc = value
 		case *notify.Dispatcher:
 			notifyDispatcher = value
 		case *sensorfield.Registry:
@@ -174,6 +180,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc, db)
 			registerFailoverLogRoutes(v1, datasourceSvc)
 		}
+
+		// 来源组 CRUD + 成员/切换/审计查询（设计/规则数据来源与复合来源-方案 §7.3）。
+		// 未注入领域服务时注册 503 占位。
+		registerSourceGroupRoutes(v1, db, sourceGroupSvc)
 
 		// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md §8.1–§8.4):
 		// /sensor-fields、/resolve、/preview、/schema 四条只读+试算端点。

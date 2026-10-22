@@ -1,0 +1,5 @@
+# 来源组门禁变异清单：id<TAB>file<TAB>pattern<TAB>replacement<TAB>check-command(变异后必须非零)
+# 纪律：apply→跑 check→restore→md5 核对；目标未命中记 SKIP(missing)，未捕获记 NOT_CAUGHT(FAIL)。
+# 现有条目只覆盖静态门禁（安全、无需改他人代码语义）；行为门禁的变异等 impl-core/auto-analyst 测试落地后补。
+sg19_databus_sourcegroup	internal/databus/consumers_heavy.go	^package databus	package databus // SourceGroup probe	./scripts/check_source_group.sh --only SG-19
+sg18_combine_purity	internal/sourceref/combine.go	^func CombineGroup\(g \*GroupSnapshot, eval EvalMemberFunc\) Result \{	func CombineGroup(g *GroupSnapshot, eval EvalMemberFunc) Result { _ = time.Now	./scripts/check_source_group.sh --only SG-18

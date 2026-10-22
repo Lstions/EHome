@@ -15,6 +15,7 @@
 package testutil
 
 import (
+	"ehome/backend/internal/dbschema"
 	"fmt"
 	"os"
 	"strconv"
@@ -89,6 +90,11 @@ var allModels = []interface{}{
 	// 数据字段解析层 (方案 v0.2 §4.2/§4.3; 与生产 AutoMigrate 列表同步)
 	&models.SensorFieldObs{},
 	&models.SensorFieldMeta{},
+	// 规则数据来源与复合来源 (方案 2026-10-22 §4; 与生产 AutoMigrate 列表同步)
+	&models.SourceGroup{},
+	&models.SourceGroupMember{},
+	&models.SourceGroupFailoverLog{},
+	&models.SourceGroupHealth{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.
@@ -127,6 +133,11 @@ func openSQLite(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(allModels...); err != nil {
 		t.Fatalf("sqlite automigrate: %v", err)
+	}
+	// 与生产启动共用同一迁移函数（N-23）：否则部分唯一索引只在生产存在，
+	// SG-04「两库各跑」会在 SQLite 测试库假绿。
+	if err := dbschema.EnsureSourceGroupSchema(db); err != nil {
+		t.Fatalf("sqlite source_group schema: %v", err)
 	}
 	return db
 }

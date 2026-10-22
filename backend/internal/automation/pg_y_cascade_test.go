@@ -45,7 +45,7 @@ func TestPGY1aContentChangeKeepsCooldownAnchor(t *testing.T) {
 	// 先落一次 executed（等价于"规则刚刚完整触发过"，锚点在同事务写入）。
 	at := time.Now().Add(-time.Minute)
 	p.db.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).Update("last_triggered_at", at)
-	if id := p.recordExecuted(rule, at, 500, "cmd-1"); id == 0 {
+	if id := p.recordExecuted(rule, at, 500, "cmd-1", nil); id == 0 {
 		t.Fatal("recordExecuted 应成功写事件 + 锚点")
 	}
 
@@ -81,7 +81,7 @@ func TestPGY2aContentChangeKeepsDailyQuota(t *testing.T) {
 	seed(rule)
 
 	at := time.Now()
-	if id := p.recordExecuted(rule, at, 500, "cmd-1"); id == 0 {
+	if id := p.recordExecuted(rule, at, 500, "cmd-1", nil); id == 0 {
 		t.Fatal("recordExecuted 应成功")
 	}
 	// 改阈值（内容变更）。

@@ -44,6 +44,7 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = [
   { path: '/channel', title: '通道管理' },
   { path: '/device-configs', title: '配置模板' },
   { path: '/data-sources', title: '数据源' },
+  { path: '/source-groups', title: '来源组' },
   { path: '/data', title: '数据面板' },
   { path: '/alerts', title: '告警规则' },
   { path: '/automation', title: '自动化策略' },
@@ -82,7 +83,7 @@ export interface NavGroup {
 export const NAV_GROUPS: readonly NavGroup[] = [
   { title: '总览', paths: ['/dashboard'] },
   { title: '设备与通道', paths: ['/node', '/edge-device', '/logical-device', '/channel', '/device-configs'] },
-  { title: '数据', paths: ['/data-sources', '/data'] },
+  { title: '数据', paths: ['/data-sources', '/source-groups', '/data'] },
   { title: '自动化与通知', paths: ['/alerts', '/automation', '/notification-channels', '/notification-deliveries'] },
   { title: '运维', paths: ['/firmware', '/monitor'] },
 ] as const
