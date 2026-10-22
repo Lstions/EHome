@@ -39,14 +39,27 @@
       <BmsCellVoltageChart :voltages="mock.cells" :cell-count="16" height="220px" />
     </el-card>
 
-    <!-- 指令频率配置（独立卡片 = 桌面形态） -->
-    <CommandFrequencySection :device-id="MOCK_DEVICE_ID" />
+    <!-- 指令频率配置（独立卡片 = 桌面/逆变器形态；上限 32 条 = 真实节点上报值，不出现容量提示） -->
+    <CommandFrequencySection :device-id="MOCK_DEVICE_ID" :max-polling-commands="32" />
 
-    <!-- 指令频率配置（embedded = BMS 折叠面板内形态，验证双层嵌套消除） -->
+    <!-- 指令频率配置（embedded 形态，验证双层嵌套消除） -->
     <el-card style="margin-top: 20px;" shadow="hover">
       <template #header><span>指令频率配置（embedded 形态）</span></template>
-      <CommandFrequencySection :device-id="MOCK_DEVICE_ID" embedded />
+      <CommandFrequencySection :device-id="MOCK_DEVICE_ID" embedded :max-polling-commands="32" />
     </el-card>
+
+    <!--
+      指令频率配置（容量门形态：上限 4 条，mock 里已启用 5 条 ⇒ 必现「超限」告警 +
+      逐行「超限」标签 + 一键禁用 + 保存判死）。这一形态原先只有 BMS 页私有实现，
+      合并进共享组件后必须在离线页面也能验证。
+    -->
+    <CommandFrequencySection
+      :device-id="MOCK_DEVICE_ID"
+      title="轮询指令配置"
+      note="每条指令可单独设间隔，0 = 禁用。"
+      :max-polling-commands="4"
+      style="margin-top: 20px;"
+    />
 
     <!-- 实时数据流（mock 多行 BMS 帧 + 错误帧 + 空帧，验证行高自适应与空兜底） -->
     <el-card style="margin-top: 20px;" shadow="hover">
@@ -82,12 +95,29 @@ const mock = reactive({
 const originalGet = edgeDeviceApi.getCommandIntervals
 const originalUpdate = edgeDeviceApi.updateCommandIntervals
 
+/**
+ * Mock 指令集：按**生产逆变器 #15 的真实形态**构造（2026-10-22 第七轮）。
+ *
+ * 为什么不能再用随便 5 条 BMS 指令：本轮两处缺陷都只在「真实形态」下复现 ——
+ *   · ASCII 行协议设备 cmd_byte=0、真正的命令名在 write_data 里（HSTS/HGRID/HOP…），
+ *     显示层必须解码成助记符（旧 mock 全是 0x03/0x04，测不到这条路）；
+ *   · 名称更长（「读取市电供电信息」）、描述更长（含全角括号与 ASCII 混排），
+ *     窄容器下才会暴露「名称被输入框覆盖 / 描述溢出」。
+ * 11 条也与实机一致（真机 11 条，其中 PV2 一条默认禁用）。
+ */
+const asciiFrame = (text: string) => Array.from(text).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
 const MOCK_COMMANDS: CommandTemplateWithInterval[] = [
-  { id: 'read-basic', name: '读取基本信息', type: 'read', cmd_byte: 0x03, write_data: '', read_length: 7, delay_ms: 0, interval_ms: 5000, schedulable: true, description: '单体电压 + 温度基础帧', current_interval_ms: 0 },
-  { id: 'read-cell', name: '读取单体电压', type: 'read', cmd_byte: 0x04, write_data: '', read_length: 12, delay_ms: 0, interval_ms: 5000, schedulable: true, description: '16 节单体电压', current_interval_ms: 0 },
-  { id: 'read-hw', name: '读取硬件版本', type: 'read', cmd_byte: 0x05, write_data: '', read_length: 4, delay_ms: 0, interval_ms: 60000, schedulable: true, description: '硬件/固件版本一次性确认', current_interval_ms: 0 },
-  { id: 'read-combined', name: '读取综合信息', type: 'read', cmd_byte: 0x0f, write_data: '', read_length: 32, delay_ms: 0, interval_ms: 1000, schedulable: true, description: 'SOC/电压/电流/MOS/保护状态综合帧', current_interval_ms: 100 },
-  { id: 'read-prot-count', name: '读取保护历史次数', type: 'read', cmd_byte: 0xaa, write_data: '', read_length: 8, delay_ms: 0, interval_ms: 10000, schedulable: true, description: '历史保护事件计数', current_interval_ms: 0 },
+  { id: 'hsts', name: '读取运行状态', type: 'read', cmd_byte: 0, write_data: asciiFrame('HSTS'), read_length: 0, delay_ms: 0, interval_ms: 10000, schedulable: true, description: '故障代码、运行模式与告警标志', current_interval_ms: 10000 },
+  { id: 'hgrid', name: '读取市电供电信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HGRID'), read_length: 0, delay_ms: 0, interval_ms: 10000, schedulable: true, description: '市电电压、频率与丢失阈值', current_interval_ms: 10000 },
+  { id: 'hop', name: '读取输出信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HOP'), read_length: 0, delay_ms: 0, interval_ms: 10000, schedulable: true, description: '输出电压、频率、功率与负载', current_interval_ms: 10000 },
+  { id: 'hbat', name: '读取电池信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HBAT'), read_length: 0, delay_ms: 0, interval_ms: 10000, schedulable: true, description: '电池电压、容量、充放电电流与 BUS 电压', current_interval_ms: 10000 },
+  { id: 'hpv1', name: '读取 PV1 信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HPV'), read_length: 0, delay_ms: 0, interval_ms: 5000, schedulable: true, description: 'PV1 电压、电流与功率', current_interval_ms: 5000 },
+  { id: 'hpv2', name: '读取 PV2 信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HPBV'), read_length: 0, delay_ms: 0, interval_ms: 5000, schedulable: true, description: 'PV2 电压、电流与功率（可选硬件；PV1-only 机型无此路）', current_interval_ms: 0 },
+  { id: 'htemp', name: '读取温度信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HTEMP'), read_length: 0, delay_ms: 0, interval_ms: 30000, schedulable: true, description: '逆变温度、升压温度、变压器温度与最高温度', current_interval_ms: 30000 },
+  { id: 'hver', name: '读取版本信息', type: 'read', cmd_byte: 0, write_data: asciiFrame('HVERSION'), read_length: 0, delay_ms: 0, interval_ms: 60000, schedulable: true, description: '主固件、协议与硬件版本一次性确认', current_interval_ms: 0 },
+  { id: 'henergy', name: '读取发电量', type: 'read', cmd_byte: 0, write_data: asciiFrame('HENERGY'), read_length: 0, delay_ms: 0, interval_ms: 60000, schedulable: true, description: '日发电量、月发电量、年发电量与总发电量', current_interval_ms: 0 },
+  { id: 'hconfig', name: '读取配置参数', type: 'read', cmd_byte: 0, write_data: asciiFrame('HCONFIG'), read_length: 0, delay_ms: 0, interval_ms: 60000, schedulable: true, description: '电池类型、充电电流上限与工作模式（只读）', current_interval_ms: 0 },
+  { id: 'serials', name: '读取序列号', type: 'read', cmd_byte: 0x03, write_data: '', read_length: 8, delay_ms: 0, interval_ms: 60000, schedulable: true, description: 'Modbus 设备序列号（一次性确认，勿频繁轮询）', current_interval_ms: 0 },
 ]
 
 edgeDeviceApi.getCommandIntervals = async () => MOCK_COMMANDS

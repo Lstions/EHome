@@ -383,93 +383,27 @@
         <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
       </CollapseBlock>
 
-      <!-- 诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限 -->
+      <!--
+        诉求②：实时数据流不抢滚动 + 诉求③：轮询指令上限
+
+        2026-10-22 第七轮（用户诉求③「指令频率应该抽一个公共组件出来，大家一起通用」）：
+        改前本页自建了一整套轮询配置卡（.poll-row + 自己的请求/保存/容量门，约 500 行），
+        与逆变器/通用设备页用的 CommandFrequencySection 是**两份实现** —— 超限点名、保存后
+        确认节点已应用这些行为各只在一半里，UI 也越长越不像，窄容器下两套还各自出现
+        「名称被输入框覆盖」的同类缺陷。现在三页统一用共享组件；本页只保留：
+          · 页头摘要需要的启用条数（组件 @usage-change 外抛，不再重复拉同一接口）；
+          · 页头「刷新数据」连带刷新指令配置（递增 reload-token，组件 watch 到就重拉）。
+      -->
       <section class="row stream-poll">
-        <!-- 诉求③ 落点：轮询指令配置（上限由节点上报，超限点名要禁用哪几条） -->
-        <div class="card poll-card">
-          <div class="card-head">
-            <span class="card-title">轮询指令配置</span>
-            <el-tag v-if="hasPollLimit" :type="pollBadgeType" size="small">已启用 {{ enabledCount }}/{{ pollLimitValue }}</el-tag>
-            <el-tag v-else type="success" size="small">已启用 {{ enabledCount }} 条</el-tag>
-          </div>
-          <p class="card-note">
-            每条指令可单独设间隔，<b>0 = 禁用</b>。
-            <!-- 上限机制的技术细节：桌面完整展示；移动端整段隐藏（窄屏这块要占 4 行 ≈ 64px），
-                 约束本身仍有两处可见 —— 卡头标签「已启用 x/32」，以及超限/占满时出现的告警条。 -->
-            <span class="note-limit-detail">
-              <template v-if="hasPollLimit">
-                固件静态上限为同时最多 <b>{{ pollLimitValue }} 条</b>；超过会被后端整单拒绝（HTTP 400）且不落库 —— 所以这里在保存前就把约束摆出来。
-              </template>
-              <template v-else>
-                本节点未上报轮询条数上限，保存前不显示容量提示（后端仍会在超限时整单拒绝）。
-              </template>
-            </span>
-          </p>
-
-          <el-alert v-if="pollLoadError" type="error" :closable="false" show-icon class="inline-alert">
-            <template #title>轮询指令加载失败</template>
-            <div class="alert-detail">
-              {{ pollLoadError }}
-              <el-button size="small" text type="primary" @click="loadPollCommands">重试</el-button>
-            </div>
-          </el-alert>
-
-          <el-alert v-if="overLimit" type="warning" :closable="false" show-icon class="inline-alert">
-            <template #title>已启用 {{ enabledCount }} 条，超过上限 {{ pollLimitValue }} 条，保存会被拒绝</template>
-            <div class="alert-detail">请先禁用 {{ enabledCount - pollLimitValue }} 条：<b>{{ excessNames }}</b>。</div>
-          </el-alert>
-          <el-alert v-else-if="hasPollLimit && enabledCount === pollLimitValue" type="info" :closable="false" class="inline-alert">
-            <template #title>已占满 {{ pollLimitValue }}/{{ pollLimitValue }} 条轮询额度</template>
-            <div class="alert-detail">再启用任何一条都会超限；如需调整，请先禁用一条。</div>
-          </el-alert>
-
-          <div class="poll-list">
-            <div v-for="c in pollCommands" :key="c.id" class="poll-row" :class="{ 'is-over': isExcess(c) }">
-              <div class="poll-main">
-                <div class="poll-name-line">
-                  <span class="poll-name">{{ c.name }}</span>
-                  <el-tag v-if="isExcess(c)" type="warning" size="small" effect="dark">超限</el-tag>
-                  <el-tag v-else-if="!isPollEnabled(c)" type="info" size="small" effect="plain">已禁用</el-tag>
-                </div>
-                <div class="poll-desc">{{ c.desc }}</div>
-              </div>
-              <div class="poll-controls">
-                <el-input-number
-                  v-model="c.interval"
-                  :min="0"
-                  :max="60000"
-                  :step="1000"
-                  size="small"
-                  controls-position="right"
-                  :disabled="!isPollEnabled(c)"
-                  class="poll-interval"
-                  :aria-label="c.name + '轮询间隔（毫秒，0 = 禁用）'"
-                  @change="() => onIntervalChange(c)"
-                />
-                <span class="poll-unit">ms</span>
-                <el-switch
-                  :model-value="isPollEnabled(c)"
-                  size="small"
-                  :aria-label="c.name + '启用轮询'"
-                  @change="(v: string | number | boolean) => togglePoll(c, !!v)"
-                />
-                <el-button v-if="isExcess(c)" size="small" @click="togglePoll(c, false)">禁用</el-button>
-              </div>
-            </div>
-            <div v-if="!pollCommands.length && !pollLoadError" class="stream-empty">暂无轮询指令</div>
-          </div>
-
-          <!-- 保存被拒：常驻页面（toast 会消失） -->
-          <el-alert v-if="pollError" type="error" :closable="false" show-icon class="inline-alert">
-            <template #title>保存失败，改动未生效（下方仍是设备当前配置）</template>
-            <div class="alert-detail">{{ pollError }}</div>
-          </el-alert>
-
-          <div class="poll-foot">
-            <el-button type="primary" size="small" :disabled="overLimit || !pollDirty || pollBusy" @click="savePoll">保存</el-button>
-            <span class="poll-sync" :class="pollSaveState === 'synced' ? 'is-ok' : overLimit ? 'is-warn' : ''">{{ pollHint }}</span>
-          </div>
-        </div>
+        <CommandFrequencySection
+          :device-id="deviceId"
+          :node-id="deviceNodeId"
+          :max-polling-commands="device?.max_polling_commands"
+          title="轮询指令配置"
+          note="每条指令可单独设间隔，0 = 禁用。"
+          :reload-token="commandReloadToken"
+          @usage-change="onUsageChange"
+        />
       </section>
 
       <!-- 受控操作（目录来自后端，按用途分组） + 操作历史 -->
@@ -641,6 +575,8 @@ import {
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
+// 指令频率/轮询指令配置：全站唯一实现（BMS / 逆变器 / 通用设备三页共用）
+import CommandFrequencySection from '@/views/edge-device/shared/CommandFrequencySection.vue'
 import BmsChartsPanel from './BmsChartsPanel.vue'
 import CollapseBlock from './CollapseBlock.vue'
 import ProtectionHistoryCard from './diag/ProtectionHistoryCard.vue'
@@ -650,7 +586,7 @@ import { useCollapseState } from '@/composables/useCollapseState'
 // 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
 import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
 import { feedback, extractErrorMessage } from '@/utils/feedback'
-import { edgeDeviceApi, type EdgeDevice, type CommandTemplateWithInterval } from '@/api/edgeDevice'
+import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { haApi } from '@/api/homeassistant'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
@@ -1157,100 +1093,30 @@ function protectionActive(bit: number): boolean {
   return (protectionStatus.value & (1 << bit)) !== 0
 }
 
-// ════════════ 诉求③：轮询指令配置（上限由节点上报） ════════════
-interface PollCommand { id: string; name: string; desc: string; interval: number; defaultInterval: number }
-const pollCommands = ref<PollCommand[]>([])
-const pollBaseline = ref('[]')
-const pollSaveState = ref<'idle' | 'saving' | 'synced'>('idle')
-const pollError = ref('')
-const pollLoadError = ref('')
-const pollBusy = computed(() => pollSaveState.value === 'saving')
-const isPollEnabled = (c: PollCommand) => c.interval > 0
-const enabledCount = computed(() => pollCommands.value.filter(isPollEnabled).length)
-/** 上限来自设备详情（后端随 GET /edge-devices/:id 下发），缺失时不显示任何上限提示。 */
+// ════════════ 轮询指令配置（共享组件 CommandFrequencySection） ════════════
+/**
+ * 2026-10-22 第七轮（用户诉求③「指令频率应该抽一个公共组件出来，大家一起通用」）。
+ *
+ * 本页原来自建一整套轮询配置卡：请求 GET /edge-devices/:id/commands、本地 interval 副本、
+ * 保存与同步状态、容量门（节点上报上限 + 超限点名 + 逐行「禁用」按钮），约 500 行；
+ * 而逆变器/通用设备页走的是 CommandFrequencySection（另有自己的保存后确认节点已应用逻辑）。
+ * 同一业务两份实现 ⇒ 行为各缺一半、UI 漂移。现在全部收口到共享组件，本页只保留两件事：
+ *   ① 页头摘要要「已启用条数 / 上限」→ 组件 @usage-change 外抛（唯一事实源在组件内）；
+ *   ② 页头「刷新数据」要连带刷新指令配置 → 递增 reloadToken，组件 watch 到后重新拉取。
+ */
+const deviceNodeId = computed(() => device.value?.node_id ?? '')
+/** 节点上报的同时可轮询条数上限（缺失 = 未上报，不显示容量提示） */
 const pollLimit = computed(() => num(device.value?.max_polling_commands))
 const pollLimitValue = computed(() => pollLimit.value ?? 0)
 const hasPollLimit = computed(() => pollLimit.value !== null && pollLimit.value > 0)
-const overLimit = computed(() => hasPollLimit.value && enabledCount.value > (pollLimit.value as number))
-const excessIds = computed(() => {
-  if (!overLimit.value) return new Set<string>()
-  return new Set(pollCommands.value.filter(isPollEnabled).slice(pollLimit.value as number).map((c) => c.id))
-})
-const excessNames = computed(() =>
-  pollCommands.value.filter((c) => excessIds.value.has(c.id)).map((c) => '「' + c.name + '」').join('、'))
-function isExcess(c: PollCommand): boolean {
-  return isPollEnabled(c) && excessIds.value.has(c.id)
-}
-const pollBadgeType = computed<TagType>(() => {
-  if (!hasPollLimit.value) return 'success'
-  if (overLimit.value) return 'danger'
-  return enabledCount.value === pollLimit.value ? 'warning' : 'success'
-})
-
-function snapshotPoll(): string {
-  return JSON.stringify(pollCommands.value.map((c) => [c.id, c.interval]))
-}
-const pollDirty = computed(() => snapshotPoll() !== pollBaseline.value)
-const pollHint = computed(() => {
-  if (overLimit.value) return '超限 ' + enabledCount.value + '/' + pollLimit.value + ' 条，修正后才能保存'
-  switch (pollSaveState.value) {
-    case 'saving': return '保存中…'
-    case 'synced': return '已保存'
-    default: return pollDirty.value ? '有未保存改动' : '当前配置与设备一致'
-  }
-})
-
-async function loadPollCommands() {
-  pollLoadError.value = ''
-  pollError.value = ''
-  try {
-    const cmds = await edgeDeviceApi.getCommandIntervals(deviceId.value)
-    const all = Array.isArray(cmds) ? cmds : []
-    pollCommands.value = all.filter((c: CommandTemplateWithInterval) => c.schedulable).map((c: CommandTemplateWithInterval) => ({
-      id: c.id,
-      name: c.name,
-      desc: c.description || '',
-      interval: c.current_interval_ms,
-      defaultInterval: c.interval_ms > 0 ? c.interval_ms : 5000,
-    }))
-    pollBaseline.value = snapshotPoll()
-    pollSaveState.value = 'idle'
-  } catch (e) {
-    pollCommands.value = []
-    pollLoadError.value = extractErrorMessage(e, '轮询指令加载失败')
-  }
+/** 已启用轮询条数：由共享组件外抛（页面不另存一份状态，避免两套事实源） */
+const enabledCount = ref(0)
+/** 刷新令牌：页头「刷新数据」/切换设备时递增，驱动共享组件重新拉取指令配置 */
+const commandReloadToken = ref(0)
+function onUsageChange(payload: { enabled: number }) {
+  enabledCount.value = payload.enabled
 }
 
-function togglePoll(c: PollCommand, on: boolean) {
-  c.interval = on ? (c.defaultInterval || 5000) : 0
-  markPollEdited()
-}
-function onIntervalChange(c: PollCommand) {
-  c.interval = !Number.isFinite(c.interval) || c.interval <= 0 ? 0 : Math.min(Math.floor(c.interval), 60000)
-  markPollEdited()
-}
-function markPollEdited() {
-  pollError.value = ''
-  if (pollSaveState.value === 'synced') pollSaveState.value = 'idle'
-}
-async function savePoll() {
-  if (overLimit.value || !pollDirty.value || pollBusy.value) return
-  pollSaveState.value = 'saving'
-  pollError.value = ''
-  try {
-    const intervals: Record<string, number> = {}
-    for (const c of pollCommands.value) intervals[c.id] = c.interval
-    await edgeDeviceApi.updateCommandIntervals(deviceId.value, intervals)
-    pollBaseline.value = snapshotPoll()
-    pollSaveState.value = 'synced'
-    feedback.success('轮询配置已保存')
-  } catch (e) {
-    pollSaveState.value = 'idle'
-    // 拒绝原因必须**常驻页面**：toast 会消失，而"改完保存、刷新后没变化"正是因为它没被留住。
-    pollError.value = extractErrorMessage(e, '轮询配置保存失败')
-    feedback.handleError(e, '轮询配置保存失败')
-  }
-}
 
 // ════════════ 受控操作（目录来自后端 catalogs） ════════════
 interface OpDef {
@@ -1752,7 +1618,9 @@ async function refreshAll() {
   refreshing.value = true
   try {
     await loadDetail()
-    await Promise.all([loadPollCommands(), loadLatestSnapshot(), loadOperations()])
+    // 指令配置由共享组件自己拉取：递增令牌让它重拉，不在页面里重复一份请求
+    commandReloadToken.value++
+    await Promise.all([loadLatestSnapshot(), loadOperations()])
     feedback.success('已刷新设备数据')
   } catch (e) {
     feedback.handleError(e, '设备数据刷新失败')
@@ -1852,7 +1720,6 @@ async function submitDeleteDevice(deleteData: boolean) {
 watch(deviceId, () => {
   resetDeviceScopedState()
   void loadDetail()
-  void loadPollCommands()
   void loadLatestSnapshot()
   void loadOperations()
 })
@@ -1868,7 +1735,6 @@ onMounted(() => {
   wsStore.connect()
   startFirstDataGrace()
   void loadDetail()
-  void loadPollCommands()
   void loadLatestSnapshot()
   void loadOperations()
 })
@@ -1970,7 +1836,6 @@ onUnmounted(() => {
 .row > .card > .card-head { flex-shrink: 0; }
 /* 需要撑满剩余高度的内容区（列表/网格）显式声明，未声明者按内容高度、自然留白 */
 .row > .card > .op-groups,
-.row > .card > .poll-list,
 .row > .card > .history-list { flex: 1 1 auto; min-height: 0; }
 
 /*
@@ -1991,8 +1856,10 @@ onUnmounted(() => {
 .diag-row > .card            { flex: 1 1 100%; }   /* 新增诊断卡同样独占一行（图表宽度优先） */
 .temp-row > .temp-card         { flex: 1 1 100%; }   /* 与 .op-groups 同宽，内部 auto-fill 决定列数 */
 /* 2026-10-21：该行原为「实时数据流 + 轮询指令配置」并排，数据流移除后
-   轮询配置独占整行（若仍沿用 380px 基准，宽屏下会被压成一条窄条）。 */
-.stream-poll > .poll-card     { flex: 1 1 100%; min-width: 0; }
+   轮询配置独占整行（若仍沿用 380px 基准，宽屏下会被压成一条窄条）。
+   2026-10-22：轮询配置改用共享组件 CommandFrequencySection（根元素 .command-frequency-card），
+   它是组件根节点、带本页 scoped 属性，故此处选择器可直接命中。 */
+.stream-poll > .command-frequency-card { flex: 1 1 100%; min-width: 0; margin-top: 0; }
 .ops-history > .ops-card      { flex-basis: 600px; min-width: 400px; }
 .ops-history > .history-card  { flex-basis: 320px; min-width: 300px; }
 
@@ -2096,22 +1963,6 @@ onUnmounted(() => {
 
 /* 实时数据流区块已按用户要求移除（2026-10-21）；.stream-empty 仍被其它空态复用 */
 .stream-empty { padding: 40px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
-/* ══════════ 轮询配置 ══════════ */
-.poll-list { display: flex; flex-direction: column; }
-.poll-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--el-border-color-lighter); flex-wrap: wrap; }
-.poll-row:last-child { border-bottom: none; }
-.poll-row.is-over { background: var(--el-color-warning-light-9); border-radius: var(--radius-sm); padding-left: 8px; padding-right: 8px; }
-.poll-main { flex: 1; min-width: 180px; }
-.poll-name-line { display: flex; align-items: center; gap: 6px; }
-.poll-name { font-size: 13px; font-weight: 600; }
-.poll-desc { font-size: 11px; color: var(--el-text-color-secondary); margin-top: 2px; }
-.poll-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.poll-interval { width: 118px; }
-.poll-unit { font-size: 11px; color: var(--el-text-color-secondary); }
-.poll-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-.poll-sync { font-size: 12px; color: var(--el-text-color-secondary); }
-.poll-sync.is-ok { color: var(--el-color-success); }
-.poll-sync.is-warn { color: var(--el-color-warning); }
 
 /* ══════════ 受控操作 ══════════ */
 .state-legend { font-size: 12px; color: var(--el-text-color-secondary); }
@@ -2281,46 +2132,6 @@ onUnmounted(() => {
   .op-name-line :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 4px; }
   .op-right :deep(.el-button) { padding: 0 8px; font-size: 12px; }
   .op-reason { grid-column: 1 / -1; margin: 2px 0 0; }
-  /* ── 轮询行：393px 下每行 114 → 73px ──
-     旧布局把一行拆成三竖段：名称+标签 / 描述 / 234px 输入框 + ms + 开关。
-     那个输入框吃掉视口 60%（234px）却只承载「1000」4 个字符，
-     把另外两段整个挤到独立行，5 条例令就是 573px。
-     新布局改用 2×2 网格（`.poll-main` 只作桌面容器，移动端 display:contents
-     让名称行/描述直接成为网格项）：
-       name                    ctl
-       desc(整行吃满剩余宽度)
-     ① 输入框按内容收缩到 104px，min/max/step 与任意毫秒输入完全不变；
-     ② 控件列跨两行，行高由 44px 输入框决定，描述不再另起一段；
-     ③ 描述跨两列，整句读得完（不会被挤成每行 6 个字）。 */
-  .poll-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: 'name ctl' 'desc desc';
-    align-items: center;
-    column-gap: 8px;
-    row-gap: 2px;
-    padding: 6px 0;
-  }
-  .poll-main { display: contents; }
-  .poll-name-line { grid-area: name; flex-wrap: wrap; min-width: 0; }
-  /* 「已禁用」标签和右侧开关表达的是同一个布尔值（isPollEnabled），纯重复：
-     窄屏下它把名称行从 19px 撑到 45px（名称栏仅 126px，名称+标签要 136px，
-     必然折行）。这里只隐藏这条重复信息，状态仍由开关（role=switch +
-     aria-label「启用轮询」）和输入框的禁用态传达；
-     「超限」标签保留 —— 它带告警色和「禁用」按钮，不是重复信息。 */
-  .poll-name-line :deep(.el-tag--info) { display: none; }
-  .poll-desc { grid-area: desc; margin-top: 0; }
-  .poll-controls { grid-area: ctl; width: auto; gap: 6px; }
-  .poll-interval { flex: 0 0 auto; width: 104px; }
-  /* 超限行会多出「禁用」按钮（+56px）：那行本来就是让用户去处理的对象，
-     退回纵向堆叠，别把名称栏压到 100px 以下换行三次。 */
-  .poll-row.is-over { display: flex; flex-wrap: wrap; align-items: flex-start; }
-  .poll-row.is-over .poll-main { display: block; flex: 1 1 100%; }
-  .poll-row.is-over .poll-controls { width: 100%; }
-  /* 卡头这段「固件上限 / 后端整单拒绝」是机制说明，窄屏要占 4 行（≈64px），
-     而约束本身由卡头标签「已启用 x/32」和超限时的告警条承担 —— 两个通道都在，
-     所以移动端只留第一句「0 = 禁用」这条操作说明。 */
-  .poll-card .card-note .note-limit-detail { display: none; }
 
   /* ── 指标卡：窄屏 2×2（此前是 1 列 × 4 行，白占 386px 高度） ──
      用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。
@@ -2361,7 +2172,7 @@ onUnmounted(() => {
   }
 
   /* ── 硬 min-width 在窄屏必须清零 ──
-     根因（实测）：.ops-card { min-width: 400px }、.poll-card { min-width: 340px }
+     根因（实测）：.ops-card { min-width: 400px }、.command-frequency-card（旧 .poll-card）等在
      等在 318px 的容器里**不能收缩**（min-width 是硬底线），于是卡片宽 400、
      整页 el-main scrollWidth 432 > clientWidth 382，页面可以横向拖动。
      桌面端这些 min-width 用于保证"卡片不会被压到不可读"，窄屏已经是单列堆叠，
@@ -2369,7 +2180,7 @@ onUnmounted(() => {
   .row > .card,
   .mos-protect > .mos-card,
   .mos-protect > .protect-card,
-  .stream-poll > .poll-card,
+  .stream-poll > .command-frequency-card,
   .ops-history > .ops-card,
   .ops-history > .history-card {
     flex: 1 1 100%;

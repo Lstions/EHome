@@ -223,34 +223,31 @@ describe('DeviceHeader mobile overflow dropdown (P1-5, 2026-10-21 统一页头�
   })
 })
 
-describe('BmsDetailPage 轮询指令行窄屏重排（762 → 522px）', () => {
-  it('桌面仍是 flex 单段布局，窄屏才改成 2×2 网格（区域名 ctl 跨两行）', () => {
-    // 桌面规则必须原样保留：一旦被网格规则顶掉，1440 下输入框会掉到第二行
-    expect(bmsDetailSource).toMatch(/\.poll-row \{ display: flex; align-items: center; gap: 12px;/)
-    expect(bmsDetailSource).toMatch(/grid-template-areas: 'name ctl' 'desc desc'/)
-    // ctl 只写在第一行 → 控件列不跨行，行高会被 44px 输入框顶成两段（实测 75px）
-    // 这里锁住「控件跨行 + 描述独占整行」的组合意图
-    expect(bmsDetailSource).toMatch(/\.poll-controls \{ grid-area: ctl; width: auto; gap: 6px; \}/)
+/**
+ * 2026-10-22 第七轮（用户诉求③「指令频率应该抽一个公共组件出来，大家一起通用」）：
+ * 本页原先自建的 .poll-row 私有实现（含 2×2 窄屏网格、104px 输入框、note-limit-detail 折叠）
+ * 已整体删除，改为共享组件 CommandFrequencySection —— 因此旧的本文件用例（断言私有 CSS 存在）
+ * 全部失效，按新契约重写为「接入 + 反向不得复活」两组断言。
+ * 共享组件自己的窄屏/容器契约由 views/edge-device/shared/__tests__/CommandFrequencyShared.spec.ts 锁定。
+ */
+describe('BmsDetailPage 轮询指令配置改用共享组件（2026-10-22 诉求③）', () => {
+  it('改为复用 CommandFrequencySection，私有 .poll-row 实现不得复活', () => {
+    expect(bmsDetailSource).toContain('<CommandFrequencySection')
+    expect(bmsDetailSource).toContain('title="轮询指令配置"')
+    for (const marker of ['.poll-row {', '.poll-controls {', '.poll-interval {', 'pollCommands']) {
+      expect(bmsDetailSource, '私有轮询实现复活：' + marker).not.toContain(marker)
+    }
   })
 
-  it('输入框收窄到 104px 但仍可输入任意毫秒（0–60000，无 precision 限制）', () => {
-    expect(bmsDetailSource).toMatch(/\.poll-interval \{ flex: 0 0 auto; width: 104px; \}/)
-    expect(bmsDetailSource).toContain(':min="0"')
-    expect(bmsDetailSource).toContain(':max="60000"')
-    // 有 precision 就只能填整千，用户明确要求任意毫秒
-    expect(bmsDetailSource).not.toMatch(/<el-input-number[\s\S]{0,400}?precision=/)
+  it('宽度/任意毫秒输入等形态由共享组件统一承担（本页不再各自覆盖）', () => {
+    // 任意毫秒（0–60000、无 precision）契约仍在共享组件里，由组件测试覆盖；
+    // 本页不得再出现第二个 el-input-number 定义（否则又变成两份实现）。
+    expect(bmsDetailSource).not.toContain('<el-input-number')
+    expect(bmsDetailSource).toContain(':max-polling-commands="device?.max_polling_commands"')
   })
 
-  it('窄屏只隐藏与开关同义的「已禁用」标签，带告警色的「超限」标签保留', () => {
-    expect(bmsDetailSource).toMatch(/\.poll-name-line :deep\(\.el-tag--info\) \{ display: none; \}/)
-    expect(bmsDetailSource).toContain('type="warning" size="small" effect="dark">超限</el-tag>')
-  })
-
-  it('卡头机制说明包进 .note-limit-detail 只在桌面显示，约束另有两个可见通道', () => {
-    expect(bmsDetailSource).toContain('<span class="note-limit-detail">')
-    expect(bmsDetailSource).toMatch(/\.poll-card \.card-note \.note-limit-detail \{ display: none; \}/)
-    // 通道一：卡头配额标签；通道二：超限/占满告警条
-    expect(bmsDetailSource).toContain('已启用 {{ enabledCount }}/{{ pollLimitValue }}')
-    expect(bmsDetailSource).toContain('超过上限 {{ pollLimitValue }} 条，保存会被拒绝')
+  it('页头摘要所需的启用条数由组件 @usage-change 外抛，页面不重复拉同一接口', () => {
+    expect(bmsDetailSource).toContain('@usage-change="onUsageChange"')
+    expect(bmsDetailSource).not.toContain('getCommandIntervals')
   })
 })

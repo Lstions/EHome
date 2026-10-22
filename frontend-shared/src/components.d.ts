@@ -13,7 +13,6 @@ declare module 'vue' {
   export interface GlobalComponents {
     ChannelManager: typeof import('./components/channel/ChannelManager.vue')['default']
     ChannelTerminal: typeof import('./components/channel/ChannelTerminal.vue')['default']
-    CommandList: typeof import('./components/device/CommandList.vue')['default']
     CountUp: typeof import('./components/common/CountUp.vue')['default']
     CreateWizardCommandIntervals: typeof import('./components/device/CreateWizardCommandIntervals.vue')['default']
     DeviceBatchDeleteDialog: typeof import('./components/device/DeviceBatchDeleteDialog.vue')['default']

@@ -265,7 +265,8 @@ describe('已移除区块的反向契约（轮询间隔分布 / 实时数据流�
     for (const kept of ['历史趋势', '保护触发历史', '温度趋势', 'SOC 与电流', '轮询指令配置', '受控操作', '操作历史']) {
       expect(bmsDetailSource, '缺少保留区块：' + kept).toContain(kept)
     }
-    // 轮询指令行仍保留（.poll-interval 输入框属于它；本次**不**删除，勿误加反向断言）
-    expect(bmsDetailSource).toContain('.poll-interval')
+    // 轮询指令区仍保留，但自 2026-10-22 第七轮起改为共享组件 CommandFrequencySection
+    // （私有 .poll-interval 行已删除 —— 改用组件标签做分母守卫，负向断言不得对空文件成立）
+    expect(bmsDetailSource).toContain('<CommandFrequencySection')
   })
 })
