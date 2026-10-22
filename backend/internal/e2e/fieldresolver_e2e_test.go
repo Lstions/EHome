@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/alert"
 	"ehome/backend/internal/api"
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
@@ -151,6 +152,7 @@ type e2eChain struct {
 	bus        *databus.DataEventBus
 	consumer   *signalingConsumer
 	eval       *automation.Evaluator
+	alertEval  *alert.Evaluator
 	pub        downlink.Publisher
 	cmdSvc     *commandexec.Service
 	disp       *commandexec.Dispatcher
@@ -517,3 +519,35 @@ func (c *e2eChain) dispatchOnce(t *testing.T) bool {
 
 // E2ECapabilitiesJSON 节点上报的命令引擎能力（commandexec 门禁读取）。
 const E2ECapabilitiesJSON = `{"supports_channel_cmd_v2":true,"supports_bounded_batch":true,"supports_finally":true,"max_batch_steps":8,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`
+
+// addSecondEdgeDevice 在同节点同通道下再建一台同型号边缘设备（主备的第二来源）。
+// 来源组键 = (逻辑设备, 类别)，来源 = 边缘设备 ⇒ 备来源必须是**另一台**物理设备。
+func (c *e2eChain) addSecondEdgeDevice(t *testing.T, name string) models.EdgeDevice {
+	t.Helper()
+	dev := models.EdgeDevice{Name: name, NodeID: c.node.NodeID, ChannelID: c.channel.ID,
+		Type: "jiabaida_bms", Enabled: true, Status: "active", LogicalDeviceID: &c.logical.ID}
+	if err := c.db.Create(&dev).Error; err != nil {
+		t.Fatalf("create backup edge device: %v", err)
+	}
+	c.registry.SetDeviceType(dev.ID, "jiabaida_bms")
+	return dev
+}
+
+// publishFrom 以指定边缘设备身份上报一帧（主备场景需要区别来源设备）。
+func (c *e2eChain) publishFrom(t *testing.T, dev models.EdgeDevice, frame []byte, requestID uint64) {
+	t.Helper()
+	before := c.consumer.done.Load()
+	c.bus.Publish(databus.DataEvent{
+		DeviceID: c.node.NodeID, ChannelID: uint64(c.channel.ID),
+		EdgeDeviceID: uint64(dev.ID), RequestID: requestID,
+		RawData: frame, ReceivedAt: time.Now(),
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.consumer.done.Load() > before {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("data plane did not finish processing frame (request_id=%d)", requestID)
+}
