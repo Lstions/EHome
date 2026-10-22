@@ -130,6 +130,17 @@
   --radius-lg: 12px;
   --radius-xl: 16px;
 
+  /* 控件尺寸档位（规范 §4.4 控件尺寸档位小节）—— 图**表卡工具条**专用档。
+     桌面 32px / 窄屏与粗指针 36px；字号 12px、圆角 6px。
+     为什么允许 36px（低于 §4.4 第 5 条的 44px 触摸档）：图表卡工具条属于
+     「极高密度、非主要任务的工具栏」例外，条件（相邻间距 ≥6px、每个控件有可访问名称）
+     由调用方保证，并在规范文档里写死。不得把这个档位用于正文输入、页头或表格行内。
+     消费方：HistoryChartSection 卡头（时间档分段 / 导出图标按钮 / 分组 tab）。 */
+  --control-h-toolbar: 32px;
+  --control-h-toolbar-touch: 36px;
+  --control-font-toolbar: 12px;
+  --control-radius-toolbar: 6px;
+
   /* 语义表面与状态色：页面和组件禁止直接依赖亮色字面量 */
   --surface: var(--bg-color);
   --surface-raised: var(--card-bg);

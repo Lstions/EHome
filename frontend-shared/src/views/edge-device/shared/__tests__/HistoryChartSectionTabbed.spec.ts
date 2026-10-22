@@ -11,14 +11,19 @@ import HistoryChartSection from '@/views/edge-device/shared/HistoryChartSection.
  * 大小对比比例异常大」。改前桌面是 7 个子图**纵向平铺**（7 × 260px ≈ 1900px），窄屏是
  * el-select 下拉（换组两步：展开 + 选择）。
  *
- * 本文件锁五件事：
+ * 本文件锁六件事：
  *   ① 两种视口**结构统一**：一行分组 tab（全部可见）+ 单张图，同屏只渲染 1 个 echarts 实例；
  *      不得回退成 chart-grid 平铺或 el-select 下拉。
- *   ② 高度硬契约：桌面 320px / 窄屏 200px；窄屏 200 ≤ 220 ⇒ 进入 LineChart 的 isCompactChart
- *      分支（不画轴名 / 图例贴顶 / axisLabel.hideOverlap），这是窄屏不糊的机制。
- *   ③ tab 切换**不得重新发请求**（数据已在 chartSeries 内存里）。
- *   ④ 默认选中第一个有数据的分组；用户手选后不被数据到达覆盖。
- *   ⑤ 空态沿用 el-empty 并说明查询范围；不得用 ellipsis 隐藏分组名。
+ *   ② 高度硬契约（2026-10-22 第七轮真机报障「按钮大小比例与图表相比大太多了」）：
+ *      桌面 320px / 窄屏 320px；窄屏离屏 320 > 220 已超出 LineChart「按高度判定紧凑图」的阈值，
+ *      故窄屏**显式**传 :compact="isMobileViewport" 保留紧凑渲染（不画轴名 / 图例贴顶 /
+ *      axisLabel.hideOverlap / 最多 2 根 Y 轴）—— 高度与排版档是两件正交的事。
+ *      窄屏 200→320 让「控件块/图高」由 0.90~1.20 降到约 0.52（验收 ≤0.55）。
+ *   ③ 卡头工具条同档：时间档 / 导出图标按钮 / 分组 tab 共用 --control-* token（32/36）；
+ *      导出不再用文字块（≤768 卡头控件行必须单行，aria-label + title + el-tooltip 三通道命名）。
+ *   ④ tab 切换**不得重新发请求**（数据已在 chartSeries 内存里）。
+ *   ⑤ 默认选中第一个有数据的分组；用户手选后不被数据到达覆盖。
+ *   ⑥ 空态沿用 el-empty 并说明查询范围；不得用 ellipsis 隐藏分组名。
  */
 
 const { clientGet } = vi.hoisted(() => ({ clientGet: vi.fn() }))
@@ -42,11 +47,13 @@ vi.mock('@/components/charts/LineChart.vue', async () => {
         yAxisMax: Number,
         reserveRightAxes: Number,
         showArea: Boolean,
+        compact: Boolean,
       },
       setup(props) {
         return () => rh('div', {
           class: 'line-chart-stub',
           'data-height': props.height,
+          'data-compact': String(Boolean(props.compact)),
           'data-series-count': String((props.series as unknown[]).length),
           'data-reserve-axes': String(props.reserveRightAxes ?? ''),
         })
@@ -170,9 +177,12 @@ describe('分组 tab + 单图（桌面与窄屏同一结构）', () => {
       wrapper.unmount()
     })
 
-    it(label + '：图高硬契约（桌面 320px / 窄屏 200px，≤220 才进紧凑分支）', async () => {
+    it(label + '：图高硬契约（桌面/窄屏均 320px；窄屏显式 compact=true 保留紧凑渲染）', async () => {
       const wrapper = await mountSection(mobile)
-      expect(wrapper.find('.line-chart-stub').attributes('data-height')).toBe(mobile ? '200px' : '320px')
+      const stub = wrapper.find('.line-chart-stub')
+      expect(stub.attributes('data-height'), '第七轮：窄屏 200→320 以压低控件块/图高比').toBe('320px')
+      // 320 > 220 ⇒ 不再按高度自动进紧凑分支；必须由父级显式传 compact 才能保留紧凑渲染
+      expect(stub.attributes('data-compact'), '窄屏必须显式 compact=true').toBe(String(mobile))
       wrapper.unmount()
     })
 
@@ -273,11 +283,40 @@ describe('源码契约：tab 结构 / 高度 / 不得用 ellipsis 隐藏分组�
     expect(code()).toContain('class="hist-tabbed"')
   })
 
-  it('高度常量 320px / 200px 与窄屏 media query 同时存在', () => {
-    expect(code()).toContain("'320px'")
-    expect(code()).toContain("'200px'")
+  it('高度常量 320px（窄屏不再 200px）且窄屏显式传 compact', () => {
+    expect(code()).toContain('const CHART_HEIGHT_PX = 320')
+    expect(code()).toContain(':compact="isMobileViewport"')
+    // 200px 已废弃：图高 200 是「控件块/图高」达 0.90~1.20 的直接原因
+    expect(code()).not.toContain("'200px'")
     expect(code()).toContain('@media (max-width: 768px)')
     expect(code()).toContain('flex-wrap: wrap')
+  })
+
+  it('工具条同档：时间档 / 导出 / 分组 tab 共用 --control-* token（桌面 32 / 窄屏 36）', () => {
+    // 三者同源 ⇒ 高度严格相等（真实浏览器量测见 .logs/ui-fix/round7/after-summary.json）
+    expect(code()).toMatch(/\.hist-export\s*\{[^}]*width:\s*var\(--control-h-toolbar,\s*32px\)/)
+    expect(code()).toMatch(/\.hist-export\s*\{[^}]*height:\s*var\(--control-h-toolbar,\s*32px\)/)
+    expect(code()).toMatch(/\.hist-tab\s*\{[^}]*height:\s*var\(--control-h-toolbar,\s*32px\)/)
+    expect(code()).toMatch(/\.hist-tab\s*\{[^}]*font-size:\s*var\(--control-font-toolbar,\s*12px\)/)
+    expect(code()).toMatch(/\.hist-tab\s*\{[^}]*border-radius:\s*var\(--control-radius-toolbar,\s*6px\)/)
+    // 窄屏与粗指针档：36px 触摸档（§4.4 第 5 条例外）
+    expect(code()).toMatch(/--control-h-toolbar-touch,\s*36px/)
+    expect(code()).toContain('@media (pointer: coarse)')
+  })
+
+  it('导出为图标按钮：不再有文字块，aria-label + title + el-tooltip 三通道命名', () => {
+    expect(code()).not.toContain('导出CSV')
+    expect(code()).toContain('<el-tooltip content="导出 CSV"')
+    expect(code()).toContain('aria-label="导出 CSV"')
+    expect(code()).toContain('title="导出 CSV"')
+    expect(code()).toContain('class="hist-export"')
+    // 图标按钮必须是 el-button 体系（复用类型/禁用/hover/焦点语义），不是裸 div
+    expect(code()).toContain('size="small"')
+  })
+
+  it('≤768px 卡头控件行恒为单行（标题可单独一行）', () => {
+    // 导出改图标按钮（108px → 32/36px）正是为了腾出这一行；nowrap 防止再被挤折行
+    expect(code()).toMatch(/\.header-controls\s*\{\s*flex-wrap:\s*nowrap/)
   })
 
   it('不得给分组 tab / 图表加 ellipsis 截断', () => {

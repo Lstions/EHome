@@ -5,20 +5,22 @@ import { resolve } from 'node:path'
 import TimeRangeSelector from '../TimeRangeSelector.vue'
 
 /**
- * 时间档选择器统一契约（2026-10-21 用户真机反馈「时间样式不对、文字没居中、大小也不对」）。
+ * 时间档选择器「图表卡工具条档」统一契约。
  *
- * 背景（生产实测 393×851）：
- *   ① 全局 theme.css 只给 .el-radio-button__inner 抬了 min-height:36px（触摸目标），
- *      没改 display/line-height ⇒ 盒子被撑高、文字贴上沿（看起来没居中）；
- *   ② 各调用页各自 :deep 覆盖成 24px ⇒ 同一控件在图表卡/诊断卡里两种高度；
- *   ③ 窄屏 flex:1 1 auto 按内容分配宽度 ⇒ 实测 53/59/41/58px 长短不齐。
- * 本文件锁住「组件内一次收口」的判据，防止再退回各页各写一套。
+ * 2026-10-21：先收口「各页各自 :deep 覆盖导致同控件三档高度」。
+ * 2026-10-22 用户第七轮真机报障「按钮大小比例与图表相比大太多了，按钮大小没有统一的规范」后，
+ * 本组件改为**图表卡工具条唯一档位**（规范 §4.4「控件尺寸档位」）：
+ *   · 桌面 32px / ≤768px 或 pointer:coarse 36px；字号 12px；圆角 6px；横向内距 10px；
+ *   · 尺寸全部走 theme.css 的 --control-* token，与导出图标按钮、分组 tab 同一来源
+ *     ⇒ 三者高度严格相等（不再出现 40/36/32 并存）；
+ *   · 36px 属 §4.4 第 5 条「极高密度、非主要任务工具栏」例外，不得把正文 44px 档降级。
  */
 const source = readFileSync(resolve(process.cwd(), 'src/components/charts/TimeRangeSelector.vue'), 'utf8')
+const themeCss = readFileSync(resolve(process.cwd(), 'src/styles/theme.css'), 'utf8')
 const chartsPanelSrc = readFileSync(resolve(process.cwd(), 'src/views/edge-device/bms/BmsChartsPanel.vue'), 'utf8')
 const dashboardSrc = readFileSync(resolve(process.cwd(), 'src/views/dashboard/Dashboard.vue'), 'utf8')
 
-describe('TimeRangeSelector 样式统一', () => {
+describe('TimeRangeSelector 工具条档（32/36、12px、圆角 6、内距统一）', () => {
   // 组件里统一写成 `.time-range-selector :deep(.el-radio-button__inner) { … }`，
   // 下面按这个真实形态匹配（先按 `:deep(...) {` 定位规则块，再在该块内查属性）。
 
@@ -29,28 +31,45 @@ describe('TimeRangeSelector 样式统一', () => {
     expect(source).toMatch(/:deep\(\.el-radio-button__inner\)\s*\{[^}]*line-height:\s*1;/)
   })
 
-  it('统一字号 13px（不再继承 EP small 的 12px 与相邻正文不一致）', () => {
-    expect(source).toMatch(/:deep\(\.el-radio-button__inner\)\s*\{[^}]*font-size:\s*13px/)
+  it('字号恒 12px（与分组 tab / 导出按钮同档，不再 13/14/15 混用）', () => {
+    expect(source).toMatch(/:deep\(\.el-radio-button__inner\)\s*\{[^}]*font-size:\s*var\(--control-font-toolbar,\s*12px\)/)
   })
 
-  it('窄屏四段等宽铺满（flex:1 1 0），而非按内容分配长短不齐', () => {
-    expect(source).toMatch(/:deep\(\.el-radio-button\)\s*\{[^}]*flex:\s*1 1 0/)
-    expect(source).toMatch(/@media \(max-width: 768px\)[\s\S]*?:deep\(\.el-radio-button__inner\)\s*\{[^}]*width:\s*100%/)
+  it('视觉高走同一 token：桌面 32px；窄屏与粗指针 36px（§4.4 第 5 条例外档）', () => {
+    expect(source).toMatch(/:deep\(\.el-radio-button__inner\)\s*\{[^}]*height:\s*var\(--control-h-toolbar,\s*32px\)/)
+    expect(source).toMatch(/@media \(max-width: 768px\)[\s\S]*?:deep\(\.el-radio-button__inner\)\s*\{[^}]*height:\s*var\(--control-h-toolbar-touch,\s*36px\)/)
+    // 粗指针独立声明：宽视口触屏（900/1440 coarse）同样取 36，不能只靠宽度断点
+    expect(source).toMatch(/@media \(pointer: coarse\)[\s\S]*?height:\s*var\(--control-h-toolbar-touch,\s*36px\)/)
   })
 
-  it('触摸目标：窄屏 ≥40px、粗指针 44px', () => {
-    expect(source).toMatch(/@media \(max-width: 768px\)[\s\S]*?min-height:\s*40px/)
-    expect(source).toMatch(/@media \(pointer: coarse\)[\s\S]*?min-height:\s*44px/)
+  it('圆角 6px + 横向内距 10px（与导出图标按钮 / 分组 tab 统一）', () => {
+    expect(source).toMatch(/border-radius:\s*var\(--control-radius-toolbar,\s*6px\)/)
+    expect(source).toMatch(/:deep\(\.el-radio-button__inner\)\s*\{[^}]*padding:\s*0 10px/)
+  })
+
+  it('36px 只在图表卡工具条作用域内（组件级），正文 44px 档在 theme.css 里未被降级', () => {
+    // token 只追加、未改既有档
+    expect(themeCss).toContain('--control-h-toolbar: 32px;')
+    expect(themeCss).toContain('--control-h-toolbar-touch: 36px;')
+    expect(themeCss).toContain('--control-font-toolbar: 12px;')
+    expect(themeCss).toContain('--control-radius-toolbar: 6px;')
+    // 既有 MUST 档原样保留：正文输入 / 粗指针分段 / 页头图标仍是 44px
+    expect(themeCss).toMatch(/\.el-input__wrapper,[\s\S]{0,200}?min-height: 44px/)
+    expect(themeCss).toMatch(/\.el-radio-button__inner,\s*\n\s*\.el-checkbox-button__inner \{\s*\n\s*min-height: 44px/)
+    expect(themeCss).toMatch(/\.main-header \.el-button\.is-circle \{[^}]*min-height: 44px/)
+    // 组件不得反过来把 44px 写成默认值（44 只应留在 theme.css 的全局 MUST 档里）
+    const sourceCss = source.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(sourceCss).not.toMatch(/min-height:\s*44px/)
   })
 })
 
-describe('TimeRangeSelector 档位', () => {
+describe('TimeRangeSelector 档位管理', () => {
   /**
    * 曾有过 dense 紧凑档（卡片头 24px/12px）。2026-10-21 独立复核否决并已删除：
    *  ① 同一页面主控件 36px/13px 与卡片头 24px/12px 并存 = 用户反馈「大小也不对」的同源问题；
    *  ② dense 的选择器特异性 0,3,0 压过窄屏/粗指针规则（0,2,0），真实手机 393px
    *     （pointer:coarse）下触摸目标只有 24px（复核实测 52.7×24），低于项目 36px 档，很难点中。
-   * 现在全站单档：桌面 36px / 窄屏 40px / 粗指针 44px，字号恒 13px。
+   * 2026-10-22 起全站图表卡也只有一档：桌面 32px / 窄屏与粗指针 36px，字号恒 12px。
    */
   it('不再存在 dense 紧凑档（避免同页两种尺寸 + 手机触摸目标被压到 24px）', () => {
     expect(source).not.toContain('dense?: boolean')

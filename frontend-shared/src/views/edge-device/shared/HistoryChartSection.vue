@@ -10,15 +10,19 @@
             v-model:custom-range="customTimeRange"
             @change="onTimeRangeChange"
           />
-          <el-button
-            type="primary"
-            class="hist-export"
-            @click="handleExportCSV"
-            :disabled="historyData.length === 0 && chartSeries.length === 0"
-          >
-            <el-icon :size="16"><Download /></el-icon>
-            导出CSV
-          </el-button>
+          <el-tooltip content="导出 CSV" placement="top">
+            <el-button
+              type="primary"
+              size="small"
+              class="hist-export"
+              aria-label="导出 CSV"
+              title="导出 CSV"
+              @click="handleExportCSV"
+              :disabled="historyData.length === 0 && chartSeries.length === 0"
+            >
+              <el-icon :size="16"><Download /></el-icon>
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
     </template>
@@ -55,6 +59,8 @@
         :data-group="activeGroupTitle"
         :data-series-count="mobileSeriesCount"
         :data-point-count="mobilePointCount"
+        :data-compact="String(isMobileViewport)"
+        :data-chart-height="chartHeightPx"
       >
         <div class="hist-tabs" role="tablist" aria-label="切换历史数据分组">
           <button
@@ -77,6 +83,7 @@
             :yAxisMin="activeGroup.yAxisMin"
             :yAxisMax="activeGroup.yAxisMax"
             :reserve-right-axes="maxReserveRightAxes"
+            :compact="isMobileViewport"
           />
           <p v-else class="chart-sub-empty">该分组在当前时间范围内无数据</p>
         </div>
@@ -407,11 +414,17 @@ const activeGroup = computed<ChartSubGroupResult | undefined>(
 const mobileSeriesCount = computed(() => activeGroup.value?.series.length ?? 0)
 /**
  * 单图高度（px 字符串，直接传给 LineChart 的 height）。
- *   · 桌面 320：平铺时代每张 260px，现在同屏只有一张，给到 320 更易读；
- *   · 窄屏 200：必须 ≤220 才会进入 LineChart 的 isCompactChart 分支
- *     （不画轴名/图例贴顶/axisLabel.hideOverlap）—— 窄屏正是靠这三个机制才不糊。
+ *
+ * 2026-10-22（第七轮真机反馈「按钮大小比例与图表相比大太多了」）：
+ *   · 桌面 320px：不变（平铺时代每张 260px，现在同屏只有一张）；
+ *   · 窄屏 200 → 320px：窄屏控件块（卡头 + 分组 tab）最少约 166px，图 200px 时
+ *     控件块/图高 = 0.90~1.20；图高 320 后降到 0.52 以内（验收要求 ≤0.55）。
+ *   · 高度 >220 已超出 LineChart 的「按高度判定紧凑图」阈值，故窄屏**显式**传
+ *     :compact="isMobileViewport" —— 紧凑渲染（不画轴名/图例贴顶/hideOverlap/少轴）
+ *     与像素高度是两件事，必须能分别指定；桌面不传 compact，行为与改前逐像素一致。
  */
-const chartHeightPx = computed(() => (isMobileViewport.value ? '200px' : '320px'))
+const CHART_HEIGHT_PX = 320
+const chartHeightPx = computed(() => `${CHART_HEIGHT_PX}px`)
 
 /** 当前分组实际绘制的点数（测试/探针用：>0 才证明横轴真有数据，不是空图） */
 const mobilePointCount = computed(
@@ -642,6 +655,31 @@ onUnmounted(() => {
 .header-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /*
+  图表卡工具条档（规范 §4.4「控件尺寸档位」）：
+  导出图标按钮与时间档分段、分组 tab 共用 theme.css 的 --control-* token，
+  桌面 32x32 / ≤768 或 pointer:coarse 36x36，圆角 6px，内距 0（方形图标按钮宽度=高度）。
+  图标按钮必须有三通道名称（aria-label + title + el-tooltip），否则纯图标对读屏/悬停用户不可达。
+  ⚠ 用 size="small"：桌面档要 32px，而 theme.css 粗指针块会把「非 small」普通按钮抬到 44px；
+    small 变体只被窄屏 36px 档约束（与本档一致），桌面由下面的 scoped 规则钉到 32px。
+*/
+.hist-export {
+  width: var(--control-h-toolbar, 32px);
+  height: var(--control-h-toolbar, 32px);
+  min-width: var(--control-h-toolbar, 32px);
+  min-height: var(--control-h-toolbar, 32px);
+  box-sizing: border-box;
+  padding: 0;
+  border-radius: var(--control-radius-toolbar, 6px);
+  /*
+    字号也要钉在同一 token 上：App.vue 有一条「≤480px 时 .el-button{font-size:15px}」的
+    全局移动端缩放规则（0,1,0），会把工具条按钮从 12px 顶回 15px —— 于是又把
+    「同一行控件一档字号」破坏在 320~480px（第七轮独立验证 D6 发现）。
+    本规则是 scoped（0,2,0），显式压回工具条档，不依赖全局规则先后顺序。
+  */
+  font-size: var(--control-font-toolbar, 12px);
+}
+
+/*
   分组 tab（2026-10-21 新增，替代「桌面 7 图平铺 / 窄屏 el-select」）。
   为什么不用 el-tabs：7 个分组在 769~900px 的卡片里会溢出，el-tabs 溢出时用
   「◀ ▶ 翻页器」把选项藏起来 —— 等于默认隐藏分组；这里是 flex-wrap，**永远全部可见**。
@@ -657,14 +695,16 @@ onUnmounted(() => {
   appearance: none;
   -webkit-appearance: none;
   margin: 0;
-  padding: 0 12px;
-  height: 30px;
+  /* 工具条档：与时间档分段、导出按钮同 token ⇒ 三者高度严格相等（32 / 窄屏 36） */
+  padding: 0 10px;
+  height: var(--control-h-toolbar, 32px);
+  box-sizing: border-box;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
+  border-radius: var(--control-radius-toolbar, 6px);
   background: var(--el-fill-color-blank);
   color: var(--el-text-color-regular);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--control-font-toolbar, 12px);
   line-height: 1;
   cursor: pointer;
   transition: color .15s, background-color .15s, border-color .15s;
@@ -686,19 +726,52 @@ onUnmounted(() => {
 
 /* ---- 窄屏（≤768px）：卡内距收紧 + tab 折行（不横向滚动、不隐藏任何分组） ---- */
 @media (max-width: 768px) {
-  .hist-title { font-size: 15px; }
-  .hist-tabs { gap: 4px; margin-bottom: 8px; }
-  .hist-tab { height: 32px; padding: 0 10px; font-size: 12px; }
-  /* 空态占满单图高度，切换分组时不抖卡高 */
+  .hist-title { font-size: 15px; line-height: 20px; }
+  /* 卡头行距收紧：320px 下标题单独一行 + 控件行一行，卡头总高 142 → 约 82px */
+  .hist-header { gap: 6px 12px; }
+  /*
+    卡头控件行**恒为单行**（标题可以单独一行）：时间档四段（约 170px）+ 导出图标按钮（36px）
+    + 8px 间距 ≈ 214px，320px 卡内宽约 256px ⇒ 放得下。导出从「文字块」改图标按钮，
+    正是为了腾出这 108px —— 改前它被挤到第二行，卡头折 3~4 行。
+  */
+  .header-controls { flex-wrap: nowrap; gap: 8px; }
+  /* 36px 例外档要求相邻控件间距 ≥6px（规范 §4.4 控件尺寸档位；改前 4px 不达标） */
+  .hist-tabs { gap: 6px; margin-bottom: 8px; }
+  .hist-tab {
+    height: var(--control-h-toolbar-touch, 36px);
+    padding: 0 10px;
+    font-size: var(--control-font-toolbar, 12px);
+  }
+  /* 导出图标按钮在窄屏也是 36×36（宽高必须同时切到触摸档，否则会变成 32×36 的长方形） */
+  .hist-export {
+    width: var(--control-h-toolbar-touch, 36px);
+    height: var(--control-h-toolbar-touch, 36px);
+    min-width: var(--control-h-toolbar-touch, 36px);
+    min-height: var(--control-h-toolbar-touch, 36px);
+  }
+  /* 空态占满单图高度，切换分组时不抖卡高（与 chartHeightPx=320 同步） */
   .hist-chart .chart-sub-empty {
-    height: 200px;
+    height: 320px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0 12px;
     box-sizing: border-box;
   }
-  :deep(.el-card__header) { padding: 12px; }
+  :deep(.el-card__header) { padding: 10px 12px; }
   :deep(.el-card__body) { padding: 12px; }
+}
+
+/* 粗指针（宽视口触屏设备也会命中）：工具条档取 36px，与窄屏一致 */
+@media (pointer: coarse) {
+  .hist-tab {
+    height: var(--control-h-toolbar-touch, 36px);
+  }
+  .hist-export {
+    width: var(--control-h-toolbar-touch, 36px);
+    height: var(--control-h-toolbar-touch, 36px);
+    min-width: var(--control-h-toolbar-touch, 36px);
+    min-height: var(--control-h-toolbar-touch, 36px);
+  }
 }
 </style>

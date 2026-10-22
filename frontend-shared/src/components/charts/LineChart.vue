@@ -69,6 +69,15 @@ export interface ChartTopLayoutInput {
   items: string[]
   /** 组件高度（"260px" / 260），用于判定紧凑图。 */
   height?: string | number
+  /**
+   * 显式紧凑开关（2026-10-22）。
+   * 缺省（undefined）→ 仍按 height ≤ COMPACT_MAX_HEIGHT_PX 判定（既有契约，逐像素不变）；
+   * true → 强制紧凑（轴名不画、图例贴顶、hideOverlap、最多 2 根 Y 轴）；
+   * false → 强制常规排版（即使高度很小）。
+   * 为什么需要：移动端图表高度抬到 320px（>220）以压低「控件块/图高」比例，
+   * 但窄屏仍需要紧凑排版才不糊 —— 像素高度与排版档是两个正交概念。
+   */
+  compact?: boolean
 }
 
 export interface ChartTopLayout {
@@ -91,7 +100,8 @@ export interface ChartTopLayout {
  * ⇒ 单行图例输出 56，与改前逐像素一致。
  */
 export function computeChartTopLayout(input: ChartTopLayoutInput): ChartTopLayout {
-  const compact = isCompactHeight(input.height)
+  // 显式 compact 优先；缺省时保持改前契约（按高度判定）
+  const compact = input.compact ?? isCompactHeight(input.height)
   const legendTop = compact ? 6 : LEGEND_TOP_PX
   const rowHeight = compact ? 16 : LEGEND_ROW_HEIGHT_PX
   const itemGap = compact ? 8 : LEGEND_ITEM_GAP_PX
@@ -208,6 +218,14 @@ const props = withDefaults(defineProps<{
    * 父级（HistoryChartSection）算出组内最大右轴数传下来，组内所有图预留同样宽度。
    */
   reserveRightAxes?: number
+  /**
+   * 显式紧凑排版开关（缺省 undefined = 按 height ≤220px 判定，保持既有契约）：
+   *   · true  → 强制紧凑（不画 Y 轴名 / 图例贴顶 / X 轴 hideOverlap / 最多 2 根 Y 轴）；
+   *   · false → 强制常规排版（即使高度很小）。
+   * 用途：移动端图高抬到 320px 后 >220 会退出紧凑分支，而窄屏仍需紧凑渲染；
+   * 高度与排版档必须能分别指定（2026-10-22，规范 §4.4 控件尺寸档位）。
+   */
+  compact?: boolean
 }>(), {
   data: () => [],
   title: '',
@@ -221,6 +239,8 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
+/** 最近一次顶部布局（图例/grid 上边距）—— 供测试/探针读取真实排版档位（legend 是否压绘图区）。 */
+let lastTopLayout: ReturnType<typeof computeChartTopLayout> | null = null
 let resizeObserver: ResizeObserver | null = null
 let themeObserver: MutationObserver | null = null
 
@@ -474,11 +494,12 @@ const formatTooltipTime = (ts: string | number) => {
 }
 
 /**
- * 是否「紧凑图」：显式高度 ≤220px（窄屏小图）。
- * 只影响两处排版：轴名要不要画（默认会压住图例）、图例/grid 的上边距。
- * 桌面大图（280/300/400px）走原分支，像素不变。
+ * 是否「紧凑图」：显式 compact prop 优先；未传时仍按高度 ≤220px 判定（既有契约）。
+ * 只影响排版：轴名要不要画（默认会压住图例）、图例/grid 的上边距、
+ * X 轴标签 hideOverlap、Y 轴上限（紧凑最多 2 根）。
+ * 桌面大图（280/300/400px）不传 compact ⇒ 走原分支，像素不变。
  */
-const isCompactChart = computed(() => isCompactHeight(props.height))
+const isCompactChart = computed(() => props.compact ?? isCompactHeight(props.height))
 
 const applyChartOption = () => {
   if (!chartInstance) return
@@ -507,7 +528,9 @@ const applyChartOption = () => {
     canvasWidth: chartRef.value?.clientWidth ?? 0,
     items: legendItems,
     height: props.height,
+    compact: props.compact,
   })
+  lastTopLayout = topLayout
   const option: EChartsCoreOption = {
     animation: props.realtime ? false : undefined,
     color: theme.palette,
@@ -677,7 +700,10 @@ const initChart = () => {
 // realtime mode: shallow watch (reference change only) — appendRealtimeData does chartSeries.value = [...]
 // normal mode: deep watch to detect nested data array mutations
 watch(
-  () => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax, props.reserveRightAxes],
+  // height / compact 也必须进 watch：窄屏切换（横竖屏/窗口缩放）时高度与排版档一起变，
+  // 不重算 option 会保留旧分支（轴名/图例位置错档）。reserveRightAxes 保持在最后：
+  // ChartPlotAlignment.spec 按 /props\.reserveRightAxes\]/ 锁这条 watch。
+  () => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax, props.height, props.compact, props.reserveRightAxes],
   applyChartOption,
   { deep: true },
 )
@@ -705,6 +731,12 @@ onMounted(() => {
  */
 defineExpose({
   getChartInstance: () => chartInstance,
+  /**
+   * 顶部布局（2026-10-22）：{ compact, legendTop, legendRows, gridTop }。
+   * 探针用它证明「紧凑图 legend 底边 < grid 顶边（图例不压绘图区）」，
+   * 与 getPlotRect 配套即可在不做像素比对的情况下量化排版。
+   */
+  getTopLayout: () => lastTopLayout,
   getPlotRect: (): { x: number; y: number; width: number; height: number } | null => {
     if (!chartInstance) return null
     // ECharts 未把 getModel 放进公开类型，但运行时可用来读 grid 布局；
