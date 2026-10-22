@@ -29,6 +29,17 @@ func nowMillis() int64 {
 }
 
 // SetupRoutes configures all API routes by domain
+// apiBuildCommit 是构建期注入的 commit（默认 unknown，由 main 调 SetBuildCommit 覆盖）。
+// 只在 /health 回显，不参与任何业务逻辑。
+var apiBuildCommit = "unknown"
+
+// SetBuildCommit 注入构建来源（main.go 从 ldflags 变量转发）。
+func SetBuildCommit(c string) {
+	if c != "" {
+		apiBuildCommit = c
+	}
+}
+
 func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry, options ...interface{}) {
 	var controlPolicy ControlPolicy
 	var commandService *commandexec.Service
@@ -104,7 +115,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 
 	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "commit": apiBuildCommit})
 	})
 
 	// Login and in-session reauthentication share one limiter (in-process

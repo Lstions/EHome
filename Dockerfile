@@ -7,12 +7,15 @@ FROM golang:1.26.5-alpine AS backend-builder
 # Go 模块代理：默认官方代理，保证 GitHub Actions 等海外 CI 直连可用；
 # 国内网络本地构建时覆盖：docker build --build-arg GOPROXY=https://goproxy.cn,direct .
 ARG GOPROXY=https://proxy.golang.org,direct
-ENV GOPROXY=${GOPROXY}
+# 构建来源（2026-10-21 事故教训：镜像必须能自证"由哪个 commit 构建"）
+ARG GIT_COMMIT=unknown
+ENV GOPROXY=${GOPROXY} GIT_COMMIT=${GIT_COMMIT}
 WORKDIR /app
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false \
+    -ldflags="-X main.buildCommit=${GIT_COMMIT}" -o ehome-server ./cmd/server/
 # 主机运维 CLI (BMS 页慢修复 §1.4): 部署维护窗口需要
 # `ehomectl datalifecycle ensure-indexes` 在启动新容器前建复合索引, 因此
 # 二进制必须随镜像发布 (此前只 COPY ehome-server, 生产无法执行该子命令)。
@@ -40,6 +43,10 @@ RUN pnpm build
 
 # ── Stage 3: Runtime ────────────────────────────────────────────────────
 FROM alpine:3.21
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
+      org.opencontainers.image.title="EHomeSystem" \
+      org.opencontainers.image.description="EHome backend + web (built from git archive of main)"
 
 RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
 

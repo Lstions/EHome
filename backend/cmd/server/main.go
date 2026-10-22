@@ -42,6 +42,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// buildCommit 由构建期注入（Dockerfile 的 -ldflags -X main.buildCommit=<sha>）。
+//
+// 为什么需要它（2026-10-21 生产事故）：那次部署的镜像"不是从 main 构建"，
+// 导致已修复的解析器语义被回退，生产写入了 91 分钟的错误字段。
+// 根因不是代码缺陷，而是**部署产物来源不可追溯** —— 无法在部署时判断
+// 这个镜像到底是哪份代码。把 commit 烙进二进制后，/health 直接回显，
+// "部署的到底是哪份代码"变成可查询事实，而不是靠 strings 事后推断。
+var buildCommit = "unknown"
+
 func main() {
 	cfg := config.Load()
 
@@ -53,6 +62,8 @@ func main() {
 	logger.Infof("EHomeSystem Server v2.0 starting...")
 
 	// Validate JWT secret is not default in production
+	// 构建来源转发给 api 层，供 /health 回显（2026-10-21 事故教训：镜像必须能自证来源）。
+	api.SetBuildCommit(buildCommit)
 	api.ValidateJWTSecret()
 	logger.Infof("Config: DB=%s:%d/%s, API=%s, device_listener=%v",
 		cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr(), cfg.Device.Enabled)

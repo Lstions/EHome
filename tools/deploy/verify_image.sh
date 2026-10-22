@@ -37,6 +37,15 @@ MARKERS=(
     "non-binary char"         # HBMS1 状态串必须是 0/1
     "bms_temp_high"           # HBMS1 c7 = BMS 温度过高
     "leadingFixedDigits"      # HTEMP 里 KKK 与 O 粘连的定宽解析
+    # ── 2026-10-22 来源组(source-group) 批次 ────────────────────────────
+    # 注意：标记必须是**会进二进制的字符串字面量**（值或日志文本），不能是标识符 —
+    # Go 编译后常量名/函数名通常被消除（实测 SourceGroupKindPrimaryBackup=0 命中），
+    # 用标识符做标记会让门禁对"任何镜像"都报缺失（假红）。
+    "cooldown_suppressed"           # R10 冷却抑制也发 ActiveChange{Next:0}（架构终审 B-1）
+    "no_active_after_cooldown"      # 组失去权威的降级健康事件
+    "source_frame_discarded"        # 丢帧观测（指标 + 健康事件）
+    "no_available_member"           # 复合组缺员 unbound 的原因码
+    "primary_backup"                # 来源组主备 kind 的字面量（4 表 + 状态机）
 )
 for m in "${EXTRA[@]:-}"; do
     [ -n "$m" ] && MARKERS+=("$m")
