@@ -1,0 +1,51 @@
+# 数据字段解析层 · 语义别名表（唯一默认表）
+#
+# 权威设计：docs/设计/数据字段解析层-方案-2026-10-21.md v0.3 §6.1。
+# 加载方：cmd/server（main.go 装配）→ sensorfield.Registry.SetAliases → Validate()（A 级 fail-closed）。
+# 生效方式：随镜像分发、启动加载一次；**改本文件必须重启进程**（方案 §11 无热加载）。
+#
+# 字段语义：
+#   expected_unit  期望单位类；候选单位与它不同类 ⇒ 启动失败（防"作用于错误物理量"）。
+#   candidates     物理名候选（有序：运行期按首个"该设备已知"的候选解析）。
+#   allow_overlap  同一物理名允许归属多个语义（默认 false ⇒ 冲突即启动失败）。
+#
+# ⚠ 动态索引字段（temperature_1..N / cell_voltage_1..N）不在声明里，其候选在冷启动时
+#   会被 Warnings() 记为"死候选"（B 级：只 WARN + 指标，不阻塞启动）——这是设计裁决
+#   （Validate 只查配置自相矛盾，不查"设备是否已上报"）。#270 起这类提示只记日志。
+#
+# v0.3 勘误（窄复核 H1）：current 已拆分。原先三候选 [current, battery_charge_current,
+# battery_discharge_current] 单位都是 A，单位类校验**无法**发现"Techfine 同帧同时产出
+# 充/放两个字段 ⇒ 冻结首候选=充电电流 ⇒ 放电过流保护静默失效"。拆分后各自单候选；
+# net_current 只覆盖 JBD 的带符号单字段（充正放负），**不得**用于过流保护。
+
+soc:
+  expected_unit: "%"
+  candidates: [rsoc, battery_capacity, bms_soc, soc]
+
+total_voltage:
+  expected_unit: "V"
+  candidates: [total_voltage, battery_voltage, bus_voltage]
+
+charge_current:
+  expected_unit: "A"
+  candidates: [battery_charge_current, charge_current]
+
+discharge_current:
+  expected_unit: "A"
+  candidates: [battery_discharge_current, discharge_current]
+
+net_current:
+  expected_unit: "A"
+  candidates: [current]
+
+dc_power:
+  expected_unit: "W"
+  candidates: [output_active_power]
+
+max_temp:
+  expected_unit: "°C"
+  candidates: [max_temp, inverter_temp, transformer_temp]
+
+temperature:
+  expected_unit: "°C"
+  candidates: [temperature_1]

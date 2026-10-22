@@ -12,12 +12,15 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/sun"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
@@ -46,14 +49,31 @@ func cooldownFor(rule models.AutomationRule) time.Duration {
 type sample struct {
 	at        time.Time
 	satisfied bool
+	// identity 是窗口来源身份（S1/S2：窗口不得跨来源拼接）。
+	// 存量单设备 = {kind:0, edgeDeviceID=Evaluate 入参}；来源组见 source.go。
+	identity sourceIdentity
 }
 
 // TriggerEvent 触发事件: 求值器产出, Planner 消费。
+//
+// 来源证据（M0，方案 §12.2.1 / F-9）只由求值器经 newTriggerEvent 填写；planner F4
+// 只认这些字段，**不得**回读规则配置列（切换后配置列不反映"这次触发是谁"）。
 type TriggerEvent struct {
 	Rule       models.AutomationRule
 	Value      float64 // 触发时值 (sensor_threshold)
 	At         time.Time
 	WindowEdge string // time_window: enter|exit (sensor_threshold 为 "")
+
+	// ── 来源证据 ──
+	SourceKind         string    // ""=存量单设备；source_group=来源组
+	SourceGroupID      uint      // 来源组 ID（SourceKind=source_group 时非 0）
+	SourceEdgeDeviceID uint      // 触发帧的物理设备（存量=Evaluate 入参；组=触发成员）
+	TransitionSeq      uint64    // 触发时来源快照的切换序号（一致性 token）
+	SourceAt           time.Time // 该成员值的时间戳（F4 staleness 判据）
+
+	// membersJSON 是 composite 触发时的分量快照（automation_events.members_json 审计）。
+	// 非导出：不是对外契约字段，只由 newTriggerEvent 填充、planner 写事件列。
+	membersJSON string
 }
 
 // TriggerHandler Planner 消费接口 (避免 automation→service 编译期反向依赖)。
@@ -78,6 +98,13 @@ type Evaluator struct {
 	mu sync.RWMutex
 	// rules 规则缓存 (仅 enabled 且 trigger_type IN (sensor_threshold, time_window)), key: rule ID。
 	rules map[uint]models.AutomationRule
+	// rulesSnap 是 rules 的不可变快照（LoadRules/Invalidate 时整体重建一次）。
+	//
+	// 为什么需要（Lead 2026-10-22 硬性能门禁 #10a-2）：Evaluate 是每帧热路径，
+	// 按值拷贝整个规则数组会让帧开销随规则数线性增长 —— 本批 AutomationRule
+	// 从 352B 涨到 448B，3 条规则即 +288B/帧（实测 +23%）。快照发布后不再修改，
+	// 读者用 atomic.Pointer 无锁零拷贝读取，连 RLock 都省掉。
+	rulesSnap atomic.Pointer[[]models.AutomationRule]
 	// windows 每规则滑动窗口, key: rule ID (sensor_threshold 专用)。
 	windows map[uint][]sample
 	// triggered 规则当前是否处于 triggered 态 (冷却中)。
@@ -116,6 +143,40 @@ type Evaluator struct {
 	// 故"保守不触发"与锚点恢复配合后不会漏触发真实事件。
 	firstSunTick bool
 
+	// planProvider 是数据字段解析层（sensorfield）控制面（设计 §7.2）。
+	// nil = 未接线：字面量继续走历史 matchField（G-6 逐字节等价），特殊形态
+	// fail-closed（不触发 + 审计）。由 main.go 经 SetPlanProvider 注入。
+	planProvider PlanProvider
+
+	// plans 是编译产物旁路缓存，key=(ruleID,slot,deviceID)（不挂 rule 结构体，
+	// 防 models→sensorfield 包环；见 selector.go 文件头裁决）。
+	plans *planCache
+
+	// sourceResolver 来源组解析器（sourceref.Registry 注入；nil=未接线）。
+	// 来源组规则在 nil 时 fail-closed 并落 unresolved_selector 审计（detail 记原因），
+	// **不得**静默跳过（否则上线顺序错误=静默失效）。存量规则不依赖它。
+	sourceResolver SourceResolver
+	// latestValueBySensorFn 是复合组逐成员取值的注入点（生产=api.LatestValueBySensor）。
+	// 与 planner 的同名注入点语义一致；求值器只用它做 composite 分量读取。
+	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
+	// rulesByGroup 是 groupID → ruleID 反向索引（切换钩子按组清窗）。
+	rulesByGroup map[uint][]uint
+	// sourceAudit 是来源失败审计节流表（key: ruleID+result+reason）。
+	sourceAudit map[sourceAuditKey]time.Time
+	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
+	// nil = 未接线（既有测试/单测），此时只落审计事件，不写健康表。
+	// 由 main.go 注入；实现方负责节流（建议同 (groupID,reason) 1 分钟 1 条）。
+	sourceHealthFn func(groupID uint, reason string)
+
+	// auditMu/unresolvedAudit 是"无法求值"审计的 5 分钟节流表
+	// （key: ruleID + selectorHash，窄复核要求按 selector 维度去重）。
+	auditMu         sync.Mutex
+	unresolvedAudit map[unresolvedKey]time.Time
+	// statsMu/ruleStats 是 ehome_rule_never_resolved / _never_fired 的进程内口径
+	// （快照持久列由 impl-wiring 的 models 批次提供；本批语义一致）。
+	statsMu   sync.Mutex
+	ruleStats map[uint]*ruleStat
+
 	stopCh chan struct{}
 	once   sync.Once
 }
@@ -133,6 +194,11 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 		sunCache:         sun.NewCache(),
 		sunLocationAudit: make(map[uint]string),
 		firstSunTick:     true,
+		plans:            newPlanCache(),
+		unresolvedAudit:  make(map[unresolvedKey]time.Time),
+		sourceAudit:      make(map[sourceAuditKey]time.Time),
+		rulesByGroup:     make(map[uint][]uint),
+		ruleStats:        make(map[uint]*ruleStat),
 		stopCh:           make(chan struct{}),
 	}
 	e.LoadRules()
@@ -262,14 +328,51 @@ func (e *Evaluator) LoadRules() {
 	}
 	next := make(map[uint]models.AutomationRule, len(rules))
 	for _, r := range rules {
+		// H-3（Lead 2026-10-22 裁决）：非法 source_kind 是脏数据，但**不跳过规则、
+		// 不 fail-closed** —— 保持按老路 edge_device 求值，只 Warn + 计数。
+		// 理由：规则静默不生效与规则静默错源是同一类不可接受；这里每条规则只判
+		// 一次（加载循环），不进求值热路径。
+		if models.InvalidSourceKind(r.SourceKind) {
+			logger.Warn("automation: rule has invalid source_kind, falling back to edge_device",
+				"rule_id", r.ID, "source_kind", *r.SourceKind)
+			metrics.RuleInvalidSourceKindTotal.WithLabelValues("automation").Inc()
+		}
 		next[r.ID] = r
 	}
 	e.mu.Lock()
 	prev := e.rules
 	e.rules = next
+	// ── 求值状态清理（分载体，窄复核 R2-followup 2026-10-21）──
+	//
+	// sensor_threshold 的窗口样本存的是"旧配置下算出的 satisfied 布尔"
+	// （sample{at,satisfied}，无原始值 ⇒ 无法重算），因此触发语义（阈值/比较符/
+	// duration/条件/selector/绑定设备/触发类型）任一变化都必须清窗口，否则：
+	//   ① 改阈值/比较符 ⇒ 旧 satisfied 继续生效（漏触发/误触发）；
+	//   ② 缩短 DurationSec ⇒ 凭旧样本立即满足（隐含误触发）；
+	//   ③ 改绑定设备 ⇒ **窗口不按设备分区**，A 的连续满足 + B 的单条满足可凑出
+	//      触发（真误触发，窄复核 F1#⑤）；
+	//   ④ conditions_json 变化 ⇒ 样本来自旧条件门控（求解器条件不满足就不写窗口）；
+	//   ⑤ selector 变化 ⇒ satisfied 来自旧物理量；
+	//   ⑥ TriggerType 切换 ⇒ 旧窗口在切回时会复活。
+	//
+	// ⚠ 载体必须独立：sameWindowStateFields 服务的是 time_window/sun 的
+	// windowStates/sunStates；把传感器字段塞进去会因无关字段漂移误清边沿态
+	// （A-17 同类风险）。故这里用独立比较器 sameSensorTriggerState。
+	//
+	// 级联（F3 裁决）：**triggered（冷却锚）保留**。清它等于绕过 CooldownSec
+	// 重复下发真实设备动作；保留后行为是"冷却到期后重新积累 DurationSec"（安全方向）。
+	// 白名单**排除** UpdatedAt/Name/CooldownSec/MaxDailyExec/动作集合：它们是簿记
+	// 字段（last_triggered_at 也会 bump UpdatedAt），纳入会导致 30s 兜底刷新每 30s
+	// 清一次窗口 ⇒ DurationSec 永不满足（A-17 教训的镜像，漏触发方向）。
 	for id := range e.windows {
-		if _, ok := next[id]; !ok {
+		old, wasPresent := prev[id]
+		nextRule, stillPresent := next[id]
+		if !stillPresent || !wasPresent || !sameSensorTriggerState(old, nextRule) {
 			delete(e.windows, id)
+		}
+	}
+	for id := range e.triggered {
+		if _, ok := next[id]; !ok {
 			delete(e.triggered, id)
 		}
 	}
@@ -289,7 +392,66 @@ func (e *Evaluator) LoadRules() {
 			delete(e.sunLocationAudit, id)
 		}
 	}
+	// 来源组反向索引：groupID → 规则集（切换钩子按组清窗；S4 保留冷却锚）。
+	byGroup := make(map[uint][]uint)
+	for id, r := range next {
+		if ref := r.SourceRef(); ref.IsGroup() {
+			byGroup[ref.GroupID] = append(byGroup[ref.GroupID], id)
+		}
+	}
+	e.rulesByGroup = byGroup
+	// 发布热路径规则快照（一次构建、之后每帧只读）。必须在锁内构建，避免
+	// 读者看到"map 已换但快照未换"的半更新状态；Store 与构建同在一把锁内。
+	e.rulesSnap.Store(makeRulesSnapshot(next))
 	e.mu.Unlock()
+	// 设计 §7.2：LoadRules/Invalidate 后清空编译产物（selector/epoch 变化惰性重编译）。
+	// 兜底刷新每 30s 一次，重编译是纯内存操作（零 DB），热路径仍靠缓存。
+	e.plans.reset()
+	// 规则级指标口径随规则集合重建（保留仍存在规则的"已解析/已触发"进度）。
+	e.rebuildRuleStats(next)
+	// 清理已删除规则的审计节流条目，避免 map 无界增长。
+	e.auditMu.Lock()
+	for key := range e.unresolvedAudit {
+		if _, ok := next[key.ruleID]; !ok {
+			delete(e.unresolvedAudit, key)
+		}
+	}
+	for key := range e.sourceAudit {
+		if _, ok := next[key.ruleID]; !ok {
+			delete(e.sourceAudit, key)
+		}
+	}
+	e.auditMu.Unlock()
+}
+
+// makeRulesSnapshot 构建不可变规则快照（调用方保证 m 不再被并发修改）。
+//
+// 语义与原来的"每帧浅拷贝"逐字节相同，只是把构建时机从热路径移到规则加载期。
+func makeRulesSnapshot(m map[uint]models.AutomationRule) *[]models.AutomationRule {
+	snap := make([]models.AutomationRule, 0, len(m))
+	for _, r := range m {
+		snap = append(snap, r)
+	}
+	return &snap
+}
+
+// sameSensorTriggerState 是 sensor_threshold 求值状态的**内容白名单**（窄复核 R2）。
+//
+// 只含"决定 satisfied 布尔是否有意义"的字段；排除一切簿记字段
+// （UpdatedAt / Name / CooldownSec / MaxDailyExec / 动作集合 / last_triggered_at）。
+// TriggerEdgeDeviceID 必须在列：窗口按 ruleID 存、不按设备分区（F1#⑤ 真误触发）。
+// TriggerType 必须在列：类型切换后旧窗口不得在切回时复活。
+func sameSensorTriggerState(prev, next models.AutomationRule) bool {
+	return prev.TriggerType == next.TriggerType &&
+		prev.TriggerSensorName == next.TriggerSensorName &&
+		prev.TriggerComparator == next.TriggerComparator &&
+		prev.TriggerThreshold == next.TriggerThreshold &&
+		prev.TriggerDurationSec == next.TriggerDurationSec &&
+		prev.TriggerEdgeDeviceID == next.TriggerEdgeDeviceID &&
+		prev.ConditionsJSON == next.ConditionsJSON &&
+		// 来源绑定（M0）：绑组/换组/换锚成员都改变窗口语义 ⇒ 必须清窗。
+		sourceKindEq(prev.SourceKind, next.SourceKind) &&
+		uintPtrEq(prev.SourceGroupID, next.SourceGroupID)
 }
 
 // sameWindowStateFields 是"影响窗口/日出日落判定"的字段**白名单**比较 (A-17)。
@@ -338,6 +500,28 @@ func strPtrEq(a, b *string) bool {
 // Invalidate CRUD 写路径直接失效重载缓存。
 func (e *Evaluator) Invalidate() {
 	e.LoadRules()
+}
+
+// SetPlanProvider 注入数据字段解析层控制面（设计 §7.2 / §9.2#1/#2）。
+//
+// nil 是**显式支持的合法状态**：既有测试与未接线部署不注入时，求值继续走历史
+// matchField（G-6：纯字面量行为逐字节不变）；特殊形态在没有解析层时无法求值，
+// 按 fail-closed 不触发并落审计（不猜测、不降级为字面量，设计 §11）。
+func (e *Evaluator) SetPlanProvider(p PlanProvider) {
+	e.mu.Lock()
+	e.planProvider = p
+	e.mu.Unlock()
+	e.plans.reset()
+}
+
+// planProviderSnapshot 读 planProvider（Evaluate 会在多 shard 并发调用）。
+func (e *Evaluator) planProviderSnapshot() PlanProvider {
+	if c := planProviderSnapshotHook.Load(); c != nil { // 测试注入计数；生产恒 nil
+		c.Add(1)
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.planProvider
 }
 
 // Start 启动兜底刷新 goroutine (30s 周期, 仅作保险)。
@@ -410,6 +594,18 @@ func (e *Evaluator) StartWindowTicker(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// EvaluateClockRulesAt 以**注入时刻**执行一次时钟驱动规则求值 (time_window + sun_event)。
+//
+// 与 StartWindowTicker 走的是**同一条** evalTimeWindows 路径、同一个状态机，唯一差别
+// 是时间源由调用方给定。存在的理由与 windowTickEnvVar 同族 (见 WindowTickInterval 注释):
+// 时钟驱动规则要么真等 1 分钟 tick、要么等到真实日出时刻，端到端/仿真测试无法承受。
+// 注入时刻只影响"何时看一眼"，不改变任何判据（边沿仍只触发一次、每日本地日仍限一次）。
+//
+// 生产代码不得调用它 —— 生产路径的唯一入口是 StartWindowTicker。
+func (e *Evaluator) EvaluateClockRulesAt(now time.Time) {
+	e.evalTimeWindows(now)
 }
 
 // evalTimeWindows 对所有时钟驱动规则 (time_window + sun_event) 执行一次 tick 求值。
@@ -544,10 +740,7 @@ func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, 
 	e.mu.Unlock()
 
 	if e.handler != nil {
-		e.handler.HandleTrigger(TriggerEvent{
-			Rule: rule,
-			At:   now,
-		})
+		e.handler.HandleTrigger(newTriggerEvent(rule, now, 0, "", nil))
 	}
 }
 
@@ -691,11 +884,7 @@ func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
 	e.mu.Unlock()
 
 	if e.handler != nil {
-		e.handler.HandleTrigger(TriggerEvent{
-			Rule:       rule,
-			At:         now,
-			WindowEdge: edge,
-		})
+		e.handler.HandleTrigger(newTriggerEvent(rule, now, 0, edge, nil))
 	}
 }
 
@@ -741,22 +930,44 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	if len(fields) == 0 || edgeDeviceID == 0 {
 		return
 	}
-	// H2 修复 (锁放大): RLock 内只快照 rules 浅拷贝, resolveLogicalID 的 SQL 往返
-	// 移到 RUnlock 之后 — 写锁等待会阻塞所有 RLock, DB 慢查询时求值 stall。
-	e.mu.RLock()
-	rules := make([]models.AutomationRule, 0, len(e.rules))
-	for _, r := range e.rules {
-		rules = append(rules, r)
+	// 热路径零拷贝：规则快照由 LoadRules/Invalidate 一次性构建并以 atomic.Pointer
+	// 发布；快照不可变 ⇒ 无需 RLock、无需每帧重建（硬性能门禁 #10a-2：
+	// 原按值拷贝在 3 条规则时 +288B/帧、+23% 时间）。
+	snapPtr := e.rulesSnap.Load()
+	if snapPtr == nil {
+		return
 	}
-	e.mu.RUnlock()
+	rules := *snapPtr
 
 	target := edgeDeviceID
 	var logicalID uint
 	resolved := false
-	matched := rules[:0]
 	for _, r := range rules {
-		// 规则匹配: TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐,
-		// 文档标注); 否则必须精确命中上报设备 (或其逻辑身份)。
+		// 来源组规则：匹配/过滤由 sourceref 快照决定（按 kind 分流，裁决 1）。
+		//   primary_backup：只收 active 成员帧（备成员帧在此丢弃，S1 的前提）；
+		//   composite      ：任一成员帧驱动整组求值（CombineGroup）。
+		if ref := r.SourceRef(); ref.IsGroup() {
+			m, ok := e.matchSourceRule(r, ref, target, at)
+			if !ok {
+				continue
+			}
+			if m.Kind == sourceref.KindComposite {
+				e.evalCompositeRule(r, m, target, fields, at)
+				continue
+			}
+			e.evalRuleWithSource(r, target, fields, at, identityForFrame(m, target),
+				&triggerSource{
+					kind:          sourceref.GroupKindSourceGroup,
+					groupID:       m.GroupID,
+					edgeDeviceID:  target,
+					transitionSeq: m.TransitionSeq,
+					sourceAt:      at,
+				})
+			continue
+		}
+		// 存量单设备/逻辑设备匹配（逐字节保持原逻辑）:
+		// TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐, 文档标注);
+		// 否则必须精确命中上报设备 (或其逻辑身份)。
 		if r.TriggerEdgeDeviceID != 0 && r.TriggerEdgeDeviceID != target {
 			if !resolved {
 				logicalID = e.resolveLogicalID(target)
@@ -766,11 +977,7 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 				continue
 			}
 		}
-		matched = append(matched, r)
-	}
-
-	for i := range matched {
-		e.evalRule(matched[i], fields, at)
+		e.evalRule(r, target, fields, at)
 	}
 }
 
@@ -792,26 +999,65 @@ func (e *Evaluator) resolveLogicalID(edgeDeviceID uint) uint {
 }
 
 // evalRule 单规则状态机: armed → triggered (连续满足 DurationSec) → 冷却到期回 armed。
-func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, at time.Time) {
-	value, ok := matchField(fields, rule.TriggerSensorName)
-	if !ok {
-		return // 本批无该传感器字段, 不影响窗口
+//
+// deviceID 是本次上报的**边缘设备 ID**（Evaluate 入参），用于解析层 plan 的
+// (device, selector) 编译 —— 不能用 rule.TriggerEdgeDeviceID（规则可能绑逻辑设备）。
+func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields []parser.Field, at time.Time) {
+	// trigger 求值走解析层（literal 路径内部与 matchField 逐字节等价）。
+	// ok=false（本批无该字段 / unbound / kill switch）⇒ 不更新窗口、不触发。
+	triggerOK, satisfied, value := e.evalSelector(rule.ID, 0, deviceID,
+		rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, fields, at)
+	if !triggerOK {
+		return
 	}
+	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
+		return
+	}
+	e.applyTrigger(rule, at, value, satisfied, legacyIdentity(deviceID),
+		legacyTriggerSource(deviceID, at))
+}
 
-	// 附加条件全部 AND 求值 (fail-closed: 非法 JSON 直接判不触发)。
+// evalRuleWithSource 是 primary_backup 规则的单帧路径：selector 在本帧求值，
+// 窗口身份与冷却/触发沿用同一条状态机（applyTrigger），只是 identity 带组信息。
+func (e *Evaluator) evalRuleWithSource(rule models.AutomationRule, deviceID uint,
+	fields []parser.Field, at time.Time, ident sourceIdentity, src *triggerSource) {
+	triggerOK, satisfied, value := e.evalSelector(rule.ID, 0, deviceID,
+		rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, fields, at)
+	if !triggerOK {
+		return
+	}
+	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
+		return
+	}
+	e.applyTrigger(rule, at, value, satisfied, ident, src)
+}
+
+// conditionsSatisfied 求值附加条件（全部 AND；任一无法判定/不满足 ⇒ false）。
+// 非法 conditions_json 属配置错误：log + 不触发（fail-closed，与存量一致）。
+func (e *Evaluator) conditionsSatisfied(rule models.AutomationRule, deviceID uint,
+	fields []parser.Field, at time.Time) bool {
 	conds, err := rule.ParseConditions()
 	if err != nil {
 		logger.Warn("automation: invalid conditions_json", "rule_id", rule.ID, "error", err)
-		return
+		return false
 	}
-	for _, c := range conds {
-		cv, ok := matchField(fields, c.SensorName)
-		if !ok || !compare(c.Comparator, cv, c.Threshold) {
-			return // 任一条件不满足 (含字段缺失) 则不触发
+	for i, c := range conds {
+		condOK, condSatisfied, _ := e.evalSelector(rule.ID, uint8(i+1), deviceID,
+			c.SensorName, c.Comparator, c.Threshold, fields, at)
+		if !condOK || !condSatisfied {
+			return false // 任一条件无法判定/不满足 则不触发（混合规则整条 fail-closed）
 		}
 	}
+	return true
+}
 
-	satisfied := compare(rule.TriggerComparator, value, rule.TriggerThreshold)
+// applyTrigger 是 armed → triggered 状态机的唯一实现（三路复用：存量单帧、
+// 主备组成员帧、复合整组结果）。
+//
+// S1/S3：写样本前若 identity 与窗口最后一条不一致 ⇒ 丢弃旧段（**不依赖切换钩子**，
+// 钩子丢失只影响清窗时延，不影响正确性）。S4：清窗保留 triggered 冷却锚。
+func (e *Evaluator) applyTrigger(rule models.AutomationRule, at time.Time, value float64,
+	satisfied bool, ident sourceIdentity, src *triggerSource) {
 	cooldown := cooldownFor(rule) // 0 = 不冷却 (cooldownFor 是唯一判定处)
 
 	e.mu.Lock()
@@ -827,7 +1073,12 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 		delete(e.triggered, rule.ID) // 冷却到期或本就不冷却 (0), 回 armed
 	}
 
-	win := append(e.windows[rule.ID], sample{at: at, satisfied: satisfied})
+	win := e.windows[rule.ID]
+	// S1（身份不匹配即清段）：同一条规则在来源切换/重启/组变更后不得拼接旧样本。
+	if len(win) > 0 && !win[len(win)-1].identity.equal(ident) {
+		win = nil
+	}
+	win = append(win, sample{at: at, satisfied: satisfied, identity: ident})
 	win = pruneWindow(win, rule.TriggerDurationSec, at)
 	e.windows[rule.ID] = win
 
@@ -841,8 +1092,11 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 	e.triggered[rule.ID] = at
 	e.mu.Unlock()
 
+	e.markRuleFired(rule.ID)
 	if e.handler != nil {
-		e.handler.HandleTrigger(TriggerEvent{Rule: rule, Value: value, At: at})
+		// Value 语义：literal 为原始上报值（与今天一致）；特殊 selector 为
+		// predicate 参与比较的值（family/reducer 的语义值），仅用于展示/审计。
+		e.handler.HandleTrigger(newTriggerEvent(rule, at, value, "", src))
 	}
 }
 

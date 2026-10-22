@@ -111,6 +111,12 @@ func registerLogicalDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			Error(c, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
+		// V-13 / SG-20：被来源组引用的逻辑设备（经其下边缘设备间接判断）禁止合并。
+		for _, srcID := range req.SourceIDs {
+			if !guardLogicalDeviceDelete(c, db, srcID) {
+				return
+			}
+		}
 		result, err := datalifecycle.MergeDevices(db, &datalifecycle.MergeRequest{
 			TargetName: req.TargetName,
 			SourceIDs:  req.SourceIDs,

@@ -101,9 +101,40 @@ func TestNotifyWiringGate_DispatcherIsSharedSingleton(t *testing.T) {
 		t.Errorf("main.go 构造 Dispatcher %d 次, 期望恰好 1 次 (必须是共享实例)", got)
 	}
 	// 实例必须被交给 API 层, 否则 POST /notification-channels/:id/test 永远 503。
-	if !strings.Contains(src, "datasourceSvc, notifyDispatcher, api.ControlPolicy{") {
+	//
+	// 2026-10-21（字段解析层 D1）：原实现断言固定字面量
+	// "datasourceSvc, notifyDispatcher, api.ControlPolicy{"，只要 SetupRoutes 增加
+	// 任何一个参数（本轮加了 fieldResolver.registry）就会误红——它测的是**参数书写顺序**
+	// 而不是**接线事实**。改为在 SetupRoutes(...) 调用文本内检查 notifyDispatcher 出现，
+	// 保持原意图（投递器被交给 API 层）且与参数顺序/个数解耦。
+	if !strings.Contains(setupRoutesCall(t, src), "notifyDispatcher") {
 		t.Error("notifyDispatcher 未传给 api.SetupRoutes: /test 端点将拿不到投递器 (503)")
 	}
+}
+
+// setupRoutesCall 返回 main.go 中 api.SetupRoutes(...) 调用的源文本（括号配平截取）。
+// 仅用于"接线事实"断言，避免对参数顺序敏感的字面量匹配。
+func setupRoutesCall(t *testing.T, src string) string {
+	t.Helper()
+	const marker = "api.SetupRoutes"
+	i := strings.Index(src, marker)
+	if i < 0 {
+		t.Fatal("main.go 未调用 api.SetupRoutes")
+	}
+	depth := 0
+	for j := i + len(marker); j < len(src); j++ {
+		switch src[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return src[i : j+1]
+			}
+		}
+	}
+	t.Fatal("api.SetupRoutes 调用未闭合")
+	return ""
 }
 
 // TestNotifyWiringGate_MutationSelfCheck 是**变异重放**。

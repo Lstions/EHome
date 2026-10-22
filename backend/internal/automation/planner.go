@@ -2,9 +2,12 @@ package automation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/notify"
+	"ehome/backend/internal/sensorfield"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
@@ -48,6 +52,27 @@ type Planner struct {
 	// 默认走 api.LatestValue; 测试注入内存实现。nil 时跳过 F4 条件复核。
 	latestValueFn func(deviceID uint) (models.UnifiedData, bool)
 
+	// latestValueBySensorFn（设计 §9.2#4 新增，不改旧签名）按 (设备, 物理名) 取
+	// 最新值，用于 literal selector 的 F4 复核：旧 latestValueFn 每设备只有一条记录，
+	// 无法回答"这个物理名的最新值"。nil 时回落 latestValueFn（既有语义）。
+	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
+
+	// latestValuesFn 按设备取最新一帧多槽值：family/@semantic/virtual selector 的
+	// 复核输入（设计 §9.2#4）。nil 且 selector 为特殊形态时 fail-closed。
+	latestValuesFn func(deviceID uint) []models.UnifiedData
+
+	// planProvider 解析层控制面（F4 复核按 selector 求值，修 AU-12）。
+	planProvider PlanProvider
+
+	// sourceResolver 来源组解析器（F4 按触发证据校验成员身份；nil=未接线）。
+	// 组规则在 nil 时 FC-4 fail-closed（source_resolver_not_configured），
+	// 存量规则不依赖它。
+	sourceResolver SourceResolver
+	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
+	// F4 判定 source_member_changed/source_stale/source_degraded 时调用，
+	// 与求值期同一语义（main.go 注入，实现方负责节流）。
+	sourceHealthFn func(groupID uint, reason string)
+
 	// nowFn 可注入时钟 (测试用), 默认 time.Now。
 	nowFn func() time.Time
 
@@ -82,6 +107,39 @@ func NewPlanner(db *gorm.DB, cmdSvc *commandexec.Service, broadcast func(string,
 // 与 databus 的 latestSink 同点挂接, 避免 automation→api 编译期依赖。
 func (p *Planner) SetLatestValueFn(fn func(deviceID uint) (models.UnifiedData, bool)) {
 	p.latestValueFn = fn
+}
+
+// SetLatestValueBySensorFn 注入"按物理名取最新值"回调（设计 §9.2#4；修 AU-12）。
+//
+// 生产实现是 api.LatestValueBySensor。不直接 import api：保持 automation 对 api 的
+// 零编译期依赖（与 SetLatestValueFn 同款二阶段注入）。
+func (p *Planner) SetLatestValueBySensorFn(fn func(deviceID uint, sensorName string) (models.UnifiedData, bool)) {
+	p.latestValueBySensorFn = fn
+}
+
+// SetLatestValuesFn 注入"按设备取最新一帧多槽值"回调（family/@semantic/virtual 复核用）。
+// 生产实现是 api.LatestValues。
+func (p *Planner) SetLatestValuesFn(fn func(deviceID uint) []models.UnifiedData) {
+	p.latestValuesFn = fn
+}
+
+// SetPlanProvider 注入解析层控制面（selector 编译/谓词求值；kill switch 也在其中）。
+func (p *Planner) SetPlanProvider(prov PlanProvider) {
+	p.planProvider = prov
+}
+
+// SetSourceResolver 注入来源组解析器（F4 身份校验；prompt 明确禁止回读配置列）。
+func (p *Planner) SetSourceResolver(r SourceResolver) {
+	p.sourceResolver = r
+}
+
+// SetSourceHealthFn 注入「来源降级可见性」回调（与 Evaluator 同签名、同语义）。
+//
+// F4 失败也意味着组来源已不可用于该决策（例如触发后 active 被切走/证据过期），
+// 属于方案 §7.1 E-1/E-2 要求"降级必须可见"的范围；否则运维在
+// GET /source-groups/:id/health 只会看到"一切正常"（e2e TestSG_E3 缺口）。
+func (p *Planner) SetSourceHealthFn(fn func(groupID uint, reason string)) {
+	p.sourceHealthFn = fn
 }
 
 // SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
@@ -136,7 +194,7 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 				rule.ID, dayStart, models.AutomationResultExecuted).
 			Count(&cnt).Error; err == nil && int(cnt) >= rule.MaxDailyExec {
 			eventID := p.recordRet(rule, at, ev.Value, models.AutomationResultSuppressedDailyLimit,
-				"", fmt.Sprintf("daily limit %d reached", rule.MaxDailyExec))
+				"", fmt.Sprintf("daily limit %d reached", rule.MaxDailyExec), &ev)
 			// F5: 补发 warning 级通知, 同日同规则只发一次 (幂等: 查当日是否已发过)
 			p.notifyDailyLimitOnce(rule, at, eventID)
 			return
@@ -145,8 +203,11 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 
 	// ── 确认分流: require_confirmed=true 只生成建议执行通知 ──
 	if rule.RequireConfirmed {
-		eventID := p.recordRet(rule, at, ev.Value, models.AutomationResultPendingConfirm, "",
-			"awaiting manual confirmation")
+		// Y5 TOCTOU（裁决 B）：pending 事件落动作集合归一化哈希快照，confirm 时比对，
+		// 不一致即拒绝（ErrConfirmActionChanged）。否则"触发后改动作、再点确认"会执行
+		// 用户从未确认过的新动作。
+		actions := p.ruleActions(rule)
+		eventID := p.recordPendingConfirm(rule, at, ev.Value, actions, &ev)
 		p.notifyConfirmation(rule, at, ev.Value, eventID)
 		return
 	}
@@ -160,12 +221,16 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 	// 任一条件不满足则落 condition_changed 事件并返回, 不执行任何动作。
 	// 只在动作集合含 device_action 时复核: 纯通知规则不消耗设备状态, 与改造前一致。
 	if hasDeviceAction(actions) {
-		if reason, ok := p.checkConditionsStillSatisfied(rule); !ok {
-			p.record(rule, at, ev.Value, models.AutomationResultConditionChanged, "", reason)
+		result, reason, ok := p.checkConditionsStillSatisfiedWithSource(rule, ev)
+		if !ok {
+			if result == "" {
+				result = models.AutomationResultConditionChanged
+			}
+			p.record(rule, at, ev.Value, result, "", reason, &ev)
 			return
 		}
 	}
-	p.executeActions(rule, at, ev.Value, actions)
+	p.executeActions(rule, at, ev.Value, actions, &ev)
 }
 
 // hasDeviceAction 报告动作集合里是否存在 device_action。
@@ -311,10 +376,10 @@ func (p *Planner) nextTriggerSeq(ctx context.Context, ruleID uint, at time.Time,
 // (少执行一个动作), 参数不同 → ErrIdempotencyCollision (规则误报失败)。
 // 两种情况都不可接受, A-5 用反例钉死。
 func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value float64,
-	actions []models.AutomationRuleAction) {
+	actions []models.AutomationRuleAction, src *TriggerEvent) {
 	if len(actions) == 0 {
 		p.record(rule, at, value, models.AutomationResultFailedDispatch, "",
-			"rule has no actions")
+			"rule has no actions", src)
 		return
 	}
 
@@ -330,7 +395,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		actorID, err = p.resolveSystemActorID()
 		if err != nil {
 			eventID := p.recordRet(rule, at, value, models.AutomationResultFailedDispatch, "",
-				"system actor unavailable: "+err.Error())
+				"system actor unavailable: "+err.Error(), src)
 			p.notifySystemActorUnavailableOnce(at, eventID, err)
 			return
 		}
@@ -352,7 +417,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		params, err := parseActionParams(act)
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), false,
-				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error())
+				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error(), src)
 			return
 		}
 		idemKey := fmt.Sprintf("automation:%d:%s:%d:%d",
@@ -372,7 +437,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		})
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), true,
-				classifyDeviceActionError(err), err.Error())
+				classifyDeviceActionError(err), err.Error(), src)
 			return
 		}
 		executed++
@@ -397,12 +462,12 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 	//   · 一个动作都没有 ⇒ 上面已按 failed_dispatch 返回, 到不了这里。
 	if executed == 0 && notified > 0 {
 		p.record(rule, at, value, models.AutomationResultNotification, "",
-			fmt.Sprintf("notified via %d action(s)", notified))
+			fmt.Sprintf("notified via %d action(s)", notified), src)
 		return
 	}
 
 	// 至少一个设备动作成功 → executed (+ 冷却锚点, 取触发时刻 at)。
-	p.recordExecuted(rule, at, value, lastCommandID)
+	p.recordExecuted(rule, at, value, lastCommandID, src)
 }
 
 // recordActionFailure 记录第 k 个动作失败时的事件行 (方案 §6.3 状态机)。
@@ -417,7 +482,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 // (熔断/冷却/条件失效/纯通知) 保持 NULL。
 func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, value float64,
 	act models.AutomationRuleAction, executed, total int, hasActionDim bool,
-	result, detail string) {
+	result, detail string, src *TriggerEvent) {
 	if executed > 0 {
 		result = models.AutomationResultPartialFailure
 		detail = fmt.Sprintf("第 %d/%d 个动作失败, 已中止剩余动作 (已成功 %d 个): %s",
@@ -430,6 +495,7 @@ func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, 
 		Detail:      detail,
 		CreatedAt:   at,
 	}
+	applySourceColumns(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -467,7 +533,8 @@ func parseActionParams(act models.AutomationRuleAction) (json.RawMessage, error)
 //
 // fail-open 边界: 与 recordRet 一致, 写失败只告警不阻塞控制流 —— 但【两者一起失败】,
 // 不会出现"一半事实"。返回事件 ID (0=写失败), 供需要透传的调用方使用。
-func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value float64, commandID string) uint {
+func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value float64,
+	commandID string, src *TriggerEvent) uint {
 	var eventID uint
 	err := p.db.Transaction(func(tx *gorm.DB) error {
 		ev := models.AutomationEvent{
@@ -477,6 +544,7 @@ func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value
 			CommandID:   commandID,
 			CreatedAt:   at,
 		}
+		applySourceColumns(&ev, src)
 		if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 			ev.TriggerValue = &value
 		}
@@ -511,58 +579,165 @@ func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value
 	return eventID
 }
 
-// checkConditionsStillSatisfied F4 条件复核: 用最新值缓存重查 rule 的所有 conditions
-// 与 trigger 条件。任一不满足则返回 (原因, false), 由调用方落 condition_changed。
+// checkConditionsStillSatisfied F4 条件复核（保留旧签名，供既有测试/调用方使用）。
 //
-// 语义边界: 与 evaluator 的 compare 同源同语义, 不复用避免 automation→evaluator
-// 编译期依赖。latestValueFn 为 nil 时 (未接线) 返回 true 跳过复核, 保持既有行为。
+// 语义：返回 (原因, 是否仍满足)。unresolved_selector 与 condition_changed 在旧签名里
+// 都表现为 ok=false；需要区分结果码的调用方用 checkConditionsStillSatisfiedDetailed。
 func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (string, bool) {
-	if p.latestValueFn == nil {
-		return "", true // 未注入最新值查询, 跳过复核 (兼容旧接线)
+	_, reason, ok := p.checkConditionsStillSatisfiedDetailed(rule)
+	return reason, ok
+}
+
+// selectorOutcome 是一次 F4 复核的单 selector 结论。
+type selectorOutcome struct {
+	ok         bool   // 是否拿到了可用于复核的值
+	satisfied  bool   // ok=true 时：条件是否仍满足
+	value      float64
+	reason     string
+	unresolved bool // true = selector 解析不到（落 unresolved_selector，而不是 condition_changed）
+}
+
+// checkConditionsStillSatisfiedDetailed F4 条件复核（修 AU-12）。
+//
+// 原实现的缺陷（AU-12）：固定用"每设备最后一条最新值"复核，special selector（@soc /
+// family / virtual）既无法命中（名字不等 ⇒ trigger 一律拒绝；conditions 一律跳过），
+// 于是 selector 规则在 F4 阶段被静默拦死/漏判。修法（设计 §9.2#4）：
+//   - literal：优先 (device, 物理名) 精确最新值（api.LatestValueBySensor）；
+//     未接线时回落旧单值缓存（保持既有语义）；
+//   - family/@semantic/virtual：用最新一帧多槽值 + 解析层 plan + EvalPredicate；
+//   - 取不到 ⇒ fail-closed 并落审计（unresolved_selector / field_resolver_disabled）。
+//
+// 返回 (result, reason, ok)：ok=false 时调用方决定落哪条事件；result="" 表示
+// condition_changed（条件已失效），否则是解析层专用的结果码。
+// checkConditionsStillSatisfiedDetailed 保留旧签名（既有测试/调用方）：
+// 等价于"无触发证据的存量规则"路径；生产 HandleTrigger 走
+// checkConditionsStillSatisfiedWithSource（带 SourceEdgeDeviceID 证据）。
+func (p *Planner) checkConditionsStillSatisfiedDetailed(rule models.AutomationRule) (string, string, bool) {
+	return p.checkConditionsStillSatisfiedWithSource(rule, newTriggerEvent(rule, time.Time{}, 0, "", nil))
+}
+
+// checkConditionsStillSatisfiedDetailedLegacy 是 M0 之前的实现（仅作行为参照保留，
+// 生产与测试入口都走上面的委托版本；删除会让"F4 有两份实现"的漂移风险重现，
+// 因此保留但不再被调用）。**不要在此新增逻辑**。
+func (p *Planner) checkConditionsStillSatisfiedDetailedLegacy(rule models.AutomationRule) (string, string, bool) {
+	// 未接线（旧构造/单测）：跳过复核，保持既有行为。
+	if p.latestValueFn == nil && p.latestValueBySensorFn == nil &&
+		p.latestValuesFn == nil && p.planProvider == nil {
+		return "", "", true
 	}
 	conds, err := rule.ParseConditions()
 	if err != nil {
-		return fmt.Sprintf("invalid conditions_json: %v", err), false
+		return "", fmt.Sprintf("invalid conditions_json: %v", err), false
 	}
 	// 触发器设备 ID 为 0 时无法定位最新值, 跳过复核 (不推荐配置, 见模型注释)
 	if rule.TriggerEdgeDeviceID == 0 {
-		return "", true
+		return "", "", true
 	}
-	rec, ok := p.latestValueFn(rule.TriggerEdgeDeviceID)
-	if !ok {
-		return fmt.Sprintf("latest value unavailable for edge_device_id=%d", rule.TriggerEdgeDeviceID), false
-	}
+	deviceID := rule.TriggerEdgeDeviceID
+
 	// Trigger 条件复核 (仅 sensor_threshold; time_window 由 evaluator 保证)。
-	//
-	// **必须先比对传感器名**：最新值缓存每设备只留一条记录（`map[edge_device_id]UnifiedData`），
-	// 它可能是**别的**物理量。不比对就比数值，等于拿 humidity 的值去和温度阈值比 ——
-	// 实测（修复前）：规则「temperature > 50」+ 缓存「humidity 80」被判为「仍满足」，
-	// 于是**条件已失效却照常执行动作**（fail-open，方向危险）。
-	//
-	// 缓存里不是本触发器传感器时：无法复核 ⇒ 保守判为「不再满足」并说明原因。
-	// 这与下方附加条件「无法复核则跳过」的取舍不同 —— 此处决定**是否执行动作**，
-	// 判不准时应偏向不执行（fail-closed），而不是拿无关数值蒙一个结论。
 	if rule.TriggerType == models.AutomationTriggerSensorThreshold {
-		if rec.SensorName != rule.TriggerSensorName {
-			return fmt.Sprintf("trigger sensor %q not in latest-value cache (cache holds %q); "+
-				"cannot re-verify, refusing to execute", rule.TriggerSensorName, rec.SensorName), false
+		out := p.evalSelectorLatest(deviceID, rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold)
+		if out.unresolved {
+			return resolverResultCode(out.reason), out.reason, false
 		}
-		if !compare(rule.TriggerComparator, rec.Value, rule.TriggerThreshold) {
-			return fmt.Sprintf("trigger condition no longer satisfied: %s %.2f vs threshold %.2f",
-				rule.TriggerComparator, rec.Value, rule.TriggerThreshold), false
+		if !out.ok {
+			return "", out.reason, false
+		}
+		if !out.satisfied {
+			return "", fmt.Sprintf("trigger condition no longer satisfied: %s %.2f vs threshold %.2f",
+				rule.TriggerComparator, out.value, rule.TriggerThreshold), false
 		}
 	}
-	// 附加条件复核 (全部 AND; SensorName 匹配 UnifiedData.SensorName)
+
+	// 附加条件复核 (全部 AND)。
 	for _, c := range conds {
-		if c.SensorName != rec.SensorName {
-			continue // 附加条件不可复核时跳过（不阻断执行），与 trigger 的 fail-closed 取舍不同
+		out := p.evalSelectorLatest(deviceID, c.SensorName, c.Comparator, c.Threshold)
+		if out.unresolved {
+			return resolverResultCode(out.reason), out.reason, false
 		}
-		if !compare(c.Comparator, rec.Value, c.Threshold) {
-			return fmt.Sprintf("condition %s %s %.2f no longer satisfied: latest=%.2f",
-				c.SensorName, c.Comparator, c.Threshold, rec.Value), false
+		if !out.ok {
+			// 历史语义：literal 附加条件无法复核时跳过（不阻断执行）；但特殊 selector
+			// 的"取不到"就是解析失败，必须 fail-closed（AU-12 的另一半）。
+			if isSpecialSelector(c.SensorName) {
+				return ResultUnresolvedSelector, out.reason, false
+			}
+			continue
+		}
+		if !out.satisfied {
+			return "", fmt.Sprintf("condition %s %s %.2f no longer satisfied: latest=%.2f",
+				c.SensorName, c.Comparator, c.Threshold, out.value), false
 		}
 	}
-	return "", true
+	return "", "", true
+}
+
+// resolverResultCode 把解析层失败原因映射为 automation_events.result。
+// kill switch 关闭 ⇒ field_resolver_disabled（运维处置不同），其余 ⇒ unresolved_selector。
+func resolverResultCode(reason string) string {
+	if strings.Contains(reason, "disabled") {
+		return ResultFieldResolverDisabled
+	}
+	return ResultUnresolvedSelector
+}
+
+// evalSelectorLatest 按 selector 形态取"最新值"并复核一个比较条件。
+func (p *Planner) evalSelectorLatest(deviceID uint, selector, comparator string, threshold float64) selectorOutcome {
+	if isSpecialSelector(selector) {
+		if p.planProvider == nil {
+			return selectorOutcome{unresolved: true, reason: "field_resolver_not_configured"}
+		}
+		if !p.planProvider.Enabled() {
+			return selectorOutcome{unresolved: true, reason: "field_resolver_disabled"}
+		}
+		if p.latestValuesFn == nil {
+			return selectorOutcome{unresolved: true, reason: "latest_frame_unavailable"}
+		}
+		plan, err := p.planProvider.Compile(deviceID, selector)
+		if err != nil {
+			return selectorOutcome{unresolved: true, reason: "compile_failed:" + sensorfield.ErrorCode(err)}
+		}
+		verdict := sensorfield.EvalPredicate(plan, readingsFromUnified(p.latestValuesFn(deviceID)),
+			sensorfield.CmpOp(comparator), threshold)
+		if !verdict.OK {
+			return selectorOutcome{unresolved: true, reason: verdict.Reason}
+		}
+		return selectorOutcome{ok: true, satisfied: verdict.Satisfied, value: verdict.Value}
+	}
+
+	// literal（含 legacy 值）：优先精确到物理名的最新值。
+	if p.latestValueBySensorFn != nil {
+		rec, found := p.latestValueBySensorFn(deviceID, selector)
+		if !found || rec.SensorName != selector {
+			return selectorOutcome{reason: fmt.Sprintf("latest value unavailable for sensor %q on edge_device_id=%d", selector, deviceID)}
+		}
+		return selectorOutcome{ok: true, satisfied: compare(comparator, rec.Value, threshold), value: rec.Value}
+	}
+	// 回落旧单值缓存：必须比对传感器名（防"拿 humidity 的值比温度阈值"）。
+	if p.latestValueFn != nil {
+		rec, found := p.latestValueFn(deviceID)
+		if !found {
+			return selectorOutcome{reason: fmt.Sprintf("latest value unavailable for edge_device_id=%d", deviceID)}
+		}
+		if rec.SensorName != selector {
+			return selectorOutcome{reason: fmt.Sprintf("trigger sensor %q not in latest-value cache (cache holds %q); "+
+				"cannot re-verify, refusing to execute", selector, rec.SensorName)}
+		}
+		return selectorOutcome{ok: true, satisfied: compare(comparator, rec.Value, threshold), value: rec.Value}
+	}
+	return selectorOutcome{reason: "latest value source unavailable"}
+}
+
+// readingsFromUnified 把最新值快照转成解析层帧视图（保留顺序；零业务依赖）。
+func readingsFromUnified(values []models.UnifiedData) []sensorfield.Reading {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]sensorfield.Reading, len(values))
+	for i := range values {
+		out[i] = sensorfield.Reading{Name: values[i].SensorName, Value: values[i].Value, Unit: values[i].Unit}
+	}
+	return out
 }
 
 // isGateError 判定 commandexec 返回错误是否属于 availability gate fail-closed
@@ -621,15 +796,107 @@ func classifyDeviceActionError(err error) string {
 	}
 }
 
+// automationActionSetHash 是动作集合的**归一化**哈希（Y5 TOCTOU 快照）。
+//
+// 归一化要求（Lead 2026-10-21 裁决）：按 (type, target, params) 排序后哈希，忽略
+// 展示字段（enabled/action_level/seq 重排本身）—— 只改通知级别不该让 pending 失效。
+// 用无分隔符歧义的定长编码（长度前缀），避免 "a|b" 与 "a" + "b" 撞哈希。
+func automationActionSetHash(actions []models.AutomationRuleAction) string {
+	type entry struct {
+		typ     string
+		target  uint
+		action  string
+		params  string
+	}
+	entries := make([]entry, 0, len(actions))
+	for _, a := range actions {
+		if a.ActionType != models.AutomationActionDeviceAction {
+			continue // 通知动作没有物理副作用，不参与"动作是否变了"的判定
+		}
+		entries = append(entries, entry{
+			typ:    a.ActionType,
+			target: a.ActionDeviceID,
+			action: a.ActionID,
+			params: canonicalActionParams(a.ActionParamsJSON),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].target != entries[j].target {
+			return entries[i].target < entries[j].target
+		}
+		if entries[i].action != entries[j].action {
+			return entries[i].action < entries[j].action
+		}
+		if entries[i].params != entries[j].params {
+			return entries[i].params < entries[j].params
+		}
+		return entries[i].typ < entries[j].typ
+	})
+	h := sha256.New()
+	for _, e := range entries {
+		fmt.Fprintf(h, "%d:%s|%d:%s|%d:%s|%d:%s;", len(e.typ), e.typ, len(e.action), e.action,
+			len(e.params), e.params, 0, "")
+		fmt.Fprintf(h, "%d;", e.target)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// canonicalActionParams 把 params JSON 规范化为稳定字符串（键序无关）。
+// 非法 JSON 原样返回（哈希仍可用于"变了"的判定）。
+func canonicalActionParams(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "{}"
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return trimmed
+	}
+	canonical, err := json.Marshal(v)
+	if err != nil {
+		return trimmed
+	}
+	return string(canonical)
+}
+
+// recordPendingConfirm 落 pending_confirm 事件（含动作集合哈希快照，Y5）。
+func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time, value float64,
+	actions []models.AutomationRuleAction, src *TriggerEvent) uint {
+	ev := models.AutomationEvent{
+		RuleID:      rule.ID,
+		TriggeredAt: at,
+		Result:      models.AutomationResultPendingConfirm,
+		Detail:      "awaiting manual confirmation",
+		ActionHash:  automationActionSetHash(actions),
+		CreatedAt:   at,
+	}
+	applySourceColumns(&ev, src)
+	// Y5 + D-8：pending 期间来源可能切换，confirm 必须能证明"来源没变"。
+	// 存量单设备规则 source_hash 为空（不启用比对，保持兼容）。
+	if src != nil && src.SourceKind != "" {
+		ev.SourceHash, ev.SourceEvidence = p.pendingSourceSnapshot(rule, src)
+	}
+	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
+		ev.TriggerValue = &value
+	}
+	if err := p.db.Create(&ev).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+		logger.Warn("automation: failed to record pending_confirm event", "rule_id", rule.ID, "error", err)
+		return 0
+	}
+	p.broadcastAutomationEvent(rule, ev, value, "")
+	return ev.ID
+}
+
 // record 落审计行 (fail-open: 写失败只计指标不阻塞, 对齐 alert 风格)。
 func (p *Planner) record(rule models.AutomationRule, at time.Time, value float64,
-	result, commandID, detail string) {
-	p.recordRet(rule, at, value, result, commandID, detail)
+	result, commandID, detail string, src *TriggerEvent) {
+	p.recordRet(rule, at, value, result, commandID, detail, src)
 }
 
 // recordRet 同 record, 但返回落库事件 ID (0=写失败)。确认分流需 eventID 透传通知。
 func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value float64,
-	result, commandID, detail string) uint {
+	result, commandID, detail string, src *TriggerEvent) uint {
 	ev := models.AutomationEvent{
 		RuleID:      rule.ID,
 		TriggeredAt: at,
@@ -638,6 +905,8 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 		Detail:      detail,
 		CreatedAt:   at,
 	}
+	// 来源归因（方案 §4.4）：group 规则的事件必须能回答"谁供的数"。
+	applySourceColumns(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -1180,6 +1449,23 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 	actions := p.ruleActions(rule)
 	if len(actions) == 0 {
 		return ev, ErrConfirmActionChanged
+	}
+	// Y5 TOCTOU（裁决 B）：pending 时快照的动作集合必须与**当前**动作集合一致。
+	// 只比对非空快照（ActionHash 列上线前的历史 pending 事件为空，保持兼容）。
+	if ev.ActionHash != "" {
+		if current := automationActionSetHash(actions); current != ev.ActionHash {
+			return ev, ErrConfirmActionChanged
+		}
+	}
+	// D-8 来源 TOCTOU：pending 期间组状态（active/成员/版本）变化 ⇒ 用户确认的
+	// 决策依据已不存在，拒绝执行（与动作变更同语义）。空串 = 存量/单设备事件，跳过。
+	if ev.SourceHash != "" {
+		current, ok := p.currentSourceSnapshot(rule)
+		if !ok || current != ev.SourceHash {
+			logger.Warn("automation: confirm rejected, source group changed while pending",
+				"rule_id", rule.ID, "event_id", ev.ID)
+			return ev, ErrConfirmActionChanged
+		}
 	}
 
 	reason := fmt.Sprintf("automation:confirm:%d", rule.ID)

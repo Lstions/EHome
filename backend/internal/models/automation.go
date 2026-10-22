@@ -82,6 +82,24 @@ const (
 	//
 	// 每节点每日本事件只落一次 (与 recordSuppressed 同款同窗节流, 防刷量)。
 	AutomationResultSuppressedNoSolarEvent = "suppressed_no_solar_event"
+
+	// ── 来源组结果码（方案《规则数据来源与复合来源》N-18 / D-7；共 5 个）──
+	//
+	// 为什么单列一组：来源失败与动作失败**语义不同**（前者是"没拿到可信数据"，
+	// 后者是"拿到了但执行失败"）。混进 detail 文本前缀会让运维无法按 result 聚合
+	// 统计，也无法在仿真/门禁里做枚举一致性校验。代价是必须同步三处：
+	// 本文件常量、simulation/catalog/audit.go 白名单、前端 AutomationEventResult。
+	// 三向一致性由 TestAutomationResultWhitelistMatchesModelConstants（models↔sim）
+	// 与 scripts/check_source_group.sh SG-16（含前端 union）共同钉住。
+	//
+	// AutomationResultSourceMemberChanged 触发成员已非 active / 组已删改（F4 FC-1/FC-5）。
+	//   这是**安全拦截**：决策所依据的权威成员已经换了人，不能用新成员的值给旧决策背书。
+	AutomationResultSourceMemberChanged = "source_member_changed"
+	// AutomationResultSourceStale 触发证据过期（F4 FC-2；仅来源组规则启用，存量豁免）。
+	AutomationResultSourceStale = "source_stale"
+	// AutomationResultSourceDegraded 复合组带降级求值（有成员缺席但策略允许继续）。
+	//   必须与 Degraded=true 一起落 members_json，否则用户以为"1+2 融合"其实只有一台。
+	AutomationResultSourceDegraded = "source_degraded"
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -155,6 +173,16 @@ type AutomationRule struct {
 	TriggerWindowEnd    string  `gorm:"size:5" json:"trigger_window_end,omitempty"`   // "HH:MM"
 	TriggerWindowEdge   string  `gorm:"size:8" json:"trigger_window_edge,omitempty"`
 	TriggerEdgeDeviceID uint    `gorm:"index" json:"trigger_edge_device_id,omitempty"` // sensor_threshold 目标设备 (0=任意设备上报该字段即触发, 不推荐)
+
+	// ── 数据来源引用（方案《规则数据来源与复合来源》§4.3；NULL = 存量老路）──
+	//
+	// SourceKind edge_device | source_group；SourceGroupID 指向 source_groups.id。
+	// 两列必须用指针承载 SQL NULL（五态校验见 models/source_ref.go）。
+	// 回退铁律（方案 N-7）：绑来源组时必须同时双写非 0 的 TriggerEdgeDeviceID
+	//（= 组锚点成员），旧二进制忽略新列后退化为「只看锚点成员」，而不是
+	//「任意设备上报即触发」—— 后者是静默乱触发，不可接受。
+	SourceKind    *string `gorm:"size:20;index" json:"source_kind,omitempty"`
+	SourceGroupID *uint   `gorm:"index" json:"source_group_id,omitempty"`
 
 	// ── Trigger: sun_event (日出/日落, 用户裁决 O-3/O-4) ──
 	//
@@ -252,6 +280,17 @@ type AutomationRule struct {
 	// 与"子表为唯一权威"的裁决直接冲突。
 	Actions []AutomationRuleAction `gorm:"-" json:"actions,omitempty"`
 
+	// ── 解析层统计 (设计/数据字段解析层-方案-2026-10-21.md §10, M1 新增列) ──
+	//
+	// 与 AlertRule 同名同义（ResolveCount/MatchCount/LastMatchedAt）:
+	//   ResolveCount  该规则 selector **成功解析**的累计次数；
+	//   MatchCount    解析成功且条件满足的累计次数；
+	//   LastMatchedAt 最近一次条件满足的时刻（nil = 从未满足）。
+	// 写入纪律：由 automation evaluator 每 60s 批量刷，禁止每帧写 DB（§10）。
+	ResolveCount  int64      `gorm:"default:0" json:"resolve_count"`
+	MatchCount    int64      `gorm:"default:0" json:"match_count"`
+	LastMatchedAt *time.Time `json:"last_matched_at,omitempty"`
+
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `gorm:"index" json:"-"` // 软删, 保留历史归因
@@ -271,12 +310,38 @@ type AutomationEvent struct {
 	Result        string    `gorm:"size:32;not null;index" json:"result"`
 	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
 	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
+	// ActionHash 是 pending 事件创建时对「动作集合」做的归一化哈希快照（Y5 TOCTOU 修复）。
+	//
+	// 背景：ConfirmEvent 在人工确认时会**重读 DB 规则**并按当前动作集合执行；
+	// pending 期间动作被修改 ⇒ 会执行用户从未确认过的新动作（安全缺陷）。
+	// 写入本列后，confirm 前重新计算并比对，不一致即拒绝执行（比对逻辑由
+	// automation 包实现；本列只是快照载体，避免 automation_events 无动作证据）。
+	//
+	// 归一化约定（auto-analyst 实现，双方共同遵守）：动作按 (type,target,params)
+	// 排序后 sha256 → 小写十六进制串。空串 = 历史行/非确认路径事件（无快照）。
+	ActionHash string `gorm:"size:64" json:"action_hash,omitempty"`
+
 	// ActionSeq 记录多动作执行中"失败/部分失败发生在第几个动作" (方案 §5.1.4)。
 	//
 	// 为什么可空: 规则级事件 (suppressed_daily_limit / pending_confirm / 纯通知等)
 	// 没有动作维度, NULL 表达"无动作维度", 而不是用 0 冒充"第 0 个动作"。
 	// 多动作下的失败事件才填 seq (1 起, 与 automation_rule_actions.seq 同域)。
-	ActionSeq *int      `json:"action_seq,omitempty"`
+	ActionSeq *int `json:"action_seq,omitempty"`
+
+	// ── 来源快照（方案 §4.4；NULL = 存量事件）──
+	//
+	// 为什么必须有：规则绑来源组后，「这次触发到底谁供的数、各成员值多少、
+	// 哪个缺席」无法从触发值反推（方案 E8 可追溯性）。MembersJSON 是
+	// [{member_id,edge_device_id,value,age_ms,state}] 的序列化快照。
+	SourceKind         *string `gorm:"size:20" json:"source_kind,omitempty"`
+	SourceGroupID      *uint   `json:"source_group_id,omitempty"`
+	SourceEdgeDeviceID *uint   `json:"source_edge_device_id,omitempty"`
+	MembersJSON        string  `gorm:"type:text" json:"members_json,omitempty"`
+	// SourceHash / SourceEvidence 是 Y5 pending_confirm 的来源快照（方案 D-8）：
+	// pending 期间 active 可能切换，confirm 时比对不一致即拒绝执行（TOCTOU）。
+	SourceHash     string `gorm:"size:64" json:"source_hash,omitempty"`
+	SourceEvidence string `gorm:"type:text" json:"source_evidence,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 

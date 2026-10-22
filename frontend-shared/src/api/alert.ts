@@ -14,6 +14,9 @@ export interface AlertRule {
   id: number
   target_type: AlertTargetType
   target_id: number
+  /** 数据来源（方案 v0.3 §4.3）：NULL = 存量 target_type 老路 */
+  source_kind?: 'edge_device' | 'source_group'
+  source_group_id?: number
   sensor_name: string
   comparator: AlertComparator
   threshold: number
@@ -29,6 +32,9 @@ export interface AlertRule {
 export interface CreateAlertRuleRequest {
   target_type: AlertTargetType
   target_id: number
+  /** 来源组（source_kind='source_group' 时必填；target_* 由后端双写锚点） */
+  source_kind?: 'edge_device' | 'source_group'
+  source_group_id?: number
   sensor_name: string
   comparator: AlertComparator
   threshold: number
@@ -42,6 +48,8 @@ export interface CreateAlertRuleRequest {
 export interface UpdateAlertRuleRequest {
   target_type?: AlertTargetType
   target_id?: number
+  source_kind?: 'edge_device' | 'source_group'
+  source_group_id?: number
   sensor_name?: string
   comparator?: AlertComparator
   threshold?: number

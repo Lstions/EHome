@@ -4,11 +4,14 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ehome/backend/internal/datasource"
+	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // 数据源主备 HTTP 层（设计/数据源主备与故障转移.md v1.0 §7 冻结契约）。
@@ -45,10 +48,13 @@ type updateDataSourceRequest struct {
 }
 
 // registerDataSourceRoutes 注册 /api/v1/data-sources 下的 9 条契约路由。
-func registerDataSourceRoutes(ds *gin.RouterGroup, svc *datasource.Service) {
+//
+// db 只用于保存期 category 校验（设计/数据字段解析层-方案-2026-10-21.md v0.3 §9.2#8）；
+// nil 时跳过该校验（单测/embedding 场景保持旧行为）。
+func registerDataSourceRoutes(ds *gin.RouterGroup, svc *datasource.Service, db *gorm.DB) {
 	ds.GET("", listDataSources(svc))
 	ds.GET("/:id", getDataSource(svc))
-	ds.POST("", createDataSource(svc))
+	ds.POST("", createDataSource(svc, db))
 	ds.PUT("/:id", updateDataSource(svc))
 	ds.DELETE("/:id", deleteDataSource(svc))
 	ds.POST("/:id/activate", activateDataSource(svc))
@@ -168,11 +174,16 @@ func getDataSource(svc *datasource.Service) gin.HandlerFunc {
 }
 
 // POST /api/v1/data-sources
-func createDataSource(svc *datasource.Service) gin.HandlerFunc {
+func createDataSource(svc *datasource.Service, db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req createDataSourceRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			Error(c, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		// 保存期 category 校验（一期只字面量 + 是否上报过；特殊 selector 拒绝）。
+		if code, msg := validateDataSourceCategory(db, req.EdgeDeviceID, req.Category); msg != "" {
+			ErrorWithCode(c, http.StatusBadRequest, code, msg)
 			return
 		}
 		item, err := svc.Create(datasource.CreateInput{
@@ -300,6 +311,64 @@ func getDataSourceHealth(svc *datasource.Service) gin.HandlerFunc {
 		}
 		Success(c, items)
 	}
+}
+
+// validateDataSourceCategory 是 POST /data-sources 的保存期校验（方案 v0.3 §9.2#8 / §9.4）。
+//
+// 一期缩范围（评审 C5 裁决）：data_sources.category **只支持字面量物理名**：
+//  1. 特殊 selector（@semantic / virtual:x / prefix_*）一律拒绝 —— 组键必须与
+//     unified_data.sensor_name 逐字节一致；让组键走解析层会把数据面依赖带进
+//     数据源域（违反方案 §3.2 红线：datasource 一期不依赖 sensorfield）。
+//  2. 校验该边缘设备是否**上报过**该物理名：否则组键永远等不到 MarkSuccess，
+//     会被停滞扫描误熔断（与数据源域 DG 类缺陷同一失效方向）。
+//
+// 未接线（currentSelectorResolver()==nil，单测/embedding）时跳过校验，保持旧行为；
+// 与 alert/automation 保存期校验的"未接线不校验"口径一致。
+func validateDataSourceCategory(db *gorm.DB, edgeDeviceID uint, category string) (string, string) {
+	resolver := currentSelectorResolver()
+	if resolver == nil {
+		return "", ""
+	}
+	cat := strings.TrimSpace(category)
+	if cat == "" {
+		// 空值由领域层给统一的 "category is required"（单一事实源），这里不抢答。
+		return "", ""
+	}
+	if strings.HasPrefix(cat, "@") || strings.HasPrefix(cat, "virtual:") || strings.Contains(cat, "_*") {
+		code := "invalid_selector_syntax"
+		if !resolver.Enabled() {
+			code = "field_resolver_disabled"
+		}
+		return code, "data_sources.category 一期只支持字面量物理名，不接受 selector: " + cat
+	}
+	if db == nil || edgeDeviceID == 0 {
+		return "", ""
+	}
+	if dataSourceCategoryObserved(db, edgeDeviceID, cat) {
+		return "", ""
+	}
+	return "category_not_observed", "边缘设备 " + strconv.FormatUint(uint64(edgeDeviceID), 10) +
+		" 尚未上报字段 " + cat + "，无法作为数据源类别（请先让该设备成功上报一帧）"
+}
+
+// dataSourceCategoryObserved 判断某边缘设备是否上报过该物理名。
+//
+// 双查（投影优先、unified_data 兜底）：sensor_field_obs 每 observe_interval（默认 60s）
+// 批量刷新，比 unified_data 滞后；若只查投影，刚上报的新字段会被误判"未上报"。
+func dataSourceCategoryObserved(db *gorm.DB, edgeDeviceID uint, category string) bool {
+	var count int64
+	if err := db.Model(&models.SensorFieldObs{}).
+		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
+		Count(&count).Error; err == nil && count > 0 {
+		return true
+	}
+	// 投影表可能尚未建（老库/单测）或滞后：回落 unified_data 的 device_id（= EdgeDevice.ID）。
+	if err := db.Model(&models.UnifiedData{}).
+		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
+		Limit(1).Count(&count).Error; err == nil && count > 0 {
+		return true
+	}
+	return false
 }
 
 // GET /api/v1/devices/:id/failover-logs?category=&limit=

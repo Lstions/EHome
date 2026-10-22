@@ -1,0 +1,18 @@
+# ===== 生产链 literal 性能基线（10a）（REFERENCE BASELINE，非 main 基线）=====
+# bench: BenchmarkAutomationLiteralPath (pkg=./internal/automation)
+# note: 生产链 literal 走 legacy matchField（G-6），新层成本不计入回归
+# 为什么不是 main：main d406dc2d 上不存在 sensorfield/selector 集成，无法在 main 录基线。
+# 局限（诚实边界）：本机（AMD Ryzen 5 5600）与并行负载下录制，单次波动大；
+#   ±5% 阈值受机器/负载影响，是 D1 门槛的近似判据，不是发布级 SLA。
+# commit: 57a6b4f8 (style(field-resolver): gofmt 对齐（空行/字段列宽，无语义变化）)
+# date: 2026-10-21T22:49:24+08:00
+# recorded_by: scripts/check_field_semantics.sh --record-bench-baseline
+goos: linux
+goarch: amd64
+pkg: ehome/backend/internal/automation
+cpu: AMD Ryzen 5 5600 6-Core Processor              
+BenchmarkAutomationLiteralPath-12    	 4203802	        57.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAutomationLiteralPath-12    	 4218831	        57.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAutomationLiteralPath-12    	 4198222	        56.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAutomationLiteralPath-12    	 4079772	        59.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAutomationLiteralPath-12    	 3992576	        56.62 ns/op	       0 B/op	       0 allocs/op

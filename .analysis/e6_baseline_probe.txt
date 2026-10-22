@@ -1,0 +1,55 @@
+package automation
+
+// e6_baseline_prefix_bug_test.go —— 只在**基线**代码树上运行的 bug 复现探针。
+//
+// 为什么单独一个文件：基线的 F4 复核入口是 checkConditionsStillSatisfied(rule)，
+// 它能力上只能拿到 rule.TriggerEdgeDeviceID —— 这正是 bug 的成因（用逻辑 ID 当物理 ID）。
+// 修复后的代码树用 checkConditionsStillSatisfiedWithSource(rule, ev) 并优先吃
+// ev.SourceEdgeDeviceID，编译不过这个文件（无 checkConditionsStillSatisfied(rule) 单参签名）。
+//
+// 因此本文件在两个树上「只有一个能编译」，这是**故意的**：
+//   - 基线：编译通过 ⇒ 必须红（确认 bug）
+//   - 修复后：编译失败 ⇒ 门禁据此判定「基线探针不适用于当前树」，走当前树的探针
+//
+// 门禁 check_e6_prefix_bug.sh 用法：把本文件拷进基线 worktree 后跑，期望 FAIL。
+
+import (
+	"testing"
+
+	"ehome/backend/internal/models"
+)
+
+func TestE6Baseline_F4QueriesLogicalIDNotTriggerMember(t *testing.T) {
+	const (
+		physicalEdgeID = uint(101)
+		logicalID      = uint(7)
+	)
+	var queried []uint
+	p := &Planner{}
+	p.SetLatestValueBySensorFn(func(deviceID uint, sensorName string) (models.UnifiedData, bool) {
+		queried = append(queried, deviceID)
+		if deviceID == physicalEdgeID {
+			return models.UnifiedData{DeviceID: physicalEdgeID, SensorName: "illuminance", Value: 600}, true
+		}
+		return models.UnifiedData{}, false
+	})
+	rule := models.AutomationRule{
+		ID: 1, Enabled: true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		TriggerEdgeDeviceID: logicalID,
+	}
+	reason, ok := p.checkConditionsStillSatisfied(rule)
+	if ok {
+		t.Fatalf("基线 F4 复核意外通过（queried=%v）—— 探针前提不成立，bug 可能已不存在", queried)
+	}
+	for _, id := range queried {
+		if id == logicalID {
+			t.Fatalf("BASELINE-BUG-CONFIRMED: F4 用逻辑 ID %d 查最新值（触发成员实际是 %d）⇒ 规则被静默拦死；reason=%q",
+				logicalID, physicalEdgeID, reason)
+		}
+	}
+	t.Fatalf("基线 F4 复核失败但未查询逻辑 ID（queried=%v, reason=%q）—— 探针前提不成立", queried, reason)
+}

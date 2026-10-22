@@ -29,6 +29,7 @@ import (
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/seed"
+	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/transport"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
@@ -237,6 +238,26 @@ func main() {
 	registerSimulationDriverTypes(driverRegistry)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
+	// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md v0.3 §3.3/§4.2/§9.2#10):
+	// 构造 Registry → 注入声明/别名/派生 → 冷加载投影表 → 启动 projector。
+	//
+	// 时序要求（写死，改动前先读方案）：
+	//   - 必须在 database.AutoMigrate 之后（冷加载要读 sensor_field_obs/meta）；
+	//   - 必须先于下面 nodemgr.SetLatestSinkFn 的包装（观测采集点要引用同一 registry）；
+	//   - 必须先于 alert/automation 求值器构造（SetPlanProvider 注入同一实例）。
+	// fail-closed：配置无效（别名冲突/死候选/派生环）时 setupFieldResolver 返回 error，
+	// 这里 Fatal 拒绝启动（方案 §12.1）；投影表读失败只降级"仅声明"。
+	fieldResolver, err := setupFieldResolver(db, cfg, driverRegistry)
+	if err != nil {
+		logger.Fatalf("Field resolver startup failed (fail-closed): %v", err)
+	}
+	// 保存期 selector 校验注入（precheck / alert / automation / data_sources 的校验路径共用）：
+	// 经 api 包窄接口注入，不影响未接线时的旧行为（nil = 不校验）。
+	api.SetFieldSelectorResolver(fieldResolver.registry)
+	fieldResolverCtx, fieldResolverStop := context.WithCancel(context.Background())
+	defer fieldResolverStop()
+	go fieldResolver.projector.Run(fieldResolverCtx)
+
 	// 数据生命周期 P4 收尾 (方案 v3.3 §2.4-2/§七-3): 尽力回填
 	// config_templates.edge_device_id 归属。依赖 driverRegistry 已就绪
 	// (WriteData 匹配需 driver CommandTemplates); 幂等, 失败仅告警不阻断
@@ -277,7 +298,14 @@ func main() {
 	}
 	defer devTransport.stop()
 
-	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
+	// 数据字段解析层观测采集点（方案 §3.3 红线 1 + 评审 B1 的处置）：
+	// **包装既有注入点**，internal/databus 零改动、零 import。每条已入库记录：
+	// 既有行为（更新最新值缓存）+ 新增纯内存观测计数（sync.Map + atomic，无锁无 DB）。
+	// device_id 口径 = UnifiedData.DeviceID = EdgeDevice.ID（禁用 edge_device_id，DS-14）。
+	nodeMgr.SetLatestSinkFn(func(record models.UnifiedData) {
+		api.SetLatestValue(record)
+		fieldResolver.registry.Observe(record.DeviceID, record.SensorName, record.Unit, record.Timestamp)
+	})
 	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
 	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
 	//
@@ -305,6 +333,15 @@ func main() {
 	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的
 	// 用户价值来源 —— 无人值守时把告警推到微信/QQ。
 	alertEvaluator.SetNotifier(notifyDispatcher)
+	// 数据字段解析层控制面注入 (方案 §9.2#3): 告警求值同样按 selector 编译。
+	//
+	// ⚠ **仅当开关打开时注入**（lead 2026-10-21 性能裁决）：provider 为 nil 时
+	// evaluator/alert 走 legacy 逐字节兼容路径（纯字面量直接 matchField，不付
+	// 编译缓存查找/谓词求值的固定开销）。无条件注入会让 enabled=false 的纯字面量
+	// 求值多付 ~58ns/次（基线 1ns，+5700%，impl-core 基准实测）。
+	if fieldResolver.registry.Enabled() {
+		alertEvaluator.SetPlanProvider(fieldResolver.registry)
+	}
 	nodeMgr.SetAlertEvaluator(alertEvaluator)
 	go alertEvaluator.Start()
 	defer alertEvaluator.Stop()
@@ -356,6 +393,53 @@ func main() {
 	defer dataSourceStop()
 	go datasourceSvc.Start(dataSourceCtx)
 
+	// ── 来源组引擎（设计/规则数据来源与复合来源-方案-2026-10-22.md v0.3 §4/§5.5）──
+	//
+	// 与 datasourceSvc 并列的第二条数据源引擎：datasourceSvc 管 (逻辑设备,类别) 的成员台账，
+	// groupSvc 管「一个数据来源」对象（主备/复合，跨逻辑设备）。两者共用同一套 R1–R11 决策
+	// 纯函数（ds-analyst 保证），但各自的表与状态互不干扰。
+	//
+	// 三个失败即拒绝启动（fail-closed，不许带病运行）：
+	//   1. PublishAll 内置 SelfCheck —— composite 组存在 active 行 / 同组多 active 行；
+	//   2. Registry 是求值热路径的唯一真值来源，没有它规则会 fail-closed 到「永不触发」；
+	//   3. 钩子负责清窗与审计，未接线时只能靠窗口 identity 兜底（S3），可用但更迟。
+	sourceGroupReg := sourceref.NewRegistry()
+	sourceGroupSvc := datasource.NewGroupService(db, datasource.Options{})
+	sourceGroupSvc.SetGroupRegistry(sourceGroupReg)
+	sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)
+	// 规则保存期需要它做来源绑定校验（组存在/enabled/锚点非 0/cooldown 推导下限）。
+	// 不注入时 api 层会按 db 惰性构造一个只读实例兜底 —— 功能可用，但每次保存多一次
+	// 构造开销，且与这里的实例状态不同源。显式注入是唯一正确做法。
+	api.SetRuleSourceGroupService(sourceGroupSvc)
+	// 快照发布 + 自检：composite 组误置 active 或同组多 active 会让「用哪一台」不确定，
+	// 必须在启动期拒绝，而不是运行期静默取第一条。
+	if err := sourceGroupSvc.PublishAll(); err != nil {
+		// fail-closed：来源组配置自相矛盾（composite 组误置 active / 同组多 active）
+		// 会让「到底用哪一台供数」不确定。带病启动比不启动更危险。
+		logger.Fatalf("source_group: 启动自检失败（拒绝启动）：%v", err)
+	}
+	// 分发器与扫描器在这里启动；切换**钩子**要等两引擎构造完才能注册（见下方 automation 段）。
+	sourceGroupCtx, sourceGroupStop := context.WithCancel(context.Background())
+	defer sourceGroupStop()
+	go sourceGroupSvc.RunDispatcher(sourceGroupCtx)
+	go sourceGroupSvc.Start(sourceGroupCtx)
+	// 钩子通道溢出后的兜底重载：dispatcher 的变更通道是固定缓冲，突发变更
+	// （批量导入 / 脚本操作）会溢出并丢通知。丢了不重载 ⇒ 快照陈旧 ⇒ 规则继续按
+	// 旧 active 过滤，而且**没有任何告警**。这个循环是那条失效路径的唯一出口
+	// （架构终审 H-5：DirtySinceLastReload 原先无消费方，是个死安全阀）。
+	go sourceGroupSvc.RunDirtyReloader(sourceGroupCtx, 5*time.Second)
+
+	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；
+	// 设备离线 ⇒ 两边都 MarkFailure。漏接一条会让该引擎「永不切换」（静默失效）。
+	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
+		datasourceSvc.MarkSuccess(edgeDeviceID, names, at)
+		sourceGroupSvc.MarkSuccess(edgeDeviceID, names, at)
+	})
+	offlineDetector.SetDeviceOfflineHook(func(edgeDeviceID uint) {
+		datasourceSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
+		sourceGroupSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
+	})
+
 	// systemActorPrecheckID 可能为 0 (全新安装): 语义是"待 Planner 惰性解析", 不是有效 actor。
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorPrecheckID)
 	// 自动化策略通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 日熔断 / 待人工确认 /
@@ -364,7 +448,54 @@ func main() {
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)
+	// F4 复核按 selector 取最新值（设计 §9.2#4 / AU-12）：
+	//   literal  → 按 (设备, 物理名) 精确取（新增函数，不改旧签名）；
+	//   family/@semantic/virtual → 最新一帧多槽值（复核输入需要整帧）。
+	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	automationPlanner.SetLatestValuesFn(api.LatestValues)
 	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
+	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物。
+	// 与 alert 同理：**仅 enabled=true 时注入**，否则保持 legacy 快速路径（见上方说明）。
+	if fieldResolver.registry.Enabled() {
+		automationEvaluator.SetPlanProvider(fieldResolver.registry)
+		automationPlanner.SetPlanProvider(fieldResolver.registry)
+	}
+
+	// ── 来源组接线（方案 §5.2 / §6.1 / §12.2.2）──
+	//
+	// 注入顺序有硬约束：两引擎的 SetSourceResolver 必须在**开始接收帧之前**完成，
+	// 否则最早几帧会走「resolver 未接线」路径（安全但会产生 unresolved_selector
+	// 噪声审计，detail 里带 f4_fail_reason=source_resolver_not_configured）。
+	//
+	// 两引擎 + planner 共用同一份快照：帧求值（MatchFrame）与 F4 复核读的必须是
+	// 同一个 revision，否则会出现「求值时是 A 供数、复核时快照已切到 B」的口径分裂。
+	automationEvaluator.SetSourceResolver(sourceGroupReg)
+	automationPlanner.SetSourceResolver(sourceGroupReg)
+	automationEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	alertEvaluator.SetSourceResolver(sourceGroupReg)
+	alertEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
+
+	// 切换钩子：ActiveChange 只在**事务提交后**发射（datasource 侧保证）。三件事 ——
+	//   ① 两引擎立即清窗：**加速**，不是正确性前提（窗口 identity 不匹配即清，S3）；
+	//   ② 关闭告警的陈旧 firing（S4）：换人后旧「正在告警」不再代表权威来源；
+	//   ③ 落审计：运维要知道换了谁、为什么换。
+	// 求值期降级可见性：sourceref 的缺席/陈旧判定发生在**求值侧**，只有那里知道
+	// 「这次为什么 unbound」。不接这个回调，规则会正确地 fail-closed，但
+	// source_group_health（运维看板）一片空白 —— 用户以为来源组健康，实际已不可用。
+	// 三处注入共用同一方法值：GroupService 内部按 (group_id, reason) 1 分钟节流，
+	// 所以每帧调用是安全的。
+	automationEvaluator.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+	automationPlanner.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+	alertEvaluator.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+
+	sourceGroupSvc.SetActiveChangeHook(func(ev datasource.ActiveChange) {
+		alertEvaluator.OnSourceTransition(ev.GroupID)
+		automationEvaluator.OnSourceTransition(ev.GroupID)
+		logger.Infof("[source_group] active change group=%d %d->%d reason=%s trigger=%s rev=%d seq=%d",
+			ev.GroupID, ev.PrevMemberID, ev.NextMemberID, ev.Reason, ev.Trigger, ev.Revision, ev.TransitionSeq)
+	})
+
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
@@ -505,7 +636,7 @@ func main() {
 	// notifyDispatcher 一并交给 API 层: POST /notification-channels/:id/test 要用它真发
 	// 一条测试消息 (D-1 步骤 4)。传的是**同一个实例** —— 否则"测试按钮"与真实通知
 	// 走两套客户端/两套 SSRF 判定的风险, 且测试通过不代表线上通道可用。
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, fieldResolver.registry, api.ControlPolicy{
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
 

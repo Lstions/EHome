@@ -87,6 +87,13 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据源', icon: 'Link' },
       },
       {
+        // 规则数据来源（方案 v0.3）：来源组 = 主备/复合的统一容器，跨逻辑设备绑定成员。
+        path: 'source-groups',
+        name: 'SourceGroupList',
+        component: () => import('@/views/source-group/SourceGroupList.vue'),
+        meta: { title: '来源组', icon: 'Link' },
+      },
+      {
         path: 'data',
         name: 'DataPanel',
         component: () => import('@/views/data/DataPanel.vue'),

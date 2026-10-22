@@ -55,6 +55,12 @@ export type AutomationEventResult =
   | 'confirmation_required'   // 自动路径被确认门拦住 (规则未授权风险动作); 与 failed_dispatch 分开, 是"需人工确认"不是"故障"
   | 'partial_failure'         // 多动作执行到第 k 个失败、剩余已中止 (危险状态: 设备已被改了一半, 需人工介入)
   | 'suppressed_no_solar_event' // 极昼/极夜: 本日无日出/日落事件, 规则本日不触发 (显式审计, 不静默)
+  // ── 来源组结果码（方案《规则数据来源与复合来源》N-18；与后端
+  // models.AutomationResultSource* 及 simulation/catalog/audit.go 白名单逐项一致，
+  // 由 backend/scripts/check_source_group.sh SG-16 三向钉住）
+  | 'source_member_changed'    // 触发成员已非 active / 组已删改 → 安全拦截，不执行
+  | 'source_stale'             // 触发证据过期（仅来源组规则；存量单设备规则豁免）
+  | 'source_degraded'          // 复合组带降级求值（有成员缺席但策略允许继续），必须看 members_json
 
 /** 自动化策略规则 */
 export interface AutomationRule {
@@ -74,6 +80,10 @@ export interface AutomationRule {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  /** 数据来源（方案 v0.3 §4.3）：edge_device = 存量老路（NULL 同义）/ source_group = 来源组 */
+  source_kind?: 'edge_device' | 'source_group'
+  /** 来源组 ID（仅 source_kind=source_group；后端校验并双写锚点 trigger_edge_device_id） */
+  source_group_id?: number
   /** sun_event: 日出/日落二选一 (后端 fail-closed 必填, 方案 V2) */
   trigger_sun_kind?: SunEventKind
   /** sun_event: 相对日出/日落时刻的偏移分钟, **可负** (负=提前), 范围 [-720, 720] */
@@ -194,6 +204,9 @@ export interface CreateAutomationRuleRequest {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  /** 数据来源（方案 v0.3 §4.3）：省略/edge_device = 存量老路；source_group 时由后端双写锚点 */
+  source_kind?: 'edge_device' | 'source_group'
+  source_group_id?: number
   /** sun_event 必填 (后端 V2) */
   trigger_sun_kind?: SunEventKind
   /** 偏移分钟, 可负; 缺省 0 (恰好在事件时刻) */
@@ -232,6 +245,8 @@ export interface UpdateAutomationRuleRequest {
   trigger_window_end?: string
   trigger_window_edge?: AutomationWindowEdge
   trigger_edge_device_id?: number
+  source_kind?: 'edge_device' | 'source_group'
+  source_group_id?: number
   trigger_sun_kind?: SunEventKind
   trigger_sun_offset_min?: number
   latitude?: number

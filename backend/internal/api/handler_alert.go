@@ -1,10 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sensorfield"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -42,6 +45,9 @@ type createAlertRuleRequest struct {
 	Level       string   `json:"level"`
 	Enabled     *bool    `json:"enabled"`
 	Name        string   `json:"name"`
+	// ── 数据来源（方案 §4.3 / N-6 / N-7；SG-01/SG-03）──
+	SourceKind    *string `json:"source_kind"`
+	SourceGroupID *uint   `json:"source_group_id"`
 }
 
 type updateAlertRuleRequest struct {
@@ -55,6 +61,9 @@ type updateAlertRuleRequest struct {
 	Level       *string  `json:"level"`
 	Enabled     *bool    `json:"enabled"`
 	Name        *string  `json:"name"`
+	// ── 数据来源（同创建；显式空串 source_kind = 解绑）──
+	SourceKind    *string `json:"source_kind"`
+	SourceGroupID *uint   `json:"source_group_id"`
 }
 
 // registerAlertRoutes 注册阈值告警规则/事件 API (方案 v0.4 §5.1.3 任务C)。
@@ -108,8 +117,21 @@ func createAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 			Error(c, 400, "参数错误: "+err.Error())
 			return
 		}
+		// ── 来源绑定（SG-01/SG-03）：source_group ⇒ 校验组 + 锚点双写到 target_type/target_id（N-7）──
+		sourceBinding, bindErr := resolveRuleSourceBinding(db, req.SourceKind, req.SourceGroupID, 0, false)
+		if respondSourceRefError(c, bindErr) {
+			return
+		}
+		if sourceBinding.IsGroup {
+			req.TargetType = models.AlertTargetEdgeDevice
+			req.TargetID = ptrUint(sourceBinding.AnchorEdgeDeviceID)
+		}
 		if msg := validateAlertRuleFields(req.TargetType, req.TargetID, req.SensorName, req.Comparator, req.Level); msg != "" {
 			ErrorWithCode(c, 400, "invalid_alert_rule", msg)
+			return
+		}
+		if code, msg := validateAlertSensorSelector(req.TargetType, *req.TargetID, req.SensorName); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
 			return
 		}
 		if req.Threshold == nil {
@@ -127,6 +149,14 @@ func createAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 			Level:       req.Level,
 			Enabled:     req.Enabled == nil || *req.Enabled,
 			Name:        req.Name,
+		}
+		if sourceBinding.IsGroup {
+			rule.SourceKind = ptrString(string(models.SourceKindSourceGroup))
+			rule.SourceGroupID = ptrUint(sourceBinding.GroupID)
+			rule.TargetType = models.AlertTargetEdgeDevice
+			rule.TargetID = sourceBinding.AnchorEdgeDeviceID
+		} else if req.SourceKind != nil && *req.SourceKind == string(models.SourceKindEdgeDevice) {
+			rule.SourceKind = req.SourceKind
 		}
 		if err := db.Create(&rule).Error; err != nil {
 			logger.Warn("api: create alert rule failed", "error", err)
@@ -179,8 +209,40 @@ func updateAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 		if req.Level != nil {
 			level = *req.Level
 		}
+		// ── 来源绑定合并 + 校验（SG-01/SG-03）──
+		effKind := ""
+		if req.SourceKind != nil {
+			effKind = *req.SourceKind
+		} else if rule.SourceKind != nil {
+			effKind = *rule.SourceKind
+		}
+		var effKindPtr *string
+		if effKind != "" {
+			effKindPtr = &effKind
+		}
+		var effGroupPtr *uint
+		if effKind == string(models.SourceKindSourceGroup) {
+			if req.SourceGroupID != nil {
+				effGroupPtr = req.SourceGroupID
+			} else if rule.SourceGroupID != nil {
+				effGroupPtr = rule.SourceGroupID
+			}
+		}
+		sourceTouched := req.SourceKind != nil || req.SourceGroupID != nil
+		sourceBinding, bindErr := resolveRuleSourceBinding(db, effKindPtr, effGroupPtr, 0, false)
+		if respondSourceRefError(c, bindErr) {
+			return
+		}
+		if sourceBinding.IsGroup {
+			targetType = models.AlertTargetEdgeDevice
+			targetID = sourceBinding.AnchorEdgeDeviceID
+		}
 		if msg := validateAlertRuleFields(targetType, &targetID, sensorName, comparator, level); msg != "" {
 			ErrorWithCode(c, 400, "invalid_alert_rule", msg)
+			return
+		}
+		if code, msg := validateAlertSensorSelector(targetType, targetID, sensorName); msg != "" {
+			ErrorWithCode(c, 400, code, msg)
 			return
 		}
 		updates := map[string]interface{}{}
@@ -213,6 +275,21 @@ func updateAlertRule(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFunc {
 		}
 		if req.Name != nil {
 			updates["name"] = *req.Name
+		}
+		// ── 来源绑定写回（N-7 / SG-01）──
+		switch {
+		case sourceBinding.IsGroup:
+			updates["source_kind"] = string(models.SourceKindSourceGroup)
+			updates["source_group_id"] = sourceBinding.GroupID
+			updates["target_type"] = models.AlertTargetEdgeDevice
+			updates["target_id"] = sourceBinding.AnchorEdgeDeviceID
+		case sourceTouched:
+			updates["source_group_id"] = nil
+			if req.SourceKind != nil && *req.SourceKind == string(models.SourceKindEdgeDevice) {
+				updates["source_kind"] = string(models.SourceKindEdgeDevice)
+			} else {
+				updates["source_kind"] = nil
+			}
 		}
 		if len(updates) > 0 {
 			if err := db.Model(&models.AlertRule{}).Where("id = ?", id).Updates(updates).Error; err != nil {
@@ -411,4 +488,31 @@ func defaultAlertSilenceSec(v *int) int {
 		return 300
 	}
 	return *v
+}
+
+// validateAlertSensorSelector 保存期校验 sensor_name 的 selector 合法性（设计 §9.2#7）。
+//
+// 规则（设计 §8.5）：保存端点只返回**硬错误**——语法错误/未知语义/未知派生/开关关闭
+// 下的特殊 selector ⇒ 400 + error_code；语法合法但当前解析不到（unbound）**不阻塞**
+// （符号可能尚未上报，属于软告警，precheck 的 warnings 才负责提示）。
+//
+// target_type=logical_device 时 TargetID 不是 EdgeDevice.ID：无法按设备解析
+// （unbound 判定需要设备已知集合），因此只用 deviceID=0 做**语法/语义**校验。
+func validateAlertSensorSelector(targetType string, targetID uint, sensorName string) (string, string) {
+	resolver := currentSelectorResolver()
+	if resolver == nil || strings.TrimSpace(sensorName) == "" {
+		return "", "" // 未接线：保持旧行为（不校验）
+	}
+	deviceID := uint(0)
+	if targetType == models.AlertTargetEdgeDevice {
+		deviceID = targetID
+	}
+	if _, err := resolver.Resolve(deviceID, sensorName); err != nil {
+		code := sensorfield.ErrorCode(err)
+		if code == "" {
+			code = "invalid_alert_rule"
+		}
+		return code, fmt.Sprintf("sensor_name 字段选择器非法 (%s): %v", code, err)
+	}
+	return "", ""
 }

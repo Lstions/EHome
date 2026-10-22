@@ -26,7 +26,7 @@ func newDataSourceAPI(t *testing.T) (*gin.Engine, *gorm.DB, *datasource.Service)
 	r := setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerDataSourceRoutes(v1.Group("/data-sources"), svc)
+	registerDataSourceRoutes(v1.Group("/data-sources"), svc, db)
 	registerFailoverLogRoutes(v1, svc)
 	return r, db, svc
 }

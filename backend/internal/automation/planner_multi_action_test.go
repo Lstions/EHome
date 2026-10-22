@@ -164,14 +164,18 @@ func TestConfirmEventExecutesAllActionsInOrder(t *testing.T) {
 		keys[row.IdempotencyKey] = true
 	}
 	// 冷却锚点 = 原事件的触发时刻 (pending_confirm 落库时刻)。
+	//
+	// 跨方言精度（2026-10-21 修）：PostgreSQL 的 timestamp 精度是**微秒**，SQLite 存
+	// 纳秒（字符串）。ConfirmEvent 从库里重读 ev 后写锚点，故 PG 下锚点是 µs 截断值，
+	// 与内存里的 ns 值永不 Equal —— 原断言在 SQLite 绿、PG 红（PR 里表现为
+	// "冷却锚点=...788932 want ...78893272"）。语义只到"锚点==事件触发时刻"，
+	// 故两侧统一截断到 µs 再比；不改变被测行为，也不会掩盖真实偏差（µs 以上仍会红）。
 	var after models.AutomationRule
 	pl.db.First(&after, rule.ID)
-	// PostgreSQL 的 timestamptz 精度是微秒，而 ev.TriggeredAt 来自 Go 的 time.Now()（纳秒）。
-	// 直接用 Equal 比较会把「同一时刻」判成不等 —— 这曾让 backend-integration 恒红。
-	// 口径：两边都截断到微秒再比（DB 能表达的最大精度）。
+	const dbTimeResolution = time.Microsecond
 	if after.LastTriggeredAt == nil ||
-		!after.LastTriggeredAt.UTC().Truncate(time.Microsecond).Equal(ev.TriggeredAt.UTC().Truncate(time.Microsecond)) {
-		t.Fatalf("冷却锚点=%v want %v（按微秒精度比较）", after.LastTriggeredAt, ev.TriggeredAt)
+		!after.LastTriggeredAt.UTC().Truncate(dbTimeResolution).Equal(ev.TriggeredAt.UTC().Truncate(dbTimeResolution)) {
+		t.Fatalf("冷却锚点=%v want %v", after.LastTriggeredAt, ev.TriggeredAt)
 	}
 }
 

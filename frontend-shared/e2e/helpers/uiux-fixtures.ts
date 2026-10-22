@@ -124,6 +124,15 @@ export const ROUTES: RouteProbe[] = [
     dataShaped: true,
   },
   {
+    // 规则数据来源：来源组管理页（主备/复合统一容器）。
+    name: 'source-groups',
+    path: '/source-groups',
+    root: '.source-group-page',
+    visible: '.el-table__row, .empty-state, [data-test="sg-error"]',
+    settle: '.sg-table, .empty-state, [data-test="sg-error"]',
+    dataShaped: true,
+  },
+  {
     name: 'firmware',
     path: '/firmware',
     root: '.firmware-manage',

@@ -525,10 +525,18 @@ func (s *Service) Deactivate(id uint) (*models.DataSource, error) {
 		if err != nil {
 			return err
 		}
-		if err := tx.Model(&models.DataSource{}).Where("id = ?", candidate.ID).Update("status", StatusActive).Error; err != nil {
+		// 顺序铁律：**先降旧、再升新**。
+		//
+		// 为什么（2026-10-22 来源组方案 D-3 落地时实测发现）：data_sources 上新增了
+		// 部分唯一索引 ux_ds_one_active (device_id,category) WHERE status='active'
+		//（此前「每组至多一条 active」只是应用层假设）。先升新再降旧会在同一事务内
+		// 出现两条 active 行，PG/SQLite 都在语句级检查唯一性 ⇒ 直接报
+		// UNIQUE constraint failed。这不是测试苛求，而是真实存在的双 active 窗口：
+		// 一旦 active 被规则消费，「读到哪条」将变得不确定。
+		if err := tx.Model(&models.DataSource{}).Where("id = ?", target.ID).Update("status", StatusDisabled).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&models.DataSource{}).Where("id = ?", target.ID).Update("status", StatusDisabled).Error; err != nil {
+		if err := tx.Model(&models.DataSource{}).Where("id = ?", candidate.ID).Update("status", StatusActive).Error; err != nil {
 			return err
 		}
 		if err := s.writeFailoverLog(tx, target.DeviceID, target.Category, target.ID, candidate.ID, ReasonManualDeactivate, ""); err != nil {
