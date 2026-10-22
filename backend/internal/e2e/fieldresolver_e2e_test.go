@@ -25,6 +25,7 @@ import (
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/databus"
+	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
@@ -137,14 +138,17 @@ func (s gormObsSink) UpsertObservations(obs []sensorfield.Observation) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type e2eChain struct {
-	db       *gorm.DB
-	node     models.Node
-	channel  models.Channel
-	device   models.EdgeDevice
-	registry *sensorfield.Registry
-	bus      *databus.DataEventBus
-	consumer *signalingConsumer
-	eval     *automation.Evaluator
+	db         *gorm.DB
+	node       models.Node
+	channel    models.Channel
+	device     models.EdgeDevice
+	logical    models.LogicalDevice
+	dataSource models.DataSource
+	registry   *sensorfield.Registry
+	dsSvc      *datasource.Service
+	bus        *databus.DataEventBus
+	consumer   *signalingConsumer
+	eval       *automation.Evaluator
 }
 
 func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
@@ -160,10 +164,25 @@ func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
 	if err := db.Create(&c.channel).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms"}
+	c.logical = models.LogicalDevice{IdentityKey: "jiabaida_bms:3001-e2e:1:1", Name: "BMS-e2e", DeviceType: "jiabaida_bms", RetentionDays: 90}
+	if err := db.Create(&c.logical).Error; err != nil {
+		t.Fatalf("create logical device: %v", err)
+	}
+	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms", LogicalDeviceID: &c.logical.ID}
 	if err := db.Create(&c.device).Error; err != nil {
 		t.Fatalf("create edge device: %v", err)
 	}
+
+	// 数据源域：一个 active 来源，category = 物理名 rsoc（与 unified_data.sensor_name 同域）
+	c.dataSource = models.DataSource{
+		DeviceID: c.logical.ID, Category: "rsoc", EdgeDeviceID: c.device.ID,
+		SourceType: "edge_device", Name: "BMS-RSOC", Priority: 100, IsPrimary: true,
+		MaxFailCount: 3, Status: datasource.StatusActive,
+	}
+	if err := db.Create(&c.dataSource).Error; err != nil {
+		t.Fatalf("create data source: %v", err)
+	}
+	c.dsSvc = datasource.New(db, datasource.Options{})
 
 	// ── 字段解析层 ──
 	c.registry = sensorfield.New(sensorfield.Config{Enabled: true})
@@ -205,6 +224,10 @@ func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
 	})
 	inner.SetAutomationSink(func(edgeDeviceID uint, fields []parser.Field, at time.Time) {
 		c.eval.Evaluate(edgeDeviceID, fields, at)
+	})
+	// 数据源健康回调：与 main.go 的 nodeMgr.SetSourceHealthSink 同语义
+	inner.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
+		c.dsSvc.MarkSuccess(edgeDeviceID, names, at)
 	})
 	c.consumer = &signalingConsumer{inner: inner}
 	c.bus = databus.NewDataEventBus()

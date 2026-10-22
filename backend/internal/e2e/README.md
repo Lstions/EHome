@@ -1,6 +1,6 @@
 # 端到端数据流模拟验证（internal/e2e）
 
-**回答的问题**：模拟一台边缘设备上报一帧真实协议数据后，整条数据流与各功能反馈是否正常。
+**回答的问题**：模拟一台边缘设备上报一帧真实协议数据后，整条数据流（边缘设备 → 数据源 → 规则引擎）与各功能反馈是否正常。
 
 ## 与 simulation/ 的分工
 
@@ -31,14 +31,13 @@ go test -tags=e2e ./internal/e2e/ -count=1
 
 ## 覆盖的场景
 
-1. **完整链路**：jiabaida 0x03 真实帧 → databus → 驱动解析 → unified_data（12 行）→
-   最新值缓存 → 观测投影 sensor_field_obs → 解析层已知字段 → @soc 语义解析 →
-   规则触发 → automation_events(result=notification) + notifications 行。
-2. **族选择器 + 冷启动**：temperature_*:max 在无静态声明的动态族上：首帧 unbound
-   并落审计（不静默）→ 投影刷新后正常求值 → 常温不触发 / 超温触发；并直接验证
-   "缺员降级求值"语义。
+| # | 测试 | 验证链路 |
+|---|---|---|
+| 1 | `TestEdgeDeviceDataFlow_FullChain` | 帧 → databus → 解析 → unified_data(12 行逐值) → 最新值缓存（复现 AU-12 单槽根因 + BySensor 修复）→ 观测投影 → KnownFields → @soc 解析 → 规则触发 → automation_events + notifications |
+| 2 | `TestEdgeDeviceDataFlow_FamilySelectorAndDegraded` | temperature_*:max（无静态声明的动态族）：首帧 unbound 且落审计 → 投影刷新后正常求值 → 常温不触发/超温触发；缺员降级求值语义 |
+| 3 | `TestEdgeDeviceDataFlow_DatasourceThenRule` | **同一帧**驱动数据源域与规则引擎：MarkSuccess 更新 last_success/fail_count → 连续 3 次 MarkFailure ⇒ error + 3 条 health 行、单来源不产生切换日志 → 恢复上报 ⇒ standby + 计数归零；期间 unified_data 持续入库 |
 
 ## 未覆盖（诚实边界）
 
 TLS 握手与设备证书、WebSocket 实时推送、device_action → commandexec 下行、
-阈值告警引擎、数据源健康、前端渲染。
+阈值告警引擎、前端渲染。
