@@ -327,6 +327,22 @@ func (s *Service) Delete(id uint) error {
 					notes = append(notes, s.newNotification(notifyTypeWarning, "数据源降级",
 						fmt.Sprintf("设备 %d 类别 %s 删除权威来源 %d 后无可用备用来源 (degraded)", ds.DeviceID, ds.Category, ds.ID), ds.ID))
 				} else {
+					// 顺序铁律：**先删旧、再升新**（与 Activate/Deactivate 的 D-3 修复同款）。
+					//
+					// 改前这里是「先 Save(candidate) 升 active，再走到函数末尾 Delete(ds)」——
+					// 同一事务内会出现**两条 active 行**，而 data_sources 上有部分唯一索引
+					// ux_ds_one_active (device_id,category) WHERE status='active'（dbschema.EnsureSourceGroupSchema）
+					// ⇒ PG/SQLite 在语句级检查唯一性，Save 当场报 duplicate key。
+					//
+					// 复现（2026-10-23 CI run 39871785449 · Backend (simulation gates)）：
+					//   SIM-DS-002/005/006 的 t.Cleanup 删除主来源（此刻它是 active、且组内还有 standby）
+					//   ⇒ "清理备数据源失败: {\"code\":500,\"data\":null,\"message\":\"internal error\"}"
+					//   以及 PG 日志 "duplicate key value violates unique constraint ux_ds_one_active"。
+					// 单测没抓到是因为旧用例 TestDataSourceDelete_ActivePromotesCandidate 的 SQLite
+					// 测试库当时还没有该部分唯一索引（N-23 补上后，本路径才真正被约束）。
+					if err := tx.Delete(&models.DataSource{}, ds.ID).Error; err != nil {
+						return err
+					}
 					candidate.Status = StatusActive
 					if err := tx.Save(candidate).Error; err != nil {
 						return err
@@ -336,6 +352,9 @@ func (s *Service) Delete(id uint) error {
 					}
 					notes = append(notes, s.newNotification(notifyTypeInfo, "数据源切换",
 						fmt.Sprintf("设备 %d 类别 %s 删除权威来源 %d，来源 %d 接替 (原因: %s)", ds.DeviceID, ds.Category, ds.ID, candidate.ID, ReasonManual), candidate.ID))
+					// 旧行已在本分支内删除：函数末尾的统一 Delete 对已删行是幂等空操作（GORM 按主键删 0 行不报错），
+					// 这里用返回提前结束，避免“删两次”被后人误读成两次写库。
+					return nil
 				}
 			}
 		}

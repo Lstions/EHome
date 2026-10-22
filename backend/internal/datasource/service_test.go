@@ -1006,3 +1006,48 @@ func TestStartExitsOnContextCancel(t *testing.T) {
 		t.Fatal("Start did not exit on context cancel")
 	}
 }
+
+// TestDelete_ActiveWithStandbyCandidate_PromotesWithoutDoubleActive 是 CI run 39871785449
+// (Backend simulation gates) 暴露缺陷的回归钉。
+//
+// 缺陷形态：Delete() 处理「删除 active、组内还有 standby 候选」时，
+// 改前是**先 Save(candidate) 升 active、再在函数末尾 Delete(ds)** ——
+// 同一事务内出现两条 active，撞上 data_sources 的部分唯一索引
+// ux_ds_one_active (device_id,category) WHERE status='active'
+// ⇒ PG/SQLite 语句级检查直接报 duplicate key，整个删除事务回滚。
+//
+// 为什么原有 TestDataSourceDelete_ActivePromotesCandidate 没抓到：
+// 它走 API + seedDataSource，删的 active 是**组内第一条**，
+// 而本用例直接打 Service 层，覆盖「active + standby 候选共存」这条真实路径。
+// （真实触发场景：仿真 SIM-DS-002/005/006 的 t.Cleanup 删主来源时组内仍有备来源。）
+func TestDelete_ActiveWithStandbyCandidate_PromotesWithoutDoubleActive(t *testing.T) {
+	now := time.Now().UTC()
+	svc, db, notes := newTestService(t, &now)
+
+	active := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5})
+	standby := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 1})
+	if active.Status != StatusActive || standby.Status != StatusStandby {
+		t.Fatalf("前置状态不符：active=%q standby=%q", active.Status, standby.Status)
+	}
+
+	if err := svc.Delete(active.ID); err != nil {
+		t.Fatalf("删除 active（组内还有 standby 候选）失败：%v", err)
+	}
+
+	var rows []models.DataSource
+	db.Where("device_id = ? AND category = ?", 1, "temperature").Find(&rows)
+	if len(rows) != 1 {
+		t.Fatalf("期望只剩备来源 1 条，实际 %d 条：%+v", len(rows), rows)
+	}
+	if rows[0].ID != standby.ID {
+		t.Fatalf("剩余的应是备来源 %d，实际 %d", standby.ID, rows[0].ID)
+	}
+	// 候选必须被接替成 active（删除权威来源不能导致该组失去权威）
+	if rows[0].Status != StatusActive {
+		t.Fatalf("备来源接替后状态 = %q，期望 active", rows[0].Status)
+	}
+	// 且必须留下切换审计（谁接替谁、原因）
+	if len(*notes) == 0 {
+		t.Fatal("删除权威来源后未产生「数据源切换」通知")
+	}
+}
