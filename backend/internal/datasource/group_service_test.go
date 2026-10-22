@@ -668,3 +668,212 @@ func TestGroupCompositeMemberDeactivateAllowed(t *testing.T) {
 	}
 }
 
+// ── 16. 求值期降级健康事件：写入 + 节流 + 删除组不写孤儿行（方案 §7.1 E-1/E-2）──
+//
+// 背景：Lead 全链路 e2e（TestSG_E3）实测 composite 因成员陈旧 unbound 时
+// source_group_health 为 0 行 —— 规则 fail-closed 正确、audit 事件有，但运维看板
+// (GET /source-groups/:id/health) 一片正常。本用例锁住"组视角可见"与节流。
+func TestGroupRecordDegradedThrottled(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+
+	healthCount := func() int {
+		rows, err := f.gsvc.Health(group.ID, 50)
+		if err != nil {
+			t.Fatalf("Health: %v", err)
+		}
+		return len(rows)
+	}
+
+	// 同一 (组, 原因) 1 分钟内只写 1 条（模拟热路径每帧回调）。
+	for i := 0; i < 20; i++ {
+		f.now = f.now.Add(time.Second)
+		f.gsvc.RecordDegraded(group.ID, "composite_member_stale")
+	}
+	if got := healthCount(); got != 1 {
+		t.Fatalf("1 分钟内同组同原因应只写 1 条，got %d（节流失效会刷爆健康表）", got)
+	}
+	rows, _ := f.gsvc.Health(group.ID, 50)
+	if rows[0].Event != "degraded" || !containsSub(rows[0].Message, "composite_member_stale") {
+		t.Fatalf("健康事件内容错误: %+v", rows[0])
+	}
+
+	// 不同原因 ⇒ 独立节流键，立即可写。
+	f.gsvc.RecordDegraded(group.ID, "below_min_members")
+	if got := healthCount(); got != 2 {
+		t.Fatalf("不同原因应独立写一条，got %d", got)
+	}
+
+	// 超过节流窗 ⇒ 同一原因可再写。
+	f.now = f.now.Add(61 * time.Second)
+	f.gsvc.RecordDegraded(group.ID, "composite_member_stale")
+	if got := healthCount(); got != 3 {
+		t.Fatalf("超过 1 分钟应再写一条，got %d", got)
+	}
+
+	// 带成员列表的扩展入口：成员 id 进消息。
+	f.now = f.now.Add(61 * time.Second)
+	f.gsvc.RecordDegradedWithMembers(group.ID, "required_member_missing", []uint{11, 22})
+	rows, _ = f.gsvc.Health(group.ID, 50)
+	last := rows[0]
+	if !containsSub(last.Message, "members=11,22") {
+		t.Fatalf("成员列表未拼入消息: %q", last.Message)
+	}
+
+	// 组已删除 ⇒ 不写孤儿健康行（回调可能晚于删除一个求值周期）。
+	f.waitEvents(t, 1)
+	if err := f.gsvc.DeleteGroup(group.ID); err != nil {
+		t.Fatalf("DeleteGroup: %v", err)
+	}
+	f.now = f.now.Add(10 * time.Minute)
+	f.gsvc.RecordDegraded(group.ID, "composite_member_stale")
+	var orphans int64
+	if err := f.db.Model(&models.SourceGroupHealth{}).Where("group_id = ?", group.ID).Count(&orphans).Error; err != nil {
+		t.Fatalf("count health: %v", err)
+	}
+	if orphans != 4 { // 前 4 条保留作审计，但不允许新增
+		t.Fatalf("删除后不应新增健康行: got %d want 4", orphans)
+	}
+}
+
+// containsSub 是测试内极小辅助（避免引入 strings 与后续冲突）。
+func containsSub(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+// ── 17. StalenessSec=0 归一（Lead 裁决 2026-10-22：0 ≠「不过期」，而是"永远过期"）──
+//
+// 背景：CreateGroupInput.StalenessSec 缺省 0 ⇒ GroupSnapshot.Staleness()=0 ⇒
+// at.Sub(ts)>0 恒真 ⇒ 全体成员恒 stale ⇒ 复合规则静默永不触发（edge-analyst 全链路 e2e 实测）。
+func TestGroupNormalizeStalenessOnCreate(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1") // fixture IntervalMs=5000
+
+	// 不传 StalenessSec：2×5s=10s 被下限抬到 30s。
+	g1, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if g1.StalenessSec != 30 {
+		t.Fatalf("interval=5000 应归一为 30s（2×5s 被下限抬起），got %d", g1.StalenessSec)
+	}
+
+	// 空成员组：无 interval ⇒ 60s 兜底（不是 0）。
+	empty, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup empty: %v", err)
+	}
+	if empty.StalenessSec != 60 {
+		t.Fatalf("空成员组应兜底 60s，got %d", empty.StalenessSec)
+	}
+
+	// 60s 采集间隔 ⇒ 2×60s=120s。
+	d2 := f.addEdgeDevice(t, "light-2")
+	if err := f.db.Model(&models.EdgeDevice{}).Where("id = ?", d2.ID).
+		Update("interval_ms", 60000).Error; err != nil {
+		t.Fatalf("set interval: %v", err)
+	}
+	g2, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		Members: []GroupMemberInput{{EdgeDeviceID: d2.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup d2: %v", err)
+	}
+	if g2.StalenessSec != 120 {
+		t.Fatalf("interval=60000 应归一为 120s，got %d", g2.StalenessSec)
+	}
+
+	// 显式非 0 值保留（用户可覆盖）。
+	d3 := f.addEdgeDevice(t, "light-3")
+	g3, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		StalenessSec: 45,
+		Members:      []GroupMemberInput{{EdgeDeviceID: d3.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup explicit: %v", err)
+	}
+	if g3.StalenessSec != 45 {
+		t.Fatalf("显式 staleness 应保留 45，got %d", g3.StalenessSec)
+	}
+}
+
+func TestGroupNormalizeStalenessOnUpdate(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	group, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindPrimaryBackup, Category: "illuminance",
+		StalenessSec: 45, Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	// 显式改成 0 ⇒ 归一为推导值（30s），不落库 0。
+	zero := 0
+	updated, err := f.gsvc.UpdateGroup(group.ID, UpdateGroupInput{StalenessSec: &zero})
+	if err != nil {
+		t.Fatalf("UpdateGroup zero: %v", err)
+	}
+	if updated.StalenessSec != 30 {
+		t.Fatalf("UpdateGroup 传 0 应归一为 30s，got %d", updated.StalenessSec)
+	}
+
+	// 历史脏值（手工 SQL/旧版本写进 0）⇒ 任意 UpdateGroup 都必须回填，不能留着 0。
+	if err := f.db.Model(&models.SourceGroup{}).Where("id = ?", group.ID).
+		Update("staleness_sec", 0).Error; err != nil {
+		t.Fatalf("dirty zero: %v", err)
+	}
+	name := "只改名字"
+	updated2, err := f.gsvc.UpdateGroup(group.ID, UpdateGroupInput{Name: &name})
+	if err != nil {
+		t.Fatalf("UpdateGroup name: %v", err)
+	}
+	if updated2.StalenessSec == 0 {
+		t.Fatalf("历史 0 值必须在 UpdateGroup 时回填（禁止 0 存活）")
+	}
+	if updated2.StalenessSec != 30 {
+		t.Fatalf("回填值应为 30s，got %d", updated2.StalenessSec)
+	}
+}
+
+func TestNormalizeStalenessSecTable(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured int
+		intervals  []int
+		want       int
+	}{
+		{"显式值保留", 45, []int{5000}, 45},
+		{"无成员", 0, nil, 60},
+		{"全零间隔", 0, []int{0, 0}, 60},
+		{"5s 间隔被下限抬起", 0, []int{5000}, 30},
+		{"60s 间隔", 0, []int{60000}, 120},
+		{"超上限截断", 0, []int{3000000}, 3600},
+	}
+	for _, c := range cases {
+		if got := normalizeStalenessSec(c.configured, c.intervals); got != c.want {
+			t.Errorf("%s: normalizeStalenessSec(%d,%v)=%d want %d", c.name, c.configured, c.intervals, got, c.want)
+		}
+	}
+}
+
+
+

@@ -76,40 +76,46 @@ func (p *Planner) checkConditionsStillSatisfiedWithSource(rule models.Automation
 	ref := rule.SourceRef()
 	deviceID := ev.SourceEdgeDeviceID
 	var group *sourceref.GroupSnapshot
+	// F4 失败同样意味着"该组来源已不可用于本决策"，必须让运维可见
+	// （方案 §7.1 E-1/E-2；e2e TestSG_E3 缺口：审计有、健康表没有）。
+	health := func(code, reason string) (string, string, bool) {
+		notifySourceHealth(p.sourceHealthFn, ref.GroupID, code, reason)
+		return code, reason, false
+	}
 
 	if ref.IsGroup() {
 		// FC-4：未接线必须可见地 fail-closed（不能静默跳过组规则）。
 		if p.sourceResolver == nil {
-			return ResultSourceResolverNotConfigured, "f4_fail_reason=source_resolver_not_configured", false
+			return health(ResultSourceResolverNotConfigured, "f4_fail_reason=source_resolver_not_configured")
 		}
 		g, ok := p.sourceResolver.Group(ref.GroupID)
 		if !ok || g == nil {
 			// FC-5：组行已不存在。
-			return ResultSourceMemberChanged, "f4_fail_reason=group_missing", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=group_missing")
 		}
 		if !g.Enabled {
-			return ResultSourceMemberChanged, "f4_fail_reason=group_disabled", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=group_disabled")
 		}
 		if ev.SourceGroupID != 0 && ev.SourceGroupID != ref.GroupID {
-			return ResultSourceMemberChanged, "f4_fail_reason=group_changed", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=group_changed")
 		}
 		// F-9：证据缺失是**显式失败**，不得回落到配置列（把漏填从静默变显式）。
 		if deviceID == 0 {
-			return ResultSourceMemberChanged, "f4_fail_reason=source_edge_device_missing", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=source_edge_device_missing")
 		}
 		member, found := g.MemberOf(deviceID)
 		if !found {
 			// FC-5：成员行已不存在（组被改绑/成员被删）。
-			return ResultSourceMemberChanged, "f4_fail_reason=member_row_missing", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=member_row_missing")
 		}
 		// FC-1：主备组只认 active 成员；触发后切走 ⇒ 拒绝执行（不取新成员的值）。
 		if g.Kind == sourceref.KindPrimaryBackup && g.ActiveMemberID != member.MemberID {
-			return ResultSourceMemberChanged, "f4_fail_reason=member_changed", false
+			return health(ResultSourceMemberChanged, "f4_fail_reason=member_changed")
 		}
 		// FC-2：证据过期 ⇒ 拒绝（陈旧数据为旧决策背书是 fail-open 方向）。
 		if !ev.SourceAt.IsZero() && at.Sub(ev.SourceAt) > g.Staleness() {
-			return ResultSourceStale, fmt.Sprintf("f4_fail_reason=source_stale age=%s",
-				at.Sub(ev.SourceAt).Round(time.Millisecond)), false
+			return health(ResultSourceStale, fmt.Sprintf("f4_fail_reason=source_stale age=%s",
+				at.Sub(ev.SourceAt).Round(time.Millisecond)))
 		}
 		group = g
 	} else {
@@ -134,10 +140,10 @@ func (p *Planner) checkConditionsStillSatisfiedWithSource(rule models.Automation
 			// 复合组：重新按整组最新值合并（不是取触发成员单值）。
 			res, cerr := p.combineGroupLatest(group, rule.TriggerSensorName, at)
 			if cerr != nil {
-				return ResultSourceDegraded, "f4_fail_reason=" + cerr.Error(), false
+				return health(ResultSourceDegraded, "f4_fail_reason="+cerr.Error())
 			}
 			if !res.OK {
-				return ResultSourceDegraded, "f4_fail_reason=" + res.Reason, false
+				return health(ResultSourceDegraded, "f4_fail_reason="+res.Reason)
 			}
 			if !compare(rule.TriggerComparator, res.Value, rule.TriggerThreshold) {
 				return "", fmt.Sprintf("trigger condition no longer satisfied: %s %.2f vs threshold %.2f",

@@ -88,6 +88,9 @@ type Evaluator struct {
 	deviceIntervalFn func(edgeDeviceID uint) time.Duration
 	// rulesByGroup groupID → ruleID 反向索引（切换钩子按组清窗/关卡）。
 	rulesByGroup map[uint][]uint
+	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
+	// 与 automation 同签名同语义；nil=未接线（只落日志，不写健康表）。
+	sourceHealthFn func(groupID uint, reason string)
 
 	stopCh chan struct{}
 	once   sync.Once

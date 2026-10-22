@@ -408,6 +408,10 @@ func main() {
 	sourceGroupSvc := datasource.NewGroupService(db, datasource.Options{})
 	sourceGroupSvc.SetGroupRegistry(sourceGroupReg)
 	sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)
+	// 规则保存期需要它做来源绑定校验（组存在/enabled/锚点非 0/cooldown 推导下限）。
+	// 不注入时 api 层会按 db 惰性构造一个只读实例兜底 —— 功能可用，但每次保存多一次
+	// 构造开销，且与这里的实例状态不同源。显式注入是唯一正确做法。
+	api.SetRuleSourceGroupService(sourceGroupSvc)
 	// 快照发布 + 自检：composite 组误置 active 或同组多 active 会让「用哪一台」不确定，
 	// 必须在启动期拒绝，而不是运行期静默取第一条。
 	if err := sourceGroupSvc.PublishAll(); err != nil {
@@ -474,6 +478,15 @@ func main() {
 	//   ① 两引擎立即清窗：**加速**，不是正确性前提（窗口 identity 不匹配即清，S3）；
 	//   ② 关闭告警的陈旧 firing（S4）：换人后旧「正在告警」不再代表权威来源；
 	//   ③ 落审计：运维要知道换了谁、为什么换。
+	// 求值期降级可见性：sourceref 的缺席/陈旧判定发生在**求值侧**，只有那里知道
+	// 「这次为什么 unbound」。不接这个回调，规则会正确地 fail-closed，但
+	// source_group_health（运维看板）一片空白 —— 用户以为来源组健康，实际已不可用。
+	// 三处注入共用同一方法值：GroupService 内部按 (group_id, reason) 1 分钟节流，
+	// 所以每帧调用是安全的。
+	automationEvaluator.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+	automationPlanner.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+	alertEvaluator.SetSourceHealthFn(sourceGroupSvc.RecordDegraded)
+
 	sourceGroupSvc.SetActiveChangeHook(func(ev datasource.ActiveChange) {
 		alertEvaluator.OnSourceTransition(ev.GroupID)
 		automationEvaluator.OnSourceTransition(ev.GroupID)

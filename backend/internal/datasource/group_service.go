@@ -140,7 +140,23 @@ type GroupService struct {
 
 	seqMu      sync.Mutex
 	transition map[uint]uint64 // groupID -> TransitionSeq（单实例内存；重启归零仅重置窗口身份）
+
+	// 求值期降级健康事件节流（(groupID, reason) 1min 一条；见 RecordDegraded）。
+	// 为什么放内存：热路径每帧都可能判出降级，写入必须廉价且可丢弃；
+	// 节流表丢失（重启）最多多写一条，不影响正确性。
+	degradedMu   sync.Mutex
+	degradedLast map[degradedKey]time.Time
 }
+
+// degradedKey 是降级健康事件节流键（同组同原因 1 分钟内只写一条）。
+type degradedKey struct {
+	GroupID uint
+	Reason  string
+}
+
+// degradedHealthThrottle 是求值期降级健康事件的节流周期（与 automation.sourceAuditInterval
+// 同思路，但更短：健康看板要能看到"最近 1 分钟还在降级"，而不是 5 分钟前的快照）。
+const degradedHealthThrottle = time.Minute
 
 // NewGroupService 构造组服务。opts 与 datasource.New 同源（共享 Cooldown/MinResidency/
 // Staleness/ScanInterval/Now 语义），main.go 应传同一份 Options 值。
@@ -161,10 +177,11 @@ func NewGroupService(db *gorm.DB, opts Options) *GroupService {
 		opts.Now = time.Now
 	}
 	return &GroupService{
-		db:         db,
-		opts:       opts,
-		dispatcher: newActiveChangeDispatcher(),
-		transition: map[uint]uint64{},
+		db:           db,
+		opts:         opts,
+		dispatcher:   newActiveChangeDispatcher(),
+		transition:   map[uint]uint64{},
+		degradedLast: map[degradedKey]time.Time{},
 	}
 }
 
@@ -545,6 +562,91 @@ func (g *GroupService) writeGroupFailoverLog(tx *gorm.DB, groupID uint, from, to
 		Trigger:      trigger,
 		CreatedAt:    g.now(),
 	}).Error
+}
+
+
+// RecordDegraded 是**求值期降级**的健康事件写入入口（方案 §7.1 E-1/E-2：成员陈旧/缺失
+// 必须在组健康表可见，运维看板 GET /source-groups/:id/health 依赖它）。
+//
+// 为什么由求值侧回调：降级判定发生在 sourceref.CombineGroup（automation/alert 求值路径），
+// datasource 不感知求值；因此 main.go 把本方法注入给 automation/alert 的
+// SetSourceDegradedFn（签名 func(groupID uint, reason string)），避免 automation 直接
+// import datasource（三层职责红线）。
+//
+// 节流：同一 (groupID, reason) 1 分钟内只写一条（热路径每帧都可能判降级，不能每帧写库；
+// 丢失窗口最多让看板少一条，不影响 fail-closed 正确性）。
+func (g *GroupService) RecordDegraded(groupID uint, reason string) {
+	g.recordDegraded(groupID, reason, nil)
+}
+
+// RecordDegradedWithMembers 是 RecordDegraded 的扩展：把缺席成员 id 拼进消息，
+// 便于运维直接看到"哪几台没数据"。签名不供 main 默认接线，automation/alert 可按需调用。
+func (g *GroupService) RecordDegradedWithMembers(groupID uint, reason string, memberIDs []uint) {
+	g.recordDegraded(groupID, reason, memberIDs)
+}
+
+func (g *GroupService) recordDegraded(groupID uint, reason string, memberIDs []uint) {
+	if g == nil || groupID == 0 || strings.TrimSpace(reason) == "" {
+		return
+	}
+	now := g.now()
+	key := degradedKey{GroupID: groupID, Reason: reason}
+	g.degradedMu.Lock()
+	if last, ok := g.degradedLast[key]; ok && now.Sub(last) < degradedHealthThrottle {
+		g.degradedMu.Unlock()
+		return
+	}
+	// 顺手清理陈旧节流项，防止长期运行内存膨胀（组/原因数量有限，但仍做上限保护）。
+	if len(g.degradedLast) > 512 {
+		for k, last := range g.degradedLast {
+			if now.Sub(last) > 10*degradedHealthThrottle {
+				delete(g.degradedLast, k)
+			}
+		}
+	}
+	g.degradedLast[key] = now
+	g.degradedMu.Unlock()
+
+	// 组已被删除时不写孤儿健康行（回调可能晚于删除一个求值周期）。
+	var exists int64
+	if err := g.db.Model(&models.SourceGroup{}).Where("id = ?", groupID).Count(&exists).Error; err != nil {
+		logger.Warn("datasource: RecordDegraded group lookup failed", "group_id", groupID, "error", err)
+		return
+	}
+	if exists == 0 {
+		return
+	}
+	msg := "求值期降级: " + reason
+	if len(memberIDs) > 0 {
+		parts := make([]string, 0, len(memberIDs))
+		for _, id := range memberIDs {
+			parts = append(parts, fmt.Sprintf("%d", id))
+		}
+		msg += " (members=" + strings.Join(parts, ",") + ")"
+	}
+	row := models.SourceGroupHealth{
+		GroupID:   groupID,
+		Event:     "degraded",
+		Message:   truncateHealthMessage(msg),
+		CreatedAt: now,
+	}
+	if err := g.db.Create(&row).Error; err != nil {
+		logger.Warn("datasource: RecordDegraded write failed", "group_id", groupID, "error", err)
+	}
+}
+
+// truncateHealthMessage 把消息裁到 source_group_health.message 的 255 字节上限，
+// 且不切断多字节字符（按 rune 边界回退）。
+func truncateHealthMessage(msg string) string {
+	const maxBytes = 255
+	if len(msg) <= maxBytes {
+		return msg
+	}
+	cut := maxBytes
+	for cut > 0 && (msg[cut]&0xC0) == 0x80 { // UTF-8 continuation byte
+		cut--
+	}
+	return msg[:cut]
 }
 
 // newGroupNotification 构造组域通知（复用既有 notify 汇聚点；Source=data_source）。

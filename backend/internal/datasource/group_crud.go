@@ -167,6 +167,80 @@ func (g *GroupService) categoryObserved(db *gorm.DB, edgeDeviceID uint, category
 	return false
 }
 
+
+// normalizeStalenessSec 把 StalenessSec=0 归一为**推导值**（Lead 裁决 2026-10-22：
+// 「0 = 不过期」不是合法语义——它会让 GroupSnapshot.Staleness()=0 ⇒ at.Sub(ts)>0 恒真
+// ⇒ 全体成员恒 stale ⇒ 复合规则静默永不触发）。
+//
+// 推导规则（与 DeriveStaleness 同口径 + 无间隔兜底）：
+//   - 有成员采集间隔 ⇒ 2×最大间隔，下限 30s、上限 3600s；
+//   - 成员为空 / IntervalMs 全 0 ⇒ 60s（不是 0，保证组始终有保守过期窗口）；
+//   - 显式非 0 值原样保留（用户可自行配置）。
+func normalizeStalenessSec(configuredSec int, intervalsMillis []int) int {
+	if configuredSec > 0 {
+		return configuredSec
+	}
+	hasPositive := false
+	for _, ms := range intervalsMillis {
+		if ms > 0 {
+			hasPositive = true
+			break
+		}
+	}
+	if !hasPositive {
+		return 60
+	}
+	sec := int(DeriveStaleness(0, intervalsMillis).Seconds())
+	if sec < 30 {
+		sec = 30
+	}
+	if sec > 3600 {
+		sec = 3600
+	}
+	return sec
+}
+
+// edgeDeviceIntervals 查询一组边缘设备的 IntervalMs（缺失设备按 0 计，不影响推导兜底）。
+func edgeDeviceIntervals(db *gorm.DB, edgeDeviceIDs []uint) []int {
+	if len(edgeDeviceIDs) == 0 {
+		return nil
+	}
+	var intervals []int
+	if err := db.Model(&models.EdgeDevice{}).
+		Where("id IN ?", edgeDeviceIDs).
+		Pluck("interval_ms", &intervals).Error; err != nil {
+		return nil
+	}
+	return intervals
+}
+
+// normalizeStalenessForInputs 用于 CreateGroup / 成员整体替换（成员声明已知）。
+func (g *GroupService) normalizeStalenessForInputs(db *gorm.DB, configuredSec int, inputs []GroupMemberInput) int {
+	ids := make([]uint, 0, len(inputs))
+	for _, in := range inputs {
+		if in.EdgeDeviceID != 0 {
+			ids = append(ids, in.EdgeDeviceID)
+		}
+	}
+	return normalizeStalenessSec(configuredSec, edgeDeviceIntervals(db, ids))
+}
+
+// normalizeStalenessForGroup 用于 UpdateGroup（未替换成员时按当前成员推导）。
+func (g *GroupService) normalizeStalenessForGroup(db *gorm.DB, configuredSec int, groupID uint) int {
+	if configuredSec > 0 {
+		return configuredSec
+	}
+	var members []models.SourceGroupMember
+	if err := db.Where("group_id = ?", groupID).Find(&members).Error; err != nil {
+		return 60
+	}
+	ids := make([]uint, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.EdgeDeviceID)
+	}
+	return normalizeStalenessSec(0, edgeDeviceIntervals(db, ids))
+}
+
 // CreateGroup 创建来源组 + 初始成员；primary_backup 组内首个成员自动 active（R7 反向）。
 func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, error) {
 	if err := validateGroupConfig(in.Kind, in.Category, in.Combine, in.MinMembers, in.OnDegrade); err != nil {
@@ -189,6 +263,8 @@ func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, er
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
+	// StalenessSec=0 ⇒ 归一为推导值（绝不落库 0；见 normalizeStalenessSec 注释）。
+	normalizedStaleness := g.normalizeStalenessForInputs(g.db, in.StalenessSec, in.Members)
 	var out models.SourceGroup
 	var event *ActiveChange
 	err := g.db.Transaction(func(tx *gorm.DB) error {
@@ -198,7 +274,7 @@ func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, er
 			Category:     strings.TrimSpace(in.Category),
 			Combine:      in.Combine,
 			MinMembers:   in.MinMembers,
-			StalenessSec: in.StalenessSec,
+			StalenessSec: normalizedStaleness,
 			OnDegrade:    in.OnDegrade,
 			Enabled:      enabled,
 			Revision:     0,
@@ -320,6 +396,21 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 			minMembers = 1
 		}
 
+		// StalenessSec=0（含"本次不传但库里本来就是 0"的历史脏值）⇒ 归一为推导值，
+		// 绝不把 0 留在 DB（Lead 裁决：0 会让 snapshot.Staleness()=0 ⇒ 全体成员恒 stale）。
+		effectiveStaleness := row.StalenessSec
+		if in.StalenessSec != nil {
+			effectiveStaleness = *in.StalenessSec
+		}
+		stalenessNeedsNormalize := effectiveStaleness <= 0
+		if stalenessNeedsNormalize {
+			if in.Members != nil {
+				effectiveStaleness = g.normalizeStalenessForInputs(tx, 0, *in.Members)
+			} else {
+				effectiveStaleness = g.normalizeStalenessForGroup(tx, 0, row.ID)
+			}
+		}
+
 		updates := map[string]interface{}{}
 		if in.Name != nil && strings.TrimSpace(*in.Name) != "" {
 			updates["name"] = strings.TrimSpace(*in.Name)
@@ -333,8 +424,8 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 		if in.MinMembers != nil {
 			updates["min_members"] = minMembers
 		}
-		if in.StalenessSec != nil {
-			updates["staleness_sec"] = *in.StalenessSec
+		if in.StalenessSec != nil || stalenessNeedsNormalize {
+			updates["staleness_sec"] = effectiveStaleness
 		}
 		if in.OnDegrade != nil {
 			updates["on_degrade"] = onDegrade
@@ -349,7 +440,8 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 		//         enabled（GroupSnapshot.Enabled 变更靠 publish 传播，不改 identity）。
 		identityChanged := in.Members != nil ||
 			in.Combine != nil || in.MinMembers != nil ||
-			in.StalenessSec != nil || in.OnDegrade != nil
+			in.StalenessSec != nil || in.OnDegrade != nil ||
+			stalenessNeedsNormalize // 脏 0 → 推导值会改变求值口径，属身份变更
 		if identityChanged {
 			if _, err := g.bumpGroupRevision(tx, row.ID); err != nil {
 				return err

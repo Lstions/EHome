@@ -7,6 +7,8 @@ package automation
 // 避免"测试替身与真实现漂移"（契约 SG-18 的唯一解析器要求）。
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,3 +350,93 @@ func TestM0LegacyRuleUnaffected(t *testing.T) {
 		t.Fatalf("存量规则触发证据必须为空: %+v", h.events[0])
 	}
 }
+
+// ── Lead 2026-10-22：求值期降级必须写入 source_group_health（E-1/E-2 可见性）──
+
+// 组件陈旧 ⇒ CombineGroup unbound(fail_closed) ⇒ 健康回调必须被调用（1 次判定 1 次）。
+func TestM0SourceHealthCallbackOnCompositeStale(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	r := groupRule(1, string(models.SourceKindSourceGroup), 8)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	reg := sourceref.NewRegistry()
+	reg.Publish(compositeGroup(8, models.OnDegradeFailClosed, models.CombineAvg, 1, 101, 102))
+	ev := NewEvaluator(db, h)
+	ev.SetSourceResolver(reg)
+
+	var calls []string
+	ev.SetSourceHealthFn(func(groupID uint, reason string) {
+		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	now := time.Now()
+	ev.SetLatestValueBySensorFn(func(deviceID uint, sensorName string) (models.UnifiedData, bool) {
+		ts := now
+		if deviceID == 102 {
+			ts = now.Add(-time.Hour) // B 的 last_success 陈旧 > staleness(300s)
+		}
+		return models.UnifiedData{SensorName: sensorName, Value: 60, Timestamp: ts}, true
+	})
+
+	ev.Evaluate(101, illuminanceField(65), now)
+	if len(h.events) != 0 {
+		t.Fatalf("fail_closed + 组件陈旧不得触发，got %d", len(h.events))
+	}
+	if len(calls) != 1 {
+		t.Fatalf("健康回调必须恰被调用 1 次（每次判定 1 次），got %d: %v", len(calls), calls)
+	}
+	if !strings.HasPrefix(calls[0], "8|source_degraded") {
+		t.Fatalf("健康回调参数应为 group=8 + source_degraded 类别，got %q", calls[0])
+	}
+	var n int64
+	db.Model(&models.AutomationEvent{}).Where("rule_id = ? AND result = ?", 1, ResultSourceDegraded).Count(&n)
+	if n == 0 {
+		t.Fatal("审计事件仍必须落库（与健康回调同源判定）")
+	}
+}
+
+// 组不存在/未启用（求值期 member_changed 类）⇒ 健康回调也必须可见。
+func TestM0SourceHealthCallbackOnGroupMissing(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	r := groupRule(1, string(models.SourceKindSourceGroup), 9) // 未发布快照
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev := NewEvaluator(db, h)
+	ev.SetSourceResolver(sourceref.NewRegistry())
+	var calls []string
+	ev.SetSourceHealthFn(func(groupID uint, reason string) {
+		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	ev.Evaluate(101, illuminanceField(65), time.Now())
+	if len(calls) != 1 {
+		t.Fatalf("组缺失必须通知健康回调 1 次，got %d: %v", len(calls), calls)
+	}
+	if !strings.HasPrefix(calls[0], "9|source_member_changed") {
+		t.Fatalf("健康回调应带 source_member_changed 类别与组 ID，got %q", calls[0])
+	}
+}
+
+// F4 失败（证据过期）同样属于"组来源不可用"，planner 侧健康回调必须收到。
+func TestM0F4SourceHealthCallbackOnStale(t *testing.T) {
+	at := time.Now()
+	p, r, _ := setupSourceF4(t, 101, 101, at, true)
+	var calls []string
+	p.SetSourceHealthFn(func(groupID uint, reason string) {
+		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	ev := newTriggerEvent(r, at, 60, "", &triggerSource{
+		kind: string(models.SourceKindSourceGroup), groupID: 7, edgeDeviceID: 101,
+		sourceAt: at.Add(-10 * time.Minute),
+	})
+	p.HandleTrigger(ev)
+	if len(calls) != 1 {
+		t.Fatalf("F4 证据过期必须通知健康回调 1 次，got %d: %v", len(calls), calls)
+	}
+	if !strings.HasPrefix(calls[0], "7|source_stale") {
+		t.Fatalf("健康回调应带 source_stale 类别与组 ID，got %q", calls[0])
+	}
+}
+

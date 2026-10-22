@@ -531,3 +531,81 @@ func TestVerifySnapshotInvariants(t *testing.T) {
 	}
 	check("update_priority")
 }
+
+// ── 6. F-4/F-5：非身份字段更新不得 bump ────────────────────────────────────
+//
+// F-1 bump 白名单只含身份/拓扑字段；name/description/enabled 是展示或运行开关，
+// 成员 status=disabled（R8）是运行态（不进 MembersHash）—— 这些都不应重置
+// 窗口 identity（否则改名/禁用一次成员会让 DurationSec 重新累计）。
+
+func TestVerifyRevision_NonIdentityUpdateNoBump(t *testing.T) {
+	f := newVF(t)
+	a, b := f.addDevice("verify-a"), f.addDevice("verify-b")
+	g := f.createPB(a, b)
+	rev0 := f.revision(g.ID)
+	hash0 := f.snapshot(g.ID).MembersHash
+	f.clearEvents()
+
+	// name / description 更新：不 bump、hash 不变、0 事件。
+	name := "renamed-group"
+	desc := "updated description"
+	if _, err := f.gsvc.UpdateGroup(g.ID, UpdateGroupInput{Name: &name, Description: &desc}); err != nil {
+		t.Fatalf("UpdateGroup name/description: %v", err)
+	}
+	if got := f.revision(g.ID); got != rev0 {
+		t.Fatalf("F-4 违反：name/description 更新 bump 了 revision %d → %d", rev0, got)
+	}
+	if got := f.snapshot(g.ID).MembersHash; got != hash0 {
+		t.Fatalf("F-4 违反：name/description 更新改变了 MembersHash")
+	}
+	row := f.group(g.ID)
+	if row.Name != name || row.Description != desc {
+		t.Fatalf("name/description 未写入: %+v", row)
+	}
+	f.expectNoEvents()
+
+	// enabled 开关：不 bump（展示/开关字段，不影响窗口 identity）。
+	disabled := false
+	if _, err := f.gsvc.UpdateGroup(g.ID, UpdateGroupInput{Enabled: &disabled}); err != nil {
+		t.Fatalf("UpdateGroup enabled: %v", err)
+	}
+	if got := f.revision(g.ID); got != rev0 {
+		t.Fatalf("F-4 违反：enabled 开关 bump 了 revision %d → %d", rev0, got)
+	}
+	if f.snapshot(g.ID).Enabled {
+		t.Fatal("快照 Enabled 未更新")
+	}
+	// 恢复启用。
+	enabled := true
+	if _, err := f.gsvc.UpdateGroup(g.ID, UpdateGroupInput{Enabled: &enabled}); err != nil {
+		t.Fatalf("UpdateGroup re-enable: %v", err)
+	}
+	if got := f.revision(g.ID); got != rev0 {
+		t.Fatalf("F-4 违反：重新启用 bump 了 revision %d → %d", rev0, got)
+	}
+	f.expectNoEvents()
+
+	// R8（停用非 active 成员）：不 bump（status 属运行态，不在 MembersHash）。
+	bm := f.memberOf(g.ID, b.ID)
+	if _, err := f.gsvc.DeactivateGroupMember(g.ID, bm.ID); err != nil {
+		t.Fatalf("R8 deactivate standby: %v", err)
+	}
+	if got := f.revision(g.ID); got != rev0 {
+		t.Fatalf("F-5 违反：R8 停用非 active 成员 bump 了 revision %d → %d", rev0, got)
+	}
+	if cur := f.memberOf(g.ID, b.ID); cur.Status != models.SourceMemberStatusDisabled {
+		t.Fatalf("R8 应 disabled，got %q", cur.Status)
+	}
+	f.expectNoEvents()
+
+	// 反证：真正的身份字段变化必须 bump（防"永不 bump"的假绿）。
+	prio := 42
+	if _, err := f.gsvc.UpdateGroup(g.ID, UpdateGroupInput{Members: &[]GroupMemberInput{
+		{EdgeDeviceID: a.ID, Priority: prio},
+	}}); err != nil {
+		t.Fatalf("UpdateGroup priority (positive control): %v", err)
+	}
+	if got := f.revision(g.ID); got <= rev0 {
+		t.Fatalf("正对照失败：priority/成员变更必须 bump，rev0=%d got=%d", rev0, got)
+	}
+}

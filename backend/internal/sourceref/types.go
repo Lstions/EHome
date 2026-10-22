@@ -145,10 +145,23 @@ func (g *GroupSnapshot) MemberOf(edgeDeviceID uint) (MemberSnapshot, bool) {
 	return MemberSnapshot{}, false
 }
 
-// Staleness 返回判定陈旧的时间阈值；<=0 表示不启用陈旧判定。
+// DefaultStaleness 是 StalenessSec 未配置时的兜底阈值（30s）。
+//
+// 为什么必须有兜底，而不是「0 = 不启用陈旧判定」：
+// 求值侧判陈旧用的是 at.Sub(rec.Timestamp) > g.Staleness()。若 0 表示「不启用」并
+// 返回 0，则该比较变成 > 0 —— 只要时间戳比 now 早一点点就【恒为 stale】，于是复合组
+// 的所有成员永远缺席、规则永不触发，而组看板看起来一切正常。
+// 这是本仓「显式零值被当成语义」的又一处陷阱：0 必须是「按默认推导」，
+// 绝不能是「全部过期」。
+//
+// 数据源域在保存期会把 0 归一为推导值（2x最大采集间隔，30s~1h）；这里 30s 是
+// 运行时最后防线，防历史行 / 手工 SQL 写入 0 时再次静默全 stale。
+const DefaultStaleness = 30 * time.Second
+
+// Staleness 返回判定陈旧的时间阈值；未配置（<=0）时返回 DefaultStaleness。
 func (g *GroupSnapshot) Staleness() time.Duration {
 	if g == nil || g.StalenessSec <= 0 {
-		return 0
+		return DefaultStaleness
 	}
 	return time.Duration(g.StalenessSec) * time.Second
 }

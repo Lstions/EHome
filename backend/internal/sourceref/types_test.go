@@ -95,17 +95,22 @@ func TestIsMemberAndMemberOf(t *testing.T) {
 	}
 }
 
-// TestStaleness 覆盖陈旧阈值归一（<=0 = 不启用）。
+// TestStaleness 覆盖陈旧阈值归一（未配置 <=0 => DefaultStaleness 兜底）。
+//
+// 语义变更（2026-10-22，Lead 裁决）：原实现把 <=0 当作「不启用陈旧判定」并返回 0，
+// 但求值侧的比较是 at.Sub(ts) > Staleness()，返回 0 会让该比较【恒真】——
+// 所有成员恒 stale、复合规则永不触发，而组看板一切正常（静默失效）。
+// 现在 <=0 统一返回 DefaultStaleness（30s），并在数据源域保存期归一为推导值。
 func TestStaleness(t *testing.T) {
 	var nilGroup *GroupSnapshot
-	if got := nilGroup.Staleness(); got != 0 {
-		t.Fatalf("nil Staleness = %v", got)
+	if got := nilGroup.Staleness(); got != DefaultStaleness {
+		t.Fatalf("nil Staleness = %v, want DefaultStaleness(%v)", got, DefaultStaleness)
 	}
 	tests := []struct {
 		sec  int
 		want time.Duration
 	}{
-		{0, 0}, {-5, 0}, {1, time.Second}, {60, time.Minute},
+		{0, DefaultStaleness}, {-5, DefaultStaleness}, {1, time.Second}, {60, time.Minute},
 	}
 	for _, tc := range tests {
 		g := &GroupSnapshot{StalenessSec: tc.sec}

@@ -62,6 +62,33 @@ func (e *Evaluator) SetSourceResolver(r SourceResolver) {
 	e.sourceResolver = r
 }
 
+// SetSourceHealthFn 注入「来源降级可见性」回调（写 source_group_health）。
+//
+// 为什么用回调而不是依赖 datasource：automation 不得反向依赖 datasource 包
+// （方案红线），健康写库能力由 main.go 注入（生产实现建议 datasource/sourcegroup
+// 的组健康写入器）。
+//
+// 调用语义：**每次**求值期判定组来源失败都会调用（含审计节流命中的那几次），
+// reason 形如 "source_degraded:no_available_member"（类别:细节），实现方负责
+// 按 (groupID, reason) 节流（建议 1 分钟 1 条），否则高频帧会刷爆健康表。
+// nil = 未接线：只落 automation_events 审计，不写健康表（既有测试不受影响）。
+func (e *Evaluator) SetSourceHealthFn(fn func(groupID uint, reason string)) {
+	e.sourceHealthFn = fn
+}
+
+// notifySourceHealth 是组来源失败的「可见性」单一出口：审计与健康回调同源判定，
+// 避免"审计有、健康表没有"的运维盲区（e2e TestSG_E3 实测缺口）。
+func notifySourceHealth(fn func(groupID uint, reason string), groupID uint, resultCode, reason string) {
+	if fn == nil || groupID == 0 {
+		return
+	}
+	detail := resultCode
+	if reason != "" && reason != resultCode {
+		detail = resultCode + ":" + reason
+	}
+	fn(groupID, detail)
+}
+
 // SetDeviceIntervalFn 注入设备采集间隔查询（S8 gap 上限 = 2×采集间隔）。
 //
 // 为什么用注入而不是查库：Evaluate 是每帧热路径，查 edge_devices 会把 5s 上报
@@ -226,14 +253,14 @@ func (e *Evaluator) matchSourceRule(rule models.AutomationRule, ref models.Sourc
 	edgeDeviceID uint, at time.Time) (sourceref.FrameMatch, bool) {
 	if e.sourceResolver == nil {
 		// E-6：未接线必须可见地 fail-closed，不得静默跳过。
-		e.recordSourceFailure(rule.ID, at, ResultSourceResolverNotConfigured,
+		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultSourceResolverNotConfigured,
 			"source_resolver_not_configured")
 		return sourceref.FrameMatch{}, false
 	}
 	m := e.sourceResolver.MatchFrame(edgeDeviceID, string(ref.Kind), ref.GroupID)
 	if !m.Configured {
 		// 组不存在/未启用：spec 规则无法求值 ⇒ 审计（方案 §7.1 E-4/E-6）。
-		e.recordSourceFailure(rule.ID, at, ResultSourceMemberChanged, m.Reason)
+		e.recordSourceFailure(rule.ID, ref.GroupID, at, ResultSourceMemberChanged, m.Reason)
 		return m, false
 	}
 	if !m.Accepts() {
@@ -251,13 +278,13 @@ func (e *Evaluator) evalCompositeRule(rule models.AutomationRule, m sourceref.Fr
 	deviceID uint, fields []parser.Field, at time.Time) {
 	g := m.Group
 	if g == nil {
-		e.recordSourceFailure(rule.ID, at, ResultSourceMemberChanged, sourceref.ReasonGroupMissing)
+		e.recordSourceFailure(rule.ID, g.ID, at, ResultSourceMemberChanged, sourceref.ReasonGroupMissing)
 		return
 	}
 	if isSpecialSelector(rule.TriggerSensorName) {
 		// M0 口径：复合组的成员读取按字面量物理名（sourceref 不感知 sensorfield）；
 		// 特殊 selector 的逐成员解析留到 M1，当前 fail-closed 并可见。
-		e.recordSourceFailure(rule.ID, at, ResultSourceDegraded, "composite_special_selector_unsupported")
+		e.recordSourceFailure(rule.ID, g.ID, at, ResultSourceDegraded, "composite_special_selector_unsupported")
 		return
 	}
 	res := sourceref.CombineGroup(g, func(ms sourceref.MemberSnapshot) sourceref.Component {
@@ -275,12 +302,12 @@ func (e *Evaluator) evalCompositeRule(rule models.AutomationRule, m sourceref.Fr
 		return comp
 	})
 	if !res.OK {
-		e.recordSourceFailure(rule.ID, at, ResultSourceDegraded, res.Reason)
+		e.recordSourceFailure(rule.ID, g.ID, at, ResultSourceDegraded, res.Reason)
 		return
 	}
 	if res.Degraded {
 		// use_available：允许触发但必须可见（方案 §7.1 E-5 + 12.9.2）。
-		e.recordSourceFailure(rule.ID, at, ResultSourceDegraded, res.Reason)
+		e.recordSourceFailure(rule.ID, g.ID, at, ResultSourceDegraded, res.Reason)
 	}
 	// 附加条件仍按本次上报帧求值（存量语义）。
 	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
@@ -330,7 +357,10 @@ func componentsJSON(comps []sourceref.Component) string {
 //
 // 与 recordUnresolvedSelector 的区别：键里带 result 码，因为同一条规则在不同阶段
 // 可能先 resolver 未接线、后成员切换，两种证据都要留。
-func (e *Evaluator) recordSourceFailure(ruleID uint, at time.Time, resultCode, reason string) {
+func (e *Evaluator) recordSourceFailure(ruleID, groupID uint, at time.Time, resultCode, reason string) {
+	// 健康可见性先于审计节流：即使本条审计被 5 分钟去重压掉，健康回调也必须收到
+	// （Lead 2026-10-22 e2e TestSG_E3：组已不可用但 source_group_health 0 行）。
+	notifySourceHealth(e.sourceHealthFn, groupID, resultCode, reason)
 	if e.db == nil {
 		return
 	}

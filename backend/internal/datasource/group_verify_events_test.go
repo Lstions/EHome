@@ -479,10 +479,13 @@ func TestVerifyEvents_DeleteGroupNextZero(t *testing.T) {
 	if _, ok := f.reg.Group(g.ID); ok {
 		t.Fatal("删除后快照必须移除")
 	}
-	// 观察项（非阻断）：DeleteGroup 直接 dispatcher.emit，未走 commitGroupChange，
-	// 因此事件缺 GroupID/At/Revision/TransitionSeq —— 详见验证报告偏差 D-2。
-	if ev.GroupID == 0 || ev.At.IsZero() {
-		t.Logf("DEVIATION D-2: 删除事件缺 GroupID/At/Revision/TransitionSeq: %+v", ev)
+	// F-2（已修复）：删除事件必须走 commitGroupChange，携带完整身份，
+	// 否则消费方按 GroupID 清窗会失败（多/少都红）。
+	if ev.GroupID != g.ID {
+		t.Fatalf("删除事件 GroupID=%d want %d", ev.GroupID, g.ID)
+	}
+	if ev.Revision == 0 || ev.TransitionSeq == 0 || ev.At.IsZero() {
+		t.Fatalf("删除事件必须含 Revision/TransitionSeq/At: %+v", ev)
 	}
 }
 

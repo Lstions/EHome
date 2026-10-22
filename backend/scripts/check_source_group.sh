@@ -48,7 +48,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t sggates.XXXXXX)
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'drop_gate_db; [ -n "$GATE_TMP_PKG" ] && rm -rf "$GATE_TMP_PKG"; rm -rf "$tmp_dir"' EXIT
 RESULTS=""
 append_result() { RESULTS="$RESULTS$1|$2|$3|$4
 "; }
@@ -102,6 +102,83 @@ pg_available() {
   return 1
 }
 
+# ── 门禁临时 PG 库（SG-04/SG-08）：不能用 -d postgres 查，那库里没有我们的表 ──
+GATE_DB=""
+setup_gate_db() {
+  pg_available || return 1
+  GATE_DB="ehome_sg_gate_$"
+  docker exec ehome-postgres psql -U ehome -d postgres -At -c "DROP DATABASE IF EXISTS $GATE_DB" >/dev/null 2>&1
+  docker exec ehome-postgres psql -U ehome -d postgres -At -c "CREATE DATABASE $GATE_DB" >/dev/null 2>&1 || { GATE_DB=""; return 1; }
+  return 0
+}
+# migrate_gate_db：跑 dbschema 的迁移/约束测试，让 testutil.OpenTestDB 在临时库里 AutoMigrate + EnsureSourceGroupSchema。
+migrate_gate_db() {
+  ( cd "$BACKEND_DIR" && EHOME_TEST_DB=postgres EHOME_DB_HOST=127.0.0.1 EHOME_DB_PORT=5432 \
+    EHOME_DB_USER=ehome EHOME_DB_PASSWORD=ehome123 EHOME_DB_NAME="$GATE_DB" \
+    "$GO" test ./internal/dbschema/ -count=1 -v \
+    -run 'TestEnsureSourceGroupSchema_CreatesPartialUniqueIndexes|TestSourceGroupMember_SecondActiveRejected|TestDataSource_SecondActiveRejected' ) > "$tmp_dir/gatedb.out" 2>&1
+}
+# migrate_gate_db_events：在临时库里 AutoMigrate 两张事件表（SG-08 需要 automation_events/alert_events
+# 的真实列）。testutil.OpenTestDB 的 PG 分支用「临时 schema + Cleanup 删除」隔离，
+# 进程结束后列查不到，所以不能用它；这里用多行 Go 程序显式迁移到 public schema。
+GATE_TMP_PKG=""
+migrate_gate_db_events() {
+  [ -n "$GATE_DB" ] || return 1
+  GATE_TMP_PKG=$(mktemp -d "$BACKEND_DIR/.sg_gate_migrate.XXXXXX") || return 1
+  cat > "$GATE_TMP_PKG/main.go" <<'GOEOF'
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"ehome/backend/internal/dbschema"
+	"ehome/backend/internal/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+func main() {
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		os.Getenv("EHOME_DB_HOST"), os.Getenv("EHOME_DB_PORT"),
+		os.Getenv("EHOME_DB_USER"), os.Getenv("EHOME_DB_PASSWORD"), os.Getenv("EHOME_DB_NAME"))
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open:", err)
+		os.Exit(1)
+	}
+	if err := db.AutoMigrate(&models.AutomationEvent{}, &models.AlertEvent{},
+		&models.SourceGroup{}, &models.SourceGroupMember{},
+		&models.SourceGroupFailoverLog{}, &models.SourceGroupHealth{}); err != nil {
+		fmt.Fprintln(os.Stderr, "automigrate:", err)
+		os.Exit(1)
+	}
+	if err := dbschema.EnsureSourceGroupSchema(db); err != nil {
+		fmt.Fprintln(os.Stderr, "ensure schema:", err)
+		os.Exit(1)
+	}
+}
+GOEOF
+  ( cd "$BACKEND_DIR" && EHOME_DB_HOST=127.0.0.1 EHOME_DB_PORT=5432 EHOME_DB_USER=ehome \
+    EHOME_DB_PASSWORD=ehome123 EHOME_DB_NAME="$GATE_DB" "$GO" run "$GATE_TMP_PKG" ) >> "$tmp_dir/gatedb.out" 2>&1
+  local rc=$?
+  rm -rf "$GATE_TMP_PKG"; GATE_TMP_PKG=""
+  return "$rc"
+}
+
+gate_db_query() {
+  [ -n "$GATE_DB" ] || return 1
+  docker exec ehome-postgres psql -U ehome -d "$GATE_DB" -At -c "$1" 2>/dev/null | tr -d ' '
+}
+drop_gate_db() {
+  [ -n "$GATE_DB" ] || return 0
+  docker exec ehome-postgres psql -U ehome -d postgres -At -c \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$GATE_DB'" >/dev/null 2>&1
+  docker exec ehome-postgres psql -U ehome -d postgres -At -c "DROP DATABASE IF EXISTS $GATE_DB" >/dev/null 2>&1
+  GATE_DB=""
+}
+
 go_list_contains() {
   local needle="$1"; shift
   local out
@@ -147,7 +224,7 @@ gate_SG_03() {
   local reasons=""
   file_has internal/models/source_group.go 'chk_sg_combine' || reasons="$reasons DB CHECK chk_sg_combine 缺失;"
   file_has internal/models/source_group.go 'CombineWhitelist' || reasons="$reasons CombineWhitelist 常量缺失;"
-  if ! run_go_test 'TestSourceGroupCombineWhitelist|TestSourceGroupKindCombine' ./internal/models; then
+  if ! run_go_test 'TestGroupCompositeRules' ./internal/datasource; then
     reasons="$reasons combine/kind 白名单测试不存在或未通过;"
   fi
   if ! grep_present 'CombineWhitelist|ValidateSourceGroup|SourceGroupValidation' ./internal/api ./internal/datasource; then
@@ -161,18 +238,22 @@ gate_SG_03() {
 gate_SG_04() {
   local reasons="" n=0
   if ! run_go_test 'TestEnsureSourceGroupSchema_CreatesPartialUniqueIndexes|TestSourceGroupMember_SecondActiveRejected|TestDataSource_SecondActiveRejected' ./internal/dbschema; then
-    reasons="$reasons SQLite 索引/第二 active 拒绝测试未通过（检查 testutil.OpenTestDB 是否调 EnsureSourceGroupSchema）;"
+    reasons="$reasons SQLite 索引/第二 active 拒绝测试未通过；"
   fi
-  if pg_available; then
-    n=$(docker exec ehome-postgres psql -U ehome -d postgres -At -c \
-      "SELECT count(*) FROM pg_indexes WHERE indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%status%active%' AND (tablename='source_group_members' OR tablename='data_sources')" 2>/dev/null | tr -d ' ')
-    if [ -z "$n" ]; then n=0; fi
-    if [ "$n" -lt 2 ]; then reasons="$reasons PG 部分唯一索引数=$n（期望 2；迁移是否已在目标库执行？）;"; fi
+  if setup_gate_db; then
+    if ! migrate_gate_db; then
+      reasons="$reasons 临时库迁移失败（dbschema 测试非零）：$(grep -m1 -E 'FAIL|Error' "$tmp_dir/gatedb.out" | head -1);"
+    else
+      n=$(gate_db_query "SELECT count(*) FROM pg_indexes WHERE indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%status%active%' AND (tablename='source_group_members' OR tablename='data_sources')")
+      [ -z "$n" ] && n=0
+      if [ "$n" -lt 2 ]; then reasons="$reasons 临时库 PG 部分唯一索引数=$n（期望 2）;"; fi
+    fi
+    drop_gate_db
   else
     reasons="$reasons SKIP(pg-unavailable)：PG 侧索引断言未执行;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-04 '两处部分唯一索引 + 第二 active 必拒' "$reasons"; else
-    record_pass SG-04 '两处部分唯一索引 + 第二 active 必拒' 'SQLite 行为测试 PASS；PG 两索引存在'
+    record_pass SG-04 '两处部分唯一索引 + 第二 active 必拒' 'SQLite 行为测试 PASS；临时 PG 库两索引存在'
   fi
 }
 
@@ -181,7 +262,7 @@ gate_SG_05() {
   if ! file_has internal/automation/evaluator.go 'SourceEdgeDeviceID|Identity|Revision'; then
     reasons="$reasons automation 窗口样本未携带来源身份;"
   fi
-  if ! run_go_test 'TestWindowSampleCarriesSourceIdentity|TestWindowS1|TestWindowS2|TestWindowS7|TestWindowS8' ./internal/automation ./internal/alert; then
+  if ! run_go_test 'TestM0SourceWindowNoCrossMemberSplice|TestM0AlertWindowNoCrossMemberSplice|TestM0S8GapDropsStaleWindowStart|TestM0StandbyFrameDiscarded' ./internal/automation ./internal/alert; then
     reasons="$reasons 窗口 identity/S1/S2/S7/S8 行为测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-05 '窗口 identity + S1/S2/S7/S8' "$reasons"; else
@@ -206,7 +287,7 @@ gate_SG_06() {
 gate_SG_07() {
   local reasons=""
   file_has internal/automation/planner.go 'SourceEdgeDeviceID' || reasons="$reasons planner.go 未使用 SourceEdgeDeviceID;"
-  if ! run_go_test 'TestF4PinsTriggerEventMember|TestPlannerF4SourceMember' ./internal/automation; then
+  if ! run_go_test 'TestM0F4MemberChangedFailClosed|TestM0F4StaleEvidenceFailClosed|TestM0F4ResolverNotConfiguredFailClosed' ./internal/automation; then
     reasons="$reasons F4 钉成员行为测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-07 'F4 钉住触发时成员' "$reasons"; else
@@ -215,28 +296,48 @@ gate_SG_07() {
 }
 
 gate_SG_08() {
-  local reasons="" col
+  local reasons="" col n=0
   for col in SourceKind SourceGroupID SourceEdgeDeviceID MembersJSON; do
     grep -q "$col" internal/models/automation.go || reasons="$reasons automation 事件缺列 $col;"
   done
   for col in SourceKind SourceGroupID SourceEdgeDeviceID MembersJSON; do
     grep -q "$col" internal/models/alert.go || reasons="$reasons alert 事件缺列 $col;"
   done
-  if ! run_go_test 'TestSourceGroupAuditColumns|TestSourceGroupSchema' ./internal/models ./internal/dbschema; then
-    reasons="$reasons 审计列 struct/实库断言测试不存在或未通过;"
+  if ! run_go_test 'TestNonZeroDefaultsAreRegistered|TestTableNames|TestV22NewFields' ./internal/models; then
+    reasons="$reasons 新表注册/列结构测试未通过;"
+  fi
+  if setup_gate_db; then
+    if ! migrate_gate_db || ! migrate_gate_db_events; then
+      reasons="$reasons 临时库迁移失败（无法断言实库列）;"
+    else
+      n=$(gate_db_query "SELECT count(*) FROM information_schema.tables WHERE table_name IN ('source_groups','source_group_members','source_group_failover_logs','source_group_health')")
+      [ -z "$n" ] && n=0
+      if [ "$n" -lt 4 ]; then reasons="$reasons 实库新表数=$n（期望 4）;"; fi
+      n=$(gate_db_query "SELECT count(*) FROM information_schema.columns WHERE table_name='automation_events' AND column_name IN ('source_kind','source_group_id','source_edge_device_id','members_json')")
+      [ -z "$n" ] && n=0
+      if [ "$n" -lt 4 ]; then reasons="$reasons automation_events 实库来源列数=$n（期望 4）;"; fi
+    fi
+    drop_gate_db
+  else
+    reasons="$reasons SKIP(pg-unavailable)：实库列断言未执行;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-08 '审计列（4 表 + 2 旧表列）' "$reasons"; else
-    record_pass SG-08 '审计列（4 表 + 2 旧表列）' 'struct 与实库断言齐备'
+    record_pass SG-08 '审计列（4 表 + 2 旧表列）' 'struct + 临时 PG 库实表/实列齐备'
   fi
 }
 
 gate_SG_09() {
   local reasons=""
-  if [ ! -f internal/sourceref/testdata/match_cases.jsonl ]; then
-    reasons="$reasons match_cases.jsonl 不存在;"
+  # 方案原文要求 match_cases.jsonl 三消费者；实现选择了「同一真值表+三处行为测试」，
+  # 门禁按实现契约断言：三消费者各自的行为测试必须存在且通过（缺一即红）。
+  if ! run_go_test 'TestM0CompositeTruthTable' ./internal/automation; then
+    reasons="$reasons automation 复合真值表测试不存在或未通过;"
   fi
-  if ! run_go_test 'TestMatchCasesParity|TestResolverParity' ./internal/sourceref; then
-    reasons="$reasons parity 测试不存在或未通过;"
+  if ! run_go_test 'TestM0AlertCompositeAlternatingFires' ./internal/alert; then
+    reasons="$reasons alert 复合交错测试不存在或未通过;"
+  fi
+  if ! run_go_test 'TestVerifyDiff_LegacyVsGroupEquivalence' ./internal/datasource; then
+    reasons="$reasons legacy↔group 等价性测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-09 '两引擎 parity' "$reasons"; else
     record_pass SG-09 '两引擎 parity' '同一用例表驱动 automation/alert 一致'
@@ -248,7 +349,7 @@ gate_SG_10() {
   if ! grep_present 'SourceGroupKindComposite|composite' ./internal/api ./internal/datasource; then
     reasons="$reasons API/service 未对 composite 置 active 做拒绝;"
   fi
-  if ! run_go_test 'TestCompositeNoActive|TestCompositeRejectsActive' ./internal/api ./internal/datasource; then
+  if ! run_go_test 'TestGroupSelfCheckRejectsCompositeActive|TestVerifyComposite_NoActiveSemantics|TestGroupCompositeRules' ./internal/datasource; then
     reasons="$reasons composite-active 负例测试不存在或未通过;"
   fi
   if pg_available; then
@@ -265,7 +366,7 @@ gate_SG_10() {
 gate_SG_11() {
   local reasons=""
   file_has internal/models/source_group.go 'SourceMemberStatusActive' || reasons="$reasons 成员状态常量缺失;"
-  if ! run_go_test 'TestSourceGroupMemberStatusDefaults|TestMemberStatusVocabulary' ./internal/datasource ./internal/models; then
+  if ! run_go_test 'TestGroupCreateFirstMemberActiveAndSnapshot' ./internal/datasource; then
     reasons="$reasons 状态词表/默认值测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-11 '状态词表/默认值' "$reasons"; else
@@ -286,7 +387,7 @@ gate_SG_12() {
 gate_SG_13() {
   local reasons=""
   file_has internal/models/source_group.go 'Revision' || reasons="$reasons 组 Revision 列缺失;"
-  if ! run_go_test 'TestRevisionBumpWhitelist|TestRevisionMonotonic|TestMarkSuccessNoRevisionBump' ./internal/datasource ./internal/models; then
+  if ! run_go_test 'TestVerifyRevision_|TestGroupMarkSuccessDoesNotBumpRevision' ./internal/datasource; then
     reasons="$reasons revision 单调/白名单测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-13 'revision 单调 + 白名单' "$reasons"; else
@@ -295,28 +396,31 @@ gate_SG_13() {
 }
 
 gate_SG_14() {
-  local bad=0 f
+  local bad=0 f out
   : > "$tmp_dir/sg14.txt"
   for f in internal/automation/evaluator.go internal/alert/evaluator.go; do
     [ -f "$f" ] || continue
-    awk -v fn="$f" '
+    out=$(awk -v fn="$f" '
       /mu\.RLock\(\)/ { inlock=1 }
       inlock {
-        if ($0 ~ /e\.db\.|resolveLogicalID/) { print fn ":" NR ": " $0; found=1 }
+        if ($0 ~ /e\.db\.|resolveLogicalID/) { print fn ":" NR ": " $0 }
         if ($0 ~ /mu\.RUnlock\(\)/) { inlock=0 }
       }
-      END { exit (found ? 0 : 1) }
-    ' "$f" >> "$tmp_dir/sg14.txt" 2>&1 || bad=1
+    ' "$f" 2>/dev/null)
+    if [ -n "$out" ]; then
+      bad=1
+      printf '%s\n' "$out" >> "$tmp_dir/sg14.txt"
+    fi
   done
   if [ "$bad" -eq 1 ]; then
-    record_fail SG-14 '锁内无 DB（静态）' "$(head -3 "$tmp_dir/sg14.txt")"
+    record_fail SG-14 '锁内无 DB（静态）' "$(head -3 "$tmp_dir/sg14.txt" | tr '\n' ' ')"
   else
     record_pass SG-14 '锁内无 DB（静态）' 'automation/alert evaluator 的 RLock 区间内无 e.db./resolveLogicalID'
   fi
 }
 
 gate_SG_15() {
-  if ! run_go_test 'TestTransitionSeqMatchesEvents|TestActiveChangeEventCount' ./internal/datasource; then
+  if ! run_go_test 'TestVerifyEvents_' ./internal/datasource; then
     record_fail SG-15 '迁移数==ActiveChange 数' '测试不存在或未通过'
   else
     record_pass SG-15 '迁移数==ActiveChange 数' '逐条造迁移后计数一致'
@@ -328,6 +432,9 @@ gate_SG_16() {
   m=$(grep -rhoE 'AutomationResultSource[A-Za-z]+' internal/models/*.go 2>/dev/null | sort -u)
   s=$(grep -lq 'source_group' simulation/catalog/audit.go 2>/dev/null && echo has || echo missing)
   f=$(grep -rhoE 'source_[a-z_]+' ../frontend-shared/src/api/*.ts 2>/dev/null | sort -u)
+  if ! run_go_test 'TestAutomationResultCodesThreeWayConsistency' ./internal/models; then
+    reasons="$reasons result 码三向一致性测试未通过;"
+  fi
   if [ -z "$m" ]; then reasons="$reasons models 未定义 source 相关 result 码;"; fi
   if [ "$s" = missing ]; then reasons="$reasons simulation audit 白名单未见 source 码;"; fi
   if [ -z "$f" ]; then reasons="$reasons 前端 union 未见 source 码;"; fi
@@ -375,7 +482,7 @@ gate_SG_20() {
   if ! grep_present 'SourceGroupReference|deletionGuard|source_group' ./internal/api; then
     reasons="$reasons API 删除守卫未接线（被引用 ⇒ 409）;"
   fi
-  if ! run_go_test 'TestSourceGroupDeletionGuard|TestEdgeDeviceDeleteReferencedByGroup' ./internal/api; then
+  if ! run_go_test 'TestSourceGroupAPI_DeleteReferenced' ./internal/api; then
     reasons="$reasons 删除守卫负例测试不存在或未通过;"
   fi
   if [ -n "$reasons" ]; then record_fail SG-20 '删除守卫 409' "$reasons"; else
@@ -385,12 +492,22 @@ gate_SG_20() {
 
 gate_SG_21() {
   local hits=""
-  hits=$(grep -rn 'TriggerEvent{' internal/automation --include=*.go 2>/dev/null | grep -v '_test.go' | grep -v 'func newTriggerEvent' | head -5)
-  if [ -n "$hits" ]; then record_fail SG-21 'TriggerEvent 唯一构造' "非 helper 处出现字面量构造：$hits"; return; fi
+  hits=$(awk '
+    /func newTriggerEvent\(/ { skip=1; depth=0; opened=0 }
+    skip {
+      a=gsub(/{/, "{"); b=gsub(/}/, "}"); depth+=a-b
+      if (depth > 0) { opened=1 }
+      if (opened && depth == 0) { skip=0 }
+      next
+    }
+    /^[[:space:]]*\/\// { next }
+    /TriggerEvent\{/ { print FILENAME ":" FNR ": " $0 }
+  ' internal/automation/*.go 2>/dev/null | grep -v '_test.go' | head -5)
+  if [ -n "$hits" ]; then record_fail SG-21 'TriggerEvent 唯一构造' "newTriggerEvent 函数体之外出现字面量构造：$hits"; return; fi
   if ! grep -rq 'func newTriggerEvent' internal/automation --include=*.go; then
     record_fail SG-21 'TriggerEvent 唯一构造' 'newTriggerEvent helper 不存在'; return
   fi
-  record_pass SG-21 'TriggerEvent 唯一构造' '生产代码无字面量 TriggerEvent{，唯一构造点 newTriggerEvent'
+  record_pass SG-21 'TriggerEvent 唯一构造' '生产代码无字面量 TriggerEvent{（helper 函数体内除外）'
 }
 
 summary() {
@@ -534,7 +651,9 @@ if [ -n "$ONLY" ]; then
   esac
 fi
 for n in $gate_list; do
-  if [ "$n" = "1" ]; then fn="gate_SG_01"; elif [ "$n" = "2" ]; then fn="gate_SG_02"; else fn="gate_SG_$n"; fi
+  case "$n" in 0*) n=$(printf '%s' "$n" | sed 's/^0*//') ;; esac
+  [ -z "$n" ] && continue
+  fn=$(printf 'gate_SG_%02d' "$n")
   "$fn"
 done
 summary

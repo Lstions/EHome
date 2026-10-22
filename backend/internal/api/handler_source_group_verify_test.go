@@ -51,15 +51,31 @@ func TestVerifySourceGroupAPI_CompositeActiveForbidden(t *testing.T) {
 		t.Fatalf("composite activate 必须 400（V-6），got %d body=%s", w.Code, w.Body.String())
 	}
 
-	// 观察项 D-3：handler 注释声明 composite deactivate 也应 400；实测记录行为。
+	// F-6 裁决（2026-10-22）：composite 成员显式 deactivate 允许（R8 → disabled），
+	// 只有 activate 一律 400；handler 注释已同步更正。
 	w = doDSRequest(t, r, http.MethodPost,
 		fmt.Sprintf("/api/v1/source-groups/%d/deactivate", created.ID), gin.H{"member_id": created.Members[0].ID})
-	switch w.Code {
-	case http.StatusBadRequest:
-		t.Logf("composite deactivate 400（与 handler 注释一致）")
-	case http.StatusOK:
-		t.Logf("DEVIATION D-3: composite deactivate 返回 200（handler 注释声明应 400，领域层按 R8 直接 disabled）body=%s", w.Body.String())
-	default:
-		t.Logf("DEVIATION D-3: composite deactivate 返回 %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("composite deactivate 应 200（F-6 裁决），got %d body=%s", w.Code, w.Body.String())
+	}
+	env = decodeSG(t, w.Body.Bytes())
+	var after sgView
+	if err := json.Unmarshal(env.Data, &after); err != nil {
+		t.Fatalf("decode after deactivate: %v", err)
+	}
+	if after.ActiveMemberID != 0 {
+		t.Fatalf("composite active_member_id 恒 0，got %d", after.ActiveMemberID)
+	}
+	foundDisabled := false
+	for _, m := range after.Members {
+		if m.ID == created.Members[0].ID && m.Status == "disabled" {
+			foundDisabled = true
+		}
+		if m.Status == "active" {
+			t.Fatalf("composite 成员不得为 active: %+v", m)
+		}
+	}
+	if !foundDisabled {
+		t.Fatalf("deactivate 目标成员应为 disabled: %s", env.Data)
 	}
 }

@@ -240,22 +240,23 @@ func TestSG_E3_CompositeMissingMemberUnbound(t *testing.T) {
 		t.Errorf("合并值 = %v, want 1400（sum(600,800)）", res.Value)
 	}
 
-	// ③ 让 B 陈旧：把它的 last_success 推到 2 小时前，重建快照后 A 再上报。
-	//    fail_closed 下必须 **不触发**，且落降级审计（不能静默单边）。
-	old := time.Now().Add(-2 * time.Hour)
-	if err := c.db.Model(&models.SourceGroupMember{}).
-		Where("group_id = ? AND edge_device_id = ?", group.ID, c.edgeB.ID).
-		Update("last_success", old).Error; err != nil {
-		t.Fatalf("age member B: %v", err)
+	// ③ 让 B 的值"陈旧"。
+	//
+	// 关键：复合求值判陈旧比较的是 **最新值记录的时间戳**（unified_data.timestamp），
+	// 不是成员行的 last_success —— 后者只用于主备组的停滞判定。第一版用 last_success
+	// 造陈旧完全无效（测出来"陈旧后仍可能触发"其实是没造出陈旧）。
+	// 这里直接把最新值缓存里 B 的时间戳改老（模拟"B 三小时没上报"）。
+	staleRec, ok := api.LatestValueBySensor(c.edgeB.ID, "illuminance")
+	if !ok {
+		t.Fatal("最新值缓存里没有 B 的 illuminance —— 播种/上报链路有问题")
 	}
-	if err := c.gsvc.PublishAll(); err != nil {
-		t.Fatalf("PublishAll: %v", err)
-	}
+	staleRec.Timestamp = time.Now().Add(-3 * time.Hour)
+	api.SetLatestValue(staleRec)
 
 	before := len(notifications())
 	c.publish(t, c.edgeA, prs3001Frame4B(0, 700), 5)
 	if after := len(notifications()); after != before {
-		t.Fatalf("B 陈旧时仍然通知了（%d → %d）—— 静默单边，违反 fail_closed", before, after)
+		t.Fatalf("B 值陈旧时仍然通知了（%d → %d）—— 静默单边，违反 fail_closed", before, after)
 	}
 	var n int64
 	if err := c.db.Model(&models.SourceGroupHealth{}).

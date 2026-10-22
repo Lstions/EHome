@@ -35,6 +35,28 @@ func (e *Evaluator) SetDeviceIntervalFn(fn func(edgeDeviceID uint) time.Duration
 	e.deviceIntervalFn = fn
 }
 
+// SetSourceHealthFn 注入「来源降级可见性」回调（写 source_group_health）。
+//
+// 与 automation 同签名同语义：每次求值期判定组来源失败都会调用（含日志节流），
+// reason 形如 "source_degraded:no_available_member"（类别:细节）；实现方负责按
+// (groupID, reason) 节流（建议 1 分钟 1 条）。nil = 未接线：只落日志不写健康表。
+func (e *Evaluator) SetSourceHealthFn(fn func(groupID uint, reason string)) {
+	e.sourceHealthFn = fn
+}
+
+// notifySourceHealth 是告警侧组来源失败的「可见性」单一出口（与 automation 同形，
+// 两包各自持有私有副本以避免 alert→automation 编译期依赖）。
+func notifySourceHealth(fn func(groupID uint, reason string), groupID uint, resultCode, reason string) {
+	if fn == nil || groupID == 0 {
+		return
+	}
+	detail := resultCode
+	if reason != "" && reason != resultCode {
+		detail = resultCode + ":" + reason
+	}
+	fn(groupID, detail)
+}
+
 // SetLatestValueBySensorFn 注入「按 (设备, 物理名) 取最新值」回调（复合组逐成员取值）。
 func (e *Evaluator) SetLatestValueBySensorFn(fn func(deviceID uint, sensorName string) (models.UnifiedData, bool)) {
 	e.latestValueBySensorFn = fn
@@ -194,12 +216,14 @@ func (e *Evaluator) matchSourceRule(rule models.AlertRule, ref models.SourceRef,
 	if e.sourceResolver == nil {
 		logger.Warn("alert: source resolver not configured, group rule skipped (fail-closed)",
 			"rule_id", rule.ID, "group_id", ref.GroupID)
+		notifySourceHealth(e.sourceHealthFn, ref.GroupID, "source_resolver_not_configured", "")
 		return sourceref.FrameMatch{}, false
 	}
 	m := e.sourceResolver.MatchFrame(edgeDeviceID, string(ref.Kind), ref.GroupID)
 	if !m.Configured {
 		logger.Warn("alert: source group unavailable, rule skipped (fail-closed)",
 			"rule_id", rule.ID, "group_id", ref.GroupID, "reason", m.Reason)
+		notifySourceHealth(e.sourceHealthFn, ref.GroupID, "source_member_changed", m.Reason)
 		return m, false
 	}
 	if !m.Accepts() {
@@ -217,11 +241,13 @@ func (e *Evaluator) evalComposite(rule models.AlertRule, m sourceref.FrameMatch,
 	g := m.Group
 	if g == nil {
 		logger.Warn("alert: composite group snapshot missing", "rule_id", rule.ID)
+		notifySourceHealth(e.sourceHealthFn, m.GroupID, "source_member_changed", sourceref.ReasonGroupMissing)
 		return false, false, 0, nil
 	}
 	if isSpecialSelector(rule.SensorName) {
 		logger.Warn("alert: composite with special selector unsupported (fail-closed)",
 			"rule_id", rule.ID, "sensor", rule.SensorName)
+		notifySourceHealth(e.sourceHealthFn, g.ID, "source_degraded", "composite_special_selector_unsupported")
 		return false, false, 0, nil
 	}
 	res := sourceref.CombineGroup(g, func(ms sourceref.MemberSnapshot) sourceref.Component {
@@ -242,6 +268,7 @@ func (e *Evaluator) evalComposite(rule models.AlertRule, m sourceref.FrameMatch,
 		logger.Warn("alert: composite source unbound (fail-closed)",
 			"rule_id", rule.ID, "reason", res.Reason,
 			"revision", res.Revision, "transition_seq", res.TransitionSeq)
+		notifySourceHealth(e.sourceHealthFn, g.ID, "source_degraded", res.Reason)
 		return false, false, 0, nil
 	}
 	if res.Degraded {
@@ -249,6 +276,7 @@ func (e *Evaluator) evalComposite(rule models.AlertRule, m sourceref.FrameMatch,
 		logger.Warn("alert: composite source degraded (use_available)",
 			"rule_id", rule.ID, "reason", res.Reason,
 			"revision", res.Revision, "transition_seq", res.TransitionSeq)
+		notifySourceHealth(e.sourceHealthFn, g.ID, "source_degraded", res.Reason)
 	}
 	ev := &alertSourceEvidence{
 		kind:         sourceref.GroupKindSourceGroup,

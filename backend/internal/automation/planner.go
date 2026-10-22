@@ -68,6 +68,10 @@ type Planner struct {
 	// 组规则在 nil 时 FC-4 fail-closed（source_resolver_not_configured），
 	// 存量规则不依赖它。
 	sourceResolver SourceResolver
+	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
+	// F4 判定 source_member_changed/source_stale/source_degraded 时调用，
+	// 与求值期同一语义（main.go 注入，实现方负责节流）。
+	sourceHealthFn func(groupID uint, reason string)
 
 	// nowFn 可注入时钟 (测试用), 默认 time.Now。
 	nowFn func() time.Time
@@ -127,6 +131,15 @@ func (p *Planner) SetPlanProvider(prov PlanProvider) {
 // SetSourceResolver 注入来源组解析器（F4 身份校验；prompt 明确禁止回读配置列）。
 func (p *Planner) SetSourceResolver(r SourceResolver) {
 	p.sourceResolver = r
+}
+
+// SetSourceHealthFn 注入「来源降级可见性」回调（与 Evaluator 同签名、同语义）。
+//
+// F4 失败也意味着组来源已不可用于该决策（例如触发后 active 被切走/证据过期），
+// 属于方案 §7.1 E-1/E-2 要求"降级必须可见"的范围；否则运维在
+// GET /source-groups/:id/health 只会看到"一切正常"（e2e TestSG_E3 缺口）。
+func (p *Planner) SetSourceHealthFn(fn func(groupID uint, reason string)) {
+	p.sourceHealthFn = fn
 }
 
 // SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。

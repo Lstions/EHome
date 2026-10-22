@@ -156,6 +156,10 @@ type Evaluator struct {
 	rulesByGroup map[uint][]uint
 	// sourceAudit 是来源失败审计节流表（key: ruleID+result+reason）。
 	sourceAudit map[sourceAuditKey]time.Time
+	// sourceHealthFn 是「来源降级可见性」回调（写 source_group_health）。
+	// nil = 未接线（既有测试/单测），此时只落审计事件，不写健康表。
+	// 由 main.go 注入；实现方负责节流（建议同 (groupID,reason) 1 分钟 1 条）。
+	sourceHealthFn func(groupID uint, reason string)
 
 	// auditMu/unresolvedAudit 是"无法求值"审计的 5 分钟节流表
 	// （key: ruleID + selectorHash，窄复核要求按 selector 维度去重）。

@@ -36,14 +36,17 @@ func TestVerifyComposite_NoActiveSemantics(t *testing.T) {
 	if _, err := f.gsvc.ActivateGroupMember(g.ID, bm.ID); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("composite activate 应 ErrInvalidRequest（V-6），got %v", err)
 	}
-	// 观察项 D-3：deactivate 在领域层**不拒绝**（非 active 分支直接 disabled）。
-	// handler 注释声明 composite deactivate 应 400；两处口径不一致，已记报告。
-	if _, err := f.gsvc.DeactivateGroupMember(g.ID, bm.ID); err == nil {
-		if cur := f.memberOf(g.ID, b.ID); cur.Status != models.SourceMemberStatusDisabled {
-			t.Logf("DEVIATION D-3: composite deactivate 返回成功但状态=%q（handler 注释声明应 400）", cur.Status)
-		} else {
-			t.Logf("DEVIATION D-3: composite deactivate 被允许（R8 语义），而 handler 注释声明 composite 应 400")
-		}
+	// F-6 裁决：领域层**允许** composite 成员显式 deactivate（R8 → disabled），
+	// 只有 activate 一律 400；handler 注释已按此更正。
+	if _, err := f.gsvc.DeactivateGroupMember(g.ID, bm.ID); err != nil {
+		t.Fatalf("composite 成员 deactivate 应允许（R8），got %v", err)
+	}
+	if cur := f.memberOf(g.ID, b.ID); cur.Status != models.SourceMemberStatusDisabled {
+		t.Fatalf("composite deactivate 后应为 disabled，got %q", cur.Status)
+	}
+	// 仍不得有任何 active（I5）。
+	if edge := f.activeEdge(g.ID); edge != 0 {
+		t.Fatalf("composite 不得有 active，got edge %d", edge)
 	}
 	_ = a
 }

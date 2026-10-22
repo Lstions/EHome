@@ -1,7 +1,7 @@
 # 数据源域组适配器独立验证（impl-core）
 
 - **工作树**：`.agents/worktrees/source-group`（分支 `source-group`）
-- **验证时 HEAD**：`e7c5df06`（M0 主备链路全量接线；本验证测试文件已随该提交入库，`group_verify_diff_test.go` 有本地产出差量）
+- **验证时 HEAD**：`e7c5df06` → **修复后复验 HEAD `9f94c279`**（§7）（M0 主备链路全量接线；本验证测试文件已随该提交入库，`group_verify_diff_test.go` 有本地产出差量）
 - **被测**：`backend/internal/datasource/group_{service,state,scan,crud}.go` + `internal/api/handler_source_group.go`
 - **环境**：go1.27.1 linux/amd64，`GOCACHE=/tmp/eh-sg-cache`；验证库用**文件型 SQLite + EnsureSourceGroupSchema**（生产同款部分唯一索引），不用 `:memory:`（见 F-3）
 - **只读被测实现，未改实现**；发现的问题先报 ds-analyst/Lead，由 ds 修复。
@@ -12,12 +12,12 @@
 |---|---|
 | `go build ./...` | **绿** |
 | `go vet ./internal/datasource/ ./internal/api/` | **绿** |
-| 本验证测试 | **5 文件 / 32 个 `=== RUN` 全绿** |
+| 本验证测试 | **5 文件 / 33 个 `=== RUN` 全绿**（修复后复验 HEAD 9f94c279） |
 | 整包 `go test ./internal/datasource/` | **ok**（含 ds-analyst 原有测试） |
 | `-race`（TestVerify*） | **ok**（4.9s） |
 | 等价性差分 | **3 seeds × 40 步状态轨迹逐步相等** |
-| 变异自证 | **9/9 CAUGHT**，恢复后 md5 全一致、整包复绿 |
-| 发现 | 1 高风险（R5 双 active，**已由 ds 修复并锁回归**）+ 4 处契约/一致性偏差（见 §5） |
+| 变异自证 | **13 项尝试：12 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1），恢复后 md5 全一致、整包复绿 |
+| 发现 | 1 高风险（R5 双 active）+ 5 处契约/一致性偏差 —— **均已由 ds-analyst 修复/裁决**（§4 状态列） |
 
 ## 1. 五个验证重点 → 用例映射
 
@@ -82,47 +82,73 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 
 ## 4. 发现的实现问题（按严重度）
 
-### F-1【高，已修复】R5 停用 active 时「先升后降」制造双 active → 事务必失败
+### F-1【高，已修复 ✅】R5 停用 active 时「先升后降」制造双 active → 事务必失败
+
+**复验**：ds 已按「先降旧→再升新→bump」修复并加 `TestGroupDeactivateActiveSingleActiveInvariant`；本文件 M6 变异证明回退会被抓红。
 
 - **现象**：`DeactivateGroupMember` 在 active+standby 场景直接返回 `UNIQUE constraint failed: source_group_members.group_id`（部分唯一索引 `ux_sgm_one_active`），deactivate 完全不可用。
 - **根因**：组适配器把候选置 active 放在原 active 置 disabled **之前**；legacy `Service.Deactivate` 的 D-3 修复注释已写明「先降旧、再升新」铁律。
 - **处置**：ds-analyst 已修为「先降后升 → bump revision」，并加回归锁 `TestGroupDeactivateActiveSingleActiveInvariant`；本验证保留 `TestVerifyEvents_ManualMigrations/R5`（M6 变异证明它能抓住回退）。
 - **证据**：本轮 14:20 前的 `go test -run TestVerifyEvents` 输出；修复后同用例绿。
 
-### F-2【中，待裁决】删除组的 ActiveChange 缺 GroupID/At/Revision/TransitionSeq
+### F-2【中，已修复 ✅】删除组的 ActiveChange 缺 GroupID/At/Revision/TransitionSeq
+
+**复验**：ds 改为 `commitGroupChange(groupID, ev)`（删除前 bump+取 seq），并有 `TestGroupDeleteEmitsCompleteEvent`；本验证 `TestVerifyEvents_DeleteGroupNextZero` 已升级为硬断言（GroupID/Revision/TransitionSeq/At 非零），M10b 变异 CAUGHT。
 
 - `DeleteGroup` 绕过 `commitGroupChange`，直接 `registry.Remove + dispatcher.emit` → 事件 = `{GroupID:0, At:zero, Revision:0, TransitionSeq:0, Next:0, Reason:delete}`。
 - 消费方按 `GroupID` 清窗/定位规则时拿不到组身份；与 `commitGroupChange` 注释「所有组状态变更的统一收尾」自相矛盾。
 - 验证用例：`TestVerifyEvents_DeleteGroupNextZero`（记录为 DEVIATION D-2，非阻断）。
 - 建议：删除路径也走 `commitGroupChange(groupID, ev)`（先 bump/填 Revision+TransitionSeq，再 Remove）。
 
-### F-3【中，测试基建 + 事务一致性】UpdateGroup 在事务内用 `g.db`（非 tx）校验成员
+### F-3【中，已修复 ✅】UpdateGroup 在事务内用 `g.db`（非 tx）校验成员
+
+**复验**：ds 让 `validateMemberConfig/categoryObserved` 显式收 db 参数、事务内传 tx；`:memory:` 单连接问题消除。本验证继续用文件型库（生产同款）不复现。
 
 - `UpdateGroup` 事务内调用 `validateMemberConfig(g.db, ...)`；SQLite `:memory:` 下事务占连接后 `g.db` 另开连接 ⇒ `no such table: edge_devices`（原 `testutil.OpenTestDB` 复现）。
 - 生产（文件型 SQLite/PG）不报错，但校验读在**事务外**，存在读到未提交状态的窗口；本次验证改用文件型库绕过。
 - 建议：`validateMemberConfig(tx *gorm.DB, ...)`，事务内传 tx；同时保护 `:memory:` 测试基建（或 testutil 固定单连接+共享缓存）。
 
-### F-4【低，待裁决】UpdateGroup 仅改 name/description 也 bump revision
+### F-4【低，已修复 ✅】UpdateGroup 仅改 name/description 也 bump revision
+
+**复验**：ds 改为仅 combine/min_members/staleness/on_degrade/members 变化才 bump；本验证新增 `TestVerifyRevision_NonIdentityUpdateNoBump`（name/description/enabled + R8 全部不 bump + priority 正对照），M11 CAUGHT。
 
 - F-1 白名单未含 name/description（它们是展示字段，不影响窗口身份）；当前实现 `len(updates)>0` 即 bump ⇒ 改名会让该组所有窗口 identity 重置一次（DurationSec 重新累计）。
 - 验证用例：`TestVerifyRevision_TopologyChangeBumps` 只断言白名单内变更必 bump；本条作为观察记录（未写成红断言）。
 - 建议：仅当身份字段（members/priority/required/combine/min/staleness/on_degrade/enabled/kind/category）实际变化时 bump。
 
-### F-5【低，待裁决】R8（停用非 active 成员）也 bump revision
+### F-5【低，已修复 ✅】R8（停用非 active 成员）也 bump revision
+
+**复验**：同上 `TestGroupNonIdentityUpdateDoesNotBumpRevision` + 本验证 `TestVerifyRevision_NonIdentityUpdateNoBump`，M12 CAUGHT。
 
 - F-1 白名单只列「成员新增/删除/priority/required/…」，成员 status=disabled 属运行态（MembersHash 也不含 status），却 bump 了一次。
 - 影响：手动禁用成员会重置一次窗口 identity（一次性、非每帧，风险低）。
 - 建议：与 F-4 一起按「身份字段真实变化」收敛。
 
-### F-6【低，契约口径不一致】composite deactivate 领域层允许（200），handler 注释声明应 400
+### F-6【低，已裁决 ✅】composite deactivate 领域层允许（200），handler 注释声明应 400
+
+**裁决**：允许 composite 成员显式 deactivate（R8 → disabled），仅 activate 一律 400；handler 注释已更正。本验证 API/领域两处已改为硬断言（200 + disabled + 无 active），M13 CAUGHT。
 
 - 实测（`TestVerifySourceGroupAPI_CompositeActiveForbidden`，记录 DEVIATION D-3）：`POST /source-groups/:id/deactivate` 对 composite 返回 **200**，成员被置 `disabled`（R8 语义）；handler 文件头注释写「composite 400」。
 - 需产品/契约裁决：composite 成员能否被停用（若能，协议注释应改；若不能，领域层应拒绝）。
 
-### F-7【提示，非本任务 scope】main.go 尚未接线 GroupService/PublishAll
+### F-7【已关闭 ✅】main.go 尚未接线 GroupService/PublishAll
+
+**复验**：`cmd/server/main.go:404-486` 已接线 `NewGroupService/SetGroupRegistry/SetDispatchNotifier/SetRuleSourceGroupService`，`PublishAll` 失败即 `logger.Fatalf` 拒绝启动，`RunDispatcher+Start` 启动，数据面 sink 双喂两引擎、离线钩子双 MarkFailure。
 
 - `grep GroupService|PublishAll cmd/server/main.go` 为空：启动自检/冷加载/扫描器/RunDispatcher 还没进生产启动路径（Lead 的 M0 全量接线提交可能仍在进行）。
 - 影响：`PublishAll` 失败拒绝启动的保护在当前 main 上不生效；属接线遗漏，非组适配器逻辑问题。
+
+### 3.1 修复后追加变异（验证新回归锁，HEAD 9f94c279）
+
+| # | 改坏点 | 目标用例 | 结果 |
+|---|---|---|---|
+| M10 | 删除事件丢 TransitionSeq | `TestVerifyEvents_DeleteGroupNextZero` | **被掩盖**（`commitGroupChange` 的 `TransitionSeq==0 ⇒ 补 seq` 兜底生效，属防御性设计，非测试缺陷） |
+| M10b | DeleteGroup 绕过 `commitGroupChange`（F-2 回归：直接 Remove+emit） | `TestVerifyEvents_DeleteGroupNextZero` | **CAUGHT**（GroupID/At/Revision 缺失） |
+| M11 | 非身份更新（name/description/enabled）重新 bump（F-4 回归） | `TestVerifyRevision_NonIdentityUpdateNoBump` | **CAUGHT** |
+| M12 | R8 停用非 active 重新 bump（F-5 回归） | `TestVerifyRevision_NonIdentityUpdateNoBump` | **CAUGHT** |
+| M13 | composite 成员 deactivate 被拒绝（F-6 裁决回归） | `TestVerifyComposite_NoActiveSemantics` | **CAUGHT** |
+
+累计：**12 CAUGHT / 1 被兜底掩盖**；恢复后 `group_crud.go/group_state.go/group_service.go` md5 一致，整包复绿。
 
 ## 5. 诚实边界
 
@@ -131,6 +157,25 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 3. N-21 自愈、revision/ActiveChange 属新增能力，按设计豁免差分（§2）。
 4. 变异自证以「目标用例必红」为判据，不追求全包必红（避免无关用例噪声掩盖因果）。
 5. `TestVerifyDiff` 覆盖 3 seeds × 40 步；如需更高置信度可加 seeds，但当前已覆盖 R1–R11 全部分支（由用例内断言覆盖矩阵保证）。
+
+## 7. 修复后复验（HEAD `9f94c279`，2026-10-22 15:1x）
+
+ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
+
+| 项 | 结果 |
+|---|---|
+| `go build ./...` | 绿 |
+| `go vet ./internal/datasource/ ./internal/api/` | **绿**（ds 提到的 `source_group_guard.go:101 unreachable` 已不复现；该文件非本验证产出） |
+| 本验证测试 | **33 个 `=== RUN` 全绿**（新增 `TestVerifyRevision_NonIdentityUpdateNoBump`；删除/复合用例升级为硬断言） |
+| 整包 `go test ./internal/datasource/` | ok（7.1s，含 ds 新增 20 个组用例） |
+| `-race`（TestVerify*） | ok（5.6s） |
+| API 验证 | `TestVerifySourceGroupAPI_CompositeActiveForbidden`（activate 400 / deactivate 200+disabled）绿 |
+| 差分 | 3 seeds × 40 步仍逐步等价（末态含 logs=5/6、disabled/standby 混合，seed 轨迹不同） |
+| 追加变异 | M10b/M11/M12/M13 **CAUGHT**（见 §3.1） |
+
+**关于 `source_group_guard.go`**：该文件不是本任务的验证产出（本任务只新增
+`internal/api/handler_source_group_verify_test.go`）；它属于规则来源绑定校验的接线文件，
+当前 `go vet ./internal/api/` 已无 unreachable 告警，无需本任务处理。
 
 ## 6. 复跑命令
 

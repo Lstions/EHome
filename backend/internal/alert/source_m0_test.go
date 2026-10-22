@@ -6,6 +6,8 @@ package alert
 // 用真实 *sourceref.Registry（与生产同结构），避免测试替身与实现漂移。
 
 import (
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,6 +169,44 @@ func TestM0AlertSourceTransitionClosesStaleFiring(t *testing.T) {
 		t.Fatal("S4: 内存 firing 状态必须清除")
 	}
 }
+
+// ── Lead 2026-10-22：告警求值期降级也必须写 source_group_health ────────────
+
+// 组件陈旧 ⇒ CombineGroup unbound(fail_closed) ⇒ 健康回调恰被调用 1 次。
+func TestM0AlertSourceHealthCallbackOnCompositeStale(t *testing.T) {
+	db := newTestDB(t)
+	r := groupAlertRule(1, 8)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	reg := sourceref.NewRegistry()
+	reg.Publish(compositeGroupSnapshot(8, models.CombineAvg)) // fail_closed 默认
+	ev := NewEvaluator(db, nil)
+	ev.SetSourceResolver(reg)
+	var calls []string
+	ev.SetSourceHealthFn(func(groupID uint, reason string) {
+		calls = append(calls, fmt.Sprintf("%d|%s", groupID, reason))
+	})
+	now := time.Now()
+	ev.SetLatestValueBySensorFn(func(deviceID uint, sensorName string) (models.UnifiedData, bool) {
+		ts := now
+		if deviceID == 102 {
+			ts = now.Add(-time.Hour) // 陈旧 > staleness(300s)
+		}
+		return models.UnifiedData{SensorName: sensorName, Value: 60, Timestamp: ts}, true
+	})
+	ev.Evaluate(101, fields("temperature", 60), now)
+	if n := eventCount(db, 1); n != 0 {
+		t.Fatalf("fail_closed + 组件陈旧不得告警，got %d", n)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("告警健康回调必须恰被调用 1 次，got %d: %v", len(calls), calls)
+	}
+	if !strings.HasPrefix(calls[0], "8|source_degraded") {
+		t.Fatalf("健康回调参数应为 group=8 + source_degraded，got %q", calls[0])
+	}
+}
+
 
 // ── 锁放大回归：Evaluate 不得在 RLock 内查 DB ──────────────────────────────
 
