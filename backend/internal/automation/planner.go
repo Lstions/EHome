@@ -64,6 +64,11 @@ type Planner struct {
 	// planProvider 解析层控制面（F4 复核按 selector 求值，修 AU-12）。
 	planProvider PlanProvider
 
+	// sourceResolver 来源组解析器（F4 按触发证据校验成员身份；nil=未接线）。
+	// 组规则在 nil 时 FC-4 fail-closed（source_resolver_not_configured），
+	// 存量规则不依赖它。
+	sourceResolver SourceResolver
+
 	// nowFn 可注入时钟 (测试用), 默认 time.Now。
 	nowFn func() time.Time
 
@@ -119,6 +124,11 @@ func (p *Planner) SetPlanProvider(prov PlanProvider) {
 	p.planProvider = prov
 }
 
+// SetSourceResolver 注入来源组解析器（F4 身份校验；prompt 明确禁止回读配置列）。
+func (p *Planner) SetSourceResolver(r SourceResolver) {
+	p.sourceResolver = r
+}
+
 // SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
 //
 // 契约: 注入后通知经它落库并顺带外发投递; 传 nil 显式回落为直接写 notifications 表。
@@ -171,7 +181,7 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 				rule.ID, dayStart, models.AutomationResultExecuted).
 			Count(&cnt).Error; err == nil && int(cnt) >= rule.MaxDailyExec {
 			eventID := p.recordRet(rule, at, ev.Value, models.AutomationResultSuppressedDailyLimit,
-				"", fmt.Sprintf("daily limit %d reached", rule.MaxDailyExec))
+				"", fmt.Sprintf("daily limit %d reached", rule.MaxDailyExec), &ev)
 			// F5: 补发 warning 级通知, 同日同规则只发一次 (幂等: 查当日是否已发过)
 			p.notifyDailyLimitOnce(rule, at, eventID)
 			return
@@ -184,7 +194,7 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 		// 不一致即拒绝（ErrConfirmActionChanged）。否则"触发后改动作、再点确认"会执行
 		// 用户从未确认过的新动作。
 		actions := p.ruleActions(rule)
-		eventID := p.recordPendingConfirm(rule, at, ev.Value, actions)
+		eventID := p.recordPendingConfirm(rule, at, ev.Value, actions, &ev)
 		p.notifyConfirmation(rule, at, ev.Value, eventID)
 		return
 	}
@@ -198,16 +208,16 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 	// 任一条件不满足则落 condition_changed 事件并返回, 不执行任何动作。
 	// 只在动作集合含 device_action 时复核: 纯通知规则不消耗设备状态, 与改造前一致。
 	if hasDeviceAction(actions) {
-		result, reason, ok := p.checkConditionsStillSatisfiedDetailed(rule)
+		result, reason, ok := p.checkConditionsStillSatisfiedWithSource(rule, ev)
 		if !ok {
 			if result == "" {
 				result = models.AutomationResultConditionChanged
 			}
-			p.record(rule, at, ev.Value, result, "", reason)
+			p.record(rule, at, ev.Value, result, "", reason, &ev)
 			return
 		}
 	}
-	p.executeActions(rule, at, ev.Value, actions)
+	p.executeActions(rule, at, ev.Value, actions, &ev)
 }
 
 // hasDeviceAction 报告动作集合里是否存在 device_action。
@@ -335,10 +345,10 @@ func (p *Planner) nextTriggerSeq(ctx context.Context, ruleID uint, at time.Time,
 // (少执行一个动作), 参数不同 → ErrIdempotencyCollision (规则误报失败)。
 // 两种情况都不可接受, A-5 用反例钉死。
 func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value float64,
-	actions []models.AutomationRuleAction) {
+	actions []models.AutomationRuleAction, src *TriggerEvent) {
 	if len(actions) == 0 {
 		p.record(rule, at, value, models.AutomationResultFailedDispatch, "",
-			"rule has no actions")
+			"rule has no actions", src)
 		return
 	}
 
@@ -354,7 +364,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		actorID, err = p.resolveSystemActorID()
 		if err != nil {
 			eventID := p.recordRet(rule, at, value, models.AutomationResultFailedDispatch, "",
-				"system actor unavailable: "+err.Error())
+				"system actor unavailable: "+err.Error(), src)
 			p.notifySystemActorUnavailableOnce(at, eventID, err)
 			return
 		}
@@ -376,7 +386,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		params, err := parseActionParams(act)
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), false,
-				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error())
+				models.AutomationResultFailedDispatch, "invalid action_params: "+err.Error(), src)
 			return
 		}
 		idemKey := fmt.Sprintf("automation:%d:%s:%d:%d",
@@ -396,7 +406,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		})
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), true,
-				classifyDeviceActionError(err), err.Error())
+				classifyDeviceActionError(err), err.Error(), src)
 			return
 		}
 		executed++
@@ -421,12 +431,12 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 	//   · 一个动作都没有 ⇒ 上面已按 failed_dispatch 返回, 到不了这里。
 	if executed == 0 && notified > 0 {
 		p.record(rule, at, value, models.AutomationResultNotification, "",
-			fmt.Sprintf("notified via %d action(s)", notified))
+			fmt.Sprintf("notified via %d action(s)", notified), src)
 		return
 	}
 
 	// 至少一个设备动作成功 → executed (+ 冷却锚点, 取触发时刻 at)。
-	p.recordExecuted(rule, at, value, lastCommandID)
+	p.recordExecuted(rule, at, value, lastCommandID, src)
 }
 
 // recordActionFailure 记录第 k 个动作失败时的事件行 (方案 §6.3 状态机)。
@@ -441,7 +451,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 // (熔断/冷却/条件失效/纯通知) 保持 NULL。
 func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, value float64,
 	act models.AutomationRuleAction, executed, total int, hasActionDim bool,
-	result, detail string) {
+	result, detail string, src *TriggerEvent) {
 	if executed > 0 {
 		result = models.AutomationResultPartialFailure
 		detail = fmt.Sprintf("第 %d/%d 个动作失败, 已中止剩余动作 (已成功 %d 个): %s",
@@ -454,6 +464,7 @@ func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, 
 		Detail:      detail,
 		CreatedAt:   at,
 	}
+	applySourceColumns(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -491,7 +502,8 @@ func parseActionParams(act models.AutomationRuleAction) (json.RawMessage, error)
 //
 // fail-open 边界: 与 recordRet 一致, 写失败只告警不阻塞控制流 —— 但【两者一起失败】,
 // 不会出现"一半事实"。返回事件 ID (0=写失败), 供需要透传的调用方使用。
-func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value float64, commandID string) uint {
+func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value float64,
+	commandID string, src *TriggerEvent) uint {
 	var eventID uint
 	err := p.db.Transaction(func(tx *gorm.DB) error {
 		ev := models.AutomationEvent{
@@ -501,6 +513,7 @@ func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value
 			CommandID:   commandID,
 			CreatedAt:   at,
 		}
+		applySourceColumns(&ev, src)
 		if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 			ev.TriggerValue = &value
 		}
@@ -565,7 +578,17 @@ type selectorOutcome struct {
 //
 // 返回 (result, reason, ok)：ok=false 时调用方决定落哪条事件；result="" 表示
 // condition_changed（条件已失效），否则是解析层专用的结果码。
+// checkConditionsStillSatisfiedDetailed 保留旧签名（既有测试/调用方）：
+// 等价于"无触发证据的存量规则"路径；生产 HandleTrigger 走
+// checkConditionsStillSatisfiedWithSource（带 SourceEdgeDeviceID 证据）。
 func (p *Planner) checkConditionsStillSatisfiedDetailed(rule models.AutomationRule) (string, string, bool) {
+	return p.checkConditionsStillSatisfiedWithSource(rule, newTriggerEvent(rule, time.Time{}, 0, "", nil))
+}
+
+// checkConditionsStillSatisfiedDetailedLegacy 是 M0 之前的实现（仅作行为参照保留，
+// 生产与测试入口都走上面的委托版本；删除会让"F4 有两份实现"的漂移风险重现，
+// 因此保留但不再被调用）。**不要在此新增逻辑**。
+func (p *Planner) checkConditionsStillSatisfiedDetailedLegacy(rule models.AutomationRule) (string, string, bool) {
 	// 未接线（旧构造/单测）：跳过复核，保持既有行为。
 	if p.latestValueFn == nil && p.latestValueBySensorFn == nil &&
 		p.latestValuesFn == nil && p.planProvider == nil {
@@ -807,7 +830,7 @@ func canonicalActionParams(raw string) string {
 
 // recordPendingConfirm 落 pending_confirm 事件（含动作集合哈希快照，Y5）。
 func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time, value float64,
-	actions []models.AutomationRuleAction) uint {
+	actions []models.AutomationRuleAction, src *TriggerEvent) uint {
 	ev := models.AutomationEvent{
 		RuleID:      rule.ID,
 		TriggeredAt: at,
@@ -815,6 +838,12 @@ func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time,
 		Detail:      "awaiting manual confirmation",
 		ActionHash:  automationActionSetHash(actions),
 		CreatedAt:   at,
+	}
+	applySourceColumns(&ev, src)
+	// Y5 + D-8：pending 期间来源可能切换，confirm 必须能证明"来源没变"。
+	// 存量单设备规则 source_hash 为空（不启用比对，保持兼容）。
+	if src != nil && src.SourceKind != "" {
+		ev.SourceHash, ev.SourceEvidence = p.pendingSourceSnapshot(rule, src)
 	}
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
@@ -830,13 +859,13 @@ func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time,
 
 // record 落审计行 (fail-open: 写失败只计指标不阻塞, 对齐 alert 风格)。
 func (p *Planner) record(rule models.AutomationRule, at time.Time, value float64,
-	result, commandID, detail string) {
-	p.recordRet(rule, at, value, result, commandID, detail)
+	result, commandID, detail string, src *TriggerEvent) {
+	p.recordRet(rule, at, value, result, commandID, detail, src)
 }
 
 // recordRet 同 record, 但返回落库事件 ID (0=写失败)。确认分流需 eventID 透传通知。
 func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value float64,
-	result, commandID, detail string) uint {
+	result, commandID, detail string, src *TriggerEvent) uint {
 	ev := models.AutomationEvent{
 		RuleID:      rule.ID,
 		TriggeredAt: at,
@@ -845,6 +874,8 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 		Detail:      detail,
 		CreatedAt:   at,
 	}
+	// 来源归因（方案 §4.4）：group 规则的事件必须能回答"谁供的数"。
+	applySourceColumns(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -1392,6 +1423,16 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 	// 只比对非空快照（ActionHash 列上线前的历史 pending 事件为空，保持兼容）。
 	if ev.ActionHash != "" {
 		if current := automationActionSetHash(actions); current != ev.ActionHash {
+			return ev, ErrConfirmActionChanged
+		}
+	}
+	// D-8 来源 TOCTOU：pending 期间组状态（active/成员/版本）变化 ⇒ 用户确认的
+	// 决策依据已不存在，拒绝执行（与动作变更同语义）。空串 = 存量/单设备事件，跳过。
+	if ev.SourceHash != "" {
+		current, ok := p.currentSourceSnapshot(rule)
+		if !ok || current != ev.SourceHash {
+			logger.Warn("automation: confirm rejected, source group changed while pending",
+				"rule_id", rule.ID, "event_id", ev.ID)
 			return ev, ErrConfirmActionChanged
 		}
 	}

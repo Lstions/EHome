@@ -431,6 +431,7 @@ const menuIcons: Record<string, unknown> = {
 	'/edge-device': Cpu,
 	'/logical-device': Share,
 	'/data-sources': Link,
+	'/source-groups': Link,
 	'/channel': Connection,
 	'/data': DataLine,
 	'/firmware': Files,

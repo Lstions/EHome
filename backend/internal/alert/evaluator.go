@@ -16,6 +16,7 @@ import (
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/notify"
+	"ehome/backend/internal/sourceref"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
@@ -40,6 +41,8 @@ type sample struct {
 	at        time.Time
 	value     float64
 	satisfied bool
+	// identity 是窗口来源身份（S1/S2：窗口不得跨来源拼接；见 source.go）。
+	identity sourceIdentity
 }
 
 // Evaluator 阈值求值器: 规则缓存 + 每规则滑动窗口 + 状态机。
@@ -77,6 +80,15 @@ type Evaluator struct {
 	statsMu   sync.Mutex
 	ruleStats map[uint]*ruleStat
 
+	// sourceResolver 来源组解析器（nil=未接线 ⇒ 组规则 fail-closed 并 Warn）。
+	sourceResolver SourceResolver
+	// latestValueBySensorFn 复合组逐成员取值注入点（生产=api.LatestValueBySensor）。
+	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
+	// deviceIntervalFn 设备采集间隔（S8 gap 上限=2×间隔；nil/0 ⇒ 不启用）。
+	deviceIntervalFn func(edgeDeviceID uint) time.Duration
+	// rulesByGroup groupID → ruleID 反向索引（切换钩子按组清窗/关卡）。
+	rulesByGroup map[uint][]uint
+
 	stopCh chan struct{}
 	once   sync.Once
 }
@@ -93,6 +105,7 @@ func NewEvaluator(db *gorm.DB, broadcast func(eventType string, payload any)) *E
 		plans:         newPlanCache(),
 		unresolvedLog: make(map[unresolvedKey]time.Time),
 		ruleStats:     make(map[uint]*ruleStat),
+		rulesByGroup:  make(map[uint][]uint),
 		stopCh:        make(chan struct{}),
 	}
 	e.LoadRules()
@@ -161,6 +174,14 @@ func (e *Evaluator) LoadRules() {
 			delete(e.lastNotifyAt, id)
 		}
 	}
+	// 来源组反向索引（切换钩子按组清窗/关闭 firing）。
+	byGroup := make(map[uint][]uint)
+	for id, r := range next {
+		if ref := r.SourceRef(); ref.IsGroup() {
+			byGroup[ref.GroupID] = append(byGroup[ref.GroupID], id)
+		}
+	}
+	e.rulesByGroup = byGroup
 	e.mu.Unlock()
 	// DB 写放在锁外（失败只告警，不影响规则加载）。
 	for _, rule := range updatedWhileFiring {
@@ -191,7 +212,10 @@ func sameAlertTriggerState(prev, next models.AlertRule) bool {
 		prev.SensorName == next.SensorName &&
 		prev.Comparator == next.Comparator &&
 		prev.Threshold == next.Threshold &&
-		prev.DurationSec == next.DurationSec
+		prev.DurationSec == next.DurationSec &&
+		// 来源绑定变化（M0）：换组/换锚目标都改变窗口语义 ⇒ 必须清窗。
+		sourceKindEq(prev.SourceKind, next.SourceKind) &&
+		uintPtrEq(prev.SourceGroupID, next.SourceGroupID)
 }
 
 // alertTriggerNeedsWindowReset 判定变化是否需要**丢弃**窗口样本：
@@ -274,29 +298,57 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	if len(fields) == 0 || edgeDeviceID == 0 {
 		return
 	}
+	// H2 修复（锁放大 + 锁内查 DB）：RLock 内只做规则浅拷贝；resolveLogicalID 的
+	// SQL 往返必须移到锁外（原实现在 RLock 内调用它，DB 慢查询会阻塞所有写锁等待）。
 	e.mu.RLock()
-	target := edgeDeviceID
-	var logicalID uint
-	rules := make([]models.AlertRule, 0, len(e.rules))
+	snapshot := make([]models.AlertRule, 0, len(e.rules))
 	for _, r := range e.rules {
-		switch r.TargetType {
-		case models.AlertTargetEdgeDevice:
-			if r.TargetID == target {
-				rules = append(rules, r)
-			}
-		case models.AlertTargetLogicalDevice:
-			if logicalID == 0 {
-				logicalID = e.resolveLogicalID(target)
-			}
-			if logicalID > 0 && r.TargetID == logicalID {
-				rules = append(rules, r)
-			}
-		}
+		snapshot = append(snapshot, r)
 	}
 	e.mu.RUnlock()
 
-	for i := range rules {
-		e.evalRule(rules[i], target, fields, at)
+	target := edgeDeviceID
+	var logicalID uint
+	logicalResolved := false
+	for i := range snapshot {
+		r := snapshot[i]
+		// 来源组规则：匹配/过滤由 sourceref 快照决定（按 kind 分流，裁决 1）。
+		if ref := r.SourceRef(); ref.IsGroup() {
+			m, ok := e.matchSourceRule(r, ref, target, at)
+			if !ok {
+				continue
+			}
+			if m.Kind == sourceref.KindComposite {
+				okc, satisfied, value, src := e.evalComposite(r, m, at)
+				if !okc {
+					continue
+				}
+				e.applyTransition(r, at, value, satisfied, identityForFrame(m, target), src, e.groupGap(m.Group))
+				continue
+			}
+			e.evalRuleWithSource(r, target, fields, at, identityForFrame(m, target),
+				&alertSourceEvidence{kind: sourceref.GroupKindSourceGroup, groupID: m.GroupID,
+					edgeDeviceID: target})
+			continue
+		}
+		// 存量单设备/逻辑设备匹配（逐字节保持原逻辑；logical 解析移到锁外且惰性）。
+		switch r.TargetType {
+		case models.AlertTargetEdgeDevice:
+			if r.TargetID != target {
+				continue
+			}
+		case models.AlertTargetLogicalDevice:
+			if !logicalResolved {
+				logicalID = e.resolveLogicalID(target)
+				logicalResolved = true
+			}
+			if logicalID == 0 || r.TargetID != logicalID {
+				continue
+			}
+		default:
+			continue
+		}
+		e.evalRule(r, target, fields, at)
 	}
 }
 
@@ -327,10 +379,34 @@ func (e *Evaluator) evalRule(rule models.AlertRule, deviceID uint, fields []pars
 	if !ok {
 		return // 本批无该字段 / 特殊 selector unbound / kill switch，不影响窗口
 	}
+	e.applyTransition(rule, at, value, satisfied, legacyIdentity(deviceID), nil, e.sourceGap(deviceID))
+}
 
+// evalRuleWithSource 是 primary_backup 规则的单帧路径（active 成员帧）：
+// window identity 带组信息，其余状态机与存量完全一致。
+func (e *Evaluator) evalRuleWithSource(rule models.AlertRule, deviceID uint, fields []parser.Field,
+	at time.Time, ident sourceIdentity, src *alertSourceEvidence) {
+	ok, satisfied, value := e.evalSelector(rule, deviceID, fields, at)
+	if !ok {
+		return
+	}
+	e.applyTransition(rule, at, value, satisfied, ident, src, e.sourceGap(deviceID))
+}
+
+// applyTransition 是 normal → firing → resolved 状态机的唯一实现（三路复用：存量帧、
+// 主备组成员帧、复合整组结果）。
+//
+// S1：写样本前 identity 与窗口最后一条不一致 ⇒ 丢弃旧段（不依赖切换钩子，S3）。
+// S8：pruneWindow 增加跨长断流判据（maxGap=2×采集间隔；0=不启用）。
+func (e *Evaluator) applyTransition(rule models.AlertRule, at time.Time, value float64,
+	satisfied bool, ident sourceIdentity, src *alertSourceEvidence, maxGap time.Duration) {
 	e.mu.Lock()
-	win := append(e.windows[rule.ID], sample{at: at, value: value, satisfied: satisfied})
-	win = pruneWindow(win, rule.DurationSec, at)
+	win := e.windows[rule.ID]
+	if len(win) > 0 && !win[len(win)-1].identity.equal(ident) {
+		win = nil
+	}
+	win = append(win, sample{at: at, value: value, satisfied: satisfied, identity: ident})
+	win = pruneWindow(win, rule.DurationSec, at, maxGap)
 	e.windows[rule.ID] = win
 
 	isFiring := e.firing[rule.ID]
@@ -344,7 +420,7 @@ func (e *Evaluator) evalRule(rule models.AlertRule, deviceID uint, fields []pars
 		e.lastNotifyAt[rule.ID] = at
 		e.mu.Unlock()
 		e.markRuleFired(rule.ID)
-		e.onFire(rule, value, at)
+		e.onFire(rule, value, at, src)
 	case !satisfied && isFiring:
 		delete(e.firing, rule.ID)
 		e.mu.Unlock()
@@ -365,7 +441,7 @@ func (e *Evaluator) evalRule(rule models.AlertRule, deviceID uint, fields []pars
 }
 
 // onFire normal→firing: 创建 AlertEvent(firing) + Notification + WS 广播。
-func (e *Evaluator) onFire(rule models.AlertRule, value float64, at time.Time) {
+func (e *Evaluator) onFire(rule models.AlertRule, value float64, at time.Time, src *alertSourceEvidence) {
 	ev := models.AlertEvent{
 		RuleID:     rule.ID,
 		State:      stateFiring,
@@ -373,6 +449,8 @@ func (e *Evaluator) onFire(rule models.AlertRule, value float64, at time.Time) {
 		FiredAt:    &at,
 		NotifiedAt: &at,
 	}
+	// 来源归因（方案 §4.4）：告警事件必须能回答"谁供的数"。
+	src.apply(&ev)
 	if err := e.db.Create(&ev).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("alert_evaluator", "alert_events").Inc()
 		logger.Warn("alert: failed to create firing event", "rule_id", rule.ID, "error", err)
@@ -556,7 +634,7 @@ func compare(op string, value, threshold float64) bool {
 }
 
 // pruneWindow 仅保留 [now-DurationSec, now] 内的样本并限制上限。
-func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
+func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Duration) []sample {
 	if len(win) == 0 {
 		return win
 	}
@@ -567,6 +645,18 @@ func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
 	}
 	if i > 0 {
 		win = append(win[:0], win[i:]...)
+	}
+	// S8（方案 F-7 写死算法）：跨长断流不得拼接 —— 相邻样本间隔 > maxGap
+	// （2×采集间隔）时，更早样本不能作为窗口起点。maxGap<=0 ⇒ 不启用。
+	if maxGap > 0 {
+		start := 0
+		for i := len(win) - 1; i > 0; i-- {
+			if win[i].at.Sub(win[i-1].at) > maxGap {
+				start = i
+				break
+			}
+		}
+		win = win[start:]
 	}
 	// ring buffer 上限保护: 超出丢最旧。
 	if len(win) > maxWindowSamples {

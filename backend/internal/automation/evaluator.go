@@ -16,6 +16,7 @@ import (
 
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/sun"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/parser"
@@ -46,14 +47,31 @@ func cooldownFor(rule models.AutomationRule) time.Duration {
 type sample struct {
 	at        time.Time
 	satisfied bool
+	// identity 是窗口来源身份（S1/S2：窗口不得跨来源拼接）。
+	// 存量单设备 = {kind:0, edgeDeviceID=Evaluate 入参}；来源组见 source.go。
+	identity sourceIdentity
 }
 
 // TriggerEvent 触发事件: 求值器产出, Planner 消费。
+//
+// 来源证据（M0，方案 §12.2.1 / F-9）只由求值器经 newTriggerEvent 填写；planner F4
+// 只认这些字段，**不得**回读规则配置列（切换后配置列不反映"这次触发是谁"）。
 type TriggerEvent struct {
 	Rule       models.AutomationRule
 	Value      float64 // 触发时值 (sensor_threshold)
 	At         time.Time
 	WindowEdge string // time_window: enter|exit (sensor_threshold 为 "")
+
+	// ── 来源证据 ──
+	SourceKind         string    // ""=存量单设备；source_group=来源组
+	SourceGroupID      uint      // 来源组 ID（SourceKind=source_group 时非 0）
+	SourceEdgeDeviceID uint      // 触发帧的物理设备（存量=Evaluate 入参；组=触发成员）
+	TransitionSeq      uint64    // 触发时来源快照的切换序号（一致性 token）
+	SourceAt           time.Time // 该成员值的时间戳（F4 staleness 判据）
+
+	// membersJSON 是 composite 触发时的分量快照（automation_events.members_json 审计）。
+	// 非导出：不是对外契约字段，只由 newTriggerEvent 填充、planner 写事件列。
+	membersJSON string
 }
 
 // TriggerHandler Planner 消费接口 (避免 automation→service 编译期反向依赖)。
@@ -125,6 +143,20 @@ type Evaluator struct {
 	// 防 models→sensorfield 包环；见 selector.go 文件头裁决）。
 	plans *planCache
 
+	// sourceResolver 来源组解析器（sourceref.Registry 注入；nil=未接线）。
+	// 来源组规则在 nil 时 fail-closed 并落 source_resolver_not_configured 审计，
+	// **不得**静默跳过（否则上线顺序错误=静默失效）。存量规则不依赖它。
+	sourceResolver SourceResolver
+	// latestValueBySensorFn 是复合组逐成员取值的注入点（生产=api.LatestValueBySensor）。
+	// 与 planner 的同名注入点语义一致；求值器只用它做 composite 分量读取。
+	latestValueBySensorFn func(deviceID uint, sensorName string) (models.UnifiedData, bool)
+	// deviceIntervalFn 设备采集间隔（S8 gap 上限=2×间隔；nil/0 ⇒ 不启用 S8）。
+	deviceIntervalFn func(edgeDeviceID uint) time.Duration
+	// rulesByGroup 是 groupID → ruleID 反向索引（切换钩子按组清窗）。
+	rulesByGroup map[uint][]uint
+	// sourceAudit 是来源失败审计节流表（key: ruleID+result+reason）。
+	sourceAudit map[sourceAuditKey]time.Time
+
 	// auditMu/unresolvedAudit 是"无法求值"审计的 5 分钟节流表
 	// （key: ruleID + selectorHash，窄复核要求按 selector 维度去重）。
 	auditMu         sync.Mutex
@@ -153,6 +185,8 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 		firstSunTick:     true,
 		plans:            newPlanCache(),
 		unresolvedAudit:  make(map[unresolvedKey]time.Time),
+		sourceAudit:      make(map[sourceAuditKey]time.Time),
+		rulesByGroup:     make(map[uint][]uint),
 		ruleStats:        make(map[uint]*ruleStat),
 		stopCh:           make(chan struct{}),
 	}
@@ -338,6 +372,14 @@ func (e *Evaluator) LoadRules() {
 			delete(e.sunLocationAudit, id)
 		}
 	}
+	// 来源组反向索引：groupID → 规则集（切换钩子按组清窗；S4 保留冷却锚）。
+	byGroup := make(map[uint][]uint)
+	for id, r := range next {
+		if ref := r.SourceRef(); ref.IsGroup() {
+			byGroup[ref.GroupID] = append(byGroup[ref.GroupID], id)
+		}
+	}
+	e.rulesByGroup = byGroup
 	e.mu.Unlock()
 	// 设计 §7.2：LoadRules/Invalidate 后清空编译产物（selector/epoch 变化惰性重编译）。
 	// 兜底刷新每 30s 一次，重编译是纯内存操作（零 DB），热路径仍靠缓存。
@@ -349,6 +391,11 @@ func (e *Evaluator) LoadRules() {
 	for key := range e.unresolvedAudit {
 		if _, ok := next[key.ruleID]; !ok {
 			delete(e.unresolvedAudit, key)
+		}
+	}
+	for key := range e.sourceAudit {
+		if _, ok := next[key.ruleID]; !ok {
+			delete(e.sourceAudit, key)
 		}
 	}
 	e.auditMu.Unlock()
@@ -367,7 +414,10 @@ func sameSensorTriggerState(prev, next models.AutomationRule) bool {
 		prev.TriggerThreshold == next.TriggerThreshold &&
 		prev.TriggerDurationSec == next.TriggerDurationSec &&
 		prev.TriggerEdgeDeviceID == next.TriggerEdgeDeviceID &&
-		prev.ConditionsJSON == next.ConditionsJSON
+		prev.ConditionsJSON == next.ConditionsJSON &&
+		// 来源绑定（M0）：绑组/换组/换锚成员都改变窗口语义 ⇒ 必须清窗。
+		sourceKindEq(prev.SourceKind, next.SourceKind) &&
+		uintPtrEq(prev.SourceGroupID, next.SourceGroupID)
 }
 
 // sameWindowStateFields 是"影响窗口/日出日落判定"的字段**白名单**比较 (A-17)。
@@ -656,10 +706,7 @@ func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, 
 	e.mu.Unlock()
 
 	if e.handler != nil {
-		e.handler.HandleTrigger(TriggerEvent{
-			Rule: rule,
-			At:   now,
-		})
+		e.handler.HandleTrigger(newTriggerEvent(rule, now, 0, "", nil))
 	}
 }
 
@@ -803,11 +850,7 @@ func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
 	e.mu.Unlock()
 
 	if e.handler != nil {
-		e.handler.HandleTrigger(TriggerEvent{
-			Rule:       rule,
-			At:         now,
-			WindowEdge: edge,
-		})
+		e.handler.HandleTrigger(newTriggerEvent(rule, now, 0, edge, nil))
 	}
 }
 
@@ -865,10 +908,32 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	target := edgeDeviceID
 	var logicalID uint
 	resolved := false
-	matched := rules[:0]
 	for _, r := range rules {
-		// 规则匹配: TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐,
-		// 文档标注); 否则必须精确命中上报设备 (或其逻辑身份)。
+		// 来源组规则：匹配/过滤由 sourceref 快照决定（按 kind 分流，裁决 1）。
+		//   primary_backup：只收 active 成员帧（备成员帧在此丢弃，S1 的前提）；
+		//   composite      ：任一成员帧驱动整组求值（CombineGroup）。
+		if ref := r.SourceRef(); ref.IsGroup() {
+			m, ok := e.matchSourceRule(r, ref, target, at)
+			if !ok {
+				continue
+			}
+			if m.Kind == sourceref.KindComposite {
+				e.evalCompositeRule(r, m, target, fields, at)
+				continue
+			}
+			e.evalRuleWithSource(r, target, fields, at, identityForFrame(m, target),
+				&triggerSource{
+					kind:          sourceref.GroupKindSourceGroup,
+					groupID:       m.GroupID,
+					edgeDeviceID:  target,
+					transitionSeq: m.TransitionSeq,
+					sourceAt:      at,
+				})
+			continue
+		}
+		// 存量单设备/逻辑设备匹配（逐字节保持原逻辑）:
+		// TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐, 文档标注);
+		// 否则必须精确命中上报设备 (或其逻辑身份)。
 		if r.TriggerEdgeDeviceID != 0 && r.TriggerEdgeDeviceID != target {
 			if !resolved {
 				logicalID = e.resolveLogicalID(target)
@@ -878,11 +943,7 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 				continue
 			}
 		}
-		matched = append(matched, r)
-	}
-
-	for i := range matched {
-		e.evalRule(matched[i], target, fields, at)
+		e.evalRule(r, target, fields, at)
 	}
 }
 
@@ -915,21 +976,55 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields [
 	if !triggerOK {
 		return
 	}
+	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
+		return
+	}
+	e.applyTrigger(rule, at, value, satisfied, legacyIdentity(deviceID),
+		legacyTriggerSource(deviceID, at), e.sourceGap(deviceID))
+}
 
-	// 附加条件全部 AND 求值 (fail-closed: 非法 JSON 直接判不触发)。
+// evalRuleWithSource 是 primary_backup 规则的单帧路径：selector 在本帧求值，
+// 窗口身份与冷却/触发沿用同一条状态机（applyTrigger），只是 identity 带组信息。
+func (e *Evaluator) evalRuleWithSource(rule models.AutomationRule, deviceID uint,
+	fields []parser.Field, at time.Time, ident sourceIdentity, src *triggerSource) {
+	triggerOK, satisfied, value := e.evalSelector(rule.ID, 0, deviceID,
+		rule.TriggerSensorName, rule.TriggerComparator, rule.TriggerThreshold, fields, at)
+	if !triggerOK {
+		return
+	}
+	if !e.conditionsSatisfied(rule, deviceID, fields, at) {
+		return
+	}
+	e.applyTrigger(rule, at, value, satisfied, ident, src, e.sourceGap(deviceID))
+}
+
+// conditionsSatisfied 求值附加条件（全部 AND；任一无法判定/不满足 ⇒ false）。
+// 非法 conditions_json 属配置错误：log + 不触发（fail-closed，与存量一致）。
+func (e *Evaluator) conditionsSatisfied(rule models.AutomationRule, deviceID uint,
+	fields []parser.Field, at time.Time) bool {
 	conds, err := rule.ParseConditions()
 	if err != nil {
 		logger.Warn("automation: invalid conditions_json", "rule_id", rule.ID, "error", err)
-		return
+		return false
 	}
 	for i, c := range conds {
 		condOK, condSatisfied, _ := e.evalSelector(rule.ID, uint8(i+1), deviceID,
 			c.SensorName, c.Comparator, c.Threshold, fields, at)
 		if !condOK || !condSatisfied {
-			return // 任一条件无法判定/不满足 则不触发（混合规则整条 fail-closed）
+			return false // 任一条件无法判定/不满足 则不触发（混合规则整条 fail-closed）
 		}
 	}
+	return true
+}
 
+// applyTrigger 是 armed → triggered 状态机的唯一实现（三路复用：存量单帧、
+// 主备组成员帧、复合整组结果）。
+//
+// S1/S3：写样本前若 identity 与窗口最后一条不一致 ⇒ 丢弃旧段（**不依赖切换钩子**，
+// 钩子丢失只影响清窗时延，不影响正确性）。S4：清窗保留 triggered 冷却锚。
+// S8：pruneWindow 增加跨长断流判据（maxGap=2×采集间隔；0=不启用）。
+func (e *Evaluator) applyTrigger(rule models.AutomationRule, at time.Time, value float64,
+	satisfied bool, ident sourceIdentity, src *triggerSource, maxGap time.Duration) {
 	cooldown := cooldownFor(rule) // 0 = 不冷却 (cooldownFor 是唯一判定处)
 
 	e.mu.Lock()
@@ -945,8 +1040,13 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields [
 		delete(e.triggered, rule.ID) // 冷却到期或本就不冷却 (0), 回 armed
 	}
 
-	win := append(e.windows[rule.ID], sample{at: at, satisfied: satisfied})
-	win = pruneWindow(win, rule.TriggerDurationSec, at)
+	win := e.windows[rule.ID]
+	// S1（身份不匹配即清段）：同一条规则在来源切换/重启/组变更后不得拼接旧样本。
+	if len(win) > 0 && !win[len(win)-1].identity.equal(ident) {
+		win = nil
+	}
+	win = append(win, sample{at: at, satisfied: satisfied, identity: ident})
+	win = pruneWindow(win, rule.TriggerDurationSec, at, maxGap)
 	e.windows[rule.ID] = win
 
 	continuous := satisfied && windowSatisfied(win, rule.TriggerDurationSec, at)
@@ -963,7 +1063,7 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields [
 	if e.handler != nil {
 		// Value 语义：literal 为原始上报值（与今天一致）；特殊 selector 为
 		// predicate 参与比较的值（family/reducer 的语义值），仅用于展示/审计。
-		e.handler.HandleTrigger(TriggerEvent{Rule: rule, Value: value, At: at})
+		e.handler.HandleTrigger(newTriggerEvent(rule, at, value, "", src))
 	}
 }
 
@@ -1035,7 +1135,7 @@ func compare(op string, value, threshold float64) bool {
 // 起点 —— 否则稀疏采样 (如每 5s 一点, duration=30s) 时窗口恰跨满 duration 的
 // 边界样本被裁, windowSatisfied 的 span 判定 (now-win[0].at >= duration) 永不满足。
 // 对照 alert pruneWindow 同位置缺陷 (alert 测试用密集采样未暴露)。
-func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
+func pruneWindow(win []sample, durationSec int, now time.Time, maxGap time.Duration) []sample {
 	if len(win) == 0 {
 		return win
 	}
@@ -1053,6 +1153,20 @@ func pruneWindow(win []sample, durationSec int, now time.Time) []sample {
 		keep--
 	}
 	win = win[keep:]
+	// S8（方案 F-7 写死算法）：跨长断流不得拼接 —— 相邻样本间隔 > maxGap
+	// （2×采集间隔）时，更早的样本不能作为窗口起点。实现取"最近一次断流之后"
+	// 的那一段（从尾部向前找第一个断点），而不是只比较首对样本。
+	// maxGap<=0 表示采集间隔取不到 ⇒ 不启用该判据（保持存量行为）。
+	if maxGap > 0 {
+		start := 0
+		for i := len(win) - 1; i > 0; i-- {
+			if win[i].at.Sub(win[i-1].at) > maxGap {
+				start = i
+				break
+			}
+		}
+		win = win[start:]
+	}
 	if len(win) > maxWindowSamples {
 		win = win[len(win)-maxWindowSamples:]
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/seed"
+	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/transport"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
@@ -392,6 +394,44 @@ func main() {
 	defer dataSourceStop()
 	go datasourceSvc.Start(dataSourceCtx)
 
+	// ── 来源组引擎（设计/规则数据来源与复合来源-方案-2026-10-22.md v0.3 §4/§5.5）──
+	//
+	// 与 datasourceSvc 并列的第二条数据源引擎：datasourceSvc 管 (逻辑设备,类别) 的成员台账，
+	// groupSvc 管「一个数据来源」对象（主备/复合，跨逻辑设备）。两者共用同一套 R1–R11 决策
+	// 纯函数（ds-analyst 保证），但各自的表与状态互不干扰。
+	//
+	// 三个失败即拒绝启动（fail-closed，不许带病运行）：
+	//   1. PublishAll 内置 SelfCheck —— composite 组存在 active 行 / 同组多 active 行；
+	//   2. Registry 是求值热路径的唯一真值来源，没有它规则会 fail-closed 到「永不触发」；
+	//   3. 钩子负责清窗与审计，未接线时只能靠窗口 identity 兜底（S3），可用但更迟。
+	sourceGroupReg := sourceref.NewRegistry()
+	sourceGroupSvc := datasource.NewGroupService(db, datasource.Options{})
+	sourceGroupSvc.SetGroupRegistry(sourceGroupReg)
+	sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)
+	// 快照发布 + 自检：composite 组误置 active 或同组多 active 会让「用哪一台」不确定，
+	// 必须在启动期拒绝，而不是运行期静默取第一条。
+	if err := sourceGroupSvc.PublishAll(); err != nil {
+		// fail-closed：来源组配置自相矛盾（composite 组误置 active / 同组多 active）
+		// 会让「到底用哪一台供数」不确定。带病启动比不启动更危险。
+		logger.Fatalf("source_group: 启动自检失败（拒绝启动）：%v", err)
+	}
+	// 分发器与扫描器在这里启动；切换**钩子**要等两引擎构造完才能注册（见下方 automation 段）。
+	sourceGroupCtx, sourceGroupStop := context.WithCancel(context.Background())
+	defer sourceGroupStop()
+	go sourceGroupSvc.RunDispatcher(sourceGroupCtx)
+	go sourceGroupSvc.Start(sourceGroupCtx)
+
+	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；
+	// 设备离线 ⇒ 两边都 MarkFailure。漏接一条会让该引擎「永不切换」（静默失效）。
+	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
+		datasourceSvc.MarkSuccess(edgeDeviceID, names, at)
+		sourceGroupSvc.MarkSuccess(edgeDeviceID, names, at)
+	})
+	offlineDetector.SetDeviceOfflineHook(func(edgeDeviceID uint) {
+		datasourceSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
+		sourceGroupSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
+	})
+
 	// systemActorPrecheckID 可能为 0 (全新安装): 语义是"待 Planner 惰性解析", 不是有效 actor。
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorPrecheckID)
 	// 自动化策略通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 日熔断 / 待人工确认 /
@@ -412,6 +452,35 @@ func main() {
 		automationEvaluator.SetPlanProvider(fieldResolver.registry)
 		automationPlanner.SetPlanProvider(fieldResolver.registry)
 	}
+
+	// ── 来源组接线（方案 §5.2 / §6.1 / §12.2.2）──
+	//
+	// 注入顺序有硬约束：两引擎的 SetSourceResolver 必须在**开始接收帧之前**完成，
+	// 否则最早几帧会走「resolver 未接线 ⇒ fail-closed」路径（安全但会产生
+	// source_resolver_not_configured 噪声审计）。
+	//
+	// 两引擎 + planner 共用同一份快照：帧求值（MatchFrame）与 F4 复核读的必须是
+	// 同一个 revision，否则会出现「求值时是 A 供数、复核时快照已切到 B」的口径分裂。
+	automationEvaluator.SetSourceResolver(sourceGroupReg)
+	automationPlanner.SetSourceResolver(sourceGroupReg)
+	automationEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	automationEvaluator.SetDeviceIntervalFn(deviceIntervalFn(db))
+	alertEvaluator.SetSourceResolver(sourceGroupReg)
+	alertEvaluator.SetLatestValueBySensorFn(api.LatestValueBySensor)
+	alertEvaluator.SetDeviceIntervalFn(deviceIntervalFn(db))
+
+	// 切换钩子：ActiveChange 只在**事务提交后**发射（datasource 侧保证）。三件事 ——
+	//   ① 两引擎立即清窗：**加速**，不是正确性前提（窗口 identity 不匹配即清，S3）；
+	//   ② 关闭告警的陈旧 firing（S4）：换人后旧「正在告警」不再代表权威来源；
+	//   ③ 落审计：运维要知道换了谁、为什么换。
+	sourceGroupSvc.SetActiveChangeHook(func(ev datasource.ActiveChange) {
+		alertEvaluator.OnSourceTransition(ev.GroupID)
+		automationEvaluator.OnSourceTransition(ev.GroupID)
+		logger.Infof("[source_group] active change group=%d %d->%d reason=%s trigger=%s rev=%d seq=%d",
+			ev.GroupID, ev.PrevMemberID, ev.NextMemberID, ev.Reason, ev.Trigger, ev.Revision, ev.TransitionSeq)
+	})
+
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
@@ -635,6 +704,47 @@ func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {
 		}
 	}
 	return configs
+}
+
+// deviceIntervalFn 返回「按边缘设备取采集间隔」的回调，供两引擎的 S8 窗口 gap 上限
+// 与来源组 staleness 推导使用（方案 §5.6 S8 / F-3）。
+//
+// 缓存策略：采集间隔是**低频变更的配置**（改配置会走 API 且极少发生），而回调在
+// 每帧求值路径上调用。这里用 10 分钟 TTL 的内存缓存 + 主键查询兜底：
+//   - 未配置 / 查询失败 ⇒ 返回 0 ⇒ 调用方**不启用** gap 判据
+//     （宁可少一道保护，也不要因为拿不到 interval 就让所有规则停止触发）；
+//   - 不做无上限缓存，避免长跑进程持有过期配置。
+func deviceIntervalFn(db *gorm.DB) func(edgeDeviceID uint) time.Duration {
+	type entry struct {
+		d  time.Duration
+		at time.Time
+	}
+	var (
+		mu    sync.Mutex
+		cache = map[uint]entry{}
+	)
+	const ttl = 10 * time.Minute
+	return func(edgeDeviceID uint) time.Duration {
+		if edgeDeviceID == 0 {
+			return 0
+		}
+		mu.Lock()
+		if e, ok := cache[edgeDeviceID]; ok && time.Since(e.at) < ttl {
+			mu.Unlock()
+			return e.d
+		}
+		mu.Unlock()
+
+		var dev models.EdgeDevice
+		var d time.Duration
+		if err := db.Select("id", "interval_ms").First(&dev, edgeDeviceID).Error; err == nil && dev.IntervalMs > 0 {
+			d = time.Duration(dev.IntervalMs) * time.Millisecond
+		}
+		mu.Lock()
+		cache[edgeDeviceID] = entry{d: d, at: time.Now()}
+		mu.Unlock()
+		return d
+	}
 }
 
 func runCommandDispatcher(ctx context.Context, dispatcher *commandexec.Dispatcher, service *commandexec.Service, wsHub *websocket.Hub) {

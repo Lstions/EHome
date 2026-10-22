@@ -1,0 +1,698 @@
+package datasource
+
+// 来源组 CRUD 与成员拓扑（方案 §4.1/§4.2/§7.3 / §12.9.1 F-1）。所有写路径：
+//   - 事务内做 DB 变更 + bumpRevision（唯一入口，白名单）；
+//   - 事务提交后 publishGroup + 必要时 emit ActiveChange（commitGroupChange）；
+//   - 校验失败一律 ErrInvalidRequest/ErrConflict/ErrNotFound（handler 映射 400/409/404）。
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
+
+	"gorm.io/gorm"
+)
+
+// GroupMemberInput 是创建/更新组时的成员声明。
+type GroupMemberInput struct {
+	EdgeDeviceID uint
+	Priority     int
+	Required     *bool // nil ⇒ kind 默认（primary_backup=false；composite=true）
+}
+
+// CreateGroupInput 是创建来源组的入参。
+type CreateGroupInput struct {
+	Name         string
+	Kind         string
+	Category     string
+	Combine      string
+	MinMembers   int
+	StalenessSec int
+	OnDegrade    string
+	Enabled      *bool // nil ⇒ true
+	Description  string
+	Members      []GroupMemberInput
+}
+
+// UpdateGroupInput 是更新来源组入参；Kind/Category 不可变（变更语义见方案 F-1：
+// 拓扑字段变更 bump revision，但本期 API 仅允许 combine/min_members/staleness/on_degrade/enabled/
+// name/description/members；kind/category 不可变，避免成员观测口径失效）。
+type UpdateGroupInput struct {
+	Name         *string
+	Combine      *string
+	MinMembers   *int
+	StalenessSec *int
+	OnDegrade    *string
+	Enabled      *bool
+	Description  *string
+	// Members 为 nil 表示不改成员；非 nil 表示**整体替换**（保留同名成员运行态）。
+	Members *[]GroupMemberInput
+}
+
+// ListGroupFilter 是列表过滤条件。
+type ListGroupFilter struct {
+	Kind    string
+	Enabled *bool
+	Category string
+	Page    int
+	PageSize int
+}
+
+const (
+	defaultGroupPageSize = 20
+	maxGroupPageSize     = 100
+)
+
+// validateGroupConfig 校验 V-1/V-2/V-3（kind×combine×min_members×required 组合）。
+func validateGroupConfig(kind, category, combine string, minMembers int, onDegrade string) error {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return fmt.Errorf("%w: category is required", ErrInvalidRequest)
+	}
+	kind = strings.TrimSpace(kind)
+	combine = strings.TrimSpace(combine)
+	onDegrade = strings.TrimSpace(onDegrade)
+	switch kind {
+	case models.SourceGroupKindPrimaryBackup:
+		// V-2：primary_backup 不得设置 combine。
+		if combine != "" {
+			return fmt.Errorf("%w: primary_backup 组不得设置 combine（V-2）", ErrInvalidRequest)
+		}
+	case models.SourceGroupKindComposite:
+		// V-1：composite 必须显式 combine 且在白名单内。
+		valid := false
+		for _, c := range models.CombineWhitelist {
+			if combine == c {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("%w: composite 组必须显式设置 combine ∈ %v（V-1）", ErrInvalidRequest, models.CombineWhitelist)
+		}
+		if onDegrade != "" && onDegrade != models.OnDegradeFailClosed && onDegrade != models.OnDegradeUseAvailable {
+			return fmt.Errorf("%w: on_degrade 非法: %q（允许 fail_closed|use_available）", ErrInvalidRequest, onDegrade)
+		}
+		if minMembers < 0 || minMembers > 64 {
+			return fmt.Errorf("%w: min_members 越界: %d", ErrInvalidRequest, minMembers)
+		}
+		// V-3：first_available 与 min_members>1 自相矛盾（D-4）。
+		if combine == models.CombineFirstAvailable && minMembers > 1 {
+			return fmt.Errorf("%w: combine=first_available 时 min_members 必须为 1（V-3）", ErrInvalidRequest)
+		}
+	default:
+		return fmt.Errorf("%w: kind 非法: %q（允许 primary_backup|composite）", ErrInvalidRequest, kind)
+	}
+	return nil
+}
+
+// validateMemberConfig 校验 V-3（first_available 自相矛盾）/ V-4（设备存在+Enabled）/ 重复。
+func (g *GroupService) validateMemberConfig(kind, combine string, category string, members []GroupMemberInput) error {
+	if kind == models.SourceGroupKindPrimaryBackup && len(members) == 0 {
+		// 允许先建空组再补成员（规则可稍后绑定）；不在此处强制。
+		return nil
+	}
+	seen := make(map[uint]struct{}, len(members))
+	for _, m := range members {
+		if m.EdgeDeviceID == 0 {
+			return fmt.Errorf("%w: member.edge_device_id is required", ErrInvalidRequest)
+		}
+		if _, dup := seen[m.EdgeDeviceID]; dup {
+			return fmt.Errorf("%w: 成员重复 edge_device_id=%d（I3）", ErrInvalidRequest, m.EdgeDeviceID)
+		}
+		seen[m.EdgeDeviceID] = struct{}{}
+		var dev models.EdgeDevice
+		if err := g.db.First(&dev, m.EdgeDeviceID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: 成员边缘设备 %d 不存在（V-4）", ErrInvalidRequest, m.EdgeDeviceID)
+			}
+			return err
+		}
+		if !dev.Enabled {
+			return fmt.Errorf("%w: 成员边缘设备 %d 未启用（V-4）", ErrInvalidRequest, m.EdgeDeviceID)
+		}
+		if !g.categoryObserved(m.EdgeDeviceID, category) {
+			return fmt.Errorf("%w: 边缘设备 %d 尚未上报字段 %s（V-5 category_not_observed）",
+				ErrInvalidRequest, m.EdgeDeviceID, category)
+		}
+		if kind == models.SourceGroupKindComposite && combine == models.CombineFirstAvailable {
+			if m.Required != nil && *m.Required {
+				return fmt.Errorf("%w: combine=first_available 且存在 required=true 成员（V-3 自相矛盾）", ErrInvalidRequest)
+			}
+		}
+	}
+	return nil
+}
+
+// categoryObserved 与 api 层 category_not_observed 同口径：投影表优先、unified_data 兜底。
+func (g *GroupService) categoryObserved(edgeDeviceID uint, category string) bool {
+	var count int64
+	if err := g.db.Model(&models.SensorFieldObs{}).
+		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
+		Count(&count).Error; err == nil && count > 0 {
+		return true
+	}
+	if err := g.db.Model(&models.UnifiedData{}).
+		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
+		Limit(1).Count(&count).Error; err == nil && count > 0 {
+		return true
+	}
+	return false
+}
+
+// CreateGroup 创建来源组 + 初始成员；primary_backup 组内首个成员自动 active（R7 反向）。
+func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, error) {
+	if err := validateGroupConfig(in.Kind, in.Category, in.Combine, in.MinMembers, in.OnDegrade); err != nil {
+		return nil, err
+	}
+	if err := g.validateMemberConfig(in.Kind, in.Combine, strings.TrimSpace(in.Category), in.Members); err != nil {
+		return nil, err
+	}
+	// D-4 保存期归一：first_available ⇒ on_degrade=use_available、min_members=1、
+	// 所有成员 required=false（即使快照侧有运行时防御，也不允许 DB 里存自相矛盾配置）。
+	if in.Combine == models.CombineFirstAvailable {
+		in.OnDegrade = models.OnDegradeUseAvailable
+		in.MinMembers = 1
+		for i := range in.Members {
+			f := false
+			in.Members[i].Required = &f
+		}
+	}
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+	var out models.SourceGroup
+	var event *ActiveChange
+	err := g.db.Transaction(func(tx *gorm.DB) error {
+		row := models.SourceGroup{
+			Name:         strings.TrimSpace(in.Name),
+			Kind:         in.Kind,
+			Category:     strings.TrimSpace(in.Category),
+			Combine:      in.Combine,
+			MinMembers:   in.MinMembers,
+			StalenessSec: in.StalenessSec,
+			OnDegrade:    in.OnDegrade,
+			Enabled:      enabled,
+			Revision:     0,
+			Description:  in.Description,
+		}
+		if row.Name == "" {
+			row.Name = fmt.Sprintf("%s@%s", row.Kind, row.Category)
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		out = row
+		if len(in.Members) == 0 {
+			return nil
+		}
+		created, err := g.createMembers(tx, row, in.Members)
+		if err != nil {
+			return err
+		}
+		if row.Kind == models.SourceGroupKindPrimaryBackup && len(created) > 0 {
+			// 首成员 active（priority 最高者），其余 standby。
+			anchor := created[0]
+			if err := tx.Model(&models.SourceGroupMember{}).Where("id = ?", anchor.ID).
+				Update("status", models.SourceMemberStatusActive).Error; err != nil {
+				return err
+			}
+			rev, err := g.bumpGroupRevision(tx, row.ID)
+			if err != nil {
+				return err
+			}
+			event = &ActiveChange{
+				PrevMemberID: 0, NextMemberID: anchor.ID, Reason: ReasonGroupManual,
+				Revision: rev, TransitionSeq: g.nextTransitionSeq(row.ID), Category: row.Category,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if event != nil {
+		g.commitGroupChange(out.ID, event)
+	} else {
+		g.publishGroup(out.ID)
+	}
+	return g.GetGroup(out.ID)
+}
+
+// createMembers 在事务内创建成员行，返回按 priority DESC,id ASC 排序后的成员。
+func (g *GroupService) createMembers(tx *gorm.DB, group models.SourceGroup, inputs []GroupMemberInput) ([]models.SourceGroupMember, error) {
+	rows := make([]models.SourceGroupMember, 0, len(inputs))
+	for _, m := range inputs {
+		required := group.Kind == models.SourceGroupKindComposite
+		if m.Required != nil {
+			required = *m.Required
+		}
+		if group.Kind == models.SourceGroupKindPrimaryBackup {
+			required = false // I2：主备组的 required 无意义
+		}
+		if group.Combine == models.CombineFirstAvailable {
+			required = false // D-4：first_available 归一
+		}
+		row := models.SourceGroupMember{
+			GroupID:      group.ID,
+			EdgeDeviceID: m.EdgeDeviceID,
+			Priority:     m.Priority,
+			Required:     required,
+			Status:       models.SourceMemberStatusStandby,
+			MaxFailCount: defaultMaxFailCount,
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	// 排序：priority DESC, id ASC（R3 候选顺序，等价于 sourceref.SortMembers 的成员序）。
+	for i := 1; i < len(rows); i++ {
+		for j := i; j > 0; j-- {
+			a, b := rows[j-1], rows[j]
+			if a.Priority > b.Priority || (a.Priority == b.Priority && a.ID < b.ID) {
+				break
+			}
+			rows[j-1], rows[j] = rows[j], rows[j-1]
+		}
+	}
+	return rows, nil
+}
+
+// UpdateGroup 更新组配置；Members 非 nil 时整体替换成员集合（保留同名成员运行态）。
+func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.SourceGroup, error) {
+	var out *models.SourceGroup
+	var event *ActiveChange
+	err := g.db.Transaction(func(tx *gorm.DB) error {
+		var row models.SourceGroup
+		if err := tx.First(&row, groupID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: source group %d", ErrGroupNotFound, groupID)
+			}
+			return err
+		}
+		combine := row.Combine
+		if in.Combine != nil {
+			combine = strings.TrimSpace(*in.Combine)
+		}
+		minMembers := row.MinMembers
+		if in.MinMembers != nil {
+			minMembers = *in.MinMembers
+		}
+		onDegrade := row.OnDegrade
+		if in.OnDegrade != nil {
+			onDegrade = strings.TrimSpace(*in.OnDegrade)
+		}
+		if err := validateGroupConfig(row.Kind, row.Category, combine, minMembers, onDegrade); err != nil {
+			return err
+		}
+		if combine == models.CombineFirstAvailable {
+			// D-4 归一（与 CreateGroup 同口径）。
+			onDegrade = models.OnDegradeUseAvailable
+			minMembers = 1
+		}
+
+		updates := map[string]interface{}{}
+		if in.Name != nil && strings.TrimSpace(*in.Name) != "" {
+			updates["name"] = strings.TrimSpace(*in.Name)
+		}
+		if in.Description != nil {
+			updates["description"] = *in.Description
+		}
+		if in.Combine != nil {
+			updates["combine"] = combine
+		}
+		if in.MinMembers != nil {
+			updates["min_members"] = minMembers
+		}
+		if in.StalenessSec != nil {
+			updates["staleness_sec"] = *in.StalenessSec
+		}
+		if in.OnDegrade != nil {
+			updates["on_degrade"] = onDegrade
+		}
+		if in.Enabled != nil {
+			updates["enabled"] = *in.Enabled
+		}
+		topologyChanged := in.Members != nil
+		if len(updates) > 0 || topologyChanged {
+			// 允许改 combine/min_members/staleness/on_degrade/enabled/name/description ⇒ bump。
+			if _, err := g.bumpGroupRevision(tx, row.ID); err != nil {
+				return err
+			}
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&models.SourceGroup{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		if in.Members != nil {
+			if err := g.validateMemberConfig(row.Kind, combine, row.Category, *in.Members); err != nil {
+				return err
+			}
+			ev, err := g.replaceMembers(tx, row, *in.Members)
+			if err != nil {
+				return err
+			}
+			event = ev
+		}
+		updated, err := g.GetGroupTx(tx, row.ID)
+		if err != nil {
+			return err
+		}
+		out = updated
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	g.emitAll(nil)
+	g.commitGroupChange(groupID, event)
+	return out, nil
+}
+
+// replaceMembers 整体替换成员集合（保留 edge_device_id 相同的运行态），按需重选 active。
+func (g *GroupService) replaceMembers(tx *gorm.DB, group models.SourceGroup, inputs []GroupMemberInput) (*ActiveChange, error) {
+	var existing []models.SourceGroupMember
+	if err := tx.Where("group_id = ?", group.ID).Find(&existing).Error; err != nil {
+		return nil, err
+	}
+	byEdge := make(map[uint]models.SourceGroupMember, len(existing))
+	for _, m := range existing {
+		byEdge[m.EdgeDeviceID] = m
+	}
+	want := make(map[uint]struct{}, len(inputs))
+	for _, in := range inputs {
+		want[in.EdgeDeviceID] = struct{}{}
+	}
+	// 1) 删除不在新集合内的成员（若为 active，稍后重选）。
+	removedActive := models.SourceGroupMember{}
+	for _, m := range existing {
+		if _, keep := want[m.EdgeDeviceID]; keep {
+			continue
+		}
+		if m.Status == models.SourceMemberStatusActive {
+			removedActive = m
+		}
+		if err := tx.Delete(&models.SourceGroupMember{}, m.ID).Error; err != nil {
+			return nil, err
+		}
+	}
+	// 2) upsert 新集合。
+	for _, in := range inputs {
+		required := group.Kind == models.SourceGroupKindComposite
+		if in.Required != nil {
+			required = *in.Required
+		}
+		if group.Kind == models.SourceGroupKindPrimaryBackup {
+			required = false
+		}
+		if group.Combine == models.CombineFirstAvailable {
+			required = false // D-4
+		}
+		if old, ok := byEdge[in.EdgeDeviceID]; ok {
+			if err := tx.Model(&models.SourceGroupMember{}).Where("id = ?", old.ID).
+				Updates(map[string]interface{}{"priority": in.Priority, "required": required}).Error; err != nil {
+				return nil, err
+			}
+			continue
+		}
+		row := models.SourceGroupMember{
+			GroupID: group.ID, EdgeDeviceID: in.EdgeDeviceID, Priority: in.Priority,
+			Required: required, Status: models.SourceMemberStatusStandby, MaxFailCount: defaultMaxFailCount,
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return nil, err
+		}
+	}
+	// 3) 自愈式补齐 active（primary_backup 且当前无 active）。
+	if group.Kind != models.SourceGroupKindPrimaryBackup {
+		return nil, nil
+	}
+	var members []models.SourceGroupMember
+	if err := tx.Where("group_id = ?", group.ID).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	var activeCount int64
+	if err := tx.Model(&models.SourceGroupMember{}).
+		Where("group_id = ? AND status = ?", group.ID, models.SourceMemberStatusActive).
+		Count(&activeCount).Error; err != nil {
+		return nil, err
+	}
+	if activeCount > 0 {
+		return nil, nil
+	}
+	candidate, ok := pickCandidate(members)
+	if !ok {
+		return nil, nil
+	}
+	rev, err := g.bumpGroupRevision(tx, group.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Model(&models.SourceGroupMember{}).Where("id = ?", candidate.ID).
+		Update("status", models.SourceMemberStatusActive).Error; err != nil {
+		return nil, err
+	}
+	prev := uint(0)
+	reason := ReasonGroupManual
+	if removedActive.ID != 0 {
+		prev = removedActive.ID
+		reason = ReasonGroupDelete
+	}
+	if err := g.writeGroupHealth(tx, group.ID, candidate.ID, "transition",
+		fmt.Sprintf("成员集合变更后补选 active 成员 %d", candidate.ID)); err != nil {
+		return nil, err
+	}
+	return &ActiveChange{
+		PrevMemberID: prev, NextMemberID: candidate.ID, Reason: reason,
+		Revision: rev, TransitionSeq: g.nextTransitionSeq(group.ID), Category: group.Category,
+	}, nil
+}
+
+// DeleteGroup 删除来源组（I6/V-6：被规则引用 ⇒ 409）。成员行删除，切换/健康日志保留作审计。
+func (g *GroupService) DeleteGroup(groupID uint) error {
+	var event *ActiveChange
+	err := g.db.Transaction(func(tx *gorm.DB) error {
+		var row models.SourceGroup
+		if err := tx.First(&row, groupID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: source group %d", ErrGroupNotFound, groupID)
+			}
+			return err
+		}
+		refs, err := g.groupRuleReferences(tx, groupID)
+		if err != nil {
+			return err
+		}
+		if refs > 0 {
+			return fmt.Errorf("%w: source group %d 仍被 %d 条规则引用，拒绝删除（I6）", ErrConflict, groupID, refs)
+		}
+		var active models.SourceGroupMember
+		if err := tx.Where("group_id = ? AND status = ?", groupID, models.SourceMemberStatusActive).
+			First(&active).Error; err == nil {
+			event = &ActiveChange{
+				PrevMemberID: active.ID, NextMemberID: 0, Reason: ReasonGroupDelete,
+				Category: row.Category,
+			}
+		}
+		if err := tx.Where("group_id = ?", groupID).Delete(&models.SourceGroupMember{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&models.SourceGroup{}, groupID).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if g.registry != nil {
+		g.registry.Remove(groupID)
+	}
+	if event != nil {
+		g.dispatcher.emit(*event)
+	}
+	return nil
+}
+
+// groupRuleReferences 统计引用该组的规则数（automation_rules + alert_rules）。
+func (g *GroupService) groupRuleReferences(tx *gorm.DB, groupID uint) (int64, error) {
+	var automation, alert int64
+	if err := tx.Model(&models.AutomationRule{}).Where("source_group_id = ?", groupID).Count(&automation).Error; err != nil {
+		return 0, err
+	}
+	if err := tx.Model(&models.AlertRule{}).Where("source_group_id = ?", groupID).Count(&alert).Error; err != nil {
+		return 0, err
+	}
+	return automation + alert, nil
+}
+
+// GroupRuleReferences 是 handler 用的导出包装（删除前置提示）。
+func (g *GroupService) GroupRuleReferences(groupID uint) (int64, error) {
+	return g.groupRuleReferences(g.db, groupID)
+}
+
+// GetGroup 返回组 + 成员（handler 嵌套渲染用）。成员按 priority DESC, id ASC 排序。
+func (g *GroupService) GetGroup(groupID uint) (*models.SourceGroup, error) {
+	return g.GetGroupTx(g.db, groupID)
+}
+
+// GetGroupTx 在给定连接/事务内读取组。返回值只有组行；成员由 GetGroupWithMembers 提供。
+func (g *GroupService) GetGroupTx(db *gorm.DB, groupID uint) (*models.SourceGroup, error) {
+	var row models.SourceGroup
+	if err := db.First(&row, groupID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: source group %d", ErrGroupNotFound, groupID)
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+// GetGroupWithMembers 返回组 + 成员（handler 的详情/列表渲染）。
+func (g *GroupService) GetGroupWithMembers(groupID uint) (*models.SourceGroup, []models.SourceGroupMember, error) {
+	row, err := g.GetGroup(groupID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var members []models.SourceGroupMember
+	if err := g.db.Where("group_id = ?", groupID).Find(&members).Error; err != nil {
+		return nil, nil, err
+	}
+	sortGroupMembers(members)
+	return row, members, nil
+}
+
+// ListGroups 分页列表。
+func (g *GroupService) ListGroups(f ListGroupFilter) ([]models.SourceGroup, int64, error) {
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = defaultGroupPageSize
+	}
+	if f.PageSize > maxGroupPageSize {
+		f.PageSize = maxGroupPageSize
+	}
+	q := g.db.Model(&models.SourceGroup{})
+	if f.Kind != "" {
+		q = q.Where("kind = ?", f.Kind)
+	}
+	if f.Enabled != nil {
+		q = q.Where("enabled = ?", *f.Enabled)
+	}
+	if f.Category != "" {
+		q = q.Where("category = ?", f.Category)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []models.SourceGroup
+	if err := q.Order("id ASC").Offset((f.Page - 1) * f.PageSize).Limit(f.PageSize).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
+
+// ListMembers 返回组内成员（排序后）。
+func (g *GroupService) ListMembers(groupID uint) ([]models.SourceGroupMember, error) {
+	var members []models.SourceGroupMember
+	if err := g.db.Where("group_id = ?", groupID).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	sortGroupMembers(members)
+	return members, nil
+}
+
+func sortGroupMembers(members []models.SourceGroupMember) {
+	for i := 1; i < len(members); i++ {
+		for j := i; j > 0; j-- {
+			a, b := members[j-1], members[j]
+			if a.Priority > b.Priority || (a.Priority == b.Priority && a.ID < b.ID) {
+				break
+			}
+			members[j-1], members[j] = members[j], members[j-1]
+		}
+	}
+}
+
+// prepareManualActivate 校验 R7 前置并返回（组、目标成员、原 active 成员 ID）。不 bump revision
+// （幂等 no-op 不得改 identity；由调用方在确认发生切换后 bump）。
+func (g *GroupService) prepareManualActivate(tx *gorm.DB, groupID, memberID uint) (*models.SourceGroup, models.SourceGroupMember, uint, error) {
+	var group models.SourceGroup
+	if err := tx.First(&group, groupID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, models.SourceGroupMember{}, 0, fmt.Errorf("%w: source group %d", ErrGroupNotFound, groupID)
+		}
+		return nil, models.SourceGroupMember{}, 0, err
+	}
+	if group.Kind != models.SourceGroupKindPrimaryBackup {
+		return nil, models.SourceGroupMember{}, 0, fmt.Errorf("%w: composite 组没有 active 概念，禁止 activate（V-6）", ErrInvalidRequest)
+	}
+	var target models.SourceGroupMember
+	if err := tx.Where("group_id = ? AND id = ?", groupID, memberID).First(&target).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, models.SourceGroupMember{}, 0, fmt.Errorf("%w: member %d", ErrNotFound, memberID)
+		}
+		return nil, models.SourceGroupMember{}, 0, err
+	}
+	var prev models.SourceGroupMember
+	err := tx.Where("group_id = ? AND status = ?", groupID, models.SourceMemberStatusActive).First(&prev).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, models.SourceGroupMember{}, 0, err
+	}
+	return &group, target, prev.ID, nil
+}
+
+// AnchorEdgeDeviceID 返回组锚点成员的边缘设备 ID（裁决 7 双写用；空组=0）。
+func (g *GroupService) AnchorEdgeDeviceID(groupID uint) (uint, error) {
+	members, err := g.ListMembers(groupID)
+	if err != nil {
+		return 0, err
+	}
+	anchor, ok := AnchorMember(members)
+	if !ok {
+		return 0, nil
+	}
+	return anchor.EdgeDeviceID, nil
+}
+
+// FailoverLogs 组级切换日志（handler GET /:id/failover-logs）。
+func (g *GroupService) FailoverLogs(groupID uint, limit int) ([]models.SourceGroupFailoverLog, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	var rows []models.SourceGroupFailoverLog
+	if err := g.db.Where("group_id = ?", groupID).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// Health 组级健康事件（handler GET /:id/health）。
+func (g *GroupService) Health(groupID uint, limit int) ([]models.SourceGroupHealth, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	var rows []models.SourceGroupHealth
+	if err := g.db.Where("group_id = ?", groupID).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+var _ = time.Now // 保留 time 导入（构造函数/MarkFailure 的时间语义由 opts.Now 统一）
+var _ = logger.Warn

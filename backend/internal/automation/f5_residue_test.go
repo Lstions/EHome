@@ -105,7 +105,7 @@ func TestY2bDailyQuotaResetsAtDayBoundary(t *testing.T) {
 	}
 
 	day1 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)
-	if id := p.recordExecuted(r, day1, 500, "cmd-1"); id == 0 {
+	if id := p.recordExecuted(r, day1, 500, "cmd-1", nil); id == 0 {
 		t.Fatal("recordExecuted 应成功")
 	}
 	// 同日再触发 ⇒ 熔断（通知动作不需要 cmdSvc，能走到 executed/notification 分支）。

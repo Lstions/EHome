@@ -323,13 +323,39 @@
 
         <!-- sensor_threshold 字段组 -->
         <template v-if="form.trigger_type === 'sensor_threshold'">
-          <el-form-item label="边缘设备" required>
+          <!-- 数据来源（方案 v0.3 §4.3）：①某台边缘设备（存量语义，NULL 同义）②来源组（主备/复合）。
+               来源组是跨逻辑设备的"一个数据来源"对象，规则只绑 source_group_id；目标设备锚点由后端保存期双写。 -->
+          <el-form-item label="数据来源">
+            <el-select v-model="form.source_kind" data-test="field-source-kind" @change="onSourceKindChange">
+              <el-option label="边缘设备" value="edge_device" />
+              <el-option label="来源组（主备 / 复合）" value="source_group" />
+            </el-select>
+          </el-form-item>
+          <template v-if="form.source_kind === 'source_group'">
+            <el-form-item label="来源组" required>
+              <el-select v-model="form.source_group_id" filterable data-test="field-source-group" @change="onSourceGroupChange">
+                <el-option v-for="g in sourceGroupOptions" :key="g.id" :label="groupOptionLabel(g)" :value="g.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="selectedSourceGroup" label="组语义">
+              <span class="hint" data-test="source-group-summary">{{ groupSummary(selectedSourceGroup) }}</span>
+            </el-form-item>
+            <el-form-item label="冷却提示">
+              <span class="hint" data-test="cooldown-hint">来源组规则的冷却时间须 ≥ 成员采集间隔（后端保存期强制）；复合组按 combine 合成，缺员处置见组配置。</span>
+            </el-form-item>
+          </template>
+          <el-form-item v-else label="边缘设备" required>
             <el-select v-model="form.trigger_edge_device_id" filterable data-test="field-trigger-device">
               <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="传感器" required>
-            <el-input v-model="form.trigger_sensor_name" placeholder="如：temperature" data-test="field-sensor" />
+            <el-input
+              v-model="form.trigger_sensor_name"
+              :disabled="form.source_kind === 'source_group'"
+              :placeholder="form.source_kind === 'source_group' ? '由来源组的数据类别决定' : '如：temperature'"
+              data-test="field-sensor"
+            />
           </el-form-item>
           <el-form-item label="条件" required>
             <div class="cond-row">
@@ -702,6 +728,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { useWebSocketStore } from '@/stores/websocket'
 import { logger } from '@/utils/logger'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { sourceGroupApi, type SourceGroup } from '@/api/sourceGroup'
 import { deviceOperationApi, type ActionDefinition, type DeviceOperation } from '@/api/deviceOperation'
 import {
   automationApi,
@@ -853,6 +880,9 @@ function emptyForm() {
     trigger_window_edge: 'enter' as const,
     // 0 会在 el-select 里回显成「0」（看起来像已选中设备 0）；undefined 才是真空态
     trigger_edge_device_id: undefined as number | undefined,
+    // 数据来源（方案 v0.3 §4.3）：edge_device=存量语义；source_group=从来源组取值
+    source_kind: 'edge_device' as 'edge_device' | 'source_group',
+    source_group_id: undefined as number | undefined,
     latitude: undefined as number | undefined,
     longitude: undefined as number | undefined,
     timezone: '' as string | undefined,
@@ -866,6 +896,52 @@ function emptyForm() {
 }
 
 const form = reactive(emptyForm())
+
+// ── 来源组（方案 v0.3 §4.3）──
+// 只做为「下拉候选」加载；组语义（active 选择/combine/缺员）由后端 sourceref 负责，前端不重算。
+const sourceGroups = ref<SourceGroup[]>([])
+/** 编辑中的规则原本是否绑来源组：决定「切回边缘设备」时要不要显式清空来源列。 */
+const editingSourceWasGroup = ref(false)
+const sourceGroupOptions = computed(() => sourceGroups.value.filter(g => g.enabled !== false))
+const selectedSourceGroup = computed(() => sourceGroups.value.find(g => g.id === form.source_group_id))
+const COMBINE_LABELS: Record<string, string> = {
+  first_available: '首个可用',
+  avg: '平均',
+  max: '最大',
+  min: '最小',
+  sum: '求和',
+}
+function groupOptionLabel(g: SourceGroup): string {
+  return `${g.name}（${g.kind === 'primary_backup' ? '主备' : '复合'}）`
+}
+function groupSummary(g: SourceGroup): string {
+  if (g.kind === 'primary_backup') return `主备组 · 类别 ${g.category} · active 成员由数据源状态机决定`
+  const n = g.combine === 'first_available' ? 1 : (g.min_members || 1)
+  const degrade = g.on_degrade === 'use_available' ? '可降级（事件标记 degraded）' : 'fail_closed'
+  return `复合组 · ${COMBINE_LABELS[g.combine || ''] ?? g.combine ?? '—'} · 最少 ${n} 个成员 · 缺员 ${degrade}`
+}
+function onSourceKindChange(kind: 'edge_device' | 'source_group') {
+  if (kind === 'edge_device') {
+    form.source_group_id = undefined
+    return
+  }
+  form.trigger_edge_device_id = undefined
+  if (form.source_group_id) onSourceGroupChange()
+}
+/** 选组后把传感器名同步为组的数据类别（组已声明 category；用户不需要再手打物理名）。 */
+function onSourceGroupChange() {
+  const g = selectedSourceGroup.value
+  if (g) form.trigger_sensor_name = g.category
+}
+async function loadSourceGroups() {
+  try {
+    const res = await sourceGroupApi.list({ page: 1, page_size: 200 })
+    sourceGroups.value = Array.isArray(res.items) ? res.items : []
+  } catch {
+    // 只影响下拉候选；存量边缘设备规则与页面其它功能不受影响。
+    sourceGroups.value = []
+  }
+}
 
 /**
  * 规则级经/纬度用文本 ref 承载，而不是直接绑 model 上的 number。
@@ -915,6 +991,7 @@ function uidSeed(): number {
 
 function openCreate() {
   editingId.value = null
+  editingSourceWasGroup.value = false
   Object.assign(form, emptyForm())
   sunLatitudeText.value = ''
   sunLongitudeText.value = ''
@@ -923,6 +1000,7 @@ function openCreate() {
 
 function openEdit(rule: AutomationRule) {
   editingId.value = rule.id
+  editingSourceWasGroup.value = rule.source_kind === 'source_group'
   Object.assign(form, {
     name: rule.name,
     trigger_type: rule.trigger_type,
@@ -936,6 +1014,8 @@ function openEdit(rule: AutomationRule) {
     trigger_window_end: rule.trigger_window_end ?? '',
     trigger_window_edge: rule.trigger_window_edge ?? 'enter',
     trigger_edge_device_id: rule.trigger_edge_device_id ?? undefined,
+    source_kind: (rule.source_kind === 'source_group' ? 'source_group' : 'edge_device') as 'edge_device' | 'source_group',
+    source_group_id: rule.source_group_id ?? undefined,
     latitude: rule.latitude,
     longitude: rule.longitude,
     timezone: rule.timezone ?? '',
@@ -1096,7 +1176,11 @@ const riskyActions = computed(() => form.actions.filter(a => riskBadgeOf(a)))
 function validate(): string | null {
   if (!form.name.trim()) return '请填写规则名称'
   if (form.trigger_type === 'sensor_threshold') {
-    if (!form.trigger_edge_device_id) return '请选择边缘设备'
+    if (form.source_kind === 'source_group') {
+      if (!form.source_group_id) return '请选择来源组'
+    } else if (!form.trigger_edge_device_id) {
+      return '请选择边缘设备'
+    }
     if (!form.trigger_sensor_name.trim()) return '请填写传感器名称'
   } else if (form.trigger_type === 'time_window') {
     if (!form.trigger_window_start.trim()) return '请填写开始时间'
@@ -1168,7 +1252,19 @@ function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
     payload.trigger_comparator = form.trigger_comparator
     payload.trigger_threshold = form.trigger_threshold
     payload.trigger_duration_sec = form.trigger_duration_sec
-    payload.trigger_edge_device_id = form.trigger_edge_device_id
+    if (form.source_kind === 'source_group') {
+      // 来源组：**不传** trigger_edge_device_id —— 锚点由后端按契约 #7 双写
+      //（旧二进制降级为「只看主成员」而不是「任意设备触发」）。
+      payload.source_kind = 'source_group'
+      payload.source_group_id = form.source_group_id
+    } else {
+      payload.trigger_edge_device_id = form.trigger_edge_device_id
+      // 编辑「来源组规则」后切回边缘设备：必须显式清空来源列（后端按指针区分 NULL）。
+      if (editingSourceWasGroup.value) {
+        payload.source_kind = 'edge_device'
+        payload.source_group_id = null
+      }
+    }
   } else if (form.trigger_type === 'time_window') {
     payload.trigger_window_start = form.trigger_window_start.trim()
     payload.trigger_window_end = form.trigger_window_end.trim()
@@ -1618,7 +1714,9 @@ function triggerTypeText(t: AutomationTriggerType): string {
 function triggerSummary(rule: AutomationRule): string {
   if (rule.trigger_type === 'sensor_threshold') {
     const cmp = comparators.find(c => c.value === rule.trigger_comparator)?.label ?? rule.trigger_comparator
-    return `${rule.trigger_sensor_name} ${cmp} ${rule.trigger_threshold}`
+    const base = `${rule.trigger_sensor_name} ${cmp} ${rule.trigger_threshold}`
+    // 来源组规则：在触发摘要里显式标注来源组，避免用户把它误读成"某台设备"。
+    return rule.source_kind === 'source_group' ? `来源组 #${rule.source_group_id} · ${base}` : base
   }
   if (rule.trigger_type === 'time_window') {
     const edge = rule.trigger_window_edge === 'enter' ? '进入' : rule.trigger_window_edge === 'exit' ? '离开' : '持续'
@@ -1738,6 +1836,7 @@ onMounted(async () => {
   } catch {
     /* 设备下拉加载失败不阻塞页面 */
   }
+  await loadSourceGroups()
   await loadActionCatalog()
 })
 
