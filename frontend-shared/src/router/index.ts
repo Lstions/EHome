@@ -179,6 +179,13 @@ const routes: RouteRecordRaw[] = [
     name: 'MobileRedesignDemo',
     component: () => import('@/dev/MobileRedesignDemo.vue'),
     meta: { requiresAuth: false, hidden: true },
+  }, {
+    // 逆变器功率流向四工况（放电 / 充电 / 静止 / 读数矛盾）：方向判定的离线验证页。
+    // 需要登录真设备页才能看到的组件，这里用固定 mock 覆盖全部分支（含箭头方向）。
+    path: '/dev/mock-power-flow',
+    name: 'MockPowerFlowPanel',
+    component: () => import('@/dev/MockPowerFlowPanel.vue'),
+    meta: { requiresAuth: false, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {

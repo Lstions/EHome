@@ -74,6 +74,9 @@ export const REGISTERED_ROUTE_EXCLUSIONS: Record<string, string> = {
   // 它是**评审用静态稿**（纯 mock、不接 API、尚未转正），按本文件既有先例登记为例外；
   // 转正时应删除本例外并把该页登记进 ROUTES 受审分母（同下方 2026-10-17 两条的处置）。
   '/dev/mobile-redesign': 'DEV-only 移动端改版设计稿（同上），评审通过前不进受审分母',
+  // 2026-10-23：逆变器功率流向四工况（放电/充电/静止/读数矛盾）的离线验证页。
+  // 方向判定是纯函数 + 组件分支，一个页面覆盖全部分支；同样 DEV 门控、不进受审分母。
+  '/dev/mock-power-flow': 'DEV-only 功率流向四工况验证页（同上），不进受审分母',
   // 2026-10-17 删除两条 DEV 例外，对应两个 demo 已转正为生产页面：
   //   · '/dev/bms-demo2'          -> views/edge-device/bms/BmsDetailPage.vue
   //                                   （经 EdgeDeviceDetailRouter 按 device_type 分派）

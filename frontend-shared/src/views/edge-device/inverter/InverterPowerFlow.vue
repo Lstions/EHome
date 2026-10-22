@@ -7,45 +7,73 @@
       而等比缩放又会把 12/13px 的标签压到 6px 读不出来（这个死结已试过三次，见下方 CSS 注释）。
       改用 DOM 版：上排 PV / 电网，中间逆变器，下排负载 / 电池，
       文字是真实 DOM 文本（12~15px），宽度自适应，零横滚。
+
+      2026-10-23 用户报障（「明明电池放电，方向却指向电池」）：
+      改前这里上下各只有一个写死的「↓」，与电池的实际方向无关 —— 放电时画面
+      依然显示「能量从上往下流」，这正是用户看到的错误。现在每个连接位都是
+      **各列独立**的箭头（topArrow / bottomArrow 按该支路真实方向取值）：
+      电池放电 = 电池 → 逆变器 = 下排右列箭头朝上「↑」。
     -->
-    <div v-if="isMobileViewport" class="pf-mobile">
+    <div v-if="isMobileViewport" class="pf-mobile" data-testid="power-flow-mobile">
       <div class="pfm-row">
-        <div class="pfm-node" :class="{ on: pvPower > 0 }">
+        <div class="pfm-node" :class="{ on: pv.active }" data-branch="pv">
           <span class="pfm-icon">☀</span>
           <span class="pfm-label">光伏 PV</span>
           <span class="pfm-value">{{ fmtPower(pvPower) }}</span>
         </div>
-        <div class="pfm-node" :class="{ on: gridActive }">
+        <div class="pfm-node" :class="{ on: grid.active }" data-branch="grid">
           <span class="pfm-icon">🏭</span>
           <span class="pfm-label">电网</span>
           <span class="pfm-value">{{ fmtVolt(gridVoltage) }}</span>
         </div>
       </div>
-      <div class="pfm-arrow" aria-hidden="true">↓</div>
+      <div class="pfm-arrow-row" role="img" :aria-label="topArrowLabel">
+        <span class="pfm-arrow" :class="arrowTone(pv)" aria-hidden="true">{{ topArrow(pv) }}</span>
+        <span class="pfm-arrow" :class="arrowTone(grid)" aria-hidden="true">{{ topArrow(grid) }}</span>
+      </div>
       <div class="pfm-hub">
         <span class="pfm-hub-icon">⚡</span>
         <span class="pfm-hub-label">逆变器</span>
         <span class="pfm-hub-value">{{ workModeLabel }}</span>
       </div>
-      <div class="pfm-arrow" aria-hidden="true">↓</div>
+      <div class="pfm-arrow-row" role="img" :aria-label="bottomArrowLabel">
+        <span class="pfm-arrow" :class="arrowTone(load)" aria-hidden="true">{{ bottomArrow(load) }}</span>
+        <span class="pfm-arrow" :class="arrowTone(battery)" aria-hidden="true">{{ bottomArrow(battery) }}</span>
+      </div>
       <div class="pfm-row">
-        <div class="pfm-node" :class="{ on: loadPower > 0 }">
+        <div class="pfm-node" :class="{ on: load.active }" data-branch="load">
           <span class="pfm-icon">🏠</span>
           <span class="pfm-label">负载</span>
           <span class="pfm-value">{{ fmtPower(loadPower) }}</span>
         </div>
-        <div class="pfm-node" :class="batteryClass">
+        <div class="pfm-node" :class="batteryClass" data-branch="battery">
           <span class="pfm-icon">🔋</span>
-          <span class="pfm-label">{{ batteryLabel }}</span>
+          <span class="pfm-label">{{ battery.label }}</span>
           <span class="pfm-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</span>
         </div>
       </div>
     </div>
 
-    <svg v-else class="power-flow-svg" viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg">
+    <svg v-else class="power-flow-svg" viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg"
+         role="img" :aria-label="svgAriaLabel">
+      <!--
+        箭头头部按支路语义分色（2026-10-23）：
+        改前只有一个灰色 marker，无论连线是绿/蓝/橙，箭头都是灰的 —— 方向信息里最关键的
+        「箭头」反而是最弱的一环。现在每个方向语义一个 marker，与连线同色，
+        保证「箭头指向 + 颜色」双重一致（不靠颜色单通道，方向文字在 <title> 与 aria-label 里）。
+      -->
       <defs>
         <marker id="pf-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
           <path d="M0,0 L6,3 L0,6 z" class="marker-fill" />
+        </marker>
+        <marker id="pf-arrow-flow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" class="marker-fill-flow" />
+        </marker>
+        <marker id="pf-arrow-charge" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" class="marker-fill-charging" />
+        </marker>
+        <marker id="pf-arrow-discharge" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" class="marker-fill-discharging" />
         </marker>
       </defs>
 
@@ -59,7 +87,7 @@
       -->
       <!-- 光伏（圆落在 y30..90） -->
       <g class="pf-node pv">
-        <circle cx="80" cy="60" r="30" :class="{ on: pvPower > 0 }" />
+        <circle cx="80" cy="60" r="30" :class="{ on: pv.active }" />
         <text x="80" y="66" text-anchor="middle" class="pf-icon">☀</text>
         <text x="80" y="112" text-anchor="middle" class="pf-label">光伏 PV</text>
         <text x="80" y="130" text-anchor="middle" class="pf-value">{{ fmtPower(pvPower) }}</text>
@@ -67,7 +95,7 @@
 
       <!-- 电网（圆落在 y170..230）：数值在圆上方，标签在圆下方 -->
       <g class="pf-node grid">
-        <circle cx="80" cy="200" r="30" :class="{ on: gridActive }" />
+        <circle cx="80" cy="200" r="30" :class="{ on: grid.active }" />
         <text x="80" y="206" text-anchor="middle" class="pf-icon">🏭</text>
         <text x="80" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(gridVoltage) }}</text>
         <text x="80" y="252" text-anchor="middle" class="pf-label">电网</text>
@@ -83,7 +111,7 @@
 
       <!-- 负载（圆落在 y30..90） -->
       <g class="pf-node load">
-        <circle cx="560" cy="60" r="30" :class="{ on: loadPower > 0 }" />
+        <circle cx="560" cy="60" r="30" :class="{ on: load.active }" />
         <text x="560" y="66" text-anchor="middle" class="pf-icon">🏠</text>
         <text x="560" y="112" text-anchor="middle" class="pf-label">负载</text>
         <text x="560" y="130" text-anchor="middle" class="pf-value">{{ fmtPower(loadPower) }}</text>
@@ -94,23 +122,35 @@
         <circle cx="560" cy="200" r="30" :class="batteryClass" />
         <text x="560" y="206" text-anchor="middle" class="pf-icon">🔋</text>
         <text x="560" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</text>
-        <text x="560" y="252" text-anchor="middle" class="pf-label">{{ batteryLabel }}</text>
+        <text x="560" y="252" text-anchor="middle" class="pf-label">{{ battery.label }}</text>
       </g>
 
-      <!-- 连线：PV -> 逆变器 -->
-      <path d="M110,60 C200,60 240,110 282,120" class="pf-link" :class="{ on: pvPower > 0 }" marker-end="url(#pf-arrow)" />
-      <!-- 连线：电网 -> 逆变器 -->
-      <path d="M110,200 C200,200 240,150 282,140" class="pf-link" :class="{ on: gridActive }" marker-end="url(#pf-arrow)" />
-      <!-- 连线：逆变器 -> 负载 -->
-      <path d="M358,120 C400,110 440,60 530,60" class="pf-link" :class="{ on: loadPower > 0 }" marker-end="url(#pf-arrow)" />
-      <!-- 连线：逆变器 <-> 电池 -->
-      <path d="M358,140 C400,150 440,200 530,200" class="pf-link" :class="batteryClass" marker-end="url(#pf-arrow)" />
+      <!--
+        连线：**方向由数据决定**，不再写死。
+        · PV / 电网 → 逆变器：purely 单向（这两条支路的能量只可能流向逆变器）；
+        · 逆变器 → 负载：负载只消耗，单向；
+        · 电池 ⇄ 逆变器：随充放电改**起点与终点**，箭头（marker-end）自然跟着反转。
+          放电时 d 从电池端出发、指向逆变器 —— 这是本轮修的核心缺陷。
+        每条连线带 <title>，悬停可读方向说明；role/aria 交给外层 svg 的 aria-label。
+      -->
+      <path d="M110,60 C200,60 240,110 282,120" class="pf-link" :class="{ on: pv.active }"
+            :marker-end="arrowMarker(pv)"><title>{{ pv.text }}</title></path>
+      <path d="M110,200 C200,200 240,150 282,140" class="pf-link" :class="{ on: grid.active }"
+            :marker-end="arrowMarker(grid)"><title>{{ grid.text }}</title></path>
+      <path d="M358,120 C400,110 440,60 530,60" class="pf-link" :class="{ on: load.active }"
+            :marker-end="arrowMarker(load)"><title>{{ load.text }}</title></path>
+      <path :d="batteryPath" class="pf-link" :class="batteryClass"
+            :marker-end="arrowMarker(battery)"><title>{{ battery.text }}</title></path>
     </svg>
 
     <div class="pf-legend">
       <span><i class="dot on" /> 工作中</span>
       <span><i class="dot idle" /> 空闲</span>
-      <span class="pf-legend-note">箭头方向 = 能量流向；数据来自各传感器最新值</span>
+      <span class="pf-legend-note">箭头方向 = 能量流向；逐支路按实测读数判定</span>
+      <!-- 电网没有功率传感器：方向是推定的，必须与实测支路区分开 -->
+      <span v-if="grid.inferred && grid.active" class="pf-legend-note is-inferred">
+        电网方向为推定（协议只提供电压/频率，无市电功率）
+      </span>
     </div>
   </div>
 </template>
@@ -118,6 +158,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from 'vue'
 import { formatPower } from '@/utils/format'
+import { batteryFlow, gridFlow, loadFlow, pvFlow, type BranchFlow } from './powerFlow'
 
 /**
  * 窄屏用 DOM 版布局（结构变化，CSS 媒体查询只能隐藏不能换结构）。
@@ -164,7 +205,7 @@ const props = defineProps<{
 /**
  * 工作模式解码 —— 与 InverterStatusGrid 同表。
  *
- * ⚠ 数值↔字母对应来自驱动（inverter_techfine.go:516 workModeMap）：
+ * ⚠ 数值↔字母对应来自驱动（inverter_techfine.go:424 workModeMap）：
  *   P=0 S=1 L=2 B=3 F=4 D=5 X=6
  * 标签里带上字母是为了让"界面显示的模式"和"设备回的字符"能一眼对上 ——
  * 这类映射一旦漂移不会报错，只会静默说错话。
@@ -181,24 +222,94 @@ const workModeLabel = computed(() => {
 })
 
 /**
- * 电池状态：**充电电流与放电电流是两个独立字段**，不是同一个量的正负号。
+ * 每条支路的能量方向 —— 全部来自 powerFlow.ts 的**纯函数单一事实源**。
  *
- * ⚠ 这里必须区分，不能简化成 single signed current：
- * 泰琪丰用的是 battery_charge_current / battery_discharge_current 两个寄存器，
- * 两者都可能为 0（浮充/待机），也可能同时非 0（边充边放的理论态）。
- * 早期实现读的是不存在的 battery_current，于是永远走"0"分支 —— 箭头恒为灰色。
+ * 为什么不在组件里各判一次（改前的形态）：
+ *   电池方向在标签里判了一次（读两个电流字段），箭头却在模板里写死成「逆变器 → 电池」。
+ *   两套判定之间没有任何约束，于是出现「文字说放电、箭头指电池」的自相矛盾（用户报障）。
+ *   现在方向只有一处结论，标签、节点配色、SVG 箭头、窄屏箭头全部由它派生。
  */
+const pv = computed(() => pvFlow(props.pvPower))
+const grid = computed(() => gridFlow(props.gridVoltage))
+const load = computed(() => loadFlow(props.loadPower))
+const battery = computed(() => batteryFlow(props.batteryChargeCurrent, props.batteryDischargeCurrent))
+
+/** 电池节点/连线配色（既有测试与 CSS 类名契约保持不变）。 */
 const batteryClass = computed(() => {
-  if (props.batteryChargeCurrent > 0) return { charging: true }
-  if (props.batteryDischargeCurrent > 0) return { discharging: true }
+  const cls = battery.value.cls
+  if (cls === 'charging') return { charging: true }
+  if (cls === 'discharging') return { discharging: true }
   return {}
 })
 
-const batteryLabel = computed(() => {
-  if (props.batteryChargeCurrent > 0) return `充电 ${props.batteryChargeCurrent.toFixed(1)}A`
-  if (props.batteryDischargeCurrent > 0) return `放电 ${props.batteryDischargeCurrent.toFixed(1)}A`
-  return '静止'
+/**
+ * 电池连线的 path：方向不同 ⇒ **起点/终点互换**（否则 marker-end 永远落在电池端，
+ * 正是用户看到的"放电却指向电池"）。弧线控制点同步镜像，保证曲线形状不突变。
+ */
+const batteryPath = computed(() => {
+  switch (battery.value.dir) {
+    case 'in': return 'M530,200 C440,200 400,150 358,140' // 电池 → 逆变器（放电）
+    case 'out': return 'M358,140 C400,150 440,200 530,200' // 逆变器 → 电池（充电）
+    default: return 'M358,140 C400,150 440,200 528,199' // 静止：无箭头，仅示意连接
+  }
 })
+
+/**
+ * 只有「有可判定流动」的支路才画箭头；静止/矛盾读数不画，绝不猜方向。
+ * 箭头头部与连线同色（充=primary、放=warning、其余流动=success），
+ * 这样"箭头指向"和"颜色语义"不会互相矛盾。
+ */
+function arrowMarker(flow: BranchFlow): string | undefined {
+  if (flow.dir === 'none') return undefined
+  const b = battery.value
+  if (flow === b) {
+    if (b.cls === 'charging') return 'url(#pf-arrow-charge)'
+    if (b.cls === 'discharging') return 'url(#pf-arrow-discharge)'
+  }
+  return 'url(#pf-arrow-flow)'
+}
+
+/** 窄屏：连接位箭头（上排 = 节点在逆变器上方；下排 = 节点在逆变器下方）。 */
+function topArrow(flow: BranchFlow): string {
+  if (flow.dir === 'in') return '↓'
+  if (flow.dir === 'out') return '↑'
+  return '·'
+}
+function bottomArrow(flow: BranchFlow): string {
+  if (flow.dir === 'out') return '↓'
+  if (flow.dir === 'in') return '↑'
+  return '·'
+}
+
+/**
+ * 窄屏箭头色调：方向是本组件要传达的头号信息（用户报障点），
+ * 所以有流动的箭头必须高对比 —— 不能用 placeholder 灰（实测 #a8abb2 on #fff = 2.3:1，
+ * 12px 正文要求 4.5:1）；电池支路沿用充/放电语义色，其余流入支路用 success。
+ */
+function arrowTone(flow: BranchFlow): string {
+  if (flow.dir === 'none') return 'is-idle'
+  const b = battery.value
+  if (flow === b) {
+    if (b.cls === 'charging') return 'is-charging'
+    if (b.cls === 'discharging') return 'is-discharging'
+  }
+  return 'is-flow'
+}
+
+/** 读屏器的方向摘要（窄屏两行箭头各自有标签，不能只念「↓ ↓」）。 */
+const topArrowLabel = computed(() =>
+  `上排连接方向：光伏${dirWord(pv.value)}，电网${dirWord(grid.value)}`)
+const bottomArrowLabel = computed(() =>
+  `下排连接方向：负载${dirWord(load.value)}，电池${dirWord(battery.value)}`)
+function dirWord(flow: BranchFlow): string {
+  if (flow.dir === 'in') return '流入逆变器'
+  if (flow.dir === 'out') return '流出逆变器'
+  return '无流动'
+}
+
+const svgAriaLabel = computed(() =>
+  `功率流向：光伏${dirWord(pv.value)}，电网${dirWord(grid.value)}${grid.value.inferred && grid.value.active ? '（推定）' : ''}，`
+  + `负载${dirWord(load.value)}，电池${battery.value.label}（${dirWord(battery.value)}）`)
 
 /**
  * 物理闸门：把不可能的读数当作"没有数据"。
@@ -218,9 +329,6 @@ const capacityPct = computed(() => {
   const v = sane(props.batteryCapacity, 0, 100)
   return v === null ? '—' : v.toFixed(0)
 })
-
-/** 市电"有电"的判据同样走闸门：1e12 V 不是"有电"，是坏数据。 */
-const gridActive = computed(() => sane(props.gridVoltage, 1, 1000) !== null)
 
 function fmtPower(w: number | undefined | null): string {
   const v = sane(w, -20000, 20000)
@@ -363,12 +471,37 @@ function fmtVolt(v: number | undefined | null): string {
   color: var(--el-text-color-primary);
   overflow-wrap: anywhere;
 }
+/*
+  连接位箭头：**每列一个**（2026-10-23）。改前是整行一个写死的「↓」，
+  电池放电时也显示向下 —— 正是用户报障的「方向指向电池」的窄屏版本。
+  现在列宽与上面的节点对齐，方向由该支路真实流向决定（↑/↓/·）。
+*/
+.pfm-arrow-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+/*
+  箭头是本组件要传达的头号信息（用户报障「方向不对」），因此：
+  · 18px / 700（改前 14px / 400 + placeholder 灰 2.3:1，方向几乎看不出来）；
+  · 有流动的箭头用语义色，实测对比度 flow 3.45:1 / charging 4.20:1 / discharging 3.35:1；
+  · 「无流动」用 secondary 灰（3.9:1），而不是 placeholder（2.3:1）。
+
+  ⚠ 判据用 WCAG 1.4.11「非文本对比度 ≥3:1」，不是 1.4.3 的 4.5:1：
+  这些 ↑/↓ 是**图形指示符**（方向本身另有「放电 6.0A」文字与节点配色承担），
+  按图形对象取 3:1。暗色主题下语义色自动反向（success-dark-2 在 #141414 上 5.35:1），无需另写规则。
+*/
 .pfm-arrow {
   text-align: center;
-  font-size: 14px;
+  font-size: 18px;
+  font-weight: 700;
   line-height: 1;
-  color: var(--el-text-color-placeholder);
+  color: var(--el-text-color-secondary);
 }
+.pfm-arrow.is-flow { color: var(--el-color-success-dark-2); }
+.pfm-arrow.is-charging { color: var(--el-color-primary-dark-2); }
+.pfm-arrow.is-discharging { color: var(--el-color-warning-dark-2); }
+.pfm-arrow.is-idle { color: var(--el-text-color-secondary); }
 .pfm-hub {
   display: flex;
   align-items: center;
@@ -416,6 +549,10 @@ function fmtVolt(v: number | undefined | null): string {
 .pf-link.charging { stroke: var(--el-color-primary); stroke-dasharray: none; }
 .pf-link.discharging { stroke: var(--el-color-warning); stroke-dasharray: none; }
 .marker-fill { fill: var(--el-text-color-secondary); }
+/* 箭头头部与连线同色：方向是本组件的头号信息，不能让箭头成为最弱的一环 */
+.marker-fill-flow { fill: var(--el-color-success); }
+.marker-fill-charging { fill: var(--el-color-primary); }
+.marker-fill-discharging { fill: var(--el-color-warning); }
 
 .pf-legend {
   display: flex;
@@ -438,4 +575,11 @@ function fmtVolt(v: number | undefined | null): string {
 /* 复核实测：placeholder #a8abb2 on #fff = 2.3:1（12px 正文要求 4.5:1）。
    这行是「箭头方向 = 能量流向；数据来自各传感器最新值」的解释性文字，属有效信息，不允许低对比。 */
 .pf-legend-note { color: var(--el-text-color-regular); }
+/* 「电网方向为推定」是**限定条件**，比普通说明更强：用 warning 文字色 + 前置标记，
+   让用户一眼看出它不是实测值。 */
+.pf-legend-note.is-inferred {
+  color: var(--el-color-warning-dark-2);
+  border-left: 2px solid var(--el-color-warning);
+  padding-left: 6px;
+}
 </style>
