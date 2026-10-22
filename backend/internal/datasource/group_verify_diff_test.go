@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
@@ -44,11 +45,15 @@ type diffState struct {
 }
 
 func (s diffState) String() string {
+	edges := make([]uint, 0, len(s.Members))
+	for e := range s.Members {
+		edges = append(edges, e)
+	}
+	sort.Slice(edges, func(i, j int) bool { return edges[i] < edges[j] })
 	out := fmt.Sprintf("active=%d logs=%d members={", s.ActiveEdge, s.SwitchLogs)
-	for _, e := range []uint{0, 1, 2} { // 稳定顺序（至多 3 成员；多余的忽略）
-		if m, ok := s.Members[e]; ok {
-			out += fmt.Sprintf("%d:%s/%d/%v ", e, m.Status, m.FailCount, m.LastSuccessSet)
-		}
+	for _, e := range edges {
+		m := s.Members[e]
+		out += fmt.Sprintf("%d:%s/%d/%v ", e, m.Status, m.FailCount, m.LastSuccessSet)
 	}
 	return out + "}"
 }
@@ -214,6 +219,13 @@ func runDiffOp(t *testing.T, lw *legacyWorld, gw *groupWorld, clock *time.Time, 
 		lw.svc.MarkFailure(op.edge, TriggerDeviceOffline)
 		gw.gsvc.MarkFailure(op.edge, TriggerDeviceOffline)
 	case "scan":
+		// N-21 是组路径**新增**能力（legacy 无自愈）。两世界都无 active 时执行 scan
+		// 会把"组自愈"与"legacy 无操作"当成不一致，因此该情形两侧都跳过扫描
+		// （时钟照常前进，不影响其它判定）。
+		if lw.state(t).ActiveEdge == 0 || gw.state(t).ActiveEdge == 0 {
+			*clock = clock.Add(30 * time.Second)
+			return
+		}
 		*clock = clock.Add(30 * time.Second)
 		lN, lErr := lw.svc.ScanStale(*clock)
 		gN, gErr := gw.gsvc.ScanGroups(*clock)
@@ -268,7 +280,7 @@ func compareErrClass(t *testing.T, op string, lErr, gErr error) {
 }
 
 // genDiffOps 生成确定性操作序列；scan 仅在两侧都有 active 时允许（避开 N-21 新行为）。
-func genDiffOps(seed int64, steps int, lw *legacyWorld, gw *groupWorld, t *testing.T) []diffOp {
+func genDiffOps(seed int64, steps int, lw *legacyWorld, t *testing.T) []diffOp {
 	rng := rand.New(rand.NewSource(seed))
 	edges := make([]uint, 0, len(lw.srcIDs))
 	for e := range lw.srcIDs {
@@ -288,14 +300,6 @@ func genDiffOps(seed int64, steps int, lw *legacyWorld, gw *groupWorld, t *testi
 			kind = "scan"
 		}
 		edge := edges[rng.Intn(len(edges))]
-		if kind == "scan" {
-			ls, gs := lw.state(t), gw.state(t)
-			if ls.ActiveEdge == 0 || gs.ActiveEdge == 0 {
-				continue // 无 active 时 scan 会触发组自愈（新行为），跳过该步
-			}
-			ops = append(ops, diffOp{kind: "scan"})
-			continue
-		}
 		ops = append(ops, diffOp{kind: kind, edge: edge})
 	}
 	return ops
@@ -314,16 +318,18 @@ func TestVerifyDiff_LegacyVsGroupEquivalence(t *testing.T) {
 				t.Fatalf("初始状态不一致:\n legacy=%s\n group =%s", ls, gs)
 			}
 
-			ops := genDiffOps(seed, 40, lw, gw, t)
+			ops := genDiffOps(seed, 40, lw, t)
+			var lastL diffState
 			for i, op := range ops {
 				runDiffOp(t, lw, gw, &clock, op)
-				ls, gs := lw.state(t), gw.state(t)
-				if ls.String() != gs.String() {
+				curL, curG := lw.state(t), gw.state(t)
+				if curL.String() != curG.String() {
 					t.Fatalf("第 %d 步(%s edge=%d)后状态不一致:\n legacy=%s\n group =%s",
-						i+1, op.kind, op.edge, ls, gs)
+						i+1, op.kind, op.edge, curL, curG)
 				}
+				lastL = curL
 			}
-			t.Logf("seed=%d 40 步等价（末态 %s）", seed, ls.String())
+			t.Logf("seed=%d 40 步等价（末态 legacy=%s）", seed, lastL.String())
 		})
 	}
 }

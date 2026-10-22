@@ -9,8 +9,9 @@ package api
 //	GET    /api/v1/source-groups/:id
 //	PUT    /api/v1/source-groups/:id
 //	DELETE /api/v1/source-groups/:id
-//	POST   /api/v1/source-groups/:id/activate   （composite 400）
-//	POST   /api/v1/source-groups/:id/deactivate （composite 400）
+//	POST   /api/v1/source-groups/:id/activate   （composite 一律 400：无 active 概念）
+//	POST   /api/v1/source-groups/:id/deactivate （带 member_id：R8 置 disabled，composite 亦允许；
+//	                                              不带 member_id：停用当前 active，composite 无 active ⇒ 409）
 //	GET    /api/v1/source-groups/:id/failover-logs?limit
 //	GET    /api/v1/source-groups/:id/health?limit
 //

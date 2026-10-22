@@ -348,12 +348,11 @@ func (g *GroupService) DeactivateGroupMember(groupID, memberID uint) (*models.So
 			return err
 		}
 		if target.Status != models.SourceMemberStatusActive {
-			// R8：直接 disabled（不可逆？可经 Activate 重新启用）。
+			// R8：直接 disabled（可经 Activate 重新启用）。
+			// 不 bump revision：status/fail_count 属**运行态**，不进 MembersHash、也不影响
+			// 窗口 identity（F-1 白名单；impl-core 验证报告 F-5）。
 			if err := tx.Model(&models.SourceGroupMember{}).Where("id = ?", target.ID).
 				Update("status", models.SourceMemberStatusDisabled).Error; err != nil {
-				return err
-			}
-			if _, err := g.bumpGroupRevision(tx, groupID); err != nil {
 				return err
 			}
 			return nil

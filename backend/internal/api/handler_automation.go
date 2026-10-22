@@ -102,6 +102,11 @@ type createAutomationRuleRequest struct {
 	CooldownSec      *int                    `json:"cooldown_sec"`
 	MaxDailyExec     int                     `json:"max_daily_exec"`
 	RequireConfirmed *bool                   `json:"require_confirmed"`
+	// ── 数据来源（方案 §4.3 / N-6 / N-7；SG-01/SG-03）──
+	// 两列可空（*string/*uint）：nil = 存量老路（trigger_edge_device_id）。
+	// source_kind=source_group 时由 handler 校验组并**双写锚点**到 trigger_edge_device_id。
+	SourceKind    *string `json:"source_kind"`
+	SourceGroupID *uint   `json:"source_group_id"`
 	// RiskAcknowledged 是用户在保存时对**风险动作**的显式确认 (O-2 规则级授权,
 	// 实施计划 §0.1)。true = 允许该规则的风险动作在自动路径上跳过人工确认。
 	//
@@ -141,6 +146,9 @@ type updateAutomationRuleRequest struct {
 	CooldownSec      *int                    `json:"cooldown_sec"`
 	MaxDailyExec     *int                    `json:"max_daily_exec"`
 	RequireConfirmed *bool                   `json:"require_confirmed"`
+	// ── 数据来源（同创建；显式传空串 source_kind = 解绑回存量老路）──
+	SourceKind    *string `json:"source_kind"`
+	SourceGroupID *uint   `json:"source_group_id"`
 	// RiskAcknowledged 同创建接口: 显式确认/撤回对风险动作的规则级授权。
 	// 动作集合发生变化时, 既有授权会被清空, 必须在本请求里重新确认才能通过 V7。
 	RiskAcknowledged *bool `json:"risk_acknowledged"`
@@ -230,6 +238,19 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Error(c, 400, "参数错误: "+err.Error())
 			return
 		}
+		// ── 来源绑定（SG-01/SG-03；组校验 + 锚点双写，先于所有 trigger 字段校验）──
+		createCooldown := 300
+		if req.CooldownSec != nil {
+			createCooldown = *req.CooldownSec
+		}
+		sourceBinding, bindErr := resolveRuleSourceBinding(db, req.SourceKind, req.SourceGroupID, createCooldown, true)
+		if respondSourceRefError(c, bindErr) {
+			return
+		}
+		triggerEdgeDeviceID := req.TriggerEdgeDeviceID
+		if sourceBinding.IsGroup {
+			triggerEdgeDeviceID = ptrUint(sourceBinding.AnchorEdgeDeviceID)
+		}
 		createRequireConfirmed := false
 		if req.RequireConfirmed != nil {
 			createRequireConfirmed = *req.RequireConfirmed
@@ -252,7 +273,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		// 镜像列/校验基准 = seq 最小的动作 (P2-F: 与 update 路径同源, 不再取数组下标 0)。
 		first := mirrorAction(actions)
 		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, first.ActionType,
-			req.TriggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
+			triggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
 			req.TriggerWindowStart, req.TriggerWindowEnd, req.TriggerWindowEdge,
 			&first.ActionDeviceID, first.ActionID, first.ActionLevel,
 			createRequireConfirmed, false); msg != "" {
@@ -279,7 +300,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Longitude:   req.Longitude,
 			Timezone:    req.Timezone,
 		}
-		if msg := validateSunEventRule(db, sunCand, req.TriggerEdgeDeviceID, &first.ActionDeviceID); msg != "" {
+		if msg := validateSunEventRule(db, sunCand, triggerEdgeDeviceID, &first.ActionDeviceID); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
@@ -319,8 +340,17 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ActionLevel:      first.ActionLevel,
 			MaxDailyExec:     req.MaxDailyExec,
 		}
-		if req.TriggerEdgeDeviceID != nil {
-			rule.TriggerEdgeDeviceID = *req.TriggerEdgeDeviceID
+		if triggerEdgeDeviceID != nil {
+			rule.TriggerEdgeDeviceID = *triggerEdgeDeviceID
+		}
+		// 来源绑定落库（N-7 / SG-01）：source_group ⇒ 两列写入 + trigger_edge_device_id=锚点；
+		// 显式 edge_device ⇒ 只写 source_kind（便于盘点）；未提供 ⇒ 两列保持 NULL（存量老路）。
+		if sourceBinding.IsGroup {
+			rule.SourceKind = ptrString(string(models.SourceKindSourceGroup))
+			rule.SourceGroupID = ptrUint(sourceBinding.GroupID)
+			rule.TriggerEdgeDeviceID = sourceBinding.AnchorEdgeDeviceID
+		} else if req.SourceKind != nil && *req.SourceKind == string(models.SourceKindEdgeDevice) {
+			rule.SourceKind = req.SourceKind
 		}
 		if req.TriggerThreshold != nil {
 			rule.TriggerThreshold = *req.TriggerThreshold
@@ -330,11 +360,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		} else {
 			rule.Enabled = true
 		}
-		if req.CooldownSec != nil {
-			rule.CooldownSec = *req.CooldownSec
-		} else {
-			rule.CooldownSec = 300
-		}
+		rule.CooldownSec = createCooldown
 		if req.RequireConfirmed != nil {
 			rule.RequireConfirmed = *req.RequireConfirmed
 		}
@@ -423,6 +449,38 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		if req.TriggerEdgeDeviceID != nil {
 			teid = *req.TriggerEdgeDeviceID
 		}
+		// ── 来源绑定合并 + 校验（SG-01/SG-03）：未提供的列取库中现值；显式空串 =
+		// 解绑回存量老路。source_group ⇒ 锚点覆盖 teid（双写，N-7）。──
+		cs := rule.CooldownSec
+		if req.CooldownSec != nil {
+			cs = *req.CooldownSec
+		}
+		effKind := ""
+		if req.SourceKind != nil {
+			effKind = *req.SourceKind
+		} else if rule.SourceKind != nil {
+			effKind = *rule.SourceKind
+		}
+		var effKindPtr *string
+		if effKind != "" {
+			effKindPtr = &effKind
+		}
+		var effGroupPtr *uint
+		if effKind == string(models.SourceKindSourceGroup) {
+			if req.SourceGroupID != nil {
+				effGroupPtr = req.SourceGroupID
+			} else if rule.SourceGroupID != nil {
+				effGroupPtr = rule.SourceGroupID
+			}
+		}
+		sourceTouched := req.SourceKind != nil || req.SourceGroupID != nil
+		sourceBinding, bindErr := resolveRuleSourceBinding(db, effKindPtr, effGroupPtr, cs, true)
+		if respondSourceRefError(c, bindErr) {
+			return
+		}
+		if sourceBinding.IsGroup {
+			teid = sourceBinding.AnchorEdgeDeviceID
+		}
 		sn := pickStr(req.TriggerSensorName, rule.TriggerSensorName)
 		cmp := pickStr(req.TriggerComparator, rule.TriggerComparator)
 		thr := rule.TriggerThreshold
@@ -444,10 +502,6 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			return
 		}
 		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + 逐动作 Catalog 校验。
-		cs := rule.CooldownSec
-		if req.CooldownSec != nil {
-			cs = *req.CooldownSec
-		}
 		mde := rule.MaxDailyExec
 		if req.MaxDailyExec != nil {
 			mde = *req.MaxDailyExec
@@ -596,6 +650,22 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		}
 		if req.RequireConfirmed != nil {
 			updates["require_confirmed"] = *req.RequireConfirmed
+		}
+		// ── 来源绑定写回（N-7 / SG-01）──
+		// 绑组：每次保存都重算锚点并回写 legacy 列（成员/优先级变更后锚点可能漂移）。
+		// 显式解绑/切单设备：清两列；显式 edge_device 写 kind 便于盘点。未触碰且非组：不动。
+		switch {
+		case sourceBinding.IsGroup:
+			updates["source_kind"] = string(models.SourceKindSourceGroup)
+			updates["source_group_id"] = sourceBinding.GroupID
+			updates["trigger_edge_device_id"] = sourceBinding.AnchorEdgeDeviceID
+		case sourceTouched:
+			updates["source_group_id"] = nil
+			if req.SourceKind != nil && *req.SourceKind == string(models.SourceKindEdgeDevice) {
+				updates["source_kind"] = string(models.SourceKindEdgeDevice)
+			} else {
+				updates["source_kind"] = nil
+			}
 		}
 		// 授权列的写入必须显式表达"清空"(nil), 不能用 map 的省略语义 ——
 		// 省略 = 保持原值, 那正是"改动作后旧授权仍然生效"的漏洞。

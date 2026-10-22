@@ -592,3 +592,79 @@ func TestGroupResetErrorPromotes(t *testing.T) {
 		t.Fatalf("R9 事件错误: %+v", ev)
 	}
 }
+
+// ── 13. F-2：删除组必须发带 GroupID/Revision/TransitionSeq 的事件（消费方按 GroupID 清窗）──
+func TestGroupDeleteEmitsCompleteEvent(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+	f.waitEvents(t, 1)
+	f.clearEvents()
+
+	if err := f.gsvc.DeleteGroup(group.ID); err != nil {
+		t.Fatalf("DeleteGroup: %v", err)
+	}
+	evs := f.waitEvents(t, 1)
+	ev := evs[len(evs)-1]
+	if ev.GroupID != group.ID || ev.Revision == 0 || ev.TransitionSeq == 0 || ev.At.IsZero() {
+		t.Fatalf("F-2：删除事件字段不完整: %+v", ev)
+	}
+	if ev.NextMemberID != 0 || ev.Reason != ReasonGroupDelete {
+		t.Fatalf("F-2：删除事件语义错误: %+v", ev)
+	}
+	if _, ok := f.reg.Group(group.ID); ok {
+		t.Fatalf("删除后快照必须移除")
+	}
+}
+
+// ── 14. F-4/F-5：改名/启停/停用 standby 不得 bump revision（白名单收敛）──
+func TestGroupNonIdentityUpdateDoesNotBumpRevision(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group := f.createPrimaryBackup(t, d1, d2)
+	members := f.members(t, group.ID)
+	rev := group.Revision
+
+	name := "改名不改身份"
+	enabled := false
+	if _, err := f.gsvc.UpdateGroup(group.ID, UpdateGroupInput{Name: &name, Enabled: &enabled}); err != nil {
+		t.Fatalf("UpdateGroup name/enabled: %v", err)
+	}
+	// F-5：停用 standby（R8）同样不 bump。
+	if _, err := f.gsvc.DeactivateGroupMember(group.ID, members[1].ID); err != nil {
+		t.Fatalf("deactivate standby: %v", err)
+	}
+	got, err := f.gsvc.GetGroup(group.ID)
+	if err != nil {
+		t.Fatalf("GetGroup: %v", err)
+	}
+	if got.Revision != rev {
+		t.Fatalf("F-4/F-5：非身份变更不得 bump revision: got %d want %d", got.Revision, rev)
+	}
+}
+
+// ── 15. F-6：composite deactivate 带 member_id ⇒ R8 置 disabled（领域层允许）──
+func TestGroupCompositeMemberDeactivateAllowed(t *testing.T) {
+	f := newGroupFixture(t)
+	d1 := f.addEdgeDevice(t, "light-1")
+	d2 := f.addEdgeDevice(t, "light-2")
+	group, err := f.gsvc.CreateGroup(CreateGroupInput{
+		Kind: models.SourceGroupKindComposite, Category: "illuminance",
+		Combine: models.CombineAvg,
+		Members: []GroupMemberInput{{EdgeDeviceID: d1.ID}, {EdgeDeviceID: d2.ID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	ms := f.members(t, group.ID)
+	if _, err := f.gsvc.DeactivateGroupMember(group.ID, ms[0].ID); err != nil {
+		t.Fatalf("F-6：composite 成员显式停用应允许（R8）: %v", err)
+	}
+	ms = f.members(t, group.ID)
+	if ms[0].Status != models.SourceMemberStatusDisabled {
+		t.Fatalf("F-6：composite 成员应 disabled，got %s", ms[0].Status)
+	}
+}
+

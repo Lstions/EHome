@@ -111,7 +111,10 @@ func validateGroupConfig(kind, category, combine string, minMembers int, onDegra
 }
 
 // validateMemberConfig 校验 V-3（first_available 自相矛盾）/ V-4（设备存在+Enabled）/ 重复。
-func (g *GroupService) validateMemberConfig(kind, combine string, category string, members []GroupMemberInput) error {
+//
+// db 参数显式传入：UpdateGroup 在事务内调用时必须传 tx —— 否则 SQLite :memory:
+// 单连接库下事务占住连接、校验另开连接会看不到表（impl-core 验证报告 F-3）。
+func (g *GroupService) validateMemberConfig(db *gorm.DB, kind, combine string, category string, members []GroupMemberInput) error {
 	if kind == models.SourceGroupKindPrimaryBackup && len(members) == 0 {
 		// 允许先建空组再补成员（规则可稍后绑定）；不在此处强制。
 		return nil
@@ -126,7 +129,7 @@ func (g *GroupService) validateMemberConfig(kind, combine string, category strin
 		}
 		seen[m.EdgeDeviceID] = struct{}{}
 		var dev models.EdgeDevice
-		if err := g.db.First(&dev, m.EdgeDeviceID).Error; err != nil {
+		if err := db.First(&dev, m.EdgeDeviceID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("%w: 成员边缘设备 %d 不存在（V-4）", ErrInvalidRequest, m.EdgeDeviceID)
 			}
@@ -135,7 +138,7 @@ func (g *GroupService) validateMemberConfig(kind, combine string, category strin
 		if !dev.Enabled {
 			return fmt.Errorf("%w: 成员边缘设备 %d 未启用（V-4）", ErrInvalidRequest, m.EdgeDeviceID)
 		}
-		if !g.categoryObserved(m.EdgeDeviceID, category) {
+		if !g.categoryObserved(db, m.EdgeDeviceID, category) {
 			return fmt.Errorf("%w: 边缘设备 %d 尚未上报字段 %s（V-5 category_not_observed）",
 				ErrInvalidRequest, m.EdgeDeviceID, category)
 		}
@@ -149,14 +152,14 @@ func (g *GroupService) validateMemberConfig(kind, combine string, category strin
 }
 
 // categoryObserved 与 api 层 category_not_observed 同口径：投影表优先、unified_data 兜底。
-func (g *GroupService) categoryObserved(edgeDeviceID uint, category string) bool {
+func (g *GroupService) categoryObserved(db *gorm.DB, edgeDeviceID uint, category string) bool {
 	var count int64
-	if err := g.db.Model(&models.SensorFieldObs{}).
+	if err := db.Model(&models.SensorFieldObs{}).
 		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
 		Count(&count).Error; err == nil && count > 0 {
 		return true
 	}
-	if err := g.db.Model(&models.UnifiedData{}).
+	if err := db.Model(&models.UnifiedData{}).
 		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
 		Limit(1).Count(&count).Error; err == nil && count > 0 {
 		return true
@@ -169,7 +172,7 @@ func (g *GroupService) CreateGroup(in CreateGroupInput) (*models.SourceGroup, er
 	if err := validateGroupConfig(in.Kind, in.Category, in.Combine, in.MinMembers, in.OnDegrade); err != nil {
 		return nil, err
 	}
-	if err := g.validateMemberConfig(in.Kind, in.Combine, strings.TrimSpace(in.Category), in.Members); err != nil {
+	if err := g.validateMemberConfig(g.db, in.Kind, in.Combine, strings.TrimSpace(in.Category), in.Members); err != nil {
 		return nil, err
 	}
 	// D-4 保存期归一：first_available ⇒ on_degrade=use_available、min_members=1、
@@ -339,9 +342,15 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 		if in.Enabled != nil {
 			updates["enabled"] = *in.Enabled
 		}
-		topologyChanged := in.Members != nil
-		if len(updates) > 0 || topologyChanged {
-			// 允许改 combine/min_members/staleness/on_degrade/enabled/name/description ⇒ bump。
+		// F-1 revision bump 白名单（方案 §12.9.1）：只有**身份字段**变化才 bump。
+		//   bump：成员集合/priority/required（replaceMembers 内部 bump）、combine、
+		//         min_members、staleness_sec、on_degrade（均影响 MembersHash/求值口径）；
+		//   不 bump：name/description（纯展示，改名重置窗口 identity 是错误行为）、
+		//         enabled（GroupSnapshot.Enabled 变更靠 publish 传播，不改 identity）。
+		identityChanged := in.Members != nil ||
+			in.Combine != nil || in.MinMembers != nil ||
+			in.StalenessSec != nil || in.OnDegrade != nil
+		if identityChanged {
 			if _, err := g.bumpGroupRevision(tx, row.ID); err != nil {
 				return err
 			}
@@ -352,7 +361,7 @@ func (g *GroupService) UpdateGroup(groupID uint, in UpdateGroupInput) (*models.S
 			}
 		}
 		if in.Members != nil {
-			if err := g.validateMemberConfig(row.Kind, combine, row.Category, *in.Members); err != nil {
+			if err := g.validateMemberConfig(tx, row.Kind, combine, row.Category, *in.Members); err != nil {
 				return err
 			}
 			ev, err := g.replaceMembers(tx, row, *in.Members)
@@ -496,9 +505,16 @@ func (g *GroupService) DeleteGroup(groupID uint) error {
 		var active models.SourceGroupMember
 		if err := tx.Where("group_id = ? AND status = ?", groupID, models.SourceMemberStatusActive).
 			First(&active).Error; err == nil {
+			// 删除 active = 权威迁移，必须带单调 Revision/TransitionSeq（否则消费方按
+			// GroupID 清窗会失败——impl-core 验证报告 F-2）。在删行前 bump 以便取到新值。
+			rev, err := g.bumpGroupRevision(tx, groupID)
+			if err != nil {
+				return err
+			}
 			event = &ActiveChange{
 				PrevMemberID: active.ID, NextMemberID: 0, Reason: ReasonGroupDelete,
-				Category: row.Category,
+				Category: row.Category, Revision: rev,
+				TransitionSeq: g.nextTransitionSeq(groupID),
 			}
 		}
 		if err := tx.Where("group_id = ?", groupID).Delete(&models.SourceGroupMember{}).Error; err != nil {
@@ -512,12 +528,9 @@ func (g *GroupService) DeleteGroup(groupID uint) error {
 	if err != nil {
 		return err
 	}
-	if g.registry != nil {
-		g.registry.Remove(groupID)
-	}
-	if event != nil {
-		g.dispatcher.emit(*event)
-	}
+	// 统一收尾：commitGroupChange 会 publishGroup（组已删 ⇒ 自动 registry.Remove），
+	// 再按同一事件通道发射 ActiveChange（GroupID/At/TransitionSeq 均由它补齐）。
+	g.commitGroupChange(groupID, event)
 	return nil
 }
 

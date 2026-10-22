@@ -1,0 +1,45 @@
+test(e2e): 来源组全链路贯通验证（E1 三组合 / E2 主备跟随 / E3 复合缺员）
+
+为什么需要这一层（单测绿 != 链路通）：
+单测各自绿但接线错时（sink 只喂了一个引擎、快照忘了发布、resolver 注入晚于求值），
+功能在线上完全不可用而测试全绿。本文件是 Lead 侧的一条贯通验证：
+真实数据面（databus + SensorParserConsumer）-> 真实 GroupService（快照发布）
+-> 真实 sourceref.Registry -> 真实 automation.Evaluator（kind 分流 + 复合整组求值）
+-> 真实事件落库。中间不 mock 任何一环。
+
+夹具（两台跨逻辑设备的光照传感器）：
+用已注册的 prs3001（builtin.go:204-209 声明 rainfall+illuminance；4 字节分支
+:245-261 同时产两个量）。夹具先自检「声明 == 产出」：ParseData(600) 必须解出
+illuminance=600，否则后面所有断言都在空值上空转（防假绿）。两台设备各自独立
+logical_device：来源组的意义就是跨逻辑设备合成，同逻辑设备装两台会被 v3.3
+单存活实例约束挡住。
+
+E1 三种组合各触发一次（用户需求 1/2/3）：
+三条规则同时存在：A 绑 1 号、B 绑 2 号、C 绑复合组（avg、min_members=2）。
+- 断言三条规则各恰好 1 条事件、result=notification、source_edge_device_id 非空；
+- 断言 C 的事件带 source_group_id + members_json；
+- 断言 C 的触发值 ~= avg(600,800)=700（逐成员取值再合并，不是取第一个）。
+PASS
+
+E2 主备切换跟随（本方案最核心的产品价值）：
+- 备成员帧不得驱动规则（active 过滤生效，否则 DurationSec 会被跨成员拼接）；
+- 主成员帧正常触发，事件来源 = A；
+- 走 service 层 ActivateGroupMember 切到 B 后，快照必须立刻反映（否则规则读旧来源）；
+- 切换后旧 active 的帧被丢弃、新 active 的帧驱动；
+- 全程恰好 2 条事件（A 一次 + B 一次，不双计）。
+PASS
+
+E3 复合缺员 unbound（发现两件事）：
+实测得到两个与设计猜想不同的真实语义，都已写进断言注释：
+1. 复合组由任一成员帧驱动整组求值，取各成员当前最新值：A 先报 600 时 B 还是
+   播种值 120，首次组值 = sum(600,120)=720；B 再报 800 后才变 1400。
+   这不是缺陷，是「复合来源由成员共同供数」的直接体现。
+2. cooldown_sec=0 会让 N 个成员帧把同一次物理变化执行 N 次（实测第一版断言
+   拿到 2 条 notification）。这正是方案 N-5 要求「保存期硬拒 cooldown<成员采集间隔」
+   的原因；夹具改用生产合法值 300。
+- 成员 B 陈旧时：规则不触发（fail_closed 生效），纯函数复算同样 unbound。
+- 发现缺口（已派修）：组件陈旧导致的 unbound 只落了 automation_events 的
+  source_degraded，source_group_health 表 0 行 —— 运维看「来源组健康」会看到
+  一切正常，而该组实际已不可用。已要求 ds-analyst/auto-analyst 补注入点。
+
+验证：SQLite 下 E1/E2 PASS；E3 的 fail_closed 断言 PASS，健康可见性断言待修后转绿。
