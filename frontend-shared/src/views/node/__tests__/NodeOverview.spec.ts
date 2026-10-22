@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
 import { readFileSync } from 'node:fs'
@@ -7,6 +7,27 @@ import { resolve } from 'node:path'
 import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 import type { Node } from '@/api/node'
+
+/**
+ * 每个用例结束后**自动卸载**组件实例。
+ *
+ * 为什么必须（2026-10-23，CI 长期偶发红「expected 2 to be 1」的根因）：
+ *   本文件 55 处 mount、0 处 unmount ⇒ 每个用例都留下一个**活着的** NodeOverview 实例：
+ *   · 它有自己的 watch(route.params.id) / setInterval / WS 订阅；
+ *   · 更重要的是它有**在途的 fetchDetail → fetchChannels** promise。
+ *   flushPromises() 只结算当前微任务队列 —— 上一个用例留下的在途请求会在
+ *   下一个用例的 flushPromises 里落地，而 mocks 是模块级共享的
+ *   （beforeEach 只 clearAllMocks() 重置调用记录，不阻止旧实例继续发请求）
+ *   ⇒ 「后端失败不刷新」用例里 mockChannelList.mock.calls.length 比 before 多一次，
+ *   断言 toBe(before) 变成 expected 2 to be 1。
+ *
+ *   本机单跑/低负载时旧实例的 promise 往往在断言前就结算完了，所以本地不易复现；
+ *   CI 机器上时序不同就必现。这是**测试隔离缺陷**，不是产品缺陷 ——
+ *   产品侧 fetchChannels 本来就有 sequence 代际守卫（见 NodeOverview.vue:1984）。
+ *   修法用 VTU 官方 API（enableAutoUnmount），一次性覆盖全文件 55 个用例，
+ *   不必逐个补 wrapper.unmount()（漏一个就又会偶发）。
+ */
+enableAutoUnmount(afterEach)
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
 const { mockGetDetail, mockChannelList, mockChannelDelete, mockChannelReconfigure, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({

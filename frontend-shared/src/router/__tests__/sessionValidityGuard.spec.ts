@@ -56,7 +56,21 @@ describe('路由守卫：会话有效性（B2，生产路由）', () => {
     expect(route.query.redirect).toBe('/dashboard')
   })
 
-  it('正常 token（未被判定失效）时 /login 弹回 /dashboard（既有行为不回归）', async () => {
+  /*
+   * 显式超时 15000ms（默认 5000ms）—— 2026-10-23 修 CI 偶发红。
+   *
+   * 慢的不是断言，是**首次 await import('@/router') 的模块图求值**：
+   *   本用例是全文件第一个真正触发导航的用例（上一个 /dashboard→/login 只走重定向快速路径），
+   *   它会一次性求值生产路由 + 全部懒加载 loader 的同步部分。
+   * 实测（本机，--coverage，本文件单独跑）：本用例 2200ms，其余 4 条各 2~129ms；
+   * 全量 190 文件并发 + v8 插桩时被放大到 >5000ms ⇒ CI 红（run 39731819925）。
+   * 同批还有 FixedColumnOcclusion 的 automation@1440（2744ms）与 LoginAuthState 一条，
+   * 形态相同：**首次动态 import 大型 SFC**。
+   *
+   * 为什么不把全局 testTimeout 调大：那会掩盖真正的死循环/挂起（本仓踩过"永远等不到"的坑）。
+   * 只给这三个已知的重模块首次 import 用例放宽预算，断言一字未改。
+   */
+  it('正常 token（未被判定失效）时 /login 弹回 /dashboard（既有行为不回归）', { timeout: 15000 }, async () => {
     // 全新 pinia = 模拟「带着残留 token 的一次全新页面加载」：
     // user store 的初始 state 在创建时从 storage 读一次，复用旧实例读不到新值。
     localStorage.setItem('token', 'good-token')

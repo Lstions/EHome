@@ -86,7 +86,12 @@ describe('Login auth-state handling', () => {
     expect(mockLogin).not.toHaveBeenCalled()
   })
 
-  it('switches to login after the administrator is created', async () => {
+  /*
+   * 显式超时 15000ms（默认 5000ms）—— 2026-10-23 修 CI 偶发红，断言未改。
+   * 实测孤立跑 4ms，但在全量 190 文件并发 + v8 插桩下偶发超过 5000ms
+   * （CI run 39731819925 出现过一次）。与另两条同源：模块图首次求值的排队等待。
+   */
+  it('switches to login after the administrator is created', { timeout: 15000 }, async () => {
     mockInitialization.mockResolvedValue({ state: 'uninitialized' })
     mockInitialize.mockResolvedValue({ id: 1, username: 'admin' })
     const wrapper = mount(Login)

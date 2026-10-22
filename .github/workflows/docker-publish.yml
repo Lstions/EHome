@@ -62,6 +62,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ⚠ GIT_COMMIT 必须显式传进去（2026-10-23 发现缺口）：
+      #   Dockerfile 用 -ldflags "-X main.buildCommit=${GIT_COMMIT}" 把来源烙进二进制，
+      #   而 buildCommit 默认值是 "unknown"。metadata-action 只会生成 **OCI label**
+      #   （org.opencontainers.image.revision），它不会自动变成 build-arg ——
+      #   缺这一行时镜像 label 有 commit，但 /health 回显的 commit 是 "unknown"，
+      #   而部署验收靠的正是 /health（见 docs/操作/部署-来源组-2026-10-23.md §三）。
+      #   实测旧一次 CI 产物 ghcr.io/lstions/ehome:main 的 label=64fbe90b，
+      #   容器内却找不到对应二进制烙印 ⇒ 「部署的到底是哪份代码」不可查。
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -69,5 +77,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

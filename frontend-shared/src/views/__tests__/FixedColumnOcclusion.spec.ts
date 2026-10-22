@@ -218,7 +218,15 @@ describe('F26 窄屏固定列不得遮挡数据列 — 操作列固定语义', (
     widthRef.value = 1440
   })
 
-  it('automation @1440px：操作列仍 fixed="right" 且宽 180px（桌面密度不变）', async () => {
+  /*
+   * 显式超时 20000ms（默认 5000ms）—— 2026-10-23 修 CI 偶发红，断言未改。
+   *
+   * 慢在 mountPage() 里的 await import('@/views/automation/AutomationRules.vue')：
+   * 该页是全站最大的几个 SFC 之一，首次动态 import 要编译整棵模板 + 拉起它的依赖图。
+   * 实测（--coverage，本文件单独跑）：本用例 2744ms，其余 5 条各 8~100ms；
+   * 全量并发 + 插桩后放大到 >5000ms。
+   */
+  it('automation @1440px：操作列仍 fixed="right" 且宽 180px（桌面密度不变）', { timeout: 20000 }, async () => {
     const wrapper = await mountPage('automation', 1440)
     const cols = operationColumns(wrapper, '180')
     expect(
