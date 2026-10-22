@@ -12,11 +12,11 @@
 |---|---|
 | `go build ./...` | **绿** |
 | `go vet ./internal/datasource/ ./internal/api/` | **绿** |
-| 本验证测试 | **5 文件 / 33 个 `=== RUN` 全绿**（修复后复验 HEAD 9f94c279） |
+| 本验证测试 | **6 文件 / 35 个 `=== RUN` 全绿**（复验 HEAD 982e298e，含后续新增的 staleness 归一/降级可见性覆盖） |
 | 整包 `go test ./internal/datasource/` | **ok**（含 ds-analyst 原有测试） |
 | `-race`（TestVerify*） | **ok**（4.9s） |
 | 等价性差分 | **3 seeds × 40 步状态轨迹逐步相等** |
-| 变异自证 | **13 项尝试：12 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1），恢复后 md5 全一致、整包复绿 |
+| 变异自证 | **17 项尝试：16 CAUGHT + 1 被防御性兜底掩盖**（见 §3.1/§3.2），恢复后 md5 全一致、整包复绿 |
 | 发现 | 1 高风险（R5 双 active）+ 5 处契约/一致性偏差 —— **均已由 ds-analyst 修复/裁决**（§4 状态列） |
 
 ## 1. 五个验证重点 → 用例映射
@@ -79,6 +79,17 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 ```
 
 > 实现文件当时为未跟踪/协作中状态，故用**字节备份 + md5** 而非 `git checkout`（等效手段，已获 Lead 认可）。
+
+### 3.2 追加改动变异（HEAD 982e298e：staleness 零值归一 + 降级可见性）
+
+| # | 改坏点 | 目标用例 | 结果 |
+|---|---|---|---|
+| M14 | 关闭 StalenessSec=0 归一 | ' + bt + 'TestVerifyStalenessNormalization' + bt + ' | **CAUGHT** |
+| M15 | 关闭 RecordDegraded 1min 节流 | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
+| M16 | 节流键忽略 reason（不同 reason 互相抑制） | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
+| M17 | 删除组孤儿健康行守卫移除 | ' + bt + 'TestVerifyRecordDegradedThrottle' + bt + ' | **CAUGHT** |
+
+恢复后 ' + bt + 'group_crud.go' + bt + '/' + bt + 'group_service.go' + bt + ' md5 一致，整包复绿。
 
 ## 4. 发现的实现问题（按严重度）
 
@@ -158,7 +169,7 @@ final full pkg: ok  ehome/backend/internal/datasource  4.8s
 4. 变异自证以「目标用例必红」为判据，不追求全包必红（避免无关用例噪声掩盖因果）。
 5. `TestVerifyDiff` 覆盖 3 seeds × 40 步；如需更高置信度可加 seeds，但当前已覆盖 R1–R11 全部分支（由用例内断言覆盖矩阵保证）。
 
-## 7. 修复后复验（HEAD `9f94c279`，2026-10-22 15:1x）
+## 7. 修复后复验（HEAD `9f94c279` → `982e298e`，2026-10-22 15:2x）
 
 ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
 
@@ -166,12 +177,12 @@ ds-analyst 完成 F-1～F-6 后，按同一套验证重新跑：
 |---|---|
 | `go build ./...` | 绿 |
 | `go vet ./internal/datasource/ ./internal/api/` | **绿**（ds 提到的 `source_group_guard.go:101 unreachable` 已不复现；该文件非本验证产出） |
-| 本验证测试 | **33 个 `=== RUN` 全绿**（新增 `TestVerifyRevision_NonIdentityUpdateNoBump`；删除/复合用例升级为硬断言） |
+| 本验证测试 | **35 个 `=== RUN` 全绿**（新增 `TestVerifyRevision_NonIdentityUpdateNoBump`/删除/复合硬断言；追加 `TestVerifyStalenessNormalization`/`TestVerifyRecordDegradedThrottle` 覆盖 982e298e 的两块新改动） |
 | 整包 `go test ./internal/datasource/` | ok（7.1s，含 ds 新增 20 个组用例） |
 | `-race`（TestVerify*） | ok（5.6s） |
 | API 验证 | `TestVerifySourceGroupAPI_CompositeActiveForbidden`（activate 400 / deactivate 200+disabled）绿 |
 | 差分 | 3 seeds × 40 步仍逐步等价（末态含 logs=5/6、disabled/standby 混合，seed 轨迹不同） |
-| 追加变异 | M10b/M11/M12/M13 **CAUGHT**（见 §3.1） |
+| 追加变异 | M10b/M11/M12/M13 **CAUGHT**（§3.1）；M14/M15/M16/M17 **CAUGHT**（§3.2，覆盖 982e298e 新改动） |
 
 **关于 `source_group_guard.go`**：该文件不是本任务的验证产出（本任务只新增
 `internal/api/handler_source_group_verify_test.go`）；它属于规则来源绑定校验的接线文件，

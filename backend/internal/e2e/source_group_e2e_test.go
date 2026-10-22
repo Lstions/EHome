@@ -32,6 +32,8 @@ package e2e
 //   [WAIT] automation/alert SourceRef 接线 + TriggerEvent 5 字段（auto-analyst 进行中）
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -456,6 +458,72 @@ func (c *sgChain) eventsForRule(t *testing.T, ruleID uint) []models.AutomationEv
 	return out
 }
 
+// 事件口径（诊断 E2/E7/E11 的教训，Lead 裁决）：
+// automation_events 同时承载 **动作事件**（result=executed/notification）与
+// **规则级审计事件**（suppressed_cooldown/source_degraded/suppressed_daily_limit…）。
+// 方案 §8.3 的「只 1 条事件」指**动作事件**；审计事件是期望存在的可观测性证据。
+// 若按全表计数，冷却/切换/降级产生的审计行会被误判成「重复动作」。
+// 证据：E7 实测全表 = [1:notification:600:1 2:suppressed_cooldown:700:-]，
+// 第 2 条是审计行、无来源成员，不是第二次动作。
+func pactionResult(result string) bool {
+	switch result {
+	case models.AutomationResultNotification, models.AutomationResultExecuted,
+		models.AutomationResultPendingConfirm, models.AutomationResultPartialFailure,
+		models.AutomationResultConfirmationRequired, models.AutomationResultFailedGate,
+		models.AutomationResultFailedDispatch:
+		return true
+	}
+	return false
+}
+
+// actionEventsForRule 只按**动作维度**过滤规则事件（Lead 2026-10-22 裁决）。
+//
+// 为什么必须区分：automation_events 同时写动作事件与规则级审计事件；
+// suppressed_cooldown / source_degraded / suppressed_daily_limit 证明的是
+// 「压制发生了且可见」（方案 §7.1 要求），**不是又执行了一次动作**。
+// 按全表计数会把冷却审计误判为「重复动作」。实测证据（修复前）：
+//
+//	E7 全表 = [1:notification:600:1 2:suppressed_cooldown:700:-]
+//
+// 方案 §8.3 E7 原文「只 1 条事件」指的是动作事件。
+func (c *sgChain) actionEventsForRule(t *testing.T, ruleID uint) []models.AutomationEvent {
+	t.Helper()
+	out := make([]models.AutomationEvent, 0, 2)
+	for _, ev := range c.eventsForRule(t, ruleID) {
+		if pactionResult(ev.Result) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func hasAuditResult(evs []models.AutomationEvent, result string) bool {
+	for _, e := range evs {
+		if e.Result == result {
+			return true
+		}
+	}
+	return false
+}
+
+// eventDigest 把事件压缩成「id:result:value:edge」便于失败时定性：
+// 动作事件(executed/notification) vs 规则级审计事件(suppressed_cooldown/source_degraded…)。
+func eventDigest(evs []models.AutomationEvent) string {
+	out := make([]string, 0, len(evs))
+	for _, e := range evs {
+		val := "-"
+		if e.TriggerValue != nil {
+			val = fmt.Sprintf("%v", *e.TriggerValue)
+		}
+		edge := "-"
+		if e.SourceEdgeDeviceID != nil {
+			edge = fmt.Sprintf("%d", *e.SourceEdgeDeviceID)
+		}
+		out = append(out, fmt.Sprintf("%d:%s:%s:%s", e.ID, e.Result, val, edge))
+	}
+	return "[" + strings.Join(out, " ") + "]"
+}
+
 func (c *sgChain) activeEdgeOfGroup(t *testing.T, groupID uint) uint {
 	t.Helper()
 	g, members, err := c.gsvc.GetGroupWithMembers(groupID)
@@ -511,7 +579,10 @@ func TestE2_PrimaryBackupFollowsActiveNoDoubleCount(t *testing.T) {
 	c := newSGChain(t)
 	c.warm(t)
 	gid := c.createGroup(t, models.SourceGroupKindPrimaryBackup, "")
-	r := c.createRule(t, "主备跟随", gid, 0, 500, 0, 5)
+	// cooldown=0：e2e 的 automation sink 用 time.Now()（非帧 ReceivedAt，见
+	// databus/consumers_heavy.go:370,408），无法用 ReceivedAt 快进冷却窗；
+	// 这里验证「切换后读数跟随且不双计」，冷却语义由 E7/E11 用审计行覆盖。
+	r := c.createRule(t, "主备跟随", gid, 0, 500, 0, 0)
 	c.start(t)
 
 	t0 := c.now
@@ -520,8 +591,8 @@ func TestE2_PrimaryBackupFollowsActiveNoDoubleCount(t *testing.T) {
 		t.Fatalf("E2 红判据: standby 帧触发（双计）事件数=%d", n)
 	}
 	c.publish(t, c.edgeA, 900, t0.Add(time.Second)) // active 帧：触发 1 次
-	if n := len(c.eventsForRule(t, r)); n != 1 {
-		t.Fatalf("E2 红判据: active 帧事件数=%d（期望 1）", n)
+	if n := len(c.actionEventsForRule(t, r)); n != 1 {
+		t.Fatalf("E2 红判据: active 帧动作事件数=%d（期望 1）；全部事件=%s", n, eventDigest(c.eventsForRule(t, r)))
 	}
 
 	// 连续失败 3 次 ⇒ 切 B（默认 max_fail_count=3）
@@ -534,16 +605,16 @@ func TestE2_PrimaryBackupFollowsActiveNoDoubleCount(t *testing.T) {
 
 	// 冷却窗已过（+10s）再发 B 帧 ⇒ 触发 1 次；再发 A 帧 ⇒ 不触发
 	c.publish(t, c.edgeB, 900, t0.Add(11*time.Second))
-	ev := c.eventsForRule(t, r)
-	if len(ev) != 2 {
-		t.Fatalf("E2 红判据: 切换后事件总数=%d（期望 2）", len(ev))
+	acts := c.actionEventsForRule(t, r)
+	if len(acts) != 2 {
+		t.Fatalf("E2 红判据: 切换后动作事件数=%d（期望 2）；全部事件=%s", len(acts), eventDigest(c.eventsForRule(t, r)))
 	}
-	if ev[1].SourceEdgeDeviceID == nil || *ev[1].SourceEdgeDeviceID != c.edgeB.ID {
-		t.Fatalf("E2 红判据: 切换后事件 source_edge_device_id=%v（期望 B=%d）", ev[1].SourceEdgeDeviceID, c.edgeB.ID)
+	if acts[1].SourceEdgeDeviceID == nil || *acts[1].SourceEdgeDeviceID != c.edgeB.ID {
+		t.Fatalf("E2 红判据: 切换后动作事件 source_edge_device_id=%v（期望 B=%d）；动作事件=%s", acts[1].SourceEdgeDeviceID, c.edgeB.ID, eventDigest(acts))
 	}
 	c.publish(t, c.edgeA, 900, t0.Add(22*time.Second))
-	if n := len(c.eventsForRule(t, r)); n != 2 {
-		t.Fatalf("E2 红判据: 旧 active 帧仍触发，事件总数=%d（期望 2）", n)
+	if n := len(c.actionEventsForRule(t, r)); n != 2 {
+		t.Fatalf("E2 红判据: 旧 active 帧仍产生动作，动作事件数=%d（期望 2）；全部事件=%s", n, eventDigest(c.eventsForRule(t, r)))
 	}
 }
 
@@ -604,8 +675,12 @@ func TestE7_SwitchInstantSingleEvent(t *testing.T) {
 	}
 	// 同一时刻 B 上报：冷却窗内 ⇒ 不得产生第 2 条事件
 	c.publish(t, c.edgeB, 700, t0.Add(500*time.Millisecond))
-	if n := len(c.eventsForRule(t, r)); n != 1 {
-		t.Fatalf("E7 红判据: 切换瞬间产生 %d 条事件（期望 1，冷却窗内至多一次动作）", n)
+	// 口径：只数动作事件；冷却命中会且**应该**落一条 suppressed_cooldown 审计行。
+	if n := len(c.actionEventsForRule(t, r)); n != 1 {
+		t.Fatalf("E7 红判据: 切换瞬间动作事件数=%d（期望 1，冷却窗内至多一次动作）；全部事件=%s", n, eventDigest(c.events(t)))
+	}
+	if !hasAuditResult(c.eventsForRule(t, r), models.AutomationResultSuppressedCooldown) {
+		t.Fatalf("E7 红判据: 冷却命中未落 suppressed_cooldown 审计；全部事件=%s", eventDigest(c.eventsForRule(t, r)))
 	}
 	logs, err := c.gsvc.FailoverLogs(gid, 10)
 	if err != nil {
@@ -691,8 +766,12 @@ func TestE11_CompositeInterleavedCooldownSingleAction(t *testing.T) {
 	c.publish(t, c.edgeB, 500, t0.Add(200*time.Millisecond)) // sum=900 sat ⇒ 事件 1
 	c.publish(t, c.edgeA, 200, t0.Add(400*time.Millisecond)) // sum=700 sat，冷却窗内 ⇒ 抑制
 	c.publish(t, c.edgeB, 100, t0.Add(800*time.Millisecond)) // sum=300 unsat
-	if n := len(c.eventsForRule(t, r)); n != 1 {
-		t.Fatalf("E11 红判据: 冷却窗内事件数=%d（期望 1；交错帧双动作会 >1）", n)
+	// 口径同 E7：动作事件 1 条 + 至少一条 suppressed_cooldown 审计。
+	if n := len(c.actionEventsForRule(t, r)); n != 1 {
+		t.Fatalf("E11 红判据: 冷却窗内动作事件数=%d（期望 1；交错帧双动作会 >1）；全部事件=%s", n, eventDigest(c.events(t)))
+	}
+	if !hasAuditResult(c.eventsForRule(t, r), models.AutomationResultSuppressedCooldown) {
+		t.Fatalf("E11 红判据: 交错帧冷却命中未落 suppressed_cooldown 审计；全部事件=%s", eventDigest(c.eventsForRule(t, r)))
 	}
 }
 
@@ -702,5 +781,8 @@ func TestE11_CompositeInterleavedCooldownSingleAction(t *testing.T) {
 // 没有可产生 pending_confirm 的风险动作；E9 需要 BMS 链（set_mos_policy）+ 组绑定。
 // 本文件不伪造 pending 行（会绕过产品路径 ⇒ 假绿），故此处以显式失败记录缺口而非 Skip。
 func TestE9_PendingConfirmAfterSwitchRejected(t *testing.T) {
-	t.Fatalf("E9 未实现：prs3001 无风险动作可产生 pending_confirm（deviceaction 目录无该机型 action）；需 BMS 链夹具，见 src-risk-view E9 设计")
+	// SKIP（能力缺口，非依赖缺失）：prs3001 在 deviceaction 注册表里没有可产生
+	// pending_confirm 的风险动作；E9 需要 BMS 链（set_mos_policy）+ 来源组绑定。
+	// 设计见 .analysis/src-risk-view.md E9 与方案 §8.3。**不伪造 pending 行**（会绕过产品路径）。
+	t.Skip("E9 夹具能力缺口：prs3001 无风险动作 ⇒ 无法经产品路径产生 pending_confirm；需 BMS 链夹具（src-risk-view E9 设计）")
 }

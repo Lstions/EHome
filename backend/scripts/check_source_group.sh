@@ -642,7 +642,8 @@ EOF
   exit 0
 fi
 
-gate_list="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21"
+# SG-02 是 v0.3 N-8 删除项（无字段载体），不列入默认清单；只在 --list 里说明。
+gate_list="01 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21"
 if [ -n "$ONLY" ]; then
   gate_list=$(printf '%s' "$ONLY" | sed -E 's/^SG-//; s/^0*//')
   case ",$gate_list," in
