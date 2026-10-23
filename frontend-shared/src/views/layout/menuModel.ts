@@ -43,8 +43,10 @@ export const NAV_DESTINATIONS: readonly NavDestination[] = [
   { path: '/logical-device', title: '逻辑设备' },
   { path: '/channel', title: '通道管理' },
   { path: '/device-configs', title: '配置模板' },
-  { path: '/data-sources', title: '数据源' },
-  { path: '/source-groups', title: '来源组' },
+  // 数据来源（数据流架构 v1 §五 M4）：原「数据源」+「来源组」合并为一个入口。
+  // 来源组作为第二个 Tab 出现在该页内，菜单不再单独列出（减少用户认知负担：
+  // 「数据源」和「来源组」听起来都像"数据从哪来"，合成一个概念更好理解）。
+  { path: '/data-sources', title: '数据来源' },
   { path: '/data', title: '数据面板' },
   { path: '/alerts', title: '告警规则' },
   { path: '/automation', title: '自动化策略' },
@@ -83,7 +85,10 @@ export interface NavGroup {
 export const NAV_GROUPS: readonly NavGroup[] = [
   { title: '总览', paths: ['/dashboard'] },
   { title: '设备与通道', paths: ['/node', '/edge-device', '/logical-device', '/channel', '/device-configs'] },
-  { title: '数据', paths: ['/data-sources', '/source-groups', '/data'] },
+  // 2026-10-23（数据流架构 v1 §五 M4）：/source-groups 不再是一级导航目标
+  // （已并入 /data-sources 的第二个 Tab），故从分组里移除 —— 分组只能引用
+  // NAV_DESTINATIONS 里存在的路径，否则 menuModel 的校验会直接抛错。
+  { title: '数据', paths: ['/data-sources', '/data'] },
   { title: '自动化与通知', paths: ['/alerts', '/automation', '/notification-channels', '/notification-deliveries'] },
   { title: '运维', paths: ['/firmware', '/monitor'] },
 ] as const

@@ -81,17 +81,25 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '逻辑设备', icon: 'Share' },
       },
       {
+        // 数据来源（数据流架构 v1 §五 M4）：单页两个 Tab。
+        //   Tab1「来源总览」只读（自动派生）
+        //   Tab2「来源组」可写（用户手动创建，唯一的主备/复合入口）
+        // Tab 由 ?tab= 驱动，链接可分享、可直达来源组。
         path: 'data-sources',
-        name: 'DataSourceList',
-        component: () => import('@/views/data-source/DataSourceList.vue'),
-        meta: { title: '数据源', icon: 'Link' },
+        name: 'DataSourcePage',
+        component: () => import('@/views/data-source/DataSourcePage.vue'),
+        meta: { title: '数据来源', icon: 'Link' },
       },
       {
-        // 规则数据来源（方案 v0.3）：来源组 = 主备/复合的统一容器，跨逻辑设备绑定成员。
+        // 旧路径保留为**重定向**：既有书签、文档链接、外部脚本仍可用。
+        // 不直接删除路由，否则用户点旧链接会看到 404（体验断崖）。
+        //
+        // ⚠ 这里刻意**不在 redirect 里写 path 字面量**（用 name 而非 path 跳转）：
+        // 本仓的路由扫描门禁按「每个对象块里首个 path: 字符串」建索引，
+        // redirect 目标若写成 path 字面量，会被当成一个独立路由块并与之撞键，
+        // 让门禁误判业务页变成了顶层非业务路由。用 name 表达同一语义且不干扰扫描。
         path: 'source-groups',
-        name: 'SourceGroupList',
-        component: () => import('@/views/source-group/SourceGroupList.vue'),
-        meta: { title: '来源组', icon: 'Link' },
+        redirect: { name: 'DataSourcePage', query: { tab: 'groups' } },
       },
       {
         path: 'data',

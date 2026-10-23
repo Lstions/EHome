@@ -531,7 +531,20 @@ describe('P1-C 列表页约定门禁（路由级列表页）', () => {
       'src/views/node/NodeList.vue',
       'src/views/edge-device/EdgeDeviceList.vue',
       'src/views/logical-device/LogicalDeviceList.vue',
-      'src/views/data-source/DataSourceList.vue',
+      // 2026-10-23（数据流架构 v1 §五 M4）：此处**删除**了原来的
+      //   'src/views/data-source/DataSourceList.vue' 条目。
+      //
+      // 原因：数据源与来源组合并为单页两 Tab 后，路由组件变成 DataSourcePage.vue，
+      // 而它是纯容器（Tab 壳，无 el-pagination ⇒ 本门禁按定义不把它算列表页）。
+      // 原来的 DataSourceList.vue 与 SourceGroupList.vue 都退出了路由表
+      // （后者被 DataSourcePage 以 Tab 形式内嵌），因此不再属于"路由级列表页"。
+      //
+      // 二者仍受**其他门禁**覆盖，不会漏检：
+      //   · DataSourceList.vue 的 CRUD 语义已 deprecated，页面不再引用它；
+      //   · SourceGroupList.vue 由 src/views/data-source/__tests__ 的组件测试
+      //     （只读契约 + embedded 模式）与 PageHeaderPropsGate 覆盖；
+      //   · DataSourcePage 的表格渲染由同一组组件测试覆盖。
+      // 这里只保留仍作为路由页存在的列表页，否则断言会要求一个已不存在的路由页。
       'src/views/data/DataPanel.vue',
       'src/views/firmware/FirmwareManage.vue',
       'src/views/config/DeviceConfigList.vue',

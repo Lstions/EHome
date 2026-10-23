@@ -77,6 +77,16 @@ export const REGISTERED_ROUTE_EXCLUSIONS: Record<string, string> = {
   // 2026-10-23：逆变器功率流向四工况（放电/充电/静止/读数矛盾）的离线验证页。
   // 方向判定是纯函数 + 组件分支，一个页面覆盖全部分支；同样 DEV 门控、不进受审分母。
   '/dev/mock-power-flow': 'DEV-only 功率流向四工况验证页（同上），不进受审分母',
+  // 2026-10-23：数据来源页整合（数据流架构 v1 §五 M4）。
+  // 「来源组」不再是独立路由页，而是 data-sources 页的第二个 Tab（?tab=groups）。
+  // 本路径保留为**重定向**兜底旧链接（书签/文档/外部脚本），它没有 component
+  // （redirect: {name:'DataSourcePage', query:{tab:'groups'}}），
+  // 与上面空路径 redirect 同性质 ⇒ 按同一先例登记为例外，不进受审分母。
+  //
+  // 键名注意：子路由在 router 源码里的 path 字面量是**相对的** 'source-groups'，
+  // 而例外表按源码字面量匹配（classifyRoutePath 收到的是同一个字符串），
+  // 所以这里必须写 'source-groups' 而不是 '/source-groups' —— 写错会静默不生效。
+  'source-groups': '旧「来源组」路由的重定向兜底（现为 data-sources?tab=groups），无 component',
   // 2026-10-17 删除两条 DEV 例外，对应两个 demo 已转正为生产页面：
   //   · '/dev/bms-demo2'          -> views/edge-device/bms/BmsDetailPage.vue
   //                                   （经 EdgeDeviceDetailRouter 按 device_type 分派）

@@ -1,13 +1,24 @@
 <template>
   <div class="source-group-page">
-    <PageHeader
-      title="来源组"
-      subtitle="把多台边缘设备组合成一个数据来源：主备组按 active 跟随，复合组按 combine 合成"
-    >
-      <template #extra>
-        <el-button type="primary" :icon="Plus" data-test="sg-create" @click="openCreate">新建来源组</el-button>
-      </template>
-    </PageHeader>
+    <!--
+      embedded=true 时由父容器（数据来源页）提供页面级标题与说明，
+      本组件只渲染内容区 —— 避免嵌套页面里出现两个 PageHeader。
+
+      ⚠ v-if 必须放在**外层 wrapper** 而不是 PageHeader 标签上：
+      本仓有 PageHeader props 门禁（PageHeaderPropsGate.spec.ts）扫全站调用点，
+      它会把标签上的 v-if 当成一个 prop 去比对白名单 ⇒ 误报"用了不存在的 prop v-if"。
+      用 <template v-if> 包一层既表达同一语义，又不给 PageHeader 添加非 prop 属性。
+    -->
+    <template v-if="!embedded">
+      <PageHeader
+        title="来源组"
+        subtitle="把多台边缘设备组合成一个数据来源：主备组按 active 跟随，复合组按 combine 合成"
+      >
+        <template #extra>
+          <el-button type="primary" :icon="Plus" data-test="sg-create" @click="openCreate">新建来源组</el-button>
+        </template>
+      </PageHeader>
+    </template>
 
     <el-alert
       v-if="store.error"
@@ -232,6 +243,14 @@ import feedback from '@/utils/feedback'
 import { useResponsive } from '@/composables/useResponsive'
 import { useSourceGroupStore } from '@/stores/sourceGroup'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+
+/**
+ * embedded 表示本组件被嵌入到某个父页面（数据来源页的「来源组」Tab）。
+ *
+ * 为 true 时不渲染 PageHeader —— 父页面已有标题，嵌套页面出现两个大标题
+ * 会让层级混乱（项目其他嵌入页同此约定）。
+ */
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 import type {
   SourceGroup,
   SourceGroupCombine,

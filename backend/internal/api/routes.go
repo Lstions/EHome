@@ -191,6 +191,12 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc, db)
 			registerFailoverLogRoutes(v1, datasourceSvc)
 		}
+		// 来源总览（数据流架构 v1 §4.1）：**只读投影**端点。
+		//
+		// 与上面 CRUD 分注册的理由：本组只注册 GET ⇒ 同路径的 POST/PUT/DELETE
+		// 由 gin 返 405。这是协议层的只读保证，不依赖前端自律 —— 运维脚本
+		// 用 curl 也写不进去。旧 CRUD 保留（deprecated）供既有脚本兼容。
+		registerSourceOverviewRoute(v1.Group("/data-sources"), db)
 
 		// 来源组 CRUD + 成员/切换/审计查询（设计/规则数据来源与复合来源-方案 §7.3）。
 		// 未注入领域服务时注册 503 占位。

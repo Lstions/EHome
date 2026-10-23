@@ -116,20 +116,18 @@ export const ROUTES: RouteProbe[] = [
     dataShaped: true,
   },
   {
+    // 数据来源（数据流架构 v1 §五 M4）：单页两个 Tab。
+    // 默认 Tab「来源总览」只读（自动派生）；第二个 Tab「来源组」可写。
+    //
+    // 为什么只保留**一条**审计条目：RouteProbe.path 被门禁约束为
+    // /^\/[a-z0-9-]+$/（不含 query），无法表达 ?tab=groups。而来源组 Tab
+    // 不是独立路由 —— 它由 src/views/data-source/__tests__ 的组件测试覆盖
+    // （断言 embedded 模式、写按钮存在性、只读契约）。这里审计默认落地的总览。
     name: 'data-sources',
     path: '/data-sources',
     root: '.data-source-page',
-    visible: '.el-table__row, .empty-state, [data-test="ds-error"]',
-    settle: '.ds-table, .empty-state, [data-test="ds-error"]',
-    dataShaped: true,
-  },
-  {
-    // 规则数据来源：来源组管理页（主备/复合统一容器）。
-    name: 'source-groups',
-    path: '/source-groups',
-    root: '.source-group-page',
-    visible: '.el-table__row, .empty-state, [data-test="sg-error"]',
-    settle: '.sg-table, .empty-state, [data-test="sg-error"]',
+    visible: '.ov-table, .el-table__row, .empty-state, [data-test="ov-error"]',
+    settle: '.ov-table, .empty-state, [data-test="ov-error"]',
     dataShaped: true,
   },
   {
