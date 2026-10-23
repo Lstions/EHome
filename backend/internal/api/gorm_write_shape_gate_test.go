@@ -207,13 +207,21 @@ func TestGormWritePathShapes(t *testing.T) {
 	}
 
 	// 分母守卫 2：写路径的**总量**也要有下限，避免「扫描器没扫到」。
-	// 阈值取实测值的约 2/3（2026-09-16 实测 Updates 66 / Save 13），
-	// 这样正常的增删不会误报，而「正则失效导致归零」会被抓住。
-	if updatesSeen < 40 {
-		t.Fatalf("只扫到 %d 处 Updates(（期望 >=40）—— 判据失效", updatesSeen)
+	// 阈值取实测值的约 2/3，这样正常的增删不会误报，而「正则失效导致归零」会被抓住。
+	//
+	// 2026-10-23 更新（M3 下线 legacy 主备状态机）：删除
+	// internal/datasource/service.go 的 MarkSuccess/MarkFailure/ScanStale/
+	// failStaleSource/Start/maybeFailover 后，实测非测试代码 Updates 38 / Save 7。
+	// 按原规则（约 2/3）把阈值从 40/8 调到 25/4。
+	//
+	// 为什么不是"删到多少就设多少"：留 2/3 的余量，才能让正常的代码增删不误报，
+	// 同时仍然能抓住"正则被改坏 ⇒ 归零"这种门禁失效。设成精确值会让每次
+	// 合理重构都触发假红，最终导致没人信这个守卫。
+	if updatesSeen < 25 {
+		t.Fatalf("只扫到 %d 处 Updates(（期望 >=25）—— 判据失效", updatesSeen)
 	}
-	if saveSeen < 8 {
-		t.Fatalf("只扫到 %d 处 Save(（期望 >=8）—— 判据失效", saveSeen)
+	if saveSeen < 4 {
+		t.Fatalf("只扫到 %d 处 Save(（期望 >=4）—— 判据失效", saveSeen)
 	}
 
 	sort.Strings(offenses)

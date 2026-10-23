@@ -1,26 +1,42 @@
 package datasource
 
-// 独立验证（impl-core）：legacy data_sources 状态机 vs 来源组适配器 **等价性差分**。
+// 主备来源的**随机操作序列不变量验证**。
 //
-// 方法：同一随机操作序列分别打在两个独立世界（文件型 SQLite）：
-//   - legacy：data_sources 行 + Service（MarkSuccess/MarkFailure/ScanStale/Activate/Deactivate/Reset）
-//   - group ：source_group + members + GroupService（同名语义方法）
-// 每步之后比较**可观测状态轨迹**：active 的 edgeDeviceID、每个成员的 status/fail_count/
-// last_success 是否已写、切换日志条数、扫描返回值、手动操作错误类别。任一步不一致即失败。
+// # 历史与变更（重要）
 //
-// Windows of intentional divergence（不在差分内）：
-//   - N-21 自愈：组无 active 时 GroupService 会自愈补选，legacy **没有**该行为；
-//     因此生成器禁止在两世界都无 active 时执行 scan（先修好权威再比）。
-//   - revision / ActiveChange / health 事件是组路径新增能力，不属于 legacy 可观测状态。
+// 本文件原名 group_verify_diff_test.go，原本做的是「legacy data_sources 状态机
+// vs 来源组适配器」的**等价性差分**：同一随机操作序列打在两套独立实现上，
+// 逐步比较可观测状态。
 //
-// 这是"决策逻辑只有一份"的反向证明：若 group 适配器复制/漂移了任何一个判定
-// （阈值、候选序、冷却、驻留期、错误方向），差分会在对应步骤直接抓到。
+// 2026-10-23（M3，数据流架构 v1 §六）legacy 状态机被**删除** —— 主备语义现在
+// 只有来源组一套（用户要求「只有来源组支持主备」）。因此本文件的语义变为：
+//
+//   **单实现对随机操作序列的不变量验证**。
+//
+// # 为什么保留而不是连同 legacy 一起删掉
+//
+// 原差分测试的价值有两层：
+//   (a) 证明两套实现判定一致 —— 随 legacy 删除而失效（没有第二套可比了）；
+//   (b) 用**随机操作序列**（40 步 × 3 seed）覆盖人工不会枚举到的操作组合，
+//       并在每一步断言关键不变量 —— 这一层**仍然有效且不可替代**。
+//
+// 固定用例（TestGroupMarkFailureFailover 等）只覆盖设计者想到的路径；
+// 随机序列能撞出"先 deactivate 再 failure 再 reset 再 scan"这类组合态 bug。
+// 所以保留 (b)，把断言从"与 legacy 相等"改为"单 active 不变量 + 状态自洽"。
+//
+// # 断言的不变量（每一步都查）
+//
+//  1. **单 active 不变量**：主备组任何时刻至多一个 active 成员。
+//     这是 R1–R11 全部规则的根本安全属性 —— 违反它意味着「两个权威同时供数」。
+//  2. **状态枚举合法**：成员 status ∈ {active, standby, error, disabled}。
+//  3. **fail_count 非负**。
+//
+// 这些不变量**不依赖具体判定阈值**，所以将来调整 R3 候选序或 R10 冷却期时，
+// 本测试仍能发现真正危险的变更（改坏不变量），而不会因为阈值变化误报。
 
 import (
-	"errors"
 	"fmt"
 	"math/rand"
-	"sort"
 	"testing"
 	"time"
 
@@ -30,68 +46,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// diffMember 是某边缘设备在一组来源中的可观测状态。
-type diffMember struct {
-	Status         string
-	FailCount      int
-	LastSuccessSet bool
-}
-
-// diffState 是一个世界在某时刻的可观测状态。
-type diffState struct {
-	ActiveEdge uint // 0 = 无权威
-	Members    map[uint]diffMember
-	SwitchLogs int
-}
-
-func (s diffState) String() string {
-	edges := make([]uint, 0, len(s.Members))
-	for e := range s.Members {
-		edges = append(edges, e)
-	}
-	sort.Slice(edges, func(i, j int) bool { return edges[i] < edges[j] })
-	out := fmt.Sprintf("active=%d logs=%d members={", s.ActiveEdge, s.SwitchLogs)
-	for _, e := range edges {
-		m := s.Members[e]
-		out += fmt.Sprintf("%d:%s/%d/%v ", e, m.Status, m.FailCount, m.LastSuccessSet)
-	}
-	return out + "}"
-}
-
-// legacyWorld 是 legacy data_sources 世界。
-type legacyWorld struct {
-	svc    *Service
-	db     *gorm.DB
-	cfg    CreateInput // 模板
-	srcIDs map[uint]uint
-}
-
-func (w *legacyWorld) state(t *testing.T) diffState {
-	t.Helper()
-	var rows []models.DataSource
-	if err := w.db.Where("device_id = ? AND category = ?", w.cfg.DeviceID, w.cfg.Category).
-		Order("edge_device_id ASC").Find(&rows).Error; err != nil {
-		t.Fatalf("legacy query sources: %v", err)
-	}
-	st := diffState{Members: map[uint]diffMember{}}
-	for _, r := range rows {
-		st.Members[r.EdgeDeviceID] = diffMember{
-			Status: r.Status, FailCount: r.FailCount, LastSuccessSet: r.LastSuccess != nil,
-		}
-		if r.Status == StatusActive {
-			st.ActiveEdge = r.EdgeDeviceID
-		}
-	}
-	var logs int64
-	if err := w.db.Model(&models.FailoverLog{}).
-		Where("device_id = ? AND category = ?", w.cfg.DeviceID, w.cfg.Category).Count(&logs).Error; err != nil {
-		t.Fatalf("legacy count failover logs: %v", err)
-	}
-	st.SwitchLogs = int(logs)
-	return st
-}
-
-// groupWorld 是来源组世界。
+// groupWorld 是一个来源组世界的测试视角。
 type groupWorld struct {
 	gsvc    *GroupService
 	reg     *sourceref.Registry
@@ -100,67 +55,28 @@ type groupWorld struct {
 	memIDs  map[uint]uint // edgeDeviceID -> member row ID
 }
 
-func (w *groupWorld) state(t *testing.T) diffState {
-	t.Helper()
-	var rows []models.SourceGroupMember
-	if err := w.db.Where("group_id = ?", w.groupID).Order("edge_device_id ASC").Find(&rows).Error; err != nil {
-		t.Fatalf("group query members: %v", err)
-	}
-	st := diffState{Members: map[uint]diffMember{}}
-	for _, r := range rows {
-		st.Members[r.EdgeDeviceID] = diffMember{
-			Status: r.Status, FailCount: r.FailCount, LastSuccessSet: r.LastSuccess != nil,
-		}
-		if r.Status == models.SourceMemberStatusActive {
-			st.ActiveEdge = r.EdgeDeviceID
-		}
-	}
-	var logs int64
-	if err := w.db.Model(&models.SourceGroupFailoverLog{}).
-		Where("group_id = ?", w.groupID).Count(&logs).Error; err != nil {
-		t.Fatalf("group count failover logs: %v", err)
-	}
-	st.SwitchLogs = int(logs)
-	return st
-}
-
 // diffOp 是一次操作。
 type diffOp struct {
 	kind string // success|failure|scan|activate|deactivate|reset
 	edge uint   // 目标边缘设备（scan 忽略）
 }
 
-// setupDiffWorlds 建两个等价世界（同一个 Now 时钟、同一组 edgeDeviceID=1/2/3）。
-func setupDiffWorlds(t *testing.T, clock *time.Time) (*legacyWorld, *groupWorld) {
+// setupGroupOnlyWorld 建一个主备组世界（3 台设备，优先级 100/90/80）。
+//
+// 时钟由调用方注入（*clock），让 Cooldown / MinResidency 这类时间相关判定
+// 在随机序列中可控 —— 否则测试会依赖真实时间流逝，无法复现。
+func setupGroupOnlyWorld(t *testing.T, clock *time.Time) *groupWorld {
 	t.Helper()
 	nowFn := func() time.Time { return *clock }
 	opts := Options{Cooldown: 5 * time.Minute, MinResidency: 2 * time.Minute,
 		Staleness: 5 * time.Minute, ScanInterval: time.Hour, Now: nowFn}
-	const deviceID = uint(1)
 	const category = "illuminance"
 	priorities := []int{100, 90, 80}
 	edges := make([]uint, len(priorities))
 	for i := range edges {
-		edges[i] = uint(i + 1) // 统一用 edgeDeviceID = 1,2,3（两世界可比较）
+		edges[i] = uint(i + 1)
 	}
 
-	// ── legacy 世界：data_sources 行 ──
-	ldb := openVerifyDB(t)
-	lw := &legacyWorld{svc: New(ldb, opts), db: ldb, srcIDs: map[uint]uint{},
-		cfg: CreateInput{DeviceID: deviceID, Category: category}}
-	lw.svc.SetNotifier(func(models.Notification) {})
-	for i, p := range priorities {
-		ds, err := lw.svc.Create(CreateInput{
-			DeviceID: deviceID, Category: category, EdgeDeviceID: edges[i],
-			Priority: p, MaxFailCount: defaultMaxFailCount, Name: fmt.Sprintf("legacy-%d", edges[i]),
-		})
-		if err != nil {
-			t.Fatalf("legacy Create edge %d: %v", edges[i], err)
-		}
-		lw.srcIDs[edges[i]] = ds.ID
-	}
-
-	// ── group 世界：边缘设备 + 来源组 ──
 	gdb := openVerifyDB(t)
 	reg := sourceref.NewRegistry()
 	gw := &groupWorld{gsvc: NewGroupService(gdb, opts), reg: reg, db: gdb, memIDs: map[uint]uint{}}
@@ -168,8 +84,8 @@ func setupDiffWorlds(t *testing.T, clock *time.Time) (*legacyWorld, *groupWorld)
 	gw.gsvc.SetNotifier(func(models.Notification) {})
 	members := make([]GroupMemberInput, 0, len(edges))
 	for i, edge := range edges {
-		ed := models.EdgeDevice{ID: edge, Name: fmt.Sprintf("edge-%d", edge), NodeID: "node-1", ChannelID: 1,
-			IntervalMs: 5000, Enabled: true, Type: "prs3001"}
+		ed := models.EdgeDevice{ID: edge, Name: fmt.Sprintf("edge-%d", edge), NodeID: "node-1",
+			ChannelID: 1, IntervalMs: 5000, Enabled: true, Type: "prs3001"}
 		if err := gdb.Create(&ed).Error; err != nil {
 			t.Fatalf("create edge device: %v", err)
 		}
@@ -179,21 +95,23 @@ func setupDiffWorlds(t *testing.T, clock *time.Time) (*legacyWorld, *groupWorld)
 		members = append(members, GroupMemberInput{EdgeDeviceID: ed.ID, Priority: priorities[i]})
 	}
 	groupRow, err := gw.gsvc.CreateGroup(CreateGroupInput{
-		Name: "diff-group", Kind: models.SourceGroupKindPrimaryBackup, Category: category,
-		StalenessSec: 300, // 关键：与 legacy opts.Staleness=5m 对齐（否则 DeriveStaleness 走 30s 默认）
+		Name: "invariant-group", Kind: models.SourceGroupKindPrimaryBackup, Category: category,
+		// StalenessSec 显式给 300s：否则 DeriveStaleness 会按采集间隔推导出 30s 默认，
+		// 让「停滞判定」在随机序列里过早触发，掩盖真正的组合态 bug。
+		StalenessSec: 300,
 		Members:      members,
 	})
 	if err != nil {
-		t.Fatalf("group CreateGroup: %v", err)
+		t.Fatalf("CreateGroup: %v", err)
 	}
 	gw.groupID = groupRow.ID
 	for _, m := range gw.gsvc.mustListMembers(t, groupRow.ID) {
 		gw.memIDs[m.EdgeDeviceID] = m.ID
 	}
 	if len(gw.memIDs) != len(priorities) {
-		t.Fatalf("group members = %d want %d", len(gw.memIDs), len(priorities))
+		t.Fatalf("members = %d want %d", len(gw.memIDs), len(priorities))
 	}
-	return lw, gw
+	return gw
 }
 
 // mustListMembers 是测试辅助（避免 t 参数在循环里丢失）。
@@ -206,84 +124,42 @@ func (g *GroupService) mustListMembers(t *testing.T, groupID uint) []models.Sour
 	return ms
 }
 
-// runDiffOp 在两侧执行同一操作，并比较错误类别。
-func runDiffOp(t *testing.T, lw *legacyWorld, gw *groupWorld, clock *time.Time, op diffOp) {
+// runGroupOp 执行一次操作。
+//
+// 错误一律**忽略**：随机序列会撞出"对 disabled 成员再 deactivate"这类非法组合，
+// 返回错误是正确行为。我们不比较错误类别（那需要第二套实现），
+// 而是在每步之后检查不变量 —— 非法操作必须不留坏状态。
+func runGroupOp(t *testing.T, gw *groupWorld, clock *time.Time, op diffOp) {
 	t.Helper()
 	switch op.kind {
 	case "success":
 		*clock = clock.Add(time.Second)
-		lw.svc.MarkSuccess(op.edge, []string{lw.cfg.Category}, *clock)
 		gw.gsvc.MarkSuccess(op.edge, []string{"illuminance"}, *clock)
 	case "failure":
 		*clock = clock.Add(time.Second)
-		lw.svc.MarkFailure(op.edge, TriggerDeviceOffline)
 		gw.gsvc.MarkFailure(op.edge, TriggerDeviceOffline)
 	case "scan":
-		// N-21 是组路径**新增**能力（legacy 无自愈）。两世界都无 active 时执行 scan
-		// 会把"组自愈"与"legacy 无操作"当成不一致，因此该情形两侧都跳过扫描
-		// （时钟照常前进，不影响其它判定）。
-		if lw.state(t).ActiveEdge == 0 || gw.state(t).ActiveEdge == 0 {
-			*clock = clock.Add(30 * time.Second)
-			return
-		}
 		*clock = clock.Add(30 * time.Second)
-		lN, lErr := lw.svc.ScanStale(*clock)
-		gN, gErr := gw.gsvc.ScanGroups(*clock)
-		if (lErr == nil) != (gErr == nil) {
-			t.Fatalf("scan 错误类别不一致: legacy=%v group=%v", lErr, gErr)
-		}
-		if lN != gN {
-			t.Fatalf("scan 切换次数不一致: legacy=%d group=%d", lN, gN)
-		}
+		_, _ = gw.gsvc.ScanGroups(*clock)
 	case "activate":
 		*clock = clock.Add(time.Second)
-		_, lErr := lw.svc.Activate(lw.srcIDs[op.edge])
-		_, gErr := gw.gsvc.ActivateGroupMember(gw.groupID, gw.memIDs[op.edge])
-		compareErrClass(t, "activate", lErr, gErr)
+		_, _ = gw.gsvc.ActivateGroupMember(gw.groupID, gw.memIDs[op.edge])
 	case "deactivate":
 		*clock = clock.Add(time.Second)
-		_, lErr := lw.svc.Deactivate(lw.srcIDs[op.edge])
-		_, gErr := gw.gsvc.DeactivateGroupMember(gw.groupID, gw.memIDs[op.edge])
-		compareErrClass(t, "deactivate", lErr, gErr)
+		_, _ = gw.gsvc.DeactivateGroupMember(gw.groupID, gw.memIDs[op.edge])
 	case "reset":
 		*clock = clock.Add(time.Second)
-		_, lErr := lw.svc.Reset(lw.srcIDs[op.edge])
-		_, gErr := gw.gsvc.ResetGroupMember(gw.groupID, gw.memIDs[op.edge])
-		compareErrClass(t, "reset", lErr, gErr)
+		_, _ = gw.gsvc.ResetGroupMember(gw.groupID, gw.memIDs[op.edge])
 	default:
 		t.Fatalf("unknown op %q", op.kind)
 	}
 }
 
-// errClass 把错误归为可比较类别（两域哨兵错误不同名，按语义归类）。
-func errClass(err error) string {
-	switch {
-	case err == nil:
-		return "nil"
-	case errors.Is(err, ErrConflict):
-		return "conflict"
-	case errors.Is(err, ErrInvalidRequest):
-		return "invalid"
-	case errors.Is(err, ErrNotFound), errors.Is(err, ErrGroupNotFound):
-		return "notfound"
-	default:
-		return "other:" + err.Error()
-	}
-}
-
-func compareErrClass(t *testing.T, op string, lErr, gErr error) {
-	t.Helper()
-	lc, gc := errClass(lErr), errClass(gErr)
-	if lc != gc {
-		t.Fatalf("%s 错误类别不一致: legacy=%q(%v) group=%q(%v)", op, lc, lErr, gc, gErr)
-	}
-}
-
-// genDiffOps 生成确定性操作序列；scan 仅在两侧都有 active 时允许（避开 N-21 新行为）。
-func genDiffOps(seed int64, steps int, lw *legacyWorld, t *testing.T) []diffOp {
+// genGroupOps 生成确定性操作序列（同 seed 同序列，可复现）。
+func genGroupOps(seed int64, steps int, gw *groupWorld) []diffOp {
 	rng := rand.New(rand.NewSource(seed))
-	edges := make([]uint, 0, len(lw.srcIDs))
-	for e := range lw.srcIDs {
+	edges := make([]uint, 0, len(gw.memIDs))
+	for e := range gw.memIDs {
 		edges = append(edges, e)
 	}
 	// 稳定顺序（map 遍历随机）。
@@ -292,44 +168,88 @@ func genDiffOps(seed int64, steps int, lw *legacyWorld, t *testing.T) []diffOp {
 			edges[j], edges[j-1] = edges[j-1], edges[j]
 		}
 	}
-	kinds := []string{"success", "success", "failure", "failure", "failure", "reset", "activate", "deactivate"}
+	// 偏向 failure/success（状态迁移主路径），少量手动操作与扫描。
+	kinds := []string{"success", "success", "failure", "failure", "failure",
+		"reset", "activate", "deactivate"}
 	ops := make([]diffOp, 0, steps)
 	for len(ops) < steps {
 		kind := kinds[rng.Intn(len(kinds))]
 		if rng.Intn(100) < 12 {
 			kind = "scan"
 		}
-		edge := edges[rng.Intn(len(edges))]
-		ops = append(ops, diffOp{kind: kind, edge: edge})
+		ops = append(ops, diffOp{kind: kind, edge: edges[rng.Intn(len(edges))]})
 	}
 	return ops
 }
 
-// TestVerifyDiff_LegacyVsGroupEquivalence 是等价性差分主用例。
+// assertGroupInvariants 断言主备组的核心不变量。
+//
+// 为什么这些不变量值得单独测：它们跨越多条规则（R1/R2/R3/R4/R10/R11），
+// 任何一条规则改坏都可能先表现为不变量被破坏。把不变量做成独立断言，
+// 比逐条核对规则更容易发现"没想到的组合"。
+func assertGroupInvariants(t *testing.T, gw *groupWorld, when string) {
+	t.Helper()
+	ms, err := gw.gsvc.ListMembers(gw.groupID)
+	if err != nil {
+		t.Fatalf("%s ListMembers: %v", when, err)
+	}
+	actives := 0
+	for _, m := range ms {
+		switch m.Status {
+		case models.SourceMemberStatusActive:
+			actives++
+		case models.SourceMemberStatusStandby, models.SourceMemberStatusError,
+			models.SourceMemberStatusDisabled:
+			// 合法状态
+		default:
+			t.Fatalf("%s 成员 %d 状态非法: %q", when, m.ID, m.Status)
+		}
+		if m.FailCount < 0 {
+			t.Fatalf("%s 成员 %d fail_count 为负: %d", when, m.ID, m.FailCount)
+		}
+	}
+	if actives > 1 {
+		t.Fatalf("%s 单 active 不变量被破坏: %d 个 active 成员（两个权威同时供数）", when, actives)
+	}
+}
+
+// TestVerifyDiff_LegacyVsGroupEquivalence 保留原标题（改 name 会打断历史追溯与
+// CI 报告连续性），但语义已变：现在是**单实现随机序列不变量验证**，不再是差分。
 func TestVerifyDiff_LegacyVsGroupEquivalence(t *testing.T) {
 	for _, seed := range []int64{1, 7, 23} {
 		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
 			clock := time.Now().UTC().Add(5 * time.Minute)
-			lw, gw := setupDiffWorlds(t, &clock)
+			gw := setupGroupOnlyWorld(t, &clock)
 
-			// 初始状态必须一致。
-			ls, gs := lw.state(t), gw.state(t)
-			if ls.String() != gs.String() {
-				t.Fatalf("初始状态不一致:\n legacy=%s\n group =%s", ls, gs)
+			// 起点也查一次（建组后应恰有一个 active）。
+			assertGroupInvariants(t, gw, "建组后")
+			if got := countActive(t, gw.gsvc, gw.groupID); got != 1 {
+				t.Fatalf("建组后 active=%d want 1（首成员应被置 active）", got)
 			}
 
-			ops := genDiffOps(seed, 40, lw, t)
-			var lastL diffState
+			ops := genGroupOps(seed, 40, gw)
 			for i, op := range ops {
-				runDiffOp(t, lw, gw, &clock, op)
-				curL, curG := lw.state(t), gw.state(t)
-				if curL.String() != curG.String() {
-					t.Fatalf("第 %d 步(%s edge=%d)后状态不一致:\n legacy=%s\n group =%s",
-						i+1, op.kind, op.edge, curL, curG)
-				}
-				lastL = curL
+				runGroupOp(t, gw, &clock, op)
+				assertGroupInvariants(t, gw, fmt.Sprintf("第 %d 步(%s edge=%d)后", i+1, op.kind, op.edge))
 			}
-			t.Logf("seed=%d 40 步等价（末态 legacy=%s）", seed, lastL.String())
+			t.Logf("seed=%d 40 步全部不变量成立（末态 active 数=%d）",
+				seed, countActive(t, gw.gsvc, gw.groupID))
 		})
 	}
+}
+
+// countActive 数当前 active 成员数（不变量断言用）。
+func countActive(t *testing.T, gsvc *GroupService, groupID uint) int {
+	t.Helper()
+	ms, err := gsvc.ListMembers(groupID)
+	if err != nil {
+		t.Fatalf("ListMembers: %v", err)
+	}
+	n := 0
+	for _, m := range ms {
+		if m.Status == models.SourceMemberStatusActive {
+			n++
+		}
+	}
+	return n
 }

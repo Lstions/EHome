@@ -460,12 +460,15 @@ func main() {
 
 	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；
 	// 设备离线 ⇒ 两边都 MarkFailure。漏接一条会让该引擎「永不切换」（静默失效）。
+	// M3（数据流架构 v1 §六）：health sink 现在**只喂 GroupService**。
+	//
+	// datasourceSvc 的主备状态机已删除（见 internal/datasource/service.go 顶部
+	// 「已下线的 legacy 主备状态机」注释）。主备语义只有来源组一套 ——
+	// 用户明确要求「只有来源组支持主备」，两套状态机会互相覆盖 status。
 	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
-		datasourceSvc.MarkSuccess(edgeDeviceID, names, at)
 		sourceGroupSvc.MarkSuccess(edgeDeviceID, names, at)
 	})
 	offlineDetector.SetDeviceOfflineHook(func(edgeDeviceID uint) {
-		datasourceSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
 		sourceGroupSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
 	})
 
