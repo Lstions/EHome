@@ -47,6 +47,7 @@ var registeredNonZeroDefaults = map[string]string{"alert.go:AlertRule.Comparator
 	"automation.go:AutomationEvent.TriggerSource":              "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	"backfill_job.go:BackfillJob.Status":                       "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	"command_execution.go:CommandExecution.VerifiedResultJSON": "JSON 列默认 空数组，零值 空串 不是合法 JSON",
+	"models.go:DataSource.ManagedBy":                           "非数值枚举（auto|manual），零值空串不是合法取值；默认 manual = 人工创建，是安全默认（自动派生只碰 auto 行，绝不覆盖 manual）",
 	"merge_job.go:MergeJob.Status":                             "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	"merge_job.go:MergeJob.WatermarkPhase":                     "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	"models.go:Channel.BusType":                                "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",

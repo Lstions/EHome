@@ -440,6 +440,20 @@ func main() {
 	// （架构终审 H-5：DirtySinceLastReload 原先无消费方，是个死安全阀）。
 	go sourceGroupSvc.RunDirtyReloader(sourceGroupCtx, 5*time.Second)
 
+	// ── L2 来源层投影（数据流架构 v1 §四 M2）──
+	//
+	// 为什么在 PublishAll 之后：派生输入需要「DB 里真实 enabled 的组」，而 PublishAll
+	// 已保证组配置自检通过（composite 误置 active 已在上面 Fatal）。
+	//
+	// 为什么失败不 fail-closed：data_sources 是**只读台账**（grep 证明 automation/alert
+	// 零引用），它坏了最多让页面显示不全，不影响采集/规则/告警。为它拒绝启动是过度反应
+	// —— 与 source_group 的启动自检（那条必须 Fatal）性质不同。
+	//
+	// 为什么放冷路径：生产 unified_data 每 10 分钟约 1.9 万行，任何在采集 sink 里写库的
+	// 设计都会反压 ingest。这里启动一次 + 60s ticker（复用字段解析层 flush 节奏）。
+	sourceProjection := setupSourceProjection(sourceGroupCtx, db, datasourceSvc, sourceGroupSvc, sourceGroupReg)
+	go sourceProjection.RunProjection(sourceGroupCtx, db, sourceGroupReg, 60*time.Second)
+
 	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；
 	// 设备离线 ⇒ 两边都 MarkFailure。漏接一条会让该引擎「永不切换」（静默失效）。
 	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
