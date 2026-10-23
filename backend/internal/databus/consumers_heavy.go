@@ -1,7 +1,6 @@
 package databus
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
+	"ehome/backend/internal/ingest"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/pendingwrite"
 	"ehome/backend/internal/websocket"
@@ -148,6 +148,12 @@ type SensorParserConsumer struct {
 	// sourceHealthSink 数据源健康 (设计/数据源主备与故障转移.md §4): 解析成功回调。
 	// 参数一: 边缘设备 ID; 参数二: 本次解析出的敏感量名; 参数三: 时间。
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
+	// ingestResolver 是 L1 接入层的解析入口 (数据流架构 v1 §3)。
+	//
+	// 为什么是接口而不是直接 import internal/ingest 的两个 adapter：
+	// 让本文件不知道「有哪些解析后端」—— 新增后端时本文件零改动（改造目标）。
+	// nil 时退化为 fail-closed（no_adapter 审计），绝不静默丢弃。
+	ingestResolver *ingest.Resolver
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -157,11 +163,41 @@ func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, reassembler Reas
 }
 
 func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, driverRegistry *drivers.Registry, deviceActivity ...func(uint)) *SensorParserConsumer {
-	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, reassembler: reassembler, driverRegistry: driverRegistry}
+	consumer := &SensorParserConsumer{
+		db:             db,
+		wsHub:          wsHub,
+		reassembler:    reassembler,
+		driverRegistry: driverRegistry,
+		// 默认装配接入层解析器。
+		//
+		// # 为什么是默认而不是可选（这是踩过坑后的设计决定）
+		//
+		// 最初把 resolver 做成纯可选（nil 时按 no_adapter 处理）。实测后果：
+		// 既有测试直接构造 consumer 而不注入 ⇒ 所有解析失败 ⇒
+		// TestS3_Probe_OneEventWritesTwoRows 从绿变红（基线验证过是本次引入）。
+		//
+		// 教训：接入层是**数据流的必经路径**，不是可插拔的旁路。任何「忘接线」
+		// 都会让解析静默全部失败 —— 而这种失败在测试里表现为"行数少了一条"，
+		// 在生产里表现为"数据不动了"，两者都极难归因。
+		// 因此默认装配内置两个 adapter，main.go 的 SetIngestResolver 只用于
+		// 定制顺序或注入额外 adapter（而非"是否启用"）。
+		ingestResolver: defaultIngestResolver(driverRegistry),
+	}
 	if len(deviceActivity) > 0 {
 		consumer.deviceActivity = deviceActivity[0]
 	}
 	return consumer
+}
+
+// defaultIngestResolver 装配内置 adapter。
+//
+// 注册顺序即优先级，且**有语义**：ConfigParser 必须在 Driver 之前
+// （配置解析优先于驱动解析；标定设备则由 AdapterConfigParser.Supports 自行排除）。
+func defaultIngestResolver(driverRegistry *drivers.Registry) *ingest.Resolver {
+	return ingest.NewResolver(
+		ingest.NewAdapterConfigParser(),
+		ingest.NewAdapterDriver(driverRegistry),
+	)
 }
 
 // SetLatestSink 注入最新值缓存更新回调 (数据层时序化 v3.4 §3.2.4)。
@@ -184,6 +220,15 @@ func (c *SensorParserConsumer) SetAutomationSink(sink func(edgeDeviceID uint, fi
 // main.go 经 nodemgr 二阶段接线), 与 alertSink/automationSink 同点并列。
 func (c *SensorParserConsumer) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames []string, at time.Time)) {
 	c.sourceHealthSink = sink
+}
+
+// SetIngestResolver 注入 L1 接入层解析器 (数据流架构 v1 §3.2, main.go 接线)。
+//
+// 为什么用 setter 而不是构造函数参数：既有 4 个 Set*Sink 都是这个模式，
+// 且 nodemgr.Manager 需要在 consumer 构建后统一推送 —— 保持一致。
+// nil 表示未接线：consumer 会按 no_adapter 落审计，不会 panic、不会静默丢弃。
+func (c *SensorParserConsumer) SetIngestResolver(r *ingest.Resolver) {
+	c.ingestResolver = r
 }
 
 // HasSourceHealthSink 报告解析成功健康回调是否已注入 (接线测试只读辅助;
@@ -262,89 +307,36 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		return
 	}
 
-	// Parse sensor data
-	var sensorData []parser.Field
-	var parseMethod string
-
-	// Primary: calibration-aware drivers must never be bypassed by a generic
-	// DeviceConfig parser: calibration is part of their decoding invariant.
-	drv, _ := c.driverRegistry.Get(device.Type)
-	_, calibrationAware := drv.(drivers.CalibrationAwareDriver)
-	if !calibrationAware && device.DeviceConfigID > 0 {
-		var dc models.DeviceConfig
-		if err := c.db.First(&dc, device.DeviceConfigID).Error; err == nil {
-			if len(dc.Parser) > 0 && string(dc.Parser) != "{}" && string(dc.Parser) != "null" {
-				cp, err := parser.NewConfigParser(dc.Parser)
-				if err == nil {
-					fields, err := cp.Parse(merged)
-					if err == nil && len(fields) > 0 {
-						sensorData = fields
-						parseMethod = fmt.Sprintf("ConfigParser(%s)", dc.Name)
-					}
-				}
-			}
-		}
-	}
-
-	// Fallback: Driver registry. CommandAwareDriver receives the originating
-	// ConfigTemplate.WriteData so protocols with identical response layouts can
-	// select the correct parser branch.
-	if sensorData == nil {
-		drv, err := c.driverRegistry.Get(device.Type)
-		if err != nil {
-			c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-			return
-		}
-
-		var drvData []drivers.SensorData
-		if calibrationDriver, ok := drv.(drivers.CalibrationAwareDriver); ok {
-			var calibration models.CalibrationCache
-			if err := c.db.Where("edge_device_id = ? AND device_type = ?", device.ID, device.Type).
-				First(&calibration).Error; err != nil {
-				logger.Warn("databus: calibration missing; refusing to persist sample", "node_id", evt.DeviceID, "edge_device_id", device.ID, "device_type", device.Type, "error", err)
-				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-				return
-			}
-			calibrationBytes, err := hex.DecodeString(calibration.Data)
-			if err != nil {
-				logger.Warn("databus: calibration encoding invalid; refusing to persist sample", "edge_device_id", device.ID, "error", err)
-				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-				return
-			}
-			drvData, err = calibrationDriver.ParseDataWithCalibration(merged, calibrationBytes)
-		} else if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
-			if evt.CommandTemplateID == 0 {
-				logger.Infof("[%s] Command-aware driver requires command template context", evt.DeviceID)
-				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-				return
-			}
-			var template models.ConfigTemplate
-			if lookupErr := c.db.Where("id = ? AND node_id = ?", evt.CommandTemplateID, evt.DeviceID).First(&template).Error; lookupErr != nil {
-				logger.Infof("[%s] Failed to resolve command template %d: %v", evt.DeviceID, evt.CommandTemplateID, lookupErr)
-				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-				return
-			}
-			if template.WriteData == "" {
-				logger.Infof("[%s] Command template %d has no write data", evt.DeviceID, evt.CommandTemplateID)
-				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-				return
-			}
-			drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
+	// ── 解析（L1 接入层：internal/ingest，数据流架构 v1 §3）──
+	//
+	// 改造前这里是两段内联 if/else（ConfigParser 优先、Driver 兜底，含标定/命令
+	// 两个子分支），新增解析后端必须改本文件。现在所有后端细节收敛到
+	// ingest.Adapter 后面，本文件只负责「查设备上下文 → 调 Resolver → 分类失败」。
+	//
+	// 等价性要守住的三点（M1 验收判据，见 docs/设计/数据流架构-接口设计-2026-10-23.md）：
+	//   1. 标定驱动绝不被 ConfigParser 绕过（adapter 注册顺序 + Supports 保证）
+	//   2. 标定/命令上下文的查询只在对应分支发生（DecodeContext.DriverContextFn 惰性）
+	//   3. Sample.Method 字符串与原 parseMethod 完全一致（历史日志可比）
+	outcome := c.decodeFrame(device, merged, nil, time.Now(), evt.CommandTemplateID)
+	if !outcome.ok() {
+		reason := outcome.FailReason
+		if ingestReasonIsConfigDefect(reason) {
+			// 配置缺陷（缺适配器/缺标定/缺命令模板）：需要人去补配置 ⇒ WARN。
+			logger.Warn("databus: decode failed (config defect); refusing to persist sample",
+				"node_id", evt.DeviceID,
+				"edge_device_id", device.ID,
+				"device_type", device.Type,
+				"reason", string(reason),
+				"error", outcome.Err)
 		} else {
-			drvData, err = drv.ParseData(merged)
+			// 数据问题（帧格式不符/零字段）：重发即可 ⇒ INFO（保持改造前级别）。
+			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, outcome.Err)
 		}
-		if err != nil {
-			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, err)
-			c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
-			return
-		}
-		sensorData = make([]parser.Field, len(drvData))
-		for i, sd := range drvData {
-			sensorData[i] = parser.Field{Name: sd.Name, Value: sd.Value, Unit: sd.Unit, StringValue: sd.StringValue}
-		}
-		parseMethod = fmt.Sprintf("Driver(%s)", device.Type)
+		c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
+		return
 	}
-
+	sensorData := toParserFields(outcome.Sample.Fields)
+	parseMethod := outcome.Sample.Method
 	// Parse succeeded — consume reassembly buffer
 	c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 
