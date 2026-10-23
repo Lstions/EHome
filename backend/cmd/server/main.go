@@ -394,15 +394,19 @@ func main() {
 			logger.Warn("datasource: failed to write notification", "source_id", n.SourceID, "error", err)
 		}
 	})
-	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
-		datasourceSvc.MarkSuccess(edgeDeviceID, names, at)
-	})
-	offlineDetector.SetDeviceOfflineHook(func(edgeDeviceID uint) {
-		datasourceSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
-	})
-	dataSourceCtx, dataSourceStop := context.WithCancel(context.Background())
-	defer dataSourceStop()
-	go datasourceSvc.Start(dataSourceCtx)
+	// ⚠ 此处**不再**注入 SetSourceHealthSink / SetDeviceOfflineHook。
+	//
+	// M3（数据流架构 v1 §六）发现：原代码在这里注入了一次只喂 datasourceSvc 的
+	// sink，随后（来源组接线之后）又注入了一次同时喂两个引擎的 sink。
+	// 而 Manager.SetSourceHealthSink 的语义是**覆盖**不是追加
+	// （manager.go:145-150：赋值 + 推给所有 consumer），
+	// 因此第一次注入**从未生效**，是死代码 —— 保留它会让读者误以为
+	// 「datasource 的健康独立注入」，掩盖真实拓扑。
+	//
+	// 现在唯一的注入点在下方（两引擎都喂）。同时 datasourceSvc 的主备扫描循环
+	// （Start/ScanStale/maybeFailover）已下线：主备语义只由 source_groups 承担
+	// （用户明确要求「只有来源组支持主备」）。datasourceSvc 退化为台账投影 +
+	// 只读查询，不再有运行态状态机。
 
 	// ── 来源组引擎（设计/规则数据来源与复合来源-方案-2026-10-22.md v0.3 §4/§5.5）──
 	//
