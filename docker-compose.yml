@@ -1,7 +1,7 @@
 services:
   # PostgreSQL database (unified infra: host port bound to 127.0.0.1 for local dev)
   postgres:
-    image: postgres:18-alpine
+    image: postgres:18.6-alpine
     container_name: ehome-postgres
     restart: unless-stopped
     ports:
@@ -56,7 +56,7 @@ services:
   # `ehome-web:8080` (deploy/monitoring/prometheus.yml) resolves.
   # Start with: docker compose --profile monitoring up -d
   prometheus:
-    image: prom/prometheus:v2.53.0
+    image: prom/prometheus:v3.15.1
     container_name: ehome-prometheus
     restart: unless-stopped
     profiles: ["monitoring"]
@@ -71,7 +71,7 @@ services:
       - "--storage.tsdb.retention.time=15d"
 
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:v0.34.1
     container_name: ehome-alertmanager
     restart: unless-stopped
     profiles: ["monitoring"]

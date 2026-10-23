@@ -269,6 +269,10 @@ let progressTimer: ReturnType<typeof setInterval> | null = null
 let otaGeneration = 0
 
 const handleStart = async () => {
+  // el-form 的 rules 之前只声明未执行（formRef 未使用）：这里补上真正的校验入口，
+  // 否则 rules 形同虚设、且 vue-tsc 3 会报 formRef 未使用（noUnusedLocals）。
+  const valid = await formRef.value?.validate?.().catch(() => false)
+  if (valid === false) return
   if (!form.firmware_id || !selectedFirmware.value) {
     ElMessage.warning('请先选择固件版本')
     return

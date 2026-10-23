@@ -200,7 +200,9 @@ describe('A：总线配置页必须渲染"已创建通道"列表', () => {
     expect(btn.exists(), '每行必须有配置入口').toBe(true)
     await btn.trigger('click')
     await flushPromises()
-    const stub = wrapper.findComponent(stubs.ChannelManager as any)
+    // @vue/test-utils 2.5 起 findComponent 对"纯对象 stub"的类型推导改为 DOMWrapper
+    // （2.4 推导为 VueWrapper），因此 .props() 不再在类型上可见；运行时行为不变，故显式标 any。
+    const stub: any = wrapper.findComponent(stubs.ChannelManager as any)
     expect(stub.props('modelValue')).toBe(true)
     expect((stub.props('initialData') as any)?.id, '必须是该行的通道（编辑态）').toBe(1)
   })

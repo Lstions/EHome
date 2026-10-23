@@ -31,11 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 与 backend/go.mod 及 Dockerfile (golang:1.26.5-alpine) 保持一致，
+  # 与 backend/go.mod 及 Dockerfile (golang:1.27.3-alpine) 保持一致，
   # 避免 runner 上触发 Go 工具链自动下载（慢且偶发失败）
-  GO_VERSION: "1.26.5"
-  NODE_VERSION: "22"
-  PNPM_VERSION: "10"
+  GO_VERSION: "1.27.3"
+  # node 24：与 Dockerfile (node:24-alpine) 一致。
+  # ⚠ 不要升 26：Node 25/26 把 corepack 改为 --with-corepack opt-in，
+  #   Dockerfile 的 corepack enable 会断（见 docs/分析/依赖升级盘点/infra-firmware.md §D.2）
+  NODE_VERSION: "24"
+  # pnpm 12：与 Dockerfile 的 pnpm@latest 对齐；注意 pnpm/action-setup 必须 >=v6 才支持 pnpm 12
+  PNPM_VERSION: "12"
 
 jobs:
   # ─── Backend: lint + unit tests ──────────────────────────────────
@@ -46,9 +50,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
@@ -81,7 +85,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
           path: backend/coverage.out
@@ -109,9 +113,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
@@ -156,9 +160,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
@@ -248,7 +252,7 @@ jobs:
       # defaults.run.working-directory。写成 backend/.logs/... 会永远匹配不到。
       - name: Upload simulation evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: simulation-evidence
           path: .logs/simulation/
@@ -262,13 +266,14 @@ jobs:
       run:
         working-directory: frontend-shared
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      # pnpm/action-setup 必须 >=v6 才支持 pnpm 12（v4 不认 v12 版本号会失败）
+      - uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -299,7 +304,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage
           path: frontend-shared/coverage/
@@ -315,7 +320,7 @@ jobs:
       run:
         working-directory: esp32-collector
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show cmake version
         run: cmake --version
@@ -348,9 +353,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
@@ -376,7 +381,7 @@ jobs:
     name: Docs claims audit (classifier selftest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run claims-audit classifier selftest
         run: bash tools/docs/claims-audit.sh --selftest

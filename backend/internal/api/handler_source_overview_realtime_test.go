@@ -44,7 +44,7 @@ type rtResp struct {
 			ValueType   string   `json:"value_type"`
 			Unit        string   `json:"unit"`
 			LatestValue *float64 `json:"latest_value"`
-			ValueAgeSec *int     `json:"value_age_sec"`
+			AgeSec      *int     `json:"age_sec"`
 		} `json:"items"`
 	} `json:"data"`
 }
@@ -106,11 +106,11 @@ func TestOverview_RealtimeValue(t *testing.T) {
 	if *it.LatestValue != 87 {
 		t.Errorf("latest_value = %v, want 87", *it.LatestValue)
 	}
-	if it.ValueAgeSec == nil {
-		t.Fatal("value_age_sec 为空 —— 前端无法区分实时与陈旧")
+	if it.AgeSec == nil {
+		t.Fatal("age_sec 为空 —— 前端无法区分实时与陈旧")
 	}
-	if *it.ValueAgeSec < 0 || *it.ValueAgeSec > 60 {
-		t.Errorf("value_age_sec = %d，超出合理范围", *it.ValueAgeSec)
+	if *it.AgeSec < 0 || *it.AgeSec > 60 {
+		t.Errorf("age_sec = %d，超出合理范围", *it.AgeSec)
 	}
 }
 

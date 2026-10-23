@@ -2,7 +2,7 @@
 # Multi-stage build: backend (Go) + frontend (Vite) → single Alpine image.
 
 # ── Stage 1: Backend build ──────────────────────────────────────────────
-FROM golang:1.26.5-alpine AS backend-builder
+FROM golang:1.27.3-alpine AS backend-builder
 
 # Go 模块代理：默认官方代理，保证 GitHub Actions 等海外 CI 直连可用；
 # 国内网络本地构建时覆盖：docker build --build-arg GOPROXY=https://goproxy.cn,direct .
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false \
 RUN CGO_ENABLED=0 GOOS=linux go build -o ehomectl ./cmd/ehomectl/
 
 # ── Stage 2: Frontend build ─────────────────────────────────────────────
-FROM node:22-alpine AS frontend-builder
+FROM node:24-alpine AS frontend-builder
 
 # 子路径前缀部署（反代 /ehome-dev 场景）：docker build --build-arg VITE_BASE_PATH=/ehome-dev/
 # 与 VITE_API_BASE_URL / VITE_WS_URL 一起注入前端构建环境
@@ -42,7 +42,7 @@ ENV CI=true
 RUN pnpm build
 
 # ── Stage 3: Runtime ────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.24
 ARG GIT_COMMIT=unknown
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
       org.opencontainers.image.title="EHomeSystem" \
