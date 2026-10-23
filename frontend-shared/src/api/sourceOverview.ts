@@ -42,7 +42,37 @@ export interface SourceOverviewItem {
   status: SourceStatus
   last_success: string | null
   revision: number
+
+  /**
+   * ── 字段元数据（「接入的数据字段要有数据类型、数据描述」）──
+   *
+   * 三者的来源分层（后端已按此组装，前端只管展示）：
+   *   label_zh   ← sensor_field_meta（声明层，可人工登记）
+   *   value_type ← sensor_field_meta；未登记时由后端按观测值推断
+   *   unit       ← sensor_field_obs（事实层：实际观测到的单位比声明更可信）
+   *
+   * 全部可能为空串 —— 前端必须降级显示（见 OverviewTab 的 fmtMeta），
+   * 不能因为某个字段没登记就让整行不可读。
+   */
+  label_zh: string
+  value_type: SourceValueType | ''
+  unit: string
+
+  /**
+   * ── 实时数据 ──
+   *
+   * latest_value 用 number | null 而非 number：**0 是合法读数**
+   * （例如告警位为 0、电流为 0），必须与「暂无数据」区分开 ——
+   * 后端因此用了 *float64，前端也必须保留 null 语义。
+   */
+  latest_value: number | null
+  latest_at: string | null
+  /** 读数年龄（秒）。用于把「实时」与「陈旧」区分开 */
+  value_age_sec: number | null
 }
+
+/** 数据字段的语义类型。与后端 sensor_field_meta.value_type 词表一致。 */
+export type SourceValueType = 'number' | 'boolean' | 'enum' | 'bitmask' | 'string' | 'raw'
 
 export interface SourceOverview {
   items: SourceOverviewItem[]

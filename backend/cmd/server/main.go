@@ -668,7 +668,17 @@ func main() {
 	// notifyDispatcher 一并交给 API 层: POST /notification-channels/:id/test 要用它真发
 	// 一条测试消息 (D-1 步骤 4)。传的是**同一个实例** —— 否则"测试按钮"与真实通知
 	// 走两套客户端/两套 SSRF 判定的风险, 且测试通过不代表线上通道可用。
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, fieldResolver.registry, api.ControlPolicy{
+	// ⚠ sourceGroupSvc **必须**在这里传：它的唯一作用是让 api 层把 /source-groups
+	// 九条路由注册到真实实现上。api.SetupRoutes 按 option 的**具体类型**做 switch
+	// （routes.go:89 case *datasource.GroupService），漏传时不会报错、不会 panic，
+	// 而是安静地走 nil 分支注册 503 占位 —— 前端表现为"来源组页面永远报
+	// source group service unavailable"。
+	//
+	// 这个缺陷曾真实存在（2026-10-23 用户在浏览器实测发现）：sourceGroupSvc 造好后
+	// 只调了 api.SetRuleSourceGroupService（那是**规则保存期校验**用的另一条通道，
+	// 见 source_group_guard.go），从未作为 option 传给 SetupRoutes ⇒ 来源组 CRUD
+	// 全部 503，而来源组的领域逻辑本身完全正常。两条注入路径互不相通，必须都接。
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, sourceGroupSvc, notifyDispatcher, fieldResolver.registry, api.ControlPolicy{
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
 

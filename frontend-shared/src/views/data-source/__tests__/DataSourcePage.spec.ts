@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { defineComponent, h, type VNode } from 'vue'
 import OverviewTab from '../OverviewTab.vue'
 import DataSourcePage from '../DataSourcePage.vue'
 import overviewRaw from '../OverviewTab.vue?raw'
@@ -50,12 +51,73 @@ const items: SourceOverviewItem[] = [
     status: 'ok',
     last_success: '2026-10-23T04:00:00Z',
     revision: 3,
+    // 字段元数据 + 实时值（本次新增的三列所需）
+    label_zh: '电池剩余电量',
+    value_type: 'number',
+    unit: '%',
+    latest_value: 87,
+    latest_at: '2026-10-23T04:00:00Z',
+    value_age_sec: 5,
   },
 ]
 
 beforeEach(() => {
   vi.clearAllMocks()
 })
+
+/**
+ * 能执行**作用域插槽**的表格替身。
+ *
+ * # 为什么需要它
+ *
+ * src/test-setup.ts 里的全局 ElTable stub 只把整行值拼成文本（不执行
+ * ElTableColumn 的 #default 插槽）。而本页的「类型/实时值/描述」都写在
+ * 列插槽里 —— 用全局 stub 断言不到它们，会得到"元素不存在"的假红。
+ *
+ * 项目已有此范式（AlertRules.spec.ts / AutomationRules.spec.ts 的 slotTable()），
+ * 这里按同一模式实现，避免每个页面各写一套。
+ */
+function slotTable() {
+  const SlotColumn = defineComponent({
+    props: { label: String, prop: String, width: [String, Number], minWidth: [String, Number] },
+    setup(_, { slots }) {
+      return () => slots.default?.()
+    },
+  })
+  const SlotTable = defineComponent({
+    props: { data: { type: Array, default: () => [] } },
+    setup(props, { slots }) {
+      return () => {
+        const columns = (slots.default?.() ?? []) as VNode[]
+        const rows = props.data as Array<Record<string, unknown>>
+        return h('table', { class: 'el-table' }, [
+          h('thead', [
+            h('tr', columns.map(vn => h('th', String(vn.props?.['label'] ?? '')))),
+          ]),
+          h('tbody', rows.map((row, index) =>
+            h('tr', { key: String(row?.['id'] ?? index) },
+              columns.map(vn => {
+                const scoped = vn.children as Record<string, unknown> | undefined
+                const fn = scoped?.['default'] as ((p: { row: unknown }) => unknown) | undefined
+                const content = fn ? fn({ row }) : String(row?.[String(vn.props?.['prop'] ?? '')] ?? '')
+                return h('td', { class: 'el-table__cell' }, content as never)
+              }),
+            ),
+          )),
+        ])
+      }
+    },
+  })
+  return { ElTable: SlotTable, 'el-table': SlotTable, ElTableColumn: SlotColumn, 'el-table-column': SlotColumn }
+}
+
+/** 用执行作用域插槽的表格替身挂载 OverviewTab。 */
+function mountTab(items: SourceOverviewItem[]) {
+  return mount(OverviewTab, {
+    props: { items, loading: false, error: '' },
+    global: { components: slotTable() },
+  })
+}
 
 describe('OverviewTab 只读契约', () => {
   /**
@@ -196,5 +258,76 @@ describe('DataSourcePage 挂载', () => {
     expect(sourceOverviewApi.list).toHaveBeenCalled()
     expect(w.text()).toBeTruthy()
     vi.doUnmock('vue-router')
+  })
+})
+
+describe('实时显示与字段元数据（本次新增）', () => {
+  it('实时值 0 必须显示为 0，不能显示成「—」', () => {
+    const zeroItems = [
+      {
+        ...items[0],
+        latest_value: 0,
+        value_age_sec: 3,
+      },
+    ]
+    const w = mountTab(zeroItems)
+    const live = w.find('[data-test="ov-live"]')
+    expect(live.exists()).toBe(true)
+    // 0 是合法读数；显示成 — 会让用户以为设备没数据
+    expect(live.text()).toContain('0')
+    expect(live.text()).not.toContain('—')
+  })
+
+  it('无数据时显示「—」且不显示年龄', () => {
+    const noData = [{ ...items[0], latest_value: null, latest_at: null, value_age_sec: null }]
+    const w = mountTab(noData)
+    const live = w.find('[data-test="ov-live"]')
+    expect(live.text()).toContain('—')
+    expect(live.classes()).toContain('is-none')
+  })
+
+  it('新鲜度分级：≤30s 新鲜 / ≤300s 偏旧 / 更久陈旧', () => {
+    const mk = (age: number) => [{ ...items[0], value_age_sec: age }]
+    const fresh = mountTab(mk(5))
+    expect(fresh.find('[data-test="ov-live"]').classes()).toContain('is-fresh')
+    const stale = mountTab(mk(120))
+    expect(stale.find('[data-test="ov-live"]').classes()).toContain('is-stale')
+    const dead = mountTab(mk(4000))
+    expect(dead.find('[data-test="ov-live"]').classes()).toContain('is-dead')
+  })
+
+  it('数据类型列显示中文标签（不是原始英文枚举）', () => {
+    const w = mountTab(items)
+    const tag = w.find('[data-test="ov-value-type"]')
+    expect(tag.exists()).toBe(true)
+    expect(tag.text()).toBe('数值')
+  })
+
+  it('未标注类型时显示「未标注」而不是空白', () => {
+    const noType = [{ ...items[0], value_type: '' as const }]
+    const w = mountTab(noType)
+    expect(w.find('[data-test="ov-value-type-empty"]').exists()).toBe(true)
+  })
+
+  it('中文描述有值时才渲染（未登记不显示空标签）', () => {
+    const w = mountTab(items)
+    expect(w.find('[data-test="ov-label"]').exists()).toBe(true)
+    const noLabel = [{ ...items[0], label_zh: '' }]
+    const w2 = mountTab(noLabel)
+    expect(w2.find('[data-test="ov-label"]').exists()).toBe(false)
+  })
+})
+
+describe('实时刷新（自适应轮询）', () => {
+  it('页面源码含轮询与可见性暂停逻辑', () => {
+    expect(pageRaw).toContain('REFRESH_MS')
+    expect(pageRaw).toContain('visibilitychange')
+    expect(pageRaw).toContain('document.hidden')
+    expect(pageRaw).toContain('onUnmounted')
+  })
+
+  it('轮询不会显示 loading（避免表格闪烁）', () => {
+    // 静默刷新必须传 true
+    expect(pageRaw).toContain('loadOverview(true)')
   })
 })

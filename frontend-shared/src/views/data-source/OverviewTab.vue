@@ -41,9 +41,46 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="数据类别" prop="category" min-width="150">
+      <el-table-column label="数据类别" min-width="200">
         <template #default="{ row }">
-          <span class="mono">{{ asItem(row).category }}</span>
+          <div class="ov-category">
+            <span class="mono">{{ asItem(row).category }}</span>
+            <!-- 中文描述：来自 sensor_field_meta，未登记时降级为物理名（不显示空） -->
+            <el-tooltip
+              v-if="asItem(row).label_zh"
+              :content="asItem(row).label_zh"
+              placement="top"
+            >
+              <span class="ov-label" data-test="ov-label">{{ asItem(row).label_zh }}</span>
+            </el-tooltip>
+          </div>
+        </template>
+      </el-table-column>
+
+      <!-- 数据类型：声明层优先，缺失时后端按观测值推断，仍缺则显示「未标注」 -->
+      <el-table-column label="类型" width="100">
+        <template #default="{ row }">
+          <el-tag
+            v-if="asItem(row).value_type"
+            size="small"
+            effect="plain"
+            :type="typeTagType(asValueType(row))"
+            data-test="ov-value-type"
+          >
+            {{ typeLabel(asValueType(row)) }}
+          </el-tag>
+          <span v-else class="muted" data-test="ov-value-type-empty">未标注</span>
+        </template>
+      </el-table-column>
+
+      <!-- 实时值：带单位 + 新鲜度着色 -->
+      <el-table-column label="实时值" min-width="150" align="right">
+        <template #default="{ row }">
+          <div class="ov-live" :class="liveClass(asItem(row))" data-test="ov-live">
+            <span class="ov-live-value mono">{{ fmtValue(asItem(row)) }}</span>
+            <span v-if="asItem(row).unit" class="ov-live-unit">{{ asItem(row).unit }}</span>
+            <span class="ov-live-age">{{ fmtAge(asItem(row)) }}</span>
+          </div>
         </template>
       </el-table-column>
 
@@ -123,7 +160,7 @@
  *
  * 三层任一层失守都还有另外两层兜底 —— 这是"只读"可信的原因。
  */
-import type { SourceKind, SourceOverviewItem, SourceStatus } from '@/api/sourceOverview'
+import type { SourceKind, SourceOverviewItem, SourceStatus, SourceValueType } from '@/api/sourceOverview'
 
 defineProps<{
   items: SourceOverviewItem[]
@@ -138,6 +175,15 @@ defineEmits<{
 
 /** el-table 的 slot 里 row 是 unknown，需要显式收窄（与项目其他列表页同模式）。 */
 const asItem = (row: unknown) => row as SourceOverviewItem
+
+/**
+ * 把 value_type 收窄为非空类型。
+ *
+ * 后端可能返回空串（未标注且无法推断）。模板里已用 v-if 挡住空串，
+ * 但 TypeScript 看不见 v-if 的收窄 —— 用本函数显式收窄，
+ * 避免在 typeLabel/typeTagType 里重复判断空串。
+ */
+const asValueType = (row: unknown) => asItem(row).value_type as SourceValueType
 
 function kindLabel(k: SourceKind): string {
   switch (k) {
@@ -192,6 +238,79 @@ function fmtTime(v: string | null): string {
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return '—'
   return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+// ── 数据类型展示 ──
+//
+// 词表与后端 sensor_field_meta.value_type 一致。展示用中文标签，
+// 但**不改词表本身**（后端/前端/仿真三处必须同词，否则门禁 SG-16 类检查会红）。
+function typeLabel(t: SourceValueType): string {
+  switch (t) {
+    case 'number':
+      return '数值'
+    case 'boolean':
+      return '开关'
+    case 'enum':
+      return '枚举'
+    case 'bitmask':
+      return '位掩码'
+    case 'string':
+      return '文本'
+    default:
+      return '原始'
+  }
+}
+
+function typeTagType(t: SourceValueType): 'success' | 'warning' | 'info' {
+  switch (t) {
+    case 'number':
+      return 'success'
+    case 'boolean':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+// ── 实时值展示 ──
+
+/**
+ * 格式化实时值。
+ *
+ * 三个必须区分的状态：
+ *   null      ⇒ 「—」（从未收到数据）
+ *   0         ⇒ 「0」（**合法读数**，不能显示成「—」）
+ *   小数       ⇒ 保留至多 3 位（避免 3.3530000000001 这类浮点噪声）
+ */
+function fmtValue(it: SourceOverviewItem): string {
+  if (it.latest_value === null || it.latest_value === undefined) return '—'
+  const v = it.latest_value
+  if (Number.isInteger(v)) return String(v)
+  return v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/**
+ * 新鲜度着色。
+ *
+ * 为什么必须显示年龄而不是只显示值：只显示值会让 3 分钟前的数据
+ * 看起来和刚采集的一样"实时"，用户会误判设备状态。
+ *
+ * 阈值说明：采集周期由设备 IntervalMs 决定（常见 5s），
+ * 因此 30s 内视为新鲜、5 分钟内视为偏旧、超过 5 分钟视为陈旧。
+ */
+function liveClass(it: SourceOverviewItem): string {
+  if (it.value_age_sec === null || it.value_age_sec === undefined) return 'is-none'
+  if (it.value_age_sec <= 30) return 'is-fresh'
+  if (it.value_age_sec <= 300) return 'is-stale'
+  return 'is-dead'
+}
+
+function fmtAge(it: SourceOverviewItem): string {
+  const age = it.value_age_sec
+  if (age === null || age === undefined) return ''
+  if (age < 60) return `${age}s`
+  if (age < 3600) return `${Math.floor(age / 60)}m`
+  return `${Math.floor(age / 3600)}h`
 }
 </script>
 
