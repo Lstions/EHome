@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
@@ -14,234 +16,267 @@ import (
 	"ehome/backend/internal/models"
 )
 
-// 本文件是来源总览端点的契约测试（数据流架构 v1 §4.1）。
+// 字段目录端点（GET /data-sources/overview）的契约测试。
 //
-// 最重要的一条在末尾：**/overview 不可写**（POST/PUT/DELETE ⇒ 405）。
-// 只读语义必须由路由层保证，不能只靠前端不调用。
+// # 这个端点的语义（2026-10-23 重做）
+//
+// **只读的「已接入字段目录」** —— 回答"设备解析成功之后，系统里有哪些字段、
+// 什么类型、什么单位、最新值多少、多久前更新的"。
+//
+// 它**不是**主备来源配置台账。早期版本把 data_sources（主备配置表）当字段
+// 目录渲染，输出了 group_id/kind/members 等配置概念。本文件用反向断言锁住：
+// 那些字段不得再出现在响应里。
 
-func overviewDB(t *testing.T) *gorm.DB {
+func ovDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.DataSource{}, &models.EdgeDevice{},
-		&models.LogicalDevice{}, &models.SourceGroup{}); err != nil {
+		&models.LogicalDevice{}, &models.SourceGroup{}, &models.SensorFieldMeta{},
+		&models.SensorFieldObs{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
 }
 
-func overviewRouter(db *gorm.DB) *gin.Engine {
+func ovRouter(db *gorm.DB) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	registerSourceOverviewRoute(r.Group("/api/v1/data-sources"), db)
 	return r
 }
 
-// TestSourceOverview_EmptyIsValid 验证空表时返回合法空结构（不是 null）。
-//
-// 为什么重要：前端拿到 null 会崩；空数组 + total=0 是「还没数据」的正确表达。
-func TestSourceOverview_EmptyIsValid(t *testing.T) {
-	r := overviewRouter(overviewDB(t))
+type ovItem struct {
+	LogicalDeviceID   uint     `json:"logical_device_id"`
+	LogicalDeviceName string   `json:"logical_device_name"`
+	Category          string   `json:"category"`
+	LabelZh           string   `json:"label_zh"`
+	ValueType         string   `json:"value_type"`
+	Unit              string   `json:"unit"`
+	LatestValue       *float64 `json:"latest_value"`
+	UpdatedAt         *string  `json:"updated_at"`
+	AgeSec            *int     `json:"age_sec"`
+	Status            string   `json:"status"`
+}
+
+type ovResp struct {
+	Data struct {
+		Items       []ovItem `json:"items"`
+		Total       int      `json:"total"`
+		GeneratedAt string   `json:"generated_at"`
+	} `json:"data"`
+}
+
+func ovFetch(t *testing.T, r *gin.Engine) ovResp {
+	t.Helper()
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/data-sources/overview", nil))
-
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
-	var body struct {
-		Code int `json:"code"`
-		Data struct {
-			Items []json.RawMessage `json:"items"`
-			Total int               `json:"total"`
-		} `json:"data"`
-	}
+	var body ovResp
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatalf("unmarshal: %v (body=%s)", err, w.Body.String())
 	}
+	return body
+}
+
+// TestOverview_EmptyIsValid 空表返回合法空结构（不是 null）。
+func TestOverview_EmptyIsValid(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	body := ovFetch(t, ovRouter(ovDB(t)))
 	if body.Data.Items == nil {
 		t.Error("items 是 null，应为空数组（前端会崩）")
 	}
 	if body.Data.Total != 0 {
 		t.Errorf("total = %d, want 0", body.Data.Total)
 	}
+	if body.Data.GeneratedAt == "" {
+		t.Error("generated_at 缺失")
+	}
 }
 
-// TestSourceOverview_GroupsByLogicalDeviceAndCategory 验证聚合语义。
-//
-// 三条同 (device, category) 的记录应聚合成**一个**来源，含 3 个成员。
-func TestSourceOverview_GroupsByLogicalDeviceAndCategory(t *testing.T) {
-	db := overviewDB(t)
-	ld := models.LogicalDevice{ID: 14, IdentityKey: "k14", Name: "bms"}
-	db.Create(&ld)
+// TestOverview_FieldFacts 验证字段事实四要素（描述/类型/单位/实时值/更新时间）。
+func TestOverview_FieldFacts(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.LogicalDevice{ID: 14, IdentityKey: "k", Name: "bms"})
+	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
+		ManagedBy: models.DataSourceManagedAuto})
+	db.Create(&models.SensorFieldMeta{SensorName: "rsoc", LabelZh: "剩余电量百分比",
+		ValueType: "number", Status: "active"})
+	db.Create(&models.SensorFieldObs{DeviceID: 14, SensorName: "rsoc", Unit: "%",
+		FirstSeen: time.Now(), LastSeen: time.Now(), Samples: 5})
+	SetLatestValue(models.UnifiedData{DeviceID: 14, SensorName: "rsoc", Value: 87,
+		Unit: "%", Timestamp: time.Now().Add(-5 * time.Second)})
 
-	// 三个成员设备供同一个 (逻辑设备 14, 类别 rsoc)
-	for _, id := range []uint{1, 2, 3} {
-		db.Create(&models.EdgeDevice{ID: id, Name: "d" + string(rune('0'+id)), Type: "t",
-			NodeID: "n", Enabled: true, LogicalDeviceID: &ld.ID})
-		db.Create(&models.DataSource{
-			DeviceID: 14, Category: "rsoc", EdgeDeviceID: id,
-			SourceType: "edge_device", Name: "x",
-			Status:    datasource.StatusActive,
-			ManagedBy: models.DataSourceManagedAuto,
-		})
-	}
-
-	r := overviewRouter(db)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/data-sources/overview", nil))
-
-	var body struct {
-		Data struct {
-			Items []struct {
-				LogicalDeviceID   uint   `json:"logical_device_id"`
-				LogicalDeviceName string `json:"logical_device_name"`
-				Category          string `json:"category"`
-				Kind              string `json:"kind"`
-				MemberCount       int    `json:"member_count"`
-				Members           []struct {
-					EdgeDeviceID   uint   `json:"edge_device_id"`
-					EdgeDeviceName string `json:"edge_device_name"`
-					Active         bool   `json:"active"`
-				} `json:"members"`
-				Status string `json:"status"`
-			} `json:"items"`
-			Total int `json:"total"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	body := ovFetch(t, ovRouter(db))
 	if body.Data.Total != 1 {
-		t.Fatalf("total = %d, want 1（三条同 key 应聚合为一条来源）", body.Data.Total)
+		t.Fatalf("total = %d, want 1", body.Data.Total)
 	}
 	it := body.Data.Items[0]
-	if it.LogicalDeviceID != 14 || it.Category != "rsoc" {
-		t.Errorf("key = (%d,%s), want (14,rsoc)", it.LogicalDeviceID, it.Category)
-	}
 	if it.LogicalDeviceName != "bms" {
-		t.Errorf("逻辑设备名 = %q, want bms", it.LogicalDeviceName)
+		t.Errorf("logical_device_name = %q", it.LogicalDeviceName)
 	}
-	if it.MemberCount != 3 {
-		t.Errorf("member_count = %d, want 3", it.MemberCount)
+	if it.LabelZh != "剩余电量百分比" {
+		t.Errorf("label_zh = %q", it.LabelZh)
 	}
-	if it.Kind != "direct" {
-		t.Errorf("kind = %q, want direct（无来源组时为直连）", it.Kind)
+	if it.ValueType != "number" {
+		t.Errorf("value_type = %q", it.ValueType)
 	}
-	if it.Status != "ok" {
-		t.Errorf("status = %q, want ok（有 active 成员）", it.Status)
+	if it.Unit != "%" {
+		t.Errorf("unit = %q", it.Unit)
 	}
-	if it.Members[0].EdgeDeviceName == "" {
-		t.Error("成员设备名为空 —— 名称批量查询失效")
+	if it.LatestValue == nil || *it.LatestValue != 87 {
+		t.Errorf("latest_value = %v, want 87", it.LatestValue)
 	}
-}
-
-// TestSourceOverview_ReflectsSourceGroup 验证有来源组时 kind/group 反映组。
-func TestSourceOverview_ReflectsSourceGroup(t *testing.T) {
-	db := overviewDB(t)
-	db.Create(&models.EdgeDevice{ID: 1, Name: "d1", Type: "t", NodeID: "n", Enabled: true})
-	db.Create(&models.DataSource{
-		DeviceID: 10, Category: "v", EdgeDeviceID: 1, SourceType: "edge_device",
-		Name: "x", Status: datasource.StatusActive, ManagedBy: models.DataSourceManagedAuto,
-	})
-	db.Create(&models.SourceGroup{
-		ID: 5, Name: "我的主备组", Kind: "primary_backup", Category: "v", Enabled: true,
-	})
-
-	r := overviewRouter(db)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/data-sources/overview", nil))
-
-	var body struct {
-		Data struct {
-			Items []struct {
-				GroupID   uint    `json:"group_id"`
-				GroupName *string `json:"group_name"`
-				Kind      string  `json:"kind"`
-			} `json:"items"`
-		} `json:"data"`
+	if it.UpdatedAt == nil {
+		t.Error("updated_at 缺失 —— 前端无法显示更新时间")
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	it := body.Data.Items[0]
-	if it.GroupID != 5 {
-		t.Errorf("group_id = %d, want 5", it.GroupID)
-	}
-	if it.GroupName == nil || *it.GroupName != "我的主备组" {
-		t.Errorf("group_name = %v, want 我的主备组", it.GroupName)
-	}
-	if it.Kind != "primary_backup" {
-		t.Errorf("kind = %q, want primary_backup", it.Kind)
+	if it.AgeSec == nil {
+		t.Error("age_sec 缺失")
 	}
 }
 
-// TestSourceOverview_ExcludesDisabled 验证 disabled 行不出现在总览里。
-func TestSourceOverview_ExcludesDisabled(t *testing.T) {
-	db := overviewDB(t)
-	db.Create(&models.DataSource{
-		DeviceID: 10, Category: "a", EdgeDeviceID: 1, SourceType: "edge_device",
-		Name: "x", Status: datasource.StatusActive, ManagedBy: models.DataSourceManagedAuto,
-	})
-	db.Create(&models.DataSource{
-		DeviceID: 10, Category: "b", EdgeDeviceID: 1, SourceType: "edge_device",
-		Name: "y", Status: datasource.StatusDisabled, ManagedBy: models.DataSourceManagedAuto,
-	})
-
-	r := overviewRouter(db)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/data-sources/overview", nil))
-
-	var body struct {
-		Data struct {
-			Total int `json:"total"`
-		} `json:"data"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &body)
-	if body.Data.Total != 1 {
-		t.Errorf("total = %d, want 1（disabled 行应被排除）", body.Data.Total)
-	}
-}
-
-// TestSourceOverview_IsReadOnly 是**协议层只读断言**。
+// TestOverview_NoConfigConcepts 是**反向断言**。
 //
-// 只注册 GET ⇒ 同路径的 POST/PUT/DELETE 必须是 405（Method Not Allowed）。
-// 若有人后来加了写路由，本测试立刻红 —— 这是「数据源只读」需求的技术保证，
-// 不依赖前端不调用、也不依赖运维自觉。
-func TestSourceOverview_IsReadOnly(t *testing.T) {
-	r := overviewRouter(overviewDB(t))
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(method, "/api/v1/data-sources/overview", nil))
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s /overview = %d, want 405 —— 该端点必须只读", method, w.Code)
+// 响应里不得出现主备配置概念（group_id/kind/members）。它们是「来源组」页
+// 的职责；混进只读字段目录会造成：
+//   - 用户以为能在这里配置（实际只读）；
+//   - 「当前来源」与「逻辑设备」重复显示同一台设备；
+//   - 「成员」在单设备时恒为 1，零信息量。
+func TestOverview_NoConfigConcepts(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
+		ManagedBy: models.DataSourceManagedAuto})
+	// 即便存在来源组，响应也不应带组信息
+	db.Create(&models.SourceGroup{ID: 5, Name: "组", Kind: "primary_backup",
+		Category: "rsoc", Enabled: true})
+
+	w := httptest.NewRecorder()
+	ovRouter(db).ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/data-sources/overview", nil))
+	raw := w.Body.String()
+
+	for _, forbidden := range []string{`"group_id"`, `"group_name"`, `"members"`, `"member_count"`} {
+		if strings.Contains(raw, forbidden) {
+			t.Errorf("响应包含主备配置字段 %s —— 它不属于只读字段目录：%s", forbidden, raw)
 		}
 	}
 }
 
-// TestSourceOverview_Filters 验证过滤参数。
-func TestSourceOverview_Filters(t *testing.T) {
-	db := overviewDB(t)
-	db.Create(&models.DataSource{DeviceID: 10, Category: "a", EdgeDeviceID: 1,
+// TestOverview_Freshness 验证状态按数据新鲜度派生（不是配置状态）。
+func TestOverview_Freshness(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.DataSource{DeviceID: 1, Category: "a", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
-	db.Create(&models.DataSource{DeviceID: 20, Category: "b", EdgeDeviceID: 2,
-		SourceType: "edge_device", Name: "y", Status: datasource.StatusActive,
+
+	cases := []struct {
+		name   string
+		ageSec int
+		want   string
+	}{
+		{"5s 内 = ok", 5, "ok"},
+		{"29s = ok", 29, "ok"},
+		{"31s = delay", 31, "delay"},
+		{"299s = delay", 299, "delay"},
+		{"301s = stale", 301, "stale"},
+		{"1h = stale", 3600, "stale"},
+	}
+	for _, tc := range cases {
+		ts := time.Now().Add(-time.Duration(tc.ageSec) * time.Second)
+		SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "a", Value: 1, Timestamp: ts})
+		body := ovFetch(t, ovRouter(db))
+		if body.Data.Items[0].Status != tc.want {
+			t.Errorf("%s: status = %q, want %q", tc.name, body.Data.Items[0].Status, tc.want)
+		}
+	}
+}
+
+// TestOverview_NoDataStatus 无读数时状态为 nodata、值为 nil。
+func TestOverview_NoDataStatus(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.DataSource{DeviceID: 1, Category: "a", EdgeDeviceID: 1,
+		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 
-	r := overviewRouter(db)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
-		"/api/v1/data-sources/overview?category=a", nil))
-
-	var body struct {
-		Data struct {
-			Total int `json:"total"`
-		} `json:"data"`
+	it := ovFetch(t, ovRouter(db)).Data.Items[0]
+	if it.Status != "nodata" {
+		t.Errorf("status = %q, want nodata", it.Status)
 	}
-	json.Unmarshal(w.Body.Bytes(), &body)
+	if it.LatestValue != nil {
+		t.Errorf("latest_value = %v, want nil", it.LatestValue)
+	}
+	if it.UpdatedAt != nil {
+		t.Errorf("updated_at = %v, want nil", it.UpdatedAt)
+	}
+}
+
+// TestOverview_ZeroValueKept 读数 0 不被当成无数据。
+func TestOverview_ZeroValueKept(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.DataSource{DeviceID: 1, Category: "alarm", EdgeDeviceID: 1,
+		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
+		ManagedBy: models.DataSourceManagedAuto})
+	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "alarm", Value: 0,
+		Timestamp: time.Now()})
+
+	it := ovFetch(t, ovRouter(db)).Data.Items[0]
+	if it.LatestValue == nil {
+		t.Fatal("读数为 0 时 latest_value 为 nil —— 0 是合法读数")
+	}
+	if *it.LatestValue != 0 {
+		t.Errorf("latest_value = %v, want 0", *it.LatestValue)
+	}
+	if it.Status != "ok" {
+		t.Errorf("status = %q, want ok（刚收到数据）", it.Status)
+	}
+}
+
+// TestOverview_MultiMemberPicksActive 多成员时实时值取 active 成员。
+//
+// 主备组的备机可能早已离线；取它的值会显示一个停在几小时前的读数。
+// 这里刻意让 active 是 ID 更大的设备：若实现取"第一个成员"而不是
+// "active 成员"，就会拿到 standby 的值（查询按 edge_device_id ASC 排序）。
+func TestOverview_MultiMemberPicksActive(t *testing.T) {
+	defer resetLatestValueCacheForTest()
+	db := ovDB(t)
+	db.Create(&models.DataSource{DeviceID: 10, Category: "v", EdgeDeviceID: 1,
+		SourceType: "edge_device", Name: "a", Status: datasource.StatusStandby,
+		ManagedBy: models.DataSourceManagedAuto})
+	db.Create(&models.DataSource{DeviceID: 10, Category: "v", EdgeDeviceID: 2,
+		SourceType: "edge_device", Name: "b", Status: datasource.StatusActive,
+		ManagedBy: models.DataSourceManagedAuto})
+	now := time.Now()
+	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "v", Value: 11, Timestamp: now})
+	SetLatestValue(models.UnifiedData{DeviceID: 2, SensorName: "v", Value: 87, Timestamp: now})
+
+	body := ovFetch(t, ovRouter(db))
 	if body.Data.Total != 1 {
-		t.Errorf("category 过滤后 total = %d, want 1", body.Data.Total)
+		t.Fatalf("total = %d, want 1（同字段多成员聚合成一行）", body.Data.Total)
+	}
+	if it := body.Data.Items[0]; it.LatestValue == nil || *it.LatestValue != 87 {
+		t.Errorf("latest_value = %v, want 87（必须取 active 成员）", it.LatestValue)
+	}
+}
+
+// TestOverview_IsReadOnly 写方法必须 405（协议层只读保证）。
+func TestOverview_IsReadOnly(t *testing.T) {
+	r := ovRouter(ovDB(t))
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(m, "/api/v1/data-sources/overview", nil))
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s /overview = %d, want 405", m, w.Code)
+		}
 	}
 }

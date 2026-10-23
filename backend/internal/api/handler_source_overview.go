@@ -12,82 +12,131 @@ import (
 	"ehome/backend/internal/models"
 )
 
-// handler_source_overview.go 实现 GET /api/v1/data-sources/overview（数据流架构 v1 §4.1）。
+// handler_source_overview.go 实现 GET /api/v1/data-sources/overview。
 //
-// # 为什么新增端点而不是改造 GET /data-sources
+// # 这个页面到底是什么（2026-10-23 重做）
 //
-// 旧端点是 **CRUD 语义**（可写、可按任意字段过滤、面向运维）。新端点是
-// **只读投影语义**（自动派生、面向所有用户、永远反映系统真实状态）。
-// 把两者混在一个端点会让「这个接口能不能写」变得不可推理，
-// 也让前端无法在类型层表达「只读」。
+// **数据来源 = 只读的「已接入字段目录」。**
 //
-// # 只读如何在路由层保证（不靠前端自律）
+// 它回答的唯一问题是：*边缘设备解析成功之后，系统里现在有哪些字段、什么类型、
+// 什么单位、最新值是多少、多久以前更新的。*
 //
-// 本组只注册 GET。对同一路径的 POST/PUT/DELETE 会由 gin 返回 405 ——
-// 这是**协议层**的保证，运维脚本用 curl 也写不进去（与旧 CRUD 保留 deprecated
-// 的策略互补：旧端点仍可写但会带 Deprecation 头，新端点根本不可写）。
+// 它**不是**主备来源的配置台账。本文件早期版本把 data_sources 表（那是一张
+// 主备配置台账）当成字段目录来渲染，于是页面上出现了「来源类型 / 成员 /
+// 当前来源 / 来源组」四列 —— 这些是"多设备里用哪台供数"的配置问题，
+// 与"有哪些字段"完全无关：
+//
+//   - 「来源类型：直连」「来源组：单设备直连」是在描述**配置状态**，
+//     而本页是只读事实目录，用户在这里根本无法配置它；
+//   - 「当前来源：bms 权威」与第一列「逻辑设备 bms #14」重复；
+//   - 「成员」在只有一台设备时恒为 1，没有任何信息量。
+//
+// 来源组的配置与成员关系在「来源组」Tab 里维护，两页职责不重叠。
+// 现在本页只输出**字段事实**：逻辑设备、类别、描述、类型、单位、实时值、
+// 更新时间、状态。
+//
+// # 只读如何保证
+//
+// 本组只注册 GET（写方法显式 405，见 registerSourceOverviewRoute）。
+// 前端组件契约里也没有任何写操作。
 
-// sourceOverviewItem 是总览里的一行（= 一个来源）。
+// sourceOverviewItem 是字段目录的一行（= 一个逻辑设备的一个数据类别）。
 type sourceOverviewItem struct {
-	LogicalDeviceID   uint             `json:"logical_device_id"`
-	LogicalDeviceName string           `json:"logical_device_name"`
-	Category          string           `json:"category"`
-	GroupID           uint             `json:"group_id"`
-	GroupName         *string          `json:"group_name"`
-	Kind              string           `json:"kind"`
-	MemberCount       int              `json:"member_count"`
-	Members           []overviewMember `json:"members"`
-	Status            string           `json:"status"`
-	LastSuccess       *time.Time       `json:"last_success"`
-	Revision          int64            `json:"revision"`
+	LogicalDeviceID   uint   `json:"logical_device_id"`
+	LogicalDeviceName string `json:"logical_device_name"`
 
-	// ── 字段元数据（"接入的数据字段要有数据类型、数据描述"）──
-	//
-	// 三个值的来源分层，缺一不可：
-	//   LabelZh   ← sensor_field_meta（人工/派生登记的中文描述）
-	//   ValueType ← sensor_field_meta；缺失时由 **观测值推断**（见 inferValueType）
-	//   Unit      ← sensor_field_obs（实际观测到的单位，比 meta 更可信：
-	//                meta 是声明，obs 是事实；声明可能过期，事实不会）
-	//
-	// 为什么不在数据面直接带上：解析产物只有 Name/Value/Unit/StringValue，
-	// 加类型/描述会让每帧多 2 个字段的转换开销，而展示元数据是**低频读**、
-	// 不需要进热路径。
-	LabelZh   string `json:"label_zh"`   // 中文描述（空 = 未登记，前端回落 category）
-	ValueType string `json:"value_type"` // number|boolean|enum|bitmask|string|raw
-	Unit      string `json:"unit"`       // 实际观测到的单位（空 = 未知）
+	// Category 是物理名（= unified_data.sensor_name，不归一）。
+	Category string `json:"category"`
 
-	// ── 实时数据（"前端数据来源页面还要支持实时显示数据"）──
+	// ── 字段元数据 ──
 	//
-	// LatestValue 来自进程内最新值缓存（latest_value_cache.go），无 DB 查询。
+	// 三层来源，任一缺失都有降级路径：
+	//   LabelZh   ← sensor_field_meta（声明层）
+	//   ValueType ← sensor_field_meta；缺失时按观测值推断（inferValueType）
+	//   Unit      ← sensor_field_obs（事实层：实际观测到的单位比声明更可信）
+	LabelZh   string `json:"label_zh"`
+	ValueType string `json:"value_type"`
+	Unit      string `json:"unit"`
+
+	// ── 实时值 ──
+	//
+	// 取自进程内最新值缓存（latest_value_cache.go），零 DB 查询。
 	// 用 *float64 而非 float64：0 是合法读数，必须与"暂无数据"区分。
 	LatestValue *float64 `json:"latest_value"`
-	// LatestAt 是该读数的时间（nil = 该来源从未收到过数据）。
-	LatestAt *time.Time `json:"latest_at"`
-	// ValueAgeSec 是读数年龄（秒）。前端据此把"实时"与"陈旧"区分开 ——
-	// 只显示值不显示年龄会让用户误以为 3 分钟前的数据是实时的。
-	ValueAgeSec *int `json:"value_age_sec"`
+	// UpdatedAt 是**该读数的时间**（nil = 从未收到数据）。
+	//
+	// 为什么用读数时间而不是 data_sources.last_success：后者是主备台账列，
+	// 在没有来源组时恒为 nil（它由组成员健康维护）—— 与"这个字段刚更新过"
+	// 是两件事。页面上显示值却显示"— 最后成功"，就是这个混淆造成的。
+	UpdatedAt *time.Time `json:"updated_at"`
+	// AgeSec 是读数年龄（秒）。前端据此判断实时/陈旧。
+	AgeSec *int `json:"age_sec"`
+
+	// Status 是**数据新鲜度**，由 AgeSec 派生（不是配置状态）。
+	//
+	// 取值：ok | delay | stale | nodata
+	//   ok     年龄 ≤ 30s（正常采集）
+	//   delay  30s < 年龄 ≤ 300s（上报变慢/丢帧）
+	//   stale  年龄 > 300s（设备可能离线）
+	//   nodata 从未收到过数据
+	Status string `json:"status"`
 }
 
-// overviewMember 是来源的一个成员设备。
-type overviewMember struct {
-	EdgeDeviceID   uint   `json:"edge_device_id"`
-	EdgeDeviceName string `json:"edge_device_name"`
-	Active         bool   `json:"active"`
-	Enabled        bool   `json:"enabled"`
-}
-
-// sourceOverviewResponse 是总览响应体。
+// sourceOverviewResponse 是字段目录响应体。
 type sourceOverviewResponse struct {
-	Items     []sourceOverviewItem `json:"items"`
-	Total     int                  `json:"total"`
-	DerivedAt time.Time            `json:"derived_at"`
+	Items []sourceOverviewItem `json:"items"`
+	Total int                  `json:"total"`
+	// GeneratedAt 是后端生成该视图的时间。
+	GeneratedAt time.Time `json:"generated_at"`
 }
 
-// listSourceOverview 返回自动派生的来源总览（只读）。
+// 新鲜度阈值（秒）。与前端 OverviewTab 的着色阈值必须一致。
+const (
+	freshnessOKSec    = 30
+	freshnessDelaySec = 300
+)
+
+// deriveFreshness 把读数年龄映射为状态标签。
 //
-// 数据来源：直接读 data_sources 表（它已由 L2 收敛器自动投影）。
-// 这样本接口是**纯查询**，不触发派生 —— 派生在后台 ticker 里做，
-// 避免「打开页面就触发一次全量派生」的性能陷阱。
+// 纯函数，便于单测穷举边界。
+func deriveFreshness(ageSec *int) string {
+	if ageSec == nil {
+		return "nodata"
+	}
+	a := *ageSec
+	if a < 0 {
+		a = 0 // 时钟偏移容错：不把"未来时间"判成异常
+	}
+	switch {
+	case a <= freshnessOKSec:
+		return "ok"
+	case a <= freshnessDelaySec:
+		return "delay"
+	default:
+		return "stale"
+	}
+}
+
+// inferValueType 在缺少 sensor_field_meta 时按观测值推断语义类型。
+//
+// 推断是**保守**的（宁可标 number 也不猜错）：非整数 ⇒ number；
+// 整数且 ∈{0,1} ⇒ boolean；其余整数 ⇒ number。
+// 不做 enum/bitmask 推断 —— 那需要值域知识，猜错比留空更糟。
+func inferValueType(v float64) string {
+	if v != math.Trunc(v) {
+		return "number"
+	}
+	if v == 0 || v == 1 {
+		return "boolean"
+	}
+	return "number"
+}
+
+// listSourceOverview 返回只读字段目录。
+//
+// 数据来源：data_sources（已由投影器自动填充的"字段 → 逻辑设备"关系）+
+// sensor_field_meta（声明层元数据）+ sensor_field_obs（事实层单位）+
+// 进程内最新值缓存（实时值）。全部批量查询，无 N+1。
 func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if db == nil {
@@ -97,7 +146,6 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// 支持按类别/逻辑设备过滤（前端筛选栏用）。
 		q := db.Model(&models.DataSource{}).
 			Where("status <> ?", datasource.StatusDisabled)
 		if cat := c.Query("category"); cat != "" {
@@ -110,52 +158,45 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 		var rows []models.DataSource
 		if err := q.Order("device_id ASC, category ASC, edge_device_id ASC").Find(&rows).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"code": "source_overview_failed", "message": "读取来源总览失败",
+				"code": "source_overview_failed", "message": "读取字段目录失败",
 			})
 			return
 		}
 
-		// 按 (device_id, category) 聚合成分组（一个来源 = 一个逻辑设备的一个类别）。
-		type groupKey struct {
+		// 按 (逻辑设备, 类别) 聚合 —— 一个字段一行。
+		//
+		// 为什么还要聚合：同一字段可能由多台设备供数（主备组）。
+		// 目录层面它是**一个**字段，实时值取权威成员的那份。
+		type fieldKey struct {
 			deviceID uint
 			category string
 		}
-		order := make([]groupKey, 0, len(rows))
-		byGroup := make(map[groupKey]*sourceOverviewItem, len(rows))
-		// 一并收集需要的设备名（避免 N+1：一次查全部涉及到的 ID）。
-		deviceIDs := make(map[uint]struct{}, len(rows))
+		order := make([]fieldKey, 0, len(rows))
+		byKey := make(map[fieldKey]*sourceOverviewItem, len(rows))
+		membersOfKey := make(map[fieldKey][]models.DataSource, len(rows))
 		logicalIDs := make(map[uint]struct{}, len(rows))
 		for i := range rows {
-			k := groupKey{rows[i].DeviceID, rows[i].Category}
-			if _, ok := byGroup[k]; !ok {
-				byGroup[k] = &sourceOverviewItem{
+			k := fieldKey{rows[i].DeviceID, rows[i].Category}
+			if _, ok := byKey[k]; !ok {
+				byKey[k] = &sourceOverviewItem{
 					LogicalDeviceID: rows[i].DeviceID,
 					Category:        rows[i].Category,
-					GroupID:         0,
-					Kind:            "direct",
-					Members:         []overviewMember{},
 				}
 				order = append(order, k)
 			}
-			deviceIDs[rows[i].EdgeDeviceID] = struct{}{}
+			membersOfKey[k] = append(membersOfKey[k], rows[i])
 			logicalIDs[rows[i].DeviceID] = struct{}{}
 		}
-
-		// 设备名映射（两次批量查询，无 N+1）。
-		edgeNames := make(map[uint]string, len(deviceIDs))
-		if len(deviceIDs) > 0 {
-			ids := make([]uint, 0, len(deviceIDs))
-			for id := range deviceIDs {
-				ids = append(ids, id)
-			}
-			var devs []models.EdgeDevice
-			db.Select("id, name").Where("id IN ?", ids).Find(&devs)
-			for _, d := range devs {
-				edgeNames[d.ID] = d.Name
-			}
+		if len(order) == 0 {
+			c.JSON(http.StatusOK, gin.H{"code": 0, "data": sourceOverviewResponse{
+				Items: []sourceOverviewItem{}, Total: 0, GeneratedAt: time.Now(),
+			}})
+			return
 		}
+
+		// 逻辑设备名（一次查询）。
 		logicalNames := make(map[uint]string, len(logicalIDs))
-		if len(logicalIDs) > 0 {
+		{
 			ids := make([]uint, 0, len(logicalIDs))
 			for id := range logicalIDs {
 				ids = append(ids, id)
@@ -167,72 +208,30 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 			}
 		}
 
-		for i := range rows {
-			k := groupKey{rows[i].DeviceID, rows[i].Category}
-			it := byGroup[k]
-			it.Members = append(it.Members, overviewMember{
-				EdgeDeviceID:   rows[i].EdgeDeviceID,
-				EdgeDeviceName: edgeNames[rows[i].EdgeDeviceID],
-				Active:         rows[i].Status == datasource.StatusActive,
-				Enabled:        rows[i].Status != datasource.StatusDisabled,
-			})
-			if rows[i].LastSuccess != nil &&
-				(it.LastSuccess == nil || rows[i].LastSuccess.After(*it.LastSuccess)) {
-				ts := *rows[i].LastSuccess
-				it.LastSuccess = &ts
-			}
-		}
-
-		// 来源组信息：查这些 (category) 上的 enabled 组（一次查询）。
-		//
-		// 为什么按 category 而不是按 key 找组：来源组是**跨设备**对象，
-		// 没有 (logicalDevice, category) 键；用 category 匹配是组与台账之间
-		// 唯一的天然连接。找不到组 ⇒ kind=direct（单设备直连）。
-		categories := make(map[string]struct{}, len(order))
+		categories := make([]string, 0, len(order))
+		seenCat := make(map[string]struct{}, len(order))
 		for _, k := range order {
-			categories[k.category] = struct{}{}
-		}
-		groupByCategory := make(map[string]models.SourceGroup, len(categories))
-		if len(categories) > 0 {
-			cats := make([]string, 0, len(categories))
-			for c := range categories {
-				cats = append(cats, c)
+			if _, ok := seenCat[k.category]; ok {
+				continue
 			}
-			var groups []models.SourceGroup
-			db.Where("category IN ? AND enabled = ?", cats, true).Find(&groups)
-			for _, g := range groups {
-				groupByCategory[g.Category] = g
-			}
+			seenCat[k.category] = struct{}{}
+			categories = append(categories, k.category)
 		}
 
-		// ── 字段元数据装载（数据类型 / 数据描述 / 单位）──
-		//
-		// 三类来源各取所长，任一缺失都有降级路径（不能让"没登记"导致整页空）：
-		//   LabelZh/ValueType ← sensor_field_meta（声明层）
-		//   Unit             ← sensor_field_obs（事实层，比声明更可信）
-		//   ValueType 兜底    ← 由最新观测值推断（见 inferValueType）
-		metaByCategory := make(map[string]models.SensorFieldMeta, len(order))
-		if len(categories) > 0 {
-			cats := make([]string, 0, len(categories))
-			for c := range categories {
-				cats = append(cats, c)
-			}
-			if db.Migrator().HasTable(&models.SensorFieldMeta{}) {
-				var metas []models.SensorFieldMeta
-				if err := db.Where("sensor_name IN ?", cats).Find(&metas).Error; err == nil {
-					for _, m := range metas {
-						metaByCategory[m.SensorName] = m
-					}
+		// 声明层：中文描述 + 语义类型。
+		metaByCat := make(map[string]models.SensorFieldMeta, len(categories))
+		if db.Migrator().HasTable(&models.SensorFieldMeta{}) {
+			var metas []models.SensorFieldMeta
+			if err := db.Where("sensor_name IN ?", categories).Find(&metas).Error; err == nil {
+				for _, m := range metas {
+					metaByCat[m.SensorName] = m
 				}
 			}
 		}
-		// 事实单位：取该类别在所有设备上的最新观测单位。
-		unitByCategory := make(map[string]string, len(order))
-		if len(categories) > 0 {
-			cats := make([]string, 0, len(categories))
-			for c := range categories {
-				cats = append(cats, c)
-			}
+
+		// 事实层：实际观测到的单位。
+		unitByCat := make(map[string]string, len(categories))
+		{
 			type unitRow struct {
 				SensorName string
 				Unit       string
@@ -240,102 +239,74 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 			var urows []unitRow
 			if err := db.Model(&models.SensorFieldObs{}).
 				Select("sensor_name, MAX(unit) AS unit").
-				Where("sensor_name IN ? AND unit <> ''", cats).
+				Where("sensor_name IN ? AND unit <> ''", categories).
 				Group("sensor_name").Scan(&urows).Error; err == nil {
 				for _, u := range urows {
-					unitByCategory[u.SensorName] = u.Unit
+					unitByCat[u.SensorName] = u.Unit
 				}
 			}
 		}
 
 		items := make([]sourceOverviewItem, 0, len(order))
+		now := time.Now()
 		for _, k := range order {
-			it := byGroup[k]
+			it := byKey[k]
 			it.LogicalDeviceName = logicalNames[k.deviceID]
-			it.MemberCount = len(it.Members)
 
-			// 字段元数据：声明层 + 事实层。
-			if m, ok := metaByCategory[k.category]; ok {
+			if m, ok := metaByCat[k.category]; ok {
 				it.LabelZh = m.LabelZh
 				it.ValueType = m.ValueType
 			}
-			it.Unit = unitByCategory[k.category]
+			it.Unit = unitByCat[k.category]
 
-			// 实时值：从进程内最新值缓存取（零 DB 查询）。
+			// 实时值：优先取台账里 active 的那个成员（主备组只有它在供数）；
+			// 单设备时它就是唯一成员。
 			//
-			// 取**权威成员**的值：主备组只有 active 在供数，取 standby 的值会显示
-			// 一个不供数的设备读数，误导用户"这个来源的数据在变"。
-			// 直连来源的成员本身就是权威。
-			for _, m := range it.Members {
-				if !m.Active {
-					continue
-				}
-				if rec, hit := LatestValueBySensor(m.EdgeDeviceID, k.category); hit {
-					v := rec.Value
-					ts := rec.Timestamp
-					it.LatestValue = &v
-					it.LatestAt = &ts
-					age := int(time.Since(ts).Seconds())
-					if age < 0 {
-						age = 0
-					}
-					it.ValueAgeSec = &age
-				}
-				break
-			}
-			// ValueType 兜底：没登记 meta 时按观测值推断，避免整列空白。
-			if it.ValueType == "" && it.LatestValue != nil {
-				it.ValueType = inferValueType(*it.LatestValue)
-			}
-			if g, ok := groupByCategory[k.category]; ok {
-				it.GroupID = g.ID
-				name := g.Name
-				it.GroupName = &name
-				it.Kind = g.Kind
-			}
-			// 状态派生（只读展示用，不参与求值）：
-			//   ok         = 至少一个 member active
-			//   degraded   = 有成员但都非 active
-			//   unconfigured = 无成员（理论上不出现，防御）
-			activeCount := 0
-			for _, m := range it.Members {
-				if m.Active {
-					activeCount++
+			// 为什么要挑 active 而不是"第一个"：主备组的备机可能早已离线，
+			// 取它的值会显示一个停在几小时前的读数，看起来像"这个字段在变"。
+			members := membersOfKey[k]
+			pick := members[0]
+			for _, m := range members {
+				if m.Status == datasource.StatusActive {
+					pick = m
+					break
 				}
 			}
-			switch {
-			case activeCount > 0:
-				it.Status = "ok"
-			case len(it.Members) > 0:
-				it.Status = "degraded"
-			default:
-				it.Status = "unconfigured"
+			if rec, hit := LatestValueBySensor(pick.EdgeDeviceID, k.category); hit {
+				v := rec.Value
+				ts := rec.Timestamp
+				it.LatestValue = &v
+				it.UpdatedAt = &ts
+				age := int(now.Sub(ts).Seconds())
+				if age < 0 {
+					age = 0
+				}
+				it.AgeSec = &age
+			}
+			it.Status = deriveFreshness(it.AgeSec)
+
+			// 类型兜底：没登记时按观测值推断，避免整列空白。
+			if it.ValueType == "" {
+				if it.LatestValue != nil {
+					it.ValueType = inferValueType(*it.LatestValue)
+				} else {
+					it.ValueType = "number" // 无读数时按最常见的数值型标注
+				}
 			}
 			items = append(items, *it)
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code": 0,
-			"data": sourceOverviewResponse{
-				Items:     items,
-				Total:     len(items),
-				DerivedAt: time.Now(),
-			},
-		})
+		c.JSON(http.StatusOK, gin.H{"code": 0, "data": sourceOverviewResponse{
+			Items: items, Total: len(items), GeneratedAt: now,
+		}})
 	}
 }
 
-// registerSourceOverviewRoute 注册来源总览路由（**只读**）。
+// registerSourceOverviewRoute 注册字段目录路由（**只读**）。
 //
-// # 为什么显式注册写方法并返回 405
-//
-// 实测：gin 的 HandleMethodNotAllowed 默认 false，未注册的方法返回 **404**
-// 而不是 405。404 虽然也挡住了写入，但它表达的是「资源不存在」——
-// 事实是「资源存在、但只允许 GET」。这个差别对调用方很重要：
-// 404 会让人以为路径写错，405 才明确告知「端点对了、方法不对」。
-//
-// 因此这里**显式**为写方法注册 405 处理器：既是自文档化的只读契约，
-// 也让运维脚本 curl 时立刻得到清晰反馈。
+// 显式注册写方法并返回 405：gin 的 HandleMethodNotAllowed 默认 false，
+// 未注册的方法会返回 404 —— 而这里的语义是"端点存在、只允许 GET"，
+// 405 才准确（404 会让人以为路径写错）。
 func registerSourceOverviewRoute(ds *gin.RouterGroup, db *gorm.DB) {
 	ds.GET("/overview", listSourceOverview(db))
 	ds.POST("/overview", rejectOverviewWrite)
@@ -345,37 +316,10 @@ func registerSourceOverviewRoute(ds *gin.RouterGroup, db *gorm.DB) {
 }
 
 // rejectOverviewWrite 是只读端点的写方法拒绝器。
-//
-// 返回 405 + Allow: GET 头（RFC 7231 §6.5.5 要求 405 应带 Allow）。
 func rejectOverviewWrite(c *gin.Context) {
 	c.Header("Allow", "GET")
 	c.JSON(http.StatusMethodNotAllowed, gin.H{
 		"code":    "source_overview_read_only",
-		"message": "来源总览是自动派生的只读视图，不支持写入；如需配置主备请使用来源组接口",
+		"message": "字段目录是只读视图；来源组请在「来源组」页维护",
 	})
-}
-
-// inferValueType 在缺少 sensor_field_meta 时按观测值推断语义类型。
-//
-// # 为什么要有这个兜底
-//
-// 生产实测（2026-10-23）：sensor_field_meta 是 **0 行** —— 它是"声明层"，
-// 依赖人工或导入登记，而当时没有任何自动填充。若不推断，前端"数据类型"列
-// 会整列为空，用户会以为功能没实现。
-//
-// 推断是**保守**的（宁可标 raw 也不猜错）：
-//   - 非整数 ⇒ number
-//   - 整数且只在 {0,1} ⇒ boolean（开关量的典型形态）
-//   - 其余整数 ⇒ number
-//
-// 不做 enum/bitmask 推断 —— 那需要值域知识，猜错比留空更糟。
-// 一旦 sensor_field_meta 有登记，声明值优先，本函数不参与。
-func inferValueType(v float64) string {
-	if v != math.Trunc(v) {
-		return "number"
-	}
-	if v == 0 || v == 1 {
-		return "boolean"
-	}
-	return "number"
 }

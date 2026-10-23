@@ -1,29 +1,31 @@
 <template>
   <div class="overview-tab">
     <!--
-      只读提示：这不是"功能受限"，而是本页的**设计事实** ——
-      数据由系统自动派生，用户不需要也不能维护。
+      只读说明：本页是**已接入字段目录**，由设备解析结果自动生成。
+      这里一句话讲清它与「来源组」的分工，避免用户在两页之间困惑。
     -->
     <el-alert type="info" :closable="false" show-icon class="ov-notice" data-test="ov-readonly-notice">
       <template #title>
-        本页由设备与采集数据<strong>自动生成</strong>，无需手工维护。
-        需要主备切换或复合来源，请到<el-button link type="primary" data-test="ov-goto-groups" @click="$emit('open-group')">
+        本页是<strong>只读</strong>的已接入字段目录，由设备解析结果自动生成。
+        需要把多台设备组合成一个数据来源（主备/复合），请到
+        <el-button link type="primary" data-test="ov-goto-groups" @click="$emit('open-group')">
           「来源组」
-        </el-button>配置。
+        </el-button>
+        配置。
       </template>
     </el-alert>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon class="ov-error" data-test="ov-error">
       <template #title>
-        <span>加载来源总览失败：{{ error }}</span>
+        <span>加载字段目录失败：{{ error }}</span>
         <el-button link type="primary" size="small" data-test="ov-retry" @click="$emit('retry')">重试</el-button>
       </template>
     </el-alert>
 
     <!--
-      移动端横滚容器：本表 8 列，窄屏必然溢出。
-      本仓有门禁（MobileTableWrapper.spec.ts）要求每张 el-table 必须在
-      .mobile-table-wrapper 祖先链上，否则窄屏用户看不到右侧列。
+      移动端横滚容器：本表 7 列，窄屏必然溢出。
+      本仓门禁（MobileTableWrapper.spec.ts）要求每张 el-table 必须在
+      .mobile-table-wrapper 祖先链上。
     -->
     <div class="mobile-table-wrapper">
       <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
@@ -32,116 +34,78 @@
         :data="items"
         class="ov-table"
         data-test="ov-table"
-        empty-text="暂无来源 —— 设备上报数据后会自动出现"
+        empty-text="暂无字段 —— 设备解析成功上报后会自动出现"
       >
-      <el-table-column label="逻辑设备" min-width="150">
-        <template #default="{ row }">
-          <span>{{ asItem(row).logical_device_name || '—' }}</span>
-          <span class="mono muted">#{{ asItem(row).logical_device_id }}</span>
-        </template>
-      </el-table-column>
+        <!--
+          列顺序按「读数据」的思维顺序：我在看哪个设备的哪个量 →
+          它是什么/叫什么 → 现在值多少 → 什么时候更新的。
+        -->
+        <el-table-column label="逻辑设备" min-width="140">
+          <template #default="{ row }">
+            <span>{{ asItem(row).logical_device_name || '—' }}</span>
+            <span class="mono muted">#{{ asItem(row).logical_device_id }}</span>
+          </template>
+        </el-table-column>
 
-      <el-table-column label="数据类别" min-width="200">
-        <template #default="{ row }">
-          <div class="ov-category">
-            <span class="mono">{{ asItem(row).category }}</span>
-            <!-- 中文描述：来自 sensor_field_meta，未登记时降级为物理名（不显示空） -->
-            <el-tooltip
-              v-if="asItem(row).label_zh"
-              :content="asItem(row).label_zh"
-              placement="top"
+        <!-- 数据类别：物理名 + 中文描述（描述是**补充**，不是替代物理名） -->
+        <el-table-column label="数据类别" min-width="220">
+          <template #default="{ row }">
+            <div class="ov-category">
+              <span class="mono">{{ asItem(row).category }}</span>
+              <span v-if="asItem(row).label_zh" class="ov-label" data-test="ov-label">
+                {{ asItem(row).label_zh }}
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+
+        <!-- 数据类型 -->
+        <el-table-column label="数据类型" width="100">
+          <template #default="{ row }">
+            <el-tag
+              v-if="asItem(row).value_type"
+              size="small"
+              effect="plain"
+              :type="typeTagType(asValueType(row))"
+              data-test="ov-value-type"
             >
-              <span class="ov-label" data-test="ov-label">{{ asItem(row).label_zh }}</span>
-            </el-tooltip>
-          </div>
-        </template>
-      </el-table-column>
+              {{ typeLabel(asValueType(row)) }}
+            </el-tag>
+            <span v-else class="muted" data-test="ov-value-type-empty">未标注</span>
+          </template>
+        </el-table-column>
 
-      <!-- 数据类型：声明层优先，缺失时后端按观测值推断，仍缺则显示「未标注」 -->
-      <el-table-column label="类型" width="100">
-        <template #default="{ row }">
-          <el-tag
-            v-if="asItem(row).value_type"
-            size="small"
-            effect="plain"
-            :type="typeTagType(asValueType(row))"
-            data-test="ov-value-type"
-          >
-            {{ typeLabel(asValueType(row)) }}
-          </el-tag>
-          <span v-else class="muted" data-test="ov-value-type-empty">未标注</span>
-        </template>
-      </el-table-column>
+        <!-- 单位：单独成列（不要和值粘在一起，否则出现 "3.315V0s" 这种粘连） -->
+        <el-table-column label="单位" width="80">
+          <template #default="{ row }">
+            <span class="mono muted">{{ asItem(row).unit || '—' }}</span>
+          </template>
+        </el-table-column>
 
-      <!-- 实时值：带单位 + 新鲜度着色 -->
-      <el-table-column label="实时值" min-width="150" align="right">
-        <template #default="{ row }">
-          <div class="ov-live" :class="liveClass(asItem(row))" data-test="ov-live">
-            <span class="ov-live-value mono">{{ fmtValue(asItem(row)) }}</span>
-            <span v-if="asItem(row).unit" class="ov-live-unit">{{ asItem(row).unit }}</span>
-            <span class="ov-live-age">{{ fmtAge(asItem(row)) }}</span>
-          </div>
-        </template>
-      </el-table-column>
+        <!-- 实时值：值与单位之间留空白，不再拼接年龄 -->
+        <el-table-column label="实时值" min-width="130" align="right">
+          <template #default="{ row }">
+            <span class="ov-value mono" data-test="ov-value">{{ fmtValue(row) }}</span>
+          </template>
+        </el-table-column>
 
-      <el-table-column label="来源类型" width="130">
-        <template #default="{ row }">
-          <el-tag :type="kindTagType(asItem(row).kind)" size="small" data-test="ov-kind">
-            {{ kindLabel(asItem(row).kind) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="成员" width="90" align="center">
-        <template #default="{ row }">
-          <span data-test="ov-member-count">{{ asItem(row).member_count }}</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="当前来源" min-width="200">
-        <template #default="{ row }">
-          <div class="ov-members">
-            <span
-              v-for="m in asItem(row).members"
-              :key="m.edge_device_id"
-              class="ov-member"
-              :class="{ 'is-active': m.active, 'is-disabled': !m.enabled }"
-            >
-              {{ m.edge_device_name || '#' + m.edge_device_id }}
-              <el-tag v-if="m.active" type="success" size="small" effect="plain">权威</el-tag>
+        <!-- 更新时间：绝对时间 + 相对年龄，两个都要（一个能对比，一个能感知新鲜） -->
+        <el-table-column label="更新时间" min-width="170">
+          <template #default="{ row }">
+            <span class="mono muted" data-test="ov-updated">
+              {{ fmtUpdated(asItem(row)) }}
             </span>
-          </div>
-        </template>
-      </el-table-column>
+          </template>
+        </el-table-column>
 
-      <el-table-column label="来源组" min-width="140">
-        <template #default="{ row }">
-          <el-button
-            v-if="asItem(row).group_id > 0"
-            link
-            type="primary"
-            data-test="ov-group-link"
-            @click="$emit('open-group')"
-          >
-            {{ asItem(row).group_name || '#' + asItem(row).group_id }}
-          </el-button>
-          <span v-else class="muted">单设备直连</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="状态" width="100">
-        <template #default="{ row }">
-          <el-tag :type="statusTagType(asItem(row).status)" size="small" data-test="ov-status">
-            {{ statusLabel(asItem(row).status) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="最后成功" width="170">
-        <template #default="{ row }">
-          <span class="mono muted">{{ fmtTime(asItem(row).last_success) }}</span>
-        </template>
-      </el-table-column>
+        <!-- 状态：按**数据新鲜度**派生，不是配置状态 -->
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="statusTagType(asItem(row).status)" size="small" data-test="ov-status">
+              {{ statusLabel(asItem(row).status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
   </div>
@@ -149,18 +113,26 @@
 
 <script setup lang="ts">
 /**
- * 来源总览 Tab（只读）。
+ * 已接入字段目录（只读）。
  *
- * # 只读是如何保证的（三层，不只靠 UI）
+ * # 这个组件为什么长这样（2026-10-23 重做）
  *
- * 1. **本组件契约**：props 只有数据、emits 只有 open-group/retry ——
- *    类型层就没有 create/update/delete 的能力。
- * 2. **前端单测**：断言本组件渲染后不存在任何写按钮（见 __tests__）。
- * 3. **后端路由**：GET /data-sources/overview 的写方法返回 405。
+ * 早期版本渲染了四个**主备配置概念**的列，它们都不属于字段目录：
+ *   · 「来源类型」与「来源组」描述的是"多设备里用哪台供数"的配置状态，
+ *     而本页只读、用户无法在这里配置它 —— 属于「来源组」页的职责；
+ *   · 「当前来源」与第一列「逻辑设备」完全重复（同一行两次显示 bms）；
+ *   · 「成员」在单设备时恒为 1，零信息量。
  *
- * 三层任一层失守都还有另外两层兜底 —— 这是"只读"可信的原因。
+ * 现在只保留字段事实：逻辑设备 / 数据类别（+中文描述）/ 数据类型 / 单位 /
+ * 实时值 / 更新时间 / 状态（= 数据新鲜度）。
+ *
+ * # 只读的三层保证
+ *
+ * 1. **组件契约**：props 只有数据，emits 只有 open-group/retry —— 类型层无写能力。
+ * 2. **前端测试**：源码扫描断言无写 API + DOM 断言无写按钮。
+ * 3. **后端路由**：写方法显式 405。
  */
-import type { SourceKind, SourceOverviewItem, SourceStatus, SourceValueType } from '@/api/sourceOverview'
+import type { SourceOverviewItem, SourceValueType } from '@/api/sourceOverview'
 
 defineProps<{
   items: SourceOverviewItem[]
@@ -179,71 +151,13 @@ const asItem = (row: unknown) => row as SourceOverviewItem
 /**
  * 把 value_type 收窄为非空类型。
  *
- * 后端可能返回空串（未标注且无法推断）。模板里已用 v-if 挡住空串，
- * 但 TypeScript 看不见 v-if 的收窄 —— 用本函数显式收窄，
- * 避免在 typeLabel/typeTagType 里重复判断空串。
+ * 后端可能返回空串。模板里已用 v-if 挡住，但 TypeScript 看不见 v-if 的收窄。
  */
 const asValueType = (row: unknown) => asItem(row).value_type as SourceValueType
 
-function kindLabel(k: SourceKind): string {
-  switch (k) {
-    case 'primary_backup':
-      return '主备'
-    case 'composite':
-      return '复合'
-    default:
-      return '直连'
-  }
-}
-
-function kindTagType(k: SourceKind): 'info' | 'success' | 'warning' {
-  switch (k) {
-    case 'primary_backup':
-      return 'success'
-    case 'composite':
-      return 'warning'
-    default:
-      return 'info'
-  }
-}
-
-function statusLabel(s: SourceStatus): string {
-  switch (s) {
-    case 'ok':
-      return '正常'
-    case 'degraded':
-      return '降级'
-    case 'disabled':
-      return '已停用'
-    default:
-      return '未配置'
-  }
-}
-
-function statusTagType(s: SourceStatus): 'success' | 'warning' | 'info' | 'danger' {
-  switch (s) {
-    case 'ok':
-      return 'success'
-    case 'degraded':
-      return 'warning'
-    case 'disabled':
-      return 'info'
-    default:
-      return 'info'
-  }
-}
-
-function fmtTime(v: string | null): string {
-  if (!v) return '—'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
-
-// ── 数据类型展示 ──
+// ── 数据类型 ──
 //
-// 词表与后端 sensor_field_meta.value_type 一致。展示用中文标签，
-// 但**不改词表本身**（后端/前端/仿真三处必须同词，否则门禁 SG-16 类检查会红）。
+// 词表与后端 sensor_field_meta.value_type 一致；这里只做中文展示。
 function typeLabel(t: SourceValueType): string {
   switch (t) {
     case 'number':
@@ -272,45 +186,78 @@ function typeTagType(t: SourceValueType): 'success' | 'warning' | 'info' {
   }
 }
 
-// ── 实时值展示 ──
+// ── 实时值 ──
 
 /**
  * 格式化实时值。
  *
  * 三个必须区分的状态：
- *   null      ⇒ 「—」（从未收到数据）
- *   0         ⇒ 「0」（**合法读数**，不能显示成「—」）
- *   小数       ⇒ 保留至多 3 位（避免 3.3530000000001 这类浮点噪声）
+ *   null  ⇒ 「—」（从未收到数据）
+ *   0     ⇒ 「0」（**合法读数**，不能显示成 —）
+ *   小数  ⇒ 至多 3 位（避免 3.3530000000001 这类浮点噪声）
+ *
+ * 注意：**不拼接单位**。单位有独立列 —— 早期把值和单位/年龄拼成
+ * "3.315V0s" 是显示缺陷（值、单位、年龄粘在一起无法阅读）。
  */
-function fmtValue(it: SourceOverviewItem): string {
+function fmtValue(row: unknown): string {
+  const it = asItem(row)
   if (it.latest_value === null || it.latest_value === undefined) return '—'
   const v = it.latest_value
   if (Number.isInteger(v)) return String(v)
   return v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+// ── 更新时间 ──
+
 /**
- * 新鲜度着色。
+ * 更新时间显示：绝对时间 + 相对年龄。
  *
- * 为什么必须显示年龄而不是只显示值：只显示值会让 3 分钟前的数据
- * 看起来和刚采集的一样"实时"，用户会误判设备状态。
- *
- * 阈值说明：采集周期由设备 IntervalMs 决定（常见 5s），
- * 因此 30s 内视为新鲜、5 分钟内视为偏旧、超过 5 分钟视为陈旧。
+ * 为什么两个都要：绝对时间便于对比/记录，相对年龄让人一眼判断新鲜度
+ * （"5s 前"比 "2026-10-23 09:12:33" 直观得多）。
  */
-function liveClass(it: SourceOverviewItem): string {
-  if (it.value_age_sec === null || it.value_age_sec === undefined) return 'is-none'
-  if (it.value_age_sec <= 30) return 'is-fresh'
-  if (it.value_age_sec <= 300) return 'is-stale'
-  return 'is-dead'
+function fmtUpdated(it: SourceOverviewItem): string {
+  if (!it.updated_at) return '—'
+  const d = new Date(it.updated_at)
+  if (Number.isNaN(d.getTime())) return '—'
+  const abs = d.toLocaleString('zh-CN', { hour12: false })
+  const age = it.age_sec
+  if (age === null || age === undefined) return abs
+  return `${abs}（${fmtAge(age)}前）`
 }
 
-function fmtAge(it: SourceOverviewItem): string {
-  const age = it.value_age_sec
-  if (age === null || age === undefined) return ''
+function fmtAge(age: number): string {
   if (age < 60) return `${age}s`
   if (age < 3600) return `${Math.floor(age / 60)}m`
-  return `${Math.floor(age / 3600)}h`
+  if (age < 86400) return `${Math.floor(age / 3600)}h`
+  return `${Math.floor(age / 86400)}d`
+}
+
+// ── 状态（数据新鲜度）──
+
+function statusLabel(s: string): string {
+  switch (s) {
+    case 'ok':
+      return '正常'
+    case 'delay':
+      return '延迟'
+    case 'stale':
+      return '陈旧'
+    default:
+      return '无数据'
+  }
+}
+
+function statusTagType(s: string): 'success' | 'warning' | 'danger' | 'info' {
+  switch (s) {
+    case 'ok':
+      return 'success'
+    case 'delay':
+      return 'warning'
+    case 'stale':
+      return 'danger'
+    default:
+      return 'info'
+  }
 }
 </script>
 
@@ -320,26 +267,17 @@ function fmtAge(it: SourceOverviewItem): string {
   flex-direction: column;
   gap: 12px;
 }
-.ov-members {
+.ov-category {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
 }
-.ov-member {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--el-fill-color-light);
+.ov-label {
   font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
-.ov-member.is-active {
-  background: var(--el-color-success-light-9);
-}
-.ov-member.is-disabled {
-  opacity: 0.5;
-  text-decoration: line-through;
+.ov-value {
+  font-variant-numeric: tabular-nums;
 }
 .mono {
   font-family: var(--el-font-family-mono, monospace);
