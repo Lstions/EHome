@@ -149,6 +149,9 @@ type e2eChain struct {
 	dataSource models.DataSource
 	registry   *sensorfield.Registry
 	dsSvc      *datasource.Service
+	// groupSvc 是来源组服务（M3 后 health sink 的唯一消费者）。
+	// 可为 nil：本 e2e 的多数用例只关心"解析→观测→规则"，不依赖来源组。
+	groupSvc *datasource.GroupService
 	bus        *databus.DataEventBus
 	consumer   *signalingConsumer
 	eval       *automation.Evaluator
@@ -265,8 +268,16 @@ func newE2EChainWithPublisher(t *testing.T, pub downlink.Publisher, rules ...*mo
 		c.eval.Evaluate(edgeDeviceID, fields, at)
 	})
 	// 数据源健康回调：与 main.go 的 nodeMgr.SetSourceHealthSink 同语义
+	// 数据源健康回调：与 main.go 的 nodeMgr.SetSourceHealthSink 同语义。
+	//
+	// M3（2026-10-23）：legacy datasource.Service 的 MarkSuccess 已随主备状态机删除，
+	// health sink 现在只喂 GroupService（主备语义只有来源组一套）。
+	// 本 e2e 关心的链路是"解析 → 观测 → 规则"，不依赖 data_sources 台账，
+	// 因此这里接 GroupService（若 c 未持有组服务则跳过，保持原测试的独立性）。
 	inner.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
-		c.dsSvc.MarkSuccess(edgeDeviceID, names, at)
+		if c.groupSvc != nil {
+			c.groupSvc.MarkSuccess(edgeDeviceID, names, at)
+		}
 	})
 	c.consumer = &signalingConsumer{inner: inner}
 	c.bus = databus.NewDataEventBus()

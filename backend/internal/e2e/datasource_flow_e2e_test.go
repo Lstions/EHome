@@ -4,18 +4,33 @@ package e2e
 
 import (
 	"testing"
-	"time"
 
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/models"
 )
 
-// TestEdgeDeviceDataFlow_DatasourceThenRule 覆盖用户要求的完整业务闭环：
+// TestEdgeDeviceDataFlow_DatasourceThenRule 覆盖「同一帧驱动多个下游」的闭环：
 //
-//	边缘设备上报一帧 → 数据源域（健康/失败计数/恢复） → 规则引擎（同一帧触发）
+//	边缘设备上报一帧 → 解析 → 数据面入库 + 规则引擎触发
+//	                 → 数据源台账（自动投影，只读）
 //
-// 断言的是"同一帧同时驱动两个下游"，而不是两个独立单元测试——这正是接线类缺陷
-// （sink 未注入、MarkSuccess 未接）唯一能暴露的地方。
+// 断言的是"同一帧同时驱动多个下游"，而不是两个独立单元测试 —— 这正是接线类缺陷
+// （sink 未注入、台账未派生）唯一能暴露的地方。
+//
+// # M3 后的语义变更（2026-10-23）
+//
+// 本测试原先还断言 data_sources 的**主备状态机**行为：
+//
+//	"连续 3 次失败 ⇒ status=error ⇒ 自动切换 ⇒ 恢复后 error→standby"
+//
+// 该状态机已被删除（用户要求「下线旧主备状态机，不需要保留债务」；主备语义
+// 只由来源组承担）。data_sources 现在是**自动派生的只读台账**：
+//   - status 由投影器按来源组快照写入（唯一写者），不再是"失败计数驱动"；
+//   - 没有自动切换、没有 failover 日志；
+//   - last_success/fail_count 仍由 health 观测更新（纯事实记录）。
+//
+// 因此本测试改为断言「台账与数据流共存且互不干扰」，而主备切换的端到端
+// 验证在 internal/e2e/source_group_fullchain_*.go（TestE1/E2/E7/E10/E11）。
 func TestEdgeDeviceDataFlow_DatasourceThenRule(t *testing.T) {
 	rule := &models.AutomationRule{
 		Name: "SOC 低电量通知", Enabled: true,
@@ -32,82 +47,57 @@ func TestEdgeDeviceDataFlow_DatasourceThenRule(t *testing.T) {
 		rsoc: 27, cellCount: 4, temps: []int16{2981, 2992},
 	}
 
-	// ── ① 成功上报：数据源健康 + 规则触发，同一帧 ──
+	// ── ① 成功上报：规则触发恰好 1 次（同一帧共享同一份解析结果）──
 	c.publish(t, frame.frame(), 1)
-
-	var src models.DataSource
-	if err := c.db.First(&src, c.dataSource.ID).Error; err != nil {
-		t.Fatalf("reload data source: %v", err)
-	}
-	if src.LastSuccess == nil {
-		t.Error("data_sources.last_success 未更新 —— MarkSuccess 未接线")
-	}
-	if src.FailCount != 0 || src.Status != datasource.StatusActive {
-		t.Errorf("成功上报后 source = status:%s fail:%d, want active/0", src.Status, src.FailCount)
-	}
 
 	if n := c.countByResult(t, rule.ID, models.AutomationResultNotification); n != 1 {
 		t.Errorf("同一帧应触发规则 1 次，实际=%d（数据源与规则引擎必须共享同一份解析结果）", n)
 	}
 
-	// ── ② 连续失败 3 次：达到 max_fail_count ⇒ error + 健康表 3 行 ──
-	for i := 0; i < 3; i++ {
-		c.dsSvc.MarkFailure(c.device.ID, datasource.TriggerDeviceOffline)
+	// ── ② 数据面正常入库（解析链路未被台账逻辑干扰）──
+	var rows int64
+	if err := c.db.Model(&models.UnifiedData{}).Where("device_id = ?", c.device.ID).Count(&rows).Error; err != nil {
+		t.Fatalf("count unified_data: %v", err)
 	}
+	if rows == 0 {
+		t.Fatal("unified_data 无行 —— 解析/入库链路断了")
+	}
+
+	// ── ③ 台账行存在且状态由投影器维护（不是状态机）──
+	var src models.DataSource
 	if err := c.db.First(&src, c.dataSource.ID).Error; err != nil {
 		t.Fatalf("reload data source: %v", err)
 	}
-	if src.Status != datasource.StatusError {
-		t.Errorf("连续 3 次失败后 status=%s, want error", src.Status)
+	// status 必须是投影器认可的取值集合之一；M3 后它**不再**因失败计数变成 error。
+	switch src.Status {
+	case datasource.StatusActive, datasource.StatusStandby, datasource.StatusDisabled:
+		// 合法（由投影器按来源组快照/成员关系决定）
+	default:
+		t.Errorf("台账 status=%q 不在投影器允许的集合内", src.Status)
 	}
-	if src.FailCount < 3 {
-		t.Errorf("fail_count=%d, want >=3", src.FailCount)
+	// 记录来源必须是 auto（本链路里台账由投影器派生）或 manual（人工创建）
+	switch src.ManagedBy {
+	case models.DataSourceManagedAuto, models.DataSourceManagedManual:
+	default:
+		t.Errorf("managed_by=%q 非法", src.ManagedBy)
 	}
-	var healthRows []models.DataSourceHealth
-	if err := c.db.Where("source_id = ?", c.dataSource.ID).Find(&healthRows).Error; err != nil {
-		t.Fatalf("query health: %v", err)
+
+	// ── ④ 再上报一帧：数据继续入库（数据面不被阻塞）──
+	c.publish(t, frame.frame(), 2)
+	var rows2 int64
+	if err := c.db.Model(&models.UnifiedData{}).Where("device_id = ?", c.device.ID).Count(&rows2).Error; err != nil {
+		t.Fatalf("count unified_data after 2nd frame: %v", err)
 	}
-	if len(healthRows) != 3 {
-		t.Errorf("data_source_health rows=%d, want 3（每次失败落一条）", len(healthRows))
+	if rows2 <= rows {
+		t.Errorf("第二帧后行数未增长（%d → %d）—— 数据面被阻塞", rows, rows2)
 	}
-	for _, h := range healthRows {
-		if h.Category != "rsoc" {
-			t.Errorf("health category=%q, want rsoc（同域同宽）", h.Category)
-		}
-	}
+
+	// ── ⑤ 确认没有产生 failover 日志（该能力已下线，不应有残余写入）──
 	var failovers int64
 	if err := c.db.Model(&models.FailoverLog{}).Count(&failovers).Error; err != nil {
 		t.Fatalf("count failover logs: %v", err)
 	}
 	if failovers != 0 {
-		t.Errorf("单来源不应产生切换日志，实际=%d", failovers)
+		t.Errorf("单来源不应产生切换日志，实际=%d（legacy 状态机已下线，不应有写入）", failovers)
 	}
-
-	// ── ③ 恢复上报：error ⇒ standby，失败计数归零 ──
-	c.publish(t, frame.frame(), 2)
-	if err := c.db.First(&src, c.dataSource.ID).Error; err != nil {
-		t.Fatalf("reload data source: %v", err)
-	}
-	if src.Status != datasource.StatusStandby {
-		t.Errorf("恢复上报后 status=%s, want standby（error 不自动抢占 active）", src.Status)
-	}
-	if src.FailCount != 0 {
-		t.Errorf("恢复上报后 fail_count=%d, want 0", src.FailCount)
-	}
-	// 恢复后的成功时间必须晚于之前的失败时间（时间线单调）
-	if src.LastSuccess == nil || src.LastFailure == nil {
-		t.Error("last_success/last_failure 应同时存在（先失败后成功）")
-	} else if src.LastSuccess.Before(*src.LastFailure) {
-		t.Errorf("last_success(%v) 早于 last_failure(%v)，时间线异常", src.LastSuccess, src.LastFailure)
-	}
-
-	// ── ④ 数据仍应持续入库（失败/恢复不应影响数据面） ──
-	var rows int64
-	if err := c.db.Model(&models.UnifiedData{}).Where("device_id = ?", c.device.ID).Count(&rows).Error; err != nil {
-		t.Fatalf("count unified_data: %v", err)
-	}
-	if rows != 24 { // 2 帧 × 12 字段
-		t.Errorf("unified_data rows=%d, want 24（2 帧 × 12 字段）", rows)
-	}
-	_ = time.Now
 }

@@ -3,9 +3,11 @@ package datasource
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/source"
+	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
 )
@@ -114,6 +116,66 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 	}
 	res.Total = len(desired)
 
+	// 2b) 收集 last_success（事实观测，不是状态机）。
+	//
+	// # 为什么投影器必须写它（M3 删除 legacy 状态机后暴露的缺口）
+	//
+	// 删除 datasource.Service.MarkSuccess 后，data_sources.last_success **无人写入**
+	// —— 但前端来源总览读的正是这一列（handler_source_overview.go:152），
+	// 不修就是"页面上最后成功时间永远为空"的功能缺口。
+	//
+	// 事实来源：source_group_members.last_success（由 GroupService.MarkSuccess 维护）。
+	// 直连来源（无组）没有成员行，此时留空 —— 这是诚实的：没有组就没有"成员健康"概念，
+	// 而设备本身的在线状态在 edge_devices.status 里。
+	lastSuccessByTriple := make(map[triple]*time.Time, len(desired))
+	if len(desired) > 0 {
+		type memRow struct {
+			EdgeDeviceID uint
+			Category     string
+			LastSuccess  *time.Time
+		}
+		var mems []memRow
+		// 容错：未迁移的库/精简测试库可能没有组成员表。此时没有成员健康事实
+		// 可回填 ⇒ last_success 留空，而不是让整次对账失败。
+		// 投影是台账，个别列取不到不应阻塞其余字段的收敛。
+		if s.db.Migrator().HasTable("source_group_members") {
+			if err := s.db.WithContext(ctx).Table("source_group_members AS sgm").
+				Select("sgm.edge_device_id AS edge_device_id, sg.category AS category, "+
+					"sgm.last_success AS last_success").
+				Joins("JOIN source_groups sg ON sg.id = sgm.group_id").
+				Where("sg.enabled = ?", true).Scan(&mems).Error; err != nil {
+				logger.Warn("datasource: load member last_success failed (will stay empty)",
+					"error", err)
+			}
+		}
+		// 逻辑设备映射：从**已派生的期望态**反推（deviceID -> 逻辑设备）。
+		//
+		// 为什么不从设备行查：ReconcileDerived 只接收 handles（不查设备表），
+		// 而 handles 的 key 已含 LogicalDeviceID + 每个成员的 EdgeDeviceID，
+		// 正好给出同一映射。这样投影器保持"输入只有 handles"的纯收敛语义。
+		logicalOf := make(map[uint]uint, len(desired))
+		for t := range desired {
+			logicalOf[t.edgeDeviceID] = t.deviceID
+		}
+		for _, m := range mems {
+			if m.LastSuccess == nil {
+				continue
+			}
+			ld, ok := logicalOf[m.EdgeDeviceID]
+			if !ok {
+				continue
+			}
+			t := triple{ld, m.Category, m.EdgeDeviceID}
+			if _, want := desired[t]; !want {
+				continue
+			}
+			ts := *m.LastSuccess
+			if cur, ok := lastSuccessByTriple[t]; !ok || ts.After(*cur) {
+				lastSuccessByTriple[t] = &ts
+			}
+		}
+	}
+
 	// 3) 收敛（单事务：部分成功会让台账处于自相矛盾状态）。
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for t := range desired {
@@ -138,6 +200,12 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 					ManagedBy:    models.DataSourceManagedAuto,
 					DerivedAt:    &now,
 				}
+				// 新建行也要带 last_success —— 否则首次派生出来的行永远显示"从未成功"，
+				// 直到状态发生变化才补上（而这可能永远不发生）。三个写入路径
+				// （新建 / 状态变化 / 状态未变）必须一致。
+				if ts := lastSuccessByTriple[t]; ts != nil {
+					row.LastSuccess = ts
+				}
 				if err := tx.Create(&row).Error; err != nil {
 					return fmt.Errorf("datasource: create derived source (%d,%s,%d): %w",
 						t.deviceID, t.category, t.edgeDeviceID, err)
@@ -147,19 +215,32 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 			}
 			// 已存在 auto 行：只在状态或派生时间需要更新时写库（减少无谓更新）。
 			if existing.Status == status {
-				// 状态没变，只刷新派生时间（可观测「派生器还活着」）。
+				// 状态没变（最常见的路径）：刷新派生时间 + last_success。
+				//
+				// ⚠ 这里**必须**也写 last_success。若只在状态变化时写，那么
+				// "设备一直正常"的来源永远不更新最后成功时间 —— 页面上会显示
+				// 一个越来越旧的时间，看起来像设备掉线了。
+				touch := map[string]interface{}{"derived_at": now}
+				if ts := lastSuccessByTriple[t]; ts != nil {
+					touch["last_success"] = *ts
+				}
 				if err := tx.Model(&models.DataSource{}).Where("id = ?", existing.ID).
-					Update("derived_at", now).Error; err != nil {
+					Updates(touch).Error; err != nil {
 					return fmt.Errorf("datasource: touch derived_at %d: %w", existing.ID, err)
 				}
 				continue
 			}
+			updates := map[string]interface{}{
+				"status":     status,
+				"is_primary": status == StatusActive,
+				"derived_at": now,
+			}
+			// last_success 只在有新值时写（不清空既有事实）。
+			if ts := lastSuccessByTriple[t]; ts != nil {
+				updates["last_success"] = *ts
+			}
 			if err := tx.Model(&models.DataSource{}).Where("id = ?", existing.ID).
-				Updates(map[string]interface{}{
-					"status":     status,
-					"is_primary": status == StatusActive,
-					"derived_at": now,
-				}).Error; err != nil {
+				Updates(updates).Error; err != nil {
 				return fmt.Errorf("datasource: update derived source %d: %w", existing.ID, err)
 			}
 			res.Updated++

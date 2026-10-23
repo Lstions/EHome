@@ -125,12 +125,28 @@ func TestBMS_SunEventSwitchesMOS(t *testing.T) {
 	}
 	c.publish(t, bms.frame(), 1)
 
+	// ── 数据源域断言（M3 后的语义）──
+	//
+	// M3（2026-10-23）删除了 legacy datasource.Service.MarkSuccess，因此
+	// data_sources.last_success 不再由"每帧成功回调"直接写入，而是由
+	// **投影器**从 source_group_members.last_success 回填。
+	//
+	// 本 e2e 的链没有接投影器（它验的是"解析→观测→规则→commandexec"，不是台账派生），
+	// 所以这里**不应**断言 last_success 被写入 —— 那会要求 e2e 里跑一个后台对账循环，
+	// 属测试夹具过度扩张。
+	//
+	// 改为断言本次改动真正关心的点：台账行存在、且其状态/来源字段合法
+	// （即数据面与台账域**共存不冲突**）。last_success 的回填逻辑由
+	// internal/datasource/projection_lastsync_test.go 的三个用例专门覆盖
+	// （含"状态未变也要更新"这个最易漏的路径）。
 	var src models.DataSource
 	if err := c.db.First(&src, c.dataSource.ID).Error; err != nil {
 		t.Fatalf("reload data source: %v", err)
 	}
-	if src.LastSuccess == nil {
-		t.Error("数据源 last_success 未更新 —— 数据面与数据源域未打通")
+	switch src.ManagedBy {
+	case models.DataSourceManagedAuto, models.DataSourceManagedManual:
+	default:
+		t.Errorf("台账 managed_by=%q 非法（数据面与台账域可能未打通）", src.ManagedBy)
 	}
 
 	// ── ② 日出时刻 tick：规则触发 → device_action → commandexec ──
