@@ -455,7 +455,7 @@ func main() {
 	//
 	// 为什么放冷路径：生产 unified_data 每 10 分钟约 1.9 万行，任何在采集 sink 里写库的
 	// 设计都会反压 ingest。这里启动一次 + 60s ticker（复用字段解析层 flush 节奏）。
-	sourceProjection := setupSourceProjection(sourceGroupCtx, db, datasourceSvc, sourceGroupSvc, sourceGroupReg)
+	sourceProjection := setupSourceProjection(sourceGroupCtx, db, datasourceSvc, sourceGroupSvc, sourceGroupReg, driverRegistry)
 	go sourceProjection.RunProjection(sourceGroupCtx, db, sourceGroupReg, 60*time.Second)
 
 	// 数据面两条 sink 同时喂两个引擎：解析成功 ⇒ 两边都 MarkSuccess；

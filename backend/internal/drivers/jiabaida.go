@@ -21,20 +21,25 @@ func (d *JiabaidaBMSDriver) OEM() string             { return "嘉佰达" }
 func (d *JiabaidaBMSDriver) Category() string        { return "BMS" }
 func (d *JiabaidaBMSDriver) HardwareTypes() []string { return []string{"uart"} }
 
+// GetSensorDefinitions 返回该驱动的字段声明（含中文描述与语义类型）。
+//
+// LabelZh/ValueType 是**静态知识**（物理名 → 含义），不随帧变化；
+// 它们由 jiaabaida 协议文档的字段表直接映射，改字段名时中文名就在旁边，
+// 不会出现"改了名忘了改描述"的漂移。
 func (d *JiabaidaBMSDriver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
-		{Name: "total_voltage", Unit: "V"},
-		{Name: "current", Unit: "A"},
-		{Name: "remaining_capacity", Unit: "Ah"},
-		{Name: "nominal_capacity", Unit: "Ah"},
-		{Name: "cycle_count", Unit: "次"},
-		{Name: "rsoc", Unit: "%"},
-		{Name: "protection_status", Unit: "bitmask"},
-		{Name: "fet_status", Unit: "bitmask"},
-		{Name: "cell_count", Unit: "串"},
-		{Name: "cell_voltage_max", Unit: "V"},
-		{Name: "cell_voltage_min", Unit: "V"},
-		{Name: "cell_voltage_avg", Unit: "V"},
+		{Name: "total_voltage", Unit: "V", LabelZh: "电池组总电压", ValueType: "number"},
+		{Name: "current", Unit: "A", LabelZh: "电池电流", ValueType: "number"},
+		{Name: "remaining_capacity", Unit: "Ah", LabelZh: "剩余容量", ValueType: "number"},
+		{Name: "nominal_capacity", Unit: "Ah", LabelZh: "标称容量", ValueType: "number"},
+		{Name: "cycle_count", Unit: "次", LabelZh: "循环次数", ValueType: "number"},
+		{Name: "rsoc", Unit: "%", LabelZh: "剩余电量百分比", ValueType: "number"},
+		{Name: "protection_status", Unit: "bitmask", LabelZh: "保护状态位", ValueType: "bitmask"},
+		{Name: "fet_status", Unit: "bitmask", LabelZh: "MOS 管开关状态位", ValueType: "bitmask"},
+		{Name: "cell_count", Unit: "串", LabelZh: "电芯串数", ValueType: "number"},
+		{Name: "cell_voltage_max", Unit: "V", LabelZh: "单体最高电压", ValueType: "number"},
+		{Name: "cell_voltage_min", Unit: "V", LabelZh: "单体最低电压", ValueType: "number"},
+		{Name: "cell_voltage_avg", Unit: "V", LabelZh: "单体平均电压", ValueType: "number"},
 	}
 }
 

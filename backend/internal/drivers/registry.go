@@ -11,6 +11,21 @@ type SensorData struct {
 	Value       float64 `json:"value"`
 	Unit        string  `json:"unit,omitempty"`
 	StringValue string  `json:"string_value,omitempty"` // optional string data (hardware version, serial number, etc.)
+
+	// LabelZh 是该字段的**中文描述**（如 "电池剩余电量"）。
+	//
+	// 只在 GetSensorDefinitions() 里有意义 —— ParseData 返回的运行时数据
+	// 不必填它（字段名与描述的对应关系是**静态知识**，不是每帧数据）。
+	//
+	// 为什么需要它：`sensor_field_meta`（展示元数据表）此前没有任何自动填充源，
+	// 生产实测 0 行 ⇒ 前端"数据描述"列整列空白。驱动是唯一掌握
+	// 「物理名 → 中文含义」的地方，让它声明是最省事且不会漂移的做法
+	// （改字段名时中文名就在旁边，不会忘记同步）。
+	LabelZh string `json:"label_zh,omitempty"`
+
+	// ValueType 是该字段的**语义类型**（number/boolean/enum/bitmask/string/raw）。
+	// 同样只在 GetSensorDefinitions() 里声明；空串 = 未标注（由后端按观测值推断）。
+	ValueType string `json:"value_type,omitempty"`
 }
 
 // Driver is the interface for device drivers

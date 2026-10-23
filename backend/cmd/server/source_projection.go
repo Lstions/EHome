@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/datasource"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/source"
 	"ehome/backend/internal/sourceref"
@@ -35,6 +36,8 @@ type projectionRuntime struct {
 	registry *source.Registry
 	svc      *datasource.Service
 	groupSvc *datasource.GroupService
+	// driverRegistry 用于派生字段展示元数据（类型/中文描述）。
+	driverRegistry *drivers.Registry
 
 	initial dataprojectionStats
 }
@@ -54,12 +57,13 @@ type dataprojectionStats struct {
 // —— 需要读到已发布的组快照作为派生输入。
 func setupSourceProjection(ctx context.Context, db *gorm.DB,
 	svc *datasource.Service, groupSvc *datasource.GroupService,
-	groupReg *sourceref.Registry) *projectionRuntime {
+	groupReg *sourceref.Registry, driverRegistry *drivers.Registry) *projectionRuntime {
 
 	rt := &projectionRuntime{
-		registry: source.NewRegistry(),
-		svc:      svc,
-		groupSvc: groupSvc,
+		registry:       source.NewRegistry(),
+		svc:            svc,
+		groupSvc:       groupSvc,
+		driverRegistry: driverRegistry,
 	}
 
 	// 首次全量对账：让页面在启动后立刻有数据（不必等第一个 ticker 周期）。
@@ -103,6 +107,19 @@ func (rt *projectionRuntime) reconcileOnce(ctx context.Context, db *gorm.DB,
 
 	handles := source.Derive(in)
 	rt.registry.Publish(handles)
+
+	// 字段展示元数据派生（与台账同一节拍）：
+	// sensor_field_meta 此前无任何填充源（生产 0 行）⇒ 前端"数据描述"列空白。
+	// 从驱动静态声明 + 字段名模式派生，只写缺失行（人工登记优先）。
+	if rt.driverRegistry != nil {
+		if names, nerr := rt.svc.ObservedFieldNames(ctx); nerr == nil && len(names) > 0 {
+			if created, cerr := rt.svc.ReconcileFieldMeta(ctx, rt.driverRegistry, names); cerr != nil {
+				logger.Warn("source_projection: 字段元数据派生失败（不影响台账）", "error", cerr)
+			} else if created > 0 {
+				logger.Infof("source_projection: 字段元数据派生 created=%d（共观测 %d 个字段）", created, len(names))
+			}
+		}
+	}
 
 	res, err := rt.svc.ReconcileDerived(ctx, handles)
 	if err != nil {
