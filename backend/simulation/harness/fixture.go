@@ -3,7 +3,7 @@
 // 本文件提供"数据能真正落库"的共用夹具。
 //
 // 为什么必须是共用件：后续 SIM-CHAN/DATA/EDGE/DS/AUTO/ALERT/CMD/OTA/RT 等
-// 数十个场景都需要"让一个仿真节点上报的数据变成 unified_data 行"。若各任务
+// 数十个场景都需要"让一个仿真节点上报的数据变成可读的历史帧"。若各任务
 // 自行发明一套，会产生多份重复实现，且极易各自踩坑（漏 field 7 → 静默变成
 // passive 事件；漏 EdgeDevice → 消费者直接 return；解析器字段对不上 → 不入库）。
 package harness
@@ -61,7 +61,7 @@ const (
 )
 
 // Fixture 是一套"节点 + 通道 + 设备配置(解析器) + 边缘设备"的已就绪组合，
-// 其上报的数据会被真实入库到 unified_data。
+// 其上报的数据会被真实入库到 telemetry_frame（2026-11-08 硬切换后 unified_data 已 DROP）。
 type Fixture struct {
 	Node           *Device
 	NodeID         string
@@ -109,7 +109,7 @@ func buildFixtureParser() json.RawMessage {
 
 // ProvisionSimpleDevice 在场景命名空间内建好
 // 节点 + 通道 + 设备配置(解析器) + 边缘设备，并做一次哨兵上报自检，
-// 确认这条链真的能把数据写进 unified_data。
+// 确认这条链真的能把数据写进帧表并被 /latest-values 读到。
 //
 // 自检的意义：后续场景的失败必须能归因到"场景断言"，而不是"夹具没配好"。
 // 任何一步没打通都会在这里以一个指明步骤的 error 结束。
@@ -190,7 +190,7 @@ func (e *Env) ProvisionSimpleDevice(scenarioID, suffix string) (*Fixture, error)
 	fixture.Node.EdgeDeviceID = uint32(fixture.EdgeDeviceID)
 	fixture.Node.ChannelID = uint32(fixture.ChannelID)
 
-	// 步骤 5：哨兵上报自检 —— 直到该行真的出现在 unified_data 里才算夹具可用。
+	// 步骤 5：哨兵上报自检 —— 直到该值能从 /latest-values 读回来才算夹具可用。
 	if err := fixture.selfCheck(); err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func (f *Fixture) selfCheck() error {
 			lastErr = err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("步骤 5（自检）失败：哨兵上报后 %s 内 unified_data 未出现预期行。"+
+			return fmt.Errorf("步骤 5（自检）失败：哨兵上报后 %s 内 /latest-values 读不到预期值。"+
 				"排查顺序：通道是否创建 / 边缘设备是否绑定 device_config_id / parser JSON 是否合法 / "+
 				"DataReport 是否携带 edge_device_id / 字段名是否匹配。最后错误: %w", fixtureSelfCheckTimeout, lastErr)
 		}

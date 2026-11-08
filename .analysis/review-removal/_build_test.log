@@ -1,0 +1,48 @@
+=== BUILD
+=== VET
+=== VET-SIM
+=== TEST
+?   	ehome/backend/cmd/ehomectl	[no test files]
+ok  	ehome/backend/cmd/server	1.655s
+ok  	ehome/backend/internal/alert	0.725s
+ok  	ehome/backend/internal/api	8.391s
+ok  	ehome/backend/internal/audit	0.090s
+ok  	ehome/backend/internal/auth	1.371s
+ok  	ehome/backend/internal/automation	2.358s
+ok  	ehome/backend/internal/commandexec	3.002s
+ok  	ehome/backend/internal/config	0.007s
+ok  	ehome/backend/internal/database	1.599s
+ok  	ehome/backend/internal/databus	0.678s
+ok  	ehome/backend/internal/datalifecycle	1.973s
+ok  	ehome/backend/internal/datasource	21.008s
+ok  	ehome/backend/internal/dbschema	0.020s
+ok  	ehome/backend/internal/deviceaction	0.225s
+ok  	ehome/backend/internal/deviceinit	0.013s
+ok  	ehome/backend/internal/downlink	0.007s
+ok  	ehome/backend/internal/drivers	0.011s
+ok  	ehome/backend/internal/events	0.002s
+ok  	ehome/backend/internal/ingest	0.005s
+ok  	ehome/backend/internal/logstream	0.040s
+ok  	ehome/backend/internal/models	0.027s
+ok  	ehome/backend/internal/nodemgr	4.016s
+ok  	ehome/backend/internal/notify	6.749s
+ok  	ehome/backend/internal/offlinedetector	0.310s
+ok  	ehome/backend/internal/ota	0.327s
+ok  	ehome/backend/internal/pendingwrite	0.021s
+ok  	ehome/backend/internal/seed	0.095s
+ok  	ehome/backend/internal/sensorfield	0.026s
+ok  	ehome/backend/internal/source	0.005s
+ok  	ehome/backend/internal/sourceref	0.005s
+ok  	ehome/backend/internal/sun	0.114s
+ok  	ehome/backend/internal/terminal	0.116s
+ok  	ehome/backend/internal/transport	3.115s
+ok  	ehome/backend/internal/uartcfg	0.004s
+ok  	ehome/backend/internal/websocket	0.056s
+ok  	ehome/backend/pkg/frame	0.012s
+ok  	ehome/backend/pkg/logger	0.004s
+ok  	ehome/backend/pkg/metrics	0.012s
+ok  	ehome/backend/pkg/parser	0.004s
+ok  	ehome/backend/pkg/protoframe	0.007s
+?   	ehome/backend/scripts/fieldsem	[no test files]
+?   	ehome/backend/scripts/migrate_v21_to_v22	[no test files]
+ok  	ehome/backend/testutil	0.006s

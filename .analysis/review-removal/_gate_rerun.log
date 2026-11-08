@@ -1,0 +1,12 @@
+=== go build ./...
+build_exit=0
+=== go vet ./...
+vet_exit=0
+=== go vet -tags=simulation ./...
+vetsim_exit=0
+=== go test ./... -count=1
+ok  	ehome/backend/internal/api	13.678s
+ok  	ehome/backend/internal/database	2.240s
+ok  	ehome/backend/internal/datalifecycle	1.630s
+ok  	ehome/backend/internal/datasource	20.521s
+ok  	ehome/backend/internal/dbschema	0.037s
