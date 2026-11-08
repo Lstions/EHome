@@ -1,5 +1,19 @@
 # BMS 页慢修复 — 本机性能基线（ehome_bench）
 
+> **历史存档声明（2026-10-23）**
+>
+> 本目录是为「BMS 详情页慢」那次排查留下的**可复现基线**，其中的 SQL 与造数脚本
+> 针对的是**逻辑设备层存在时**的 schema（`unified_data.logical_device_id` 等列）。
+> 该概念层已于 2026-10-23 整体移除（`.contract/logical-device-removal.md`），
+> 这些列在生产/本机库中都已 DROP。因此：
+>
+> - 本目录的 `*.sql` 不能在新 schema 上直接重放（会报 column does not exist）；
+> - 保留它们的目的是**留证**：`baseline-*.json` 与 `explain-*.txt` 里的数字需要
+>   一个能对上号的 SQL 原件；
+> - 需要在新 schema 上重做同类基线时，把 SQL 里的 `logical_device_id IN (...)` /
+>   `logical_device_id IS NULL AND ...` 两个分支整体替换为 `device_id IN (...)`
+>   —— 这正是本次移除带来的简化（旧的两分支 UNION ALL 已不再需要）。
+
 复现生产 BMS 详情页（`edge_devices.id=14`，jiabaida_bms，16 串，1 Hz，29 测点）
 的历史查询成本，供 before（main 旧代码）/ after（worktree 修复代码）对比。
 **本目录脚本只操作本机 docker 的 `ehome-postgres`，不接触生产。**

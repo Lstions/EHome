@@ -353,7 +353,16 @@ test-infra-down: infra-down ## 停止统一基础设施
 # ---- Lint ----
 lint: lint-backend lint-frontend ## 运行全部 lint
 
-lint-backend: ## Go vet 静态检查
+lint-backend: ## Go vet 静态检查 + 临时探针门禁
+	@echo "==> Checking for temp probe files..."
+	@bad=$$(find $(BACKEND) -name 'zz_*_test.go' -o -name 'zz_tmp*' -o -name '*.mutbak' 2>/dev/null); \
+	if [ -n "$$bad" ]; then \
+		echo "❌ 临时探针/变异备份文件不得进 backend/（会让整个包测试编译失败）:"; \
+		echo "$$bad" | sed 's/^/     /'; \
+		echo "   请移到 .tmp-probe/ 或删除"; \
+		exit 1; \
+	fi
+	@echo "✅ no temp probe files"
 	@echo "==> Running go vet..."
 	@cd $(BACKEND) && go vet ./...
 	@echo "✅ go vet passed"

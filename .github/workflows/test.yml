@@ -69,6 +69,18 @@ jobs:
       - name: Go vet (simulation build tag)
         run: go vet -tags=simulation ./...
 
+      # TZ 回归护栏（2026-11-06 实测缺陷的防线）：
+      # pgx 解码 timestamptz 返回的是 time.Local 视角的 time.Time，
+      # 任何「取本地年月却构造 UTC 时刻」的写法在 TZ≠UTC 的机器上都会错位。
+      # 该 job 的容器默认 TZ=UTC，这类缺陷在默认环境里**测不出来**；
+      # runner 是 UTC、生产容器也是 UTC(碰巧)，所以生产同样不会暴露。
+      # 这里显式用 TZ=Asia/Shanghai 再跑一遍，用一行 env 兜住将来所有同类回归。
+      # 失败的最小复现见 backend/internal/datalifecycle/partition_mgr_tz_test.go。
+      - name: Run unit tests (SQLite, TZ=Asia/Shanghai)
+        env:
+          TZ: Asia/Shanghai
+        run: go test -race -count=1 -run 'TestMonthStart|TestPartitionName|TestAddMonths|TestMonthSpanInclusive' ./internal/datalifecycle/
+
       - name: Run unit tests (SQLite)
         run: |
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...

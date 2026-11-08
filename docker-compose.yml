@@ -46,6 +46,29 @@ services:
       EHOME_STATIC_DIR: /app/static/dist
     volumes:
       - ./backend/firmwares:/app/firmwares
+    # 就绪探针 —— 必须用 /readyz，**不能**用 /health：
+    #
+    #   启动期数据库优化（分区迁移 / 补建 F-10 索引 / DROP 死索引）会在
+    #   database.Connect 之前就监听端口（让浏览器能显示维护页进度），
+    #   此时 /health 返回 **200**（进程活着），而 /readyz 返回 **503**
+    #   （业务路由尚未注册）。探 /health 会让编排在迁移没做完时就把流量
+    #   打进来 —— 用户拿到一堆 503 业务错误而不是维护页。
+    #   语义见 docs/设计/启动期数据库优化与进度展示-契约-2026-11-06.md §3.3。
+    #
+    # start_period 给足：首次升级到含 F-10 索引的镜像时，生产要在 69.6M 行上
+    # 补建两条复合索引（实测 +4.51 GB，分钟级 DDL）。这个值应随数据量上调。
+    # 运行期 alpine 自带 busybox wget，无需额外安装。
+    #
+    #   ⚠ 不要给本容器注入 HTTP_PROXY / HTTPS_PROXY：运行镜像是 alpine（busybox wget），
+    #   它**不认 no_proxy**，连 http://localhost:8080 也会走代理 ⇒ 探针永远 unhealthy，
+    #   表现为「服务明明能用但一直重启/不健康」。2026-11-06 实测：清空代理变量后
+    #   200→exit 0、503→exit 1、连接拒绝→exit 1，语义正确。
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
     depends_on:
       postgres:
         condition: service_healthy
