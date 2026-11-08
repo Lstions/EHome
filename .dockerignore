@@ -1,0 +1,17 @@
+# 构建上下文必须瘦身：本仓 .analysis(526M) + .tmp-telemetry(251M) + .git 全进上下文，
+# 会让 docker build 在 "Sending build context" 阶段卡十几分钟。
+# 镜像只需要 backend/ + frontend-shared/ + Dockerfile。
+.git
+.analysis
+.tmp-*
+build-*
+.agents
+__scratch*
+docs
+scripts
+esp32-collector
+simulation
+**/node_modules
+**/dist
+**/bin
+*.tar.gz
