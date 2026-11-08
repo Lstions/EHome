@@ -38,8 +38,14 @@ export const BANNED_TERMS: Record<string, string> = {
 export const REGISTERED_EXCEPTIONS: { term: string; count: number; reason: string }[] = [
   {
     term: '设备类型',
-    count: 13,
-    reason: '需产品措辞裁定；改动会触及 2 条逐字断言文案的测试，见 docs/分析/后续工作计划与方案-2026-09-15.md',
+    // 13 → 11（2026-10-23 销账）：逻辑设备移除时删除了 views/logical-device/
+    // LogicalDeviceList.vue，该文件贡献了 2 处「设备类型」。这不是"放宽断言"，
+    // 而是按本门禁的 fail-closed 规则把分母改成实测值（少了要销账）。
+    // 剩余 11 处仍待产品措辞裁定（术语表 §4 裁定为「设备型号」），原理由保留：
+    // 需产品措辞裁定；改动会触及 2 条逐字断言文案的测试，
+    // 见 docs/分析/后续工作计划与方案-2026-09-15.md
+    count: 11,
+    reason: '需产品措辞裁定；改动会触及 2 条逐字断言文案的测试，见 docs/分析/后续工作计划与方案-2026-09-15.md（2026-10-23 由 13 降为 11：删除逻辑设备页贡献的 2 处）',
   },
 ]
 

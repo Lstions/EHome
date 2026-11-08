@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { defineComponent, h, type VNode } from 'vue'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
 import type { EdgeDeviceListParams } from '@/api/edgeDevice'
@@ -8,27 +9,54 @@ import type { EdgeDeviceListParams } from '@/api/edgeDevice'
 // 显式标注 mock 签名: 无参 `vi.fn(() => ...)` 会把 `mock.calls` 推成 `[][]`
 // (长度 0 的元组), 之后读 `calls[0][0]` 会报 TS2493。标注后 calls 是
 // `[params?, force?][]`, 既能断言参数、也不需要任何 `as any`。
-const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands, mockGetCapabilities } = vi.hoisted(() => ({
+const {
+  mockEdgeDeviceGetList,
+  mockGetDataSummary,
+  mockGetDriverCommands,
+  mockGetCapabilities,
+  mockGetDeleted,
+  mockBatchUpdate,
+  mockBatchDeleteHistory,
+} = vi.hoisted(() => ({
   // D6：向导「硬件ID」下拉的真源是设备上报能力（GET /nodes/:id/capabilities）
   mockGetCapabilities: vi.fn((..._args: any[]) => Promise.resolve({ buses: {} })),
   mockEdgeDeviceGetList: vi.fn<(params?: EdgeDeviceListParams) => Promise<{ items: unknown[]; total: number }>>(() => Promise.resolve({
     items: [
-      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
+      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', channel_id: 3 },
       { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
     ],
     total: 2,
   })),
-  mockGetLogicalDeviceInfo: vi.fn(() => Promise.resolve({
-    edge_device_id: 1,
-    name: 'Logic-A',
-    logical_device_id: 11,
-    retention_days: 30,
-    instance_count: 2,
-    row_estimate: 500,
+  // 2026-10-23 逻辑设备移除：删除弹窗的数据量来源改为 data-summary；
+  // 2026-10-25 新契约：目标自身行数走 target/target_rows（不再有 items/total_rows）。
+  mockGetDataSummary: vi.fn(() => Promise.resolve({
+    target: { source_id: 1, device_name: 'Device A', state: 'live', rows: 500, first_time: null, last_time: null },
+    sources: [],
+    target_rows: 500,
   })),
   // EDGE-WIZ-004/005: 默认返回空指令集 (普通驱动); 具体测试按需覆盖为
   // jiabaida_bms 的 5 条 schedulable 指令。
   mockGetDriverCommands: vi.fn((..._args: any[]) => Promise.resolve([])),
+  // 2026-10-25 历史设备视图 / 批量管理（显式标注签名：每行/每条结果都是对象，
+  // 无注解时 vi.fn 会把 results 推成 never[]，后续 mockResolvedValue 无法赋值）
+  mockGetDeleted: vi.fn<(params?: Record<string, unknown>) => Promise<{
+    items: Array<Record<string, unknown>>
+    total: number
+    page: number
+    page_size: number
+  }>>(() => Promise.resolve({ items: [], total: 0, page: 1, page_size: 20 })),
+  mockBatchUpdate: vi.fn<(ids: number[], payload: Record<string, unknown>) => Promise<{
+    total: number
+    succeeded: number
+    failed: number
+    results: Array<{ id: number; success: boolean; error?: string }>
+  }>>(() => Promise.resolve({ total: 0, succeeded: 0, failed: 0, results: [] })),
+  mockBatchDeleteHistory: vi.fn<(ids: number[]) => Promise<{
+    total: number
+    succeeded: number
+    failed: number
+    results: Array<{ id: number; success: boolean; error?: string; queued?: boolean }>
+  }>>(() => Promise.resolve({ total: 0, succeeded: 0, failed: 0, results: [] })),
 }))
 
 vi.mock('element-plus', () => ({
@@ -55,9 +83,14 @@ vi.mock('@/api/edgeDevice', () => ({
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
-    getLogicalDeviceInfo: mockGetLogicalDeviceInfo,
-    // 方案 v3.3 §1.3: 步骤 0 候选组件依赖; 测试默认空候选集
-    getCandidates: vi.fn(() => Promise.resolve([])),
+    getDataSummary: mockGetDataSummary,
+    // 恢复/合并入口依赖（契约 §4.2/§4.3）+ 历史设备视图
+    getDeleted: mockGetDeleted,
+    restore: vi.fn(),
+    mergeHistory: vi.fn(() => Promise.resolve({ rows_migrated: 0, sources: [], warnings: [] })),
+    // 2026-10-25 批量管理 / 历史彻底删除
+    batchUpdate: mockBatchUpdate,
+    batchDeleteHistory: mockBatchDeleteHistory,
     // EDGE-WIZ-004/005: 创建向导逐指令轮询间隔依赖
     getDriverCommands: mockGetDriverCommands,
   },
@@ -297,9 +330,12 @@ describe('EdgeDeviceList.vue', () => {
   })
 
   it('invalidates caches and forces refresh after writes and deletion batches', () => {
-    expect(source.match(/await fetchDevices\(true\)/g)).toHaveLength(2)
-    expect(source.match(/await fetchDevices\(true, true\)/g)).toHaveLength(2)
-    expect(source.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
+    // 计数由精确值改为「至少 N 次」：2026-10-23 新增「恢复已删除设备」「合并历史数据」
+    // 两个写入口后各多了一次强制刷新，2 → 4。判据本意是「每个写路径都必须
+    // invalidate + 强制重取」，精确等于 2 会把**新增的正确写路径**误判成回归。
+    expect(source.match(/await fetchDevices\(true\)/g)!.length).toBeGreaterThanOrEqual(2)
+    expect(source.match(/await fetchDevices\(true, true\)/g)!).toHaveLength(2)
+    expect(source.match(/edgeDeviceStore\.invalidateLists\(\)/g)!.length).toBeGreaterThanOrEqual(2)
     expect(source).toContain('confirmBatchDeleteBase(deleteData)')
     expect(source).toContain('assertSessionGeneration(sessionGeneration)')
   })
@@ -333,11 +369,12 @@ describe('EdgeDeviceList.vue', () => {
   // P1-1: 编辑模式不走向导——隐藏步骤指示器与前三步,只改基本信息,且不传 type。
   // (步骤编号含 v3.3 §3.1 新增的步骤 0"历史数据继承": 0=继承 1=型号 2=通道 3=基本信息)
   it('P1-1: edit mode bypasses the wizard and never resubmits type', () => {
+    // 步骤编号 2026-10-23 整体前移一位（原「历史数据继承」步删除）：
+    // 0=型号 1=通道 2=基本信息；编辑模式仍只显示最后一步。
     expect(source).toContain('v-if="!editingDeviceId" :active="createStep"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 0"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 1"')
-    expect(source).toContain('v-show="!editingDeviceId && createStep === 2"')
-    expect(source).toContain('v-show="editingDeviceId || createStep === 3"')
+    expect(source).toContain('v-show="editingDeviceId || createStep === 2"')
     expect(source).toContain('保存修改')
     // 编辑提交不得携带 type(后端 G1 在 device_config_id>0 时拒绝)
     const editBlock = source.slice(source.indexOf('if (frozenEditingDeviceId) {'))
@@ -368,7 +405,7 @@ describe('EdgeDeviceList.vue', () => {
 
   // ---- 数据生命周期 T2: 删除确认弹窗改造 (方案 v3.3 §2.1/§2.2) ----
 
-  it('单删: 卡片视图点击删除打开 DeviceDeleteDialog 并异步加载逻辑设备信息', async () => {
+  it('单删: 卡片视图点击删除打开 DeviceDeleteDialog 并异步加载本设备数据量', async () => {
     const wrapper = mountList()
     await flushPromises()
 
@@ -383,11 +420,12 @@ describe('EdgeDeviceList.vue', () => {
     expect(dialog.exists()).toBe(true)
     expect(dialog.text()).toContain('Device A')
     expect(dialog.text()).toContain('删除边缘设备')
-    // 信息区异步加载完成 (mock resolve)
-    expect(mockGetLogicalDeviceInfo).toHaveBeenCalledWith(1)
-    expect(dialog.text()).toContain('Logic-A')
+    // 数据量区异步加载完成 (mock resolve)：口径是「本设备作为唯一 source」
+    expect(mockGetDataSummary).toHaveBeenCalledWith(1, [1])
     expect(dialog.text()).toContain('约 500 条')
-    expect(dialog.text()).toContain('保留 30 天')
+    expect(dialog.text()).toContain('系统级')
+    // 逻辑设备概念已移除：弹窗里不得再出现该词
+    expect(dialog.text()).not.toContain('逻辑设备')
   })
 
   it('单删: 默认保留历史数据 → delete_data=false 提交', async () => {
@@ -425,7 +463,7 @@ describe('EdgeDeviceList.vue', () => {
   })
 
   it('单删: 信息请求失败降级 — 信息区不显示但删除仍可提交', async () => {
-    mockGetLogicalDeviceInfo.mockImplementationOnce(() => Promise.reject(new Error('network down')))
+    mockGetDataSummary.mockImplementationOnce(() => Promise.reject(new Error('network down')))
     const { edgeDeviceApi } = await import('@/api/edgeDevice')
     const wrapper = mountList()
     await flushPromises()
@@ -436,14 +474,14 @@ describe('EdgeDeviceList.vue', () => {
     const dialog = wrapper.find('.el-dialog')
     expect(dialog.exists()).toBe(true)
     expect(dialog.text()).toContain('Device A')
-    expect(dialog.find('.logical-info').exists()).toBe(false)
+    expect(dialog.find('.data-info').exists()).toBe(false)
 
     await wrapper.find('.el-dialog__footer .el-button--danger').trigger('click')
     await flushPromises()
     expect(edgeDeviceApi.delete).toHaveBeenCalledWith(1, { delete_data: false })
   })
 
-  it('批删: 表格多选打开汇总弹窗, 展示 N 台/M 台逻辑设备, 统一 radio 默认保留', async () => {
+  it('批删: 表格多选打开汇总弹窗, 只报台数（不再统计逻辑设备）, 统一 radio 默认保留', async () => {
     const wrapper = mountList()
     await flushPromises()
 
@@ -453,7 +491,7 @@ describe('EdgeDeviceList.vue', () => {
     await tableModeButton!.trigger('click')
     await flushPromises()
 
-    // 勾选两行 (Device A 有 logical_device_id, Device B 无)
+    // 勾选两行
     const checkboxes = wrapper.findAll('.el-table__row-checkbox')
     expect(checkboxes).toHaveLength(2)
     await checkboxes[0].setValue(true)
@@ -471,8 +509,8 @@ describe('EdgeDeviceList.vue', () => {
     expect(dialog.text()).toContain('批量删除确认')
     expect(dialog.text()).toContain('将删除')
     expect(dialog.text()).toContain('2')
-    expect(dialog.text()).toContain('1')
-    expect(dialog.text()).toContain('逻辑设备')
+    // 2026-10-23 逻辑设备移除：原「其中 M 台属于逻辑设备」统计口径已删除
+    expect(dialog.text()).not.toContain('逻辑设备')
 
     // 统一 radio 默认全部保留
     const radios = dialog.findAll('.data-action-group input[type="radio"]')
@@ -525,14 +563,52 @@ describe('EdgeDeviceList.vue', () => {
     expect(cardClose).toBeLessThan(cardListStart)
   })
 
-  it('窄屏操作列收窄到 96px 并给行内图标按钮补触控热区 (源码契约)', () => {
-    // 原 160px 固定操作列在 390px 视口占 41%：三个按钮都只有图标，96px 足够
-    expect(source).toContain('<el-table-column label="操作" width="96" fixed="right">')
+  it('窄屏操作列收窄到图标列并给行内图标按钮补触控热区 (源码契约)', () => {
+    // 2026-10-23 新增「合并历史数据」后 3 → 4 个图标按钮。
+    // 2026-10-25 修正：全局 .touch-target / .el-table .el-button--small 的 min-width
+    // 都是 36px（theme.css:871,919-922），加上 .cell 左右 12px padding，单行需要
+    // ≥ 4×36 + 24 = 168px；旧值 128px（按"4×32"算错）会把按钮挤成 2 行（Chromium 实测）。
+    expect(source).toContain('<el-table-column label="操作" width="168" fixed="right">')
+    expect(source).not.toContain('<el-table-column label="操作" width="128" fixed="right">')
     expect(source).not.toContain('<el-table-column label="操作" width="160" fixed="right">')
     // 每个行内图标按钮都有可访问名称 + 热区类
     expect(source).toContain('class="touch-target" :aria-label="`查看 ${row.name}`"')
     expect(source).toContain('class="touch-target" :aria-label="`编辑 ${row.name}`"')
     expect(source).toContain('class="touch-target" :aria-label="`删除 ${row.name}`"')
+  })
+
+  it('合并结果刷新：rows>0 强制重取列表；rows=0 不刷新但 warnings 要提示', async () => {
+    const { useEdgeDeviceStore } = await import('@/stores/edgeDevice')
+    const store = useEdgeDeviceStore()
+    const fetchSpy = vi.spyOn(store, 'fetchList')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    // rows>0：目标数据量/最后采集变了 ⇒ 强制重取（force=true）
+    fetchSpy.mockClear()
+    await vm.handleMerged({ targetId: 1, rowsMigrated: 500, warnings: [] })
+    await flushPromises()
+    expect(fetchSpy).toHaveBeenCalled()
+    expect(fetchSpy.mock.calls.at(-1)![1]).toBe(true)
+
+    // rows=0 且无告警：没有任何数据变化，不发无效刷新
+    fetchSpy.mockClear()
+    await vm.handleMerged({ targetId: 1, rowsMigrated: 0, warnings: [] })
+    await flushPromises()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    // rows=0 但有 warnings：如实提示（不刷新数据，因为没有迁移行）
+    const { ElMessage } = await import('element-plus')
+    await vm.handleMerged({ targetId: 1, rowsMigrated: 0, warnings: ['人工 data_sources 冲突'] })
+    await flushPromises()
+    expect(ElMessage.warning).toHaveBeenCalled()
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    // 产品重做后不再有 retiredSources 概念
+    expect(source).not.toContain('retiredSources')
+    expect(source).not.toContain('retired_sources')
+    fetchSpy.mockRestore()
   })
 
   it('删除弹窗不再使用 ElMessageBox (源码契约)', () => {
@@ -542,47 +618,43 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain('useDeviceDelete')
   })
 
-  // ---- 数据生命周期 T5: 创建继承 步骤 0 (方案 v3.3 §3.1/§3.2) ----
+  // ---- 2026-10-23 逻辑设备移除：原「步骤 0 历史数据继承」两条用例随该步骤
+  // 一并删除（承接历史改由设备页的「恢复已删除设备」「合并历史数据」入口完成，
+  // 见契约 §4.2/§4.3）。下面三条用例改为守住「继承概念不得复活」。
 
-  it('步骤0: 向导默认"作为新设备创建", 不渲染候选组件', async () => {
-    const wrapper = mountList()
-    await flushPromises()
-    // 打开创建对话框
-    const createBtn = wrapper.findAll('button').find(b => b.text().includes('创建边缘设备'))
-    expect(createBtn).toBeTruthy()
-    await createBtn!.trigger('click')
-    await flushPromises()
-
-    const dialog = wrapper.find('.el-dialog')
-    expect(dialog.exists()).toBe(true)
-    // 步骤指示器含新增的步骤 0 (ElSteps/ElStep 为通用 stub 不渲染 title prop,
-    // 用源码契约断言步骤标题)
-    expect(source).toContain('<el-step title="历史数据继承" />')
-    expect(dialog.text()).toContain('此设备是否要继承历史数据')
-    // 默认 radio = 作为新设备创建 (is-checked 在第一个 radio 上)
-    const radios = dialog.findAll('.inherit-mode-radio input[type="radio"]')
-    expect(radios.length).toBe(2)
-    expect((radios[0].element as HTMLInputElement).checked).toBe(true)
-    expect((radios[1].element as HTMLInputElement).checked).toBe(false)
-    // 未选"继承" → 候选组件不渲染
-    expect(dialog.find('.inherit-candidate-area').exists()).toBe(false)
+  it('创建向导不再有「历史数据继承」步骤，也不再有继承模式/候选组件', () => {
+    expect(source).not.toContain('<el-step title="历史数据继承" />')
+    expect(source).not.toContain('inheritMode')
+    expect(source).not.toContain('inheritLogicalDeviceId')
+    expect(source).not.toContain('LogicalDeviceCandidateSelect')
+    expect(source).not.toContain('logical_device_id')
   })
 
-  it('步骤0: 选"继承历史数据"展开候选组件, 型号未选时显示引导', async () => {
-    const wrapper = mountList()
-    await flushPromises()
-    const createBtn = wrapper.findAll('button').find(b => b.text().includes('创建边缘设备'))
-    await createBtn!.trigger('click')
-    await flushPromises()
+  it('创建向导步骤指示器就是三步：型号 / 节点&通道 / 基本信息', () => {
+    expect(source).toContain('<el-step title="选择设备型号" />')
+    expect(source).toContain('<el-step title="选择节点 & 通道" />')
+    expect(source).toContain('<el-step title="基本信息" />')
+  })
 
-    const dialog = wrapper.find('.el-dialog')
-    const radios = dialog.findAll('.inherit-mode-radio input[type="radio"]')
-    await radios[1].setValue(true)
-    await flushPromises()
+  it('编辑模式开放「所属节点 + 通道」并提交 channel_id（契约 §4.1，换节点后历史连续）', () => {
+    expect(source).toContain('data-test="edit-node"')
+    expect(source).toContain('data-test="edit-channel"')
+    expect(source).toContain('const handleEditNodeChange = () => {')
+    // 切节点必须清空已选通道（旧通道一定不属于新节点）
+    expect(source).toContain('deviceForm.channel_id = null')
+    // 提交体必须真的带 channel_id（否则后端 400 channel does not belong to node）
+    expect(source).toContain('channel_id: frozenDeviceForm.channel_id,')
+  })
 
-    expect(dialog.find('.inherit-candidate-area').exists()).toBe(true)
-    // 步骤 0 时型号未选 (type=''), 候选组件显示"先选型号"引导而非空列表
-    expect(dialog.find('[data-testid="candidate-awaiting-type"]').exists()).toBe(true)
+  it('边缘设备页提供「恢复已删除设备」与「合并历史数据」两个入口（契约 §4.2/§4.3）', () => {
+    expect(source).toContain('DeviceRestoreDialog')
+    expect(source).toContain('DeviceMergeHistoryDialog')
+    expect(source).toContain('data-test="open-restore"')
+    expect(source).toContain('openMergeDialog')
+    expect(source).toContain('handleRestored')
+    expect(source).toContain('handleMerged')
+    // 2026-10-25 产品重做：合并弹窗不能再拿到"当前页存活设备"（源只能是已删除同型号设备）
+    expect(source).not.toContain(':devices="devices"')
   })
 
   // ---- EDGE-WIZ-003: 打开创建向导强制刷新通道 ----
@@ -684,7 +756,8 @@ describe('EdgeDeviceList.vue', () => {
     vm.deviceForm.node_id = 'node-1'
     vm.deviceForm.name = 'BMP280-1'
     vm.channelTab = 'create'
-    vm.createStep = 2
+    // 步骤编号前移一位（2026-10-23 删除「历史数据继承」步）：通道/节点步 = 1
+    vm.createStep = 1
     vm.newChannel.hardware_type = 'spi'
     vm.newChannel.hardware_id = ''
     await flushPromises()
@@ -711,7 +784,7 @@ describe('EdgeDeviceList.vue', () => {
     vm2.selectedParser = { id: 'bmp280', name: 'BMP280', hardware_types: ['spi'] }
     vm2.deviceForm.node_id = 'node-1'
     vm2.channelTab = 'create'
-    vm2.createStep = 2
+    vm2.createStep = 1
     vm2.newChannel.hardware_type = 'spi'
     vm2.newChannel.hardware_id = 'SPI2'
     await flushPromises()
@@ -934,28 +1007,22 @@ describe('EdgeDeviceList.vue', () => {
     expect(edgeDeviceApi.create).not.toHaveBeenCalled()
   })
 
-  it('步骤0: 默认与选"继承"均可进入下一步 (候选依赖型号, 提交时拦截)', () => {
-    // 交互死锁防护: 候选列表依赖设备型号 (步骤 1), 若步骤 0 要求先选候选
-    // 才能进步骤 1 会形成死锁; 故步骤 0 恒可过, 拦截逻辑在 handleCreate。
-    expect(source).toContain('if (createStep.value === 0) return true')
-    expect(source).toContain("inheritMode.value === 'inherit' && inheritLogicalDeviceId.value === null")
-    expect(source).toContain('已选择"继承历史数据"但未选中候选逻辑设备')
-  })
+  // 2026-10-23 逻辑设备移除：原「步骤0 恒可过」「创建携带/不携带 logical_device_id」
+  // 「选继承但未选候选则拦截」「关闭清空继承状态」五条用例整体删除 —— 它们守护的
+  // 对象（继承模式、候选选择器、logical_device_id 提交参数）已全部不存在。
+  // 替代守护见上方的「继承概念不得复活」与两个新入口用例。
 
-  it('创建: "作为新设备创建"不携带 logical_device_id', async () => {
+  it('创建: 提交体不再含 logical_device_id（继承概念已下线）', async () => {
     const { edgeDeviceApi } = await import('@/api/edgeDevice')
     const wrapper = mountList()
     await flushPromises()
     const vm = wrapper.vm as any
 
-    // 构造创建上下文: 型号 + 已有通道 + 表单
     vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
     vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
     vm.channelTab = 'existing'
     vm.deviceForm.name = '新雨量计'
     vm.deviceForm.node_id = 1
-    vm.inheritMode = 'new'
-    vm.inheritLogicalDeviceId = null
     vm.deviceFormRef = { validate: () => Promise.resolve(), resetFields: () => {} }
     await vm.handleCreate()
     await flushPromises()
@@ -971,68 +1038,13 @@ describe('EdgeDeviceList.vue', () => {
     expect(arg.logical_device_id).toBeUndefined()
   })
 
-  it('创建: 选"继承"且已选候选 → create 携带 logical_device_id', async () => {
-    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+  it('创建对话框关闭后向导回到第 0 步（三步向导）', async () => {
     const wrapper = mountList()
     await flushPromises()
     const vm = wrapper.vm as any
 
-    vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
-    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
-    vm.channelTab = 'existing'
-    vm.deviceForm.name = '雨量计-重建'
-    vm.deviceForm.node_id = 1
-    vm.inheritMode = 'inherit'
-    vm.inheritLogicalDeviceId = 42
-    vm.deviceFormRef = { validate: () => Promise.resolve() }
-    await vm.handleCreate()
-    await flushPromises()
-
-    expect(edgeDeviceApi.create).toHaveBeenCalledWith(expect.objectContaining({
-      name: '雨量计-重建',
-      logical_device_id: 42,
-    }))
-  })
-
-  it('创建: 选"继承"但未选候选 → 提交拦截, 不调 create', async () => {
-    const { edgeDeviceApi } = await import('@/api/edgeDevice')
-    const { ElMessage } = await import('element-plus')
-    const wrapper = mountList()
-    await flushPromises()
-    const vm = wrapper.vm as any
-
-    vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
-    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
-    vm.channelTab = 'existing'
-    vm.deviceForm.name = '雨量计'
-    vm.deviceForm.node_id = 1
-    vm.inheritMode = 'inherit'
-    vm.inheritLogicalDeviceId = null
-    vm.deviceFormRef = { validate: () => Promise.resolve() }
-    await vm.handleCreate()
-    await flushPromises()
-
-    expect(edgeDeviceApi.create).not.toHaveBeenCalled()
-    // 回归点（2026-10-06 现场"点创建没有任何反应"）：拦截时**必须把用户送回
-    // 第 0 步**。候选选择器就在第 0 步（v-if inheritMode==='inherit' + v-show 控制），
-    // 用户在步骤 3 提交时它不在视口 —— 只弹 toast 的话，提示语指向的是
-    // 一个他看不见的控件，按钮态与对话框又都不变，于是表现为"点了没反应"。
-    expect(vm.createStep).toBe(0)
-    expect(ElMessage.warning).toHaveBeenCalledWith(
-      expect.objectContaining({ message: expect.stringContaining('未选中候选逻辑设备') }),
-    )
-  })
-
-  it('创建对话框关闭/重置清空继承状态', async () => {
-    const wrapper = mountList()
-    await flushPromises()
-    const vm = wrapper.vm as any
-
-    vm.inheritMode = 'inherit'
-    vm.inheritLogicalDeviceId = 7
+    vm.createStep = 2
     vm.resetCreateDialog()
-    expect(vm.inheritMode).toBe('new')
-    expect(vm.inheritLogicalDeviceId).toBeNull()
     expect(vm.createStep).toBe(0)
   })
 })
@@ -1045,30 +1057,372 @@ describe('EdgeDeviceList.vue', () => {
   // 对不上，修一个显示错误不该引入一个新的对不上。
   //
   // 修法不是加第 5 张卡：移动端契约（views/__tests__/MobileStatCardsResponsive.spec.ts:118）
-  // 钉死了本页 ≤768px 必须是 4 张卡（grid repeat(4,…)）。故第三张卡承载
-  // 「离线/异常 + 等待数据」，并在卡内单列"等待数据 N"。
-  // 不变量：total = online + (offline + pending)。
-  //
-  // 它凭什么会失败：把第三张卡的 value 从 `stats.offline + stats.pending`
-  // 改回 `stats.offline`，第一与第三条断言立刻红。
-  // ===================================================================
-  it("统计不变量：在线 + 非在线(离线/异常+等待数据) = 总数", () => {
-    // 复用文件顶部已导入的 ?raw 源码（与其它源码级断言同一来源）。
-    // pending 必须被单独统计（否则它既不进在线也不进非在线，三卡之和小于总数）
-    expect(source).toContain("stats.pending = allVisible.filter")
-    // 第三张卡的数字必须把 pending 算进去，等式才成立
-    expect(
-      source,
-      "「离线/异常」卡必须 = offline + pending，否则三卡之和小于总数（用户会看到数字对不上）",
-    ).toContain("stats.offline + stats.pending")
-    // pending 不得被计入在线（缺陷 5 的核心：没数据不能算在线）
-    expect(source).not.toMatch(/stats\.online\s*=[^\n]*pending/)
-    // pending 也不得被并进 stats.offline 本身：它要与"真离线"保持可区分，
-    // 否则卡内无法单列"等待数据 N"，也就丢失了缺陷 5 要表达的语义。
-    expect(source).not.toMatch(/stats\.offline\s*=[^\n]*pending/)
-    // 卡内必须真的把等待数据单列出来，用户才能区分两者
-    expect(source).toContain("等待数据 {{ stats.pending }}")
-    // 且不得新增第 5 张卡（移动端 4 卡契约）
-    const cardCount = [...source.matchAll(/<StatCard/g)].length
-    expect(cardCount, "EdgeDeviceList 必须保持 4 张统计卡（移动端布局契约）").toBe(4)
+
+// ══════════════════════════════════════════════════════════════════════
+// 2026-10-25 产品需求：批量管理 + 历史设备视图
+// ══════════════════════════════════════════════════════════════════════
+
+const historyRow = (overrides: Record<string, unknown> = {}) => ({
+  id: 31,
+  name: '旧BMS',
+  device_type: 'jiabaida_bms',
+  hardware_id: '1',
+  node_id: 'F0F5BDFFFE02',
+  channel_id: 3,
+  deleted_at: '2026-10-20T10:00:00',
+  last_data_at: '2026-10-19T09:00:00',
+  row_estimate: 1234,
+  data_purge_requested: false,
+  purge_in_progress: false,
+  ...overrides,
+})
+
+const activeDevice = (id: number, name: string) => ({
+  id,
+  name,
+  status: 'active',
+  device_type: 'temp_humidity',
+  hardware_type: 'uart',
+  channel_id: 3,
+  config: { interval_ms: 5000 },
+})
+
+/** 能执行列插槽的表格替身（行操作按钮/状态 tag 才可断言；全局 ElTable stub 只拼原始值）。 */
+function slotTableForList() {
+  const SlotColumn = defineComponent({
+    props: { label: String, prop: String, width: [String, Number], minWidth: [String, Number], type: String, fixed: [String, Boolean] },
+    setup(_, { slots }) {
+      return () => slots.default?.() ?? null
+    },
   })
+  const SlotTable = defineComponent({
+    props: { data: { type: Array, default: () => [] }, rowKey: [String, Function] },
+    emits: ['selection-change'],
+    setup(props, { slots }) {
+      return () => {
+        const columns = ((slots.default?.() ?? []) as VNode[]).flat().filter(Boolean) as VNode[]
+        const rows = props.data as Array<Record<string, unknown>>
+        return h('table', { class: 'el-table' }, [
+          h('tbody', rows.map((row, index) => h('tr', { key: String(row?.id ?? index) },
+            columns.map((vn) => {
+              const scoped = vn.children as Record<string, unknown> | undefined
+              const fn = scoped?.['default'] as ((p: { row: unknown }) => unknown) | undefined
+              if (!fn) return h('td', { class: 'el-table__cell' }, '')
+              return h('td', { class: 'el-table__cell' }, fn({ row }) as never)
+            }),
+          ))),
+        ])
+      }
+    },
+  })
+  return { ElTable: SlotTable, 'el-table': SlotTable, ElTableColumn: SlotColumn, 'el-table-column': SlotColumn }
+}
+
+const mountListWithSlots = () =>
+  mount(EdgeDeviceList, {
+    global: { stubs: { ...stubs, ...slotTableForList() } },
+  })
+
+async function switchToHistory(wrapper: ReturnType<typeof mount>) {
+  const radios = wrapper.findAll('.el-radio-button')
+  expect(radios.length, '未找到在役/历史切换按钮').toBeGreaterThanOrEqual(2)
+  await radios[1].trigger('click')
+  await flushPromises()
+}
+
+const selectActiveRows = async (wrapper: ReturnType<typeof mount>, rows: unknown[]) => {
+  const vm = wrapper.vm as any
+  vm.viewMode = 'table'
+  await flushPromises()
+  vm.handleSelectionChange(rows)
+  await flushPromises()
+}
+
+describe('EdgeDeviceList 批量管理 + 历史设备视图（2026-10-25）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    localStorage.clear()
+    sessionStorage.clear()
+    mockEdgeDeviceGetList.mockResolvedValue({
+      items: [activeDevice(1, 'Device A'), activeDevice(2, 'Device B')],
+      total: 2,
+    })
+    mockGetDeleted.mockResolvedValue({ items: [historyRow()], total: 1, page: 1, page_size: 20 })
+    mockBatchUpdate.mockResolvedValue({
+      total: 2,
+      succeeded: 2,
+      failed: 0,
+      results: [{ id: 1, success: true }, { id: 2, success: true }],
+    })
+    mockBatchDeleteHistory.mockResolvedValue({
+      total: 1,
+      succeeded: 1,
+      failed: 0,
+      results: [{ id: 31, success: true, queued: true }],
+    })
+  })
+
+  it('切到历史 Tab：按分页/类型/搜索请求 getDeleted，并渲染历史行与概览', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    await switchToHistory(wrapper)
+
+    expect(mockGetDeleted).toHaveBeenCalledWith({ page: 1, page_size: 20 })
+    expect(wrapper.text()).toContain('共 1 台历史设备')
+    expect(wrapper.text()).toContain('旧BMS')
+    // 与在役视图共用类型筛选 → 服务端 device_type 过滤
+    ;(wrapper.vm as any).typeFilter = 'jiabaida_bms'
+    await flushPromises()
+    expect(mockGetDeleted).toHaveBeenLastCalledWith({ page: 1, page_size: 20, device_type: 'jiabaida_bms' })
+    // 共用搜索框（300ms 防抖）→ 服务端 search
+    ;(wrapper.vm as any).searchKeyword = 'bms'
+    await new Promise(resolve => setTimeout(resolve, 350))
+    await flushPromises()
+    expect(mockGetDeleted.mock.calls.at(-1)![0]).toMatchObject({ search: 'bms' })
+  })
+
+  it('历史分页：total>0 显示分页器，翻页重新请求 page=2', async () => {
+    mockGetDeleted.mockResolvedValue({ items: [historyRow()], total: 61, page: 1, page_size: 20 })
+    const wrapper = mountList()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    const pager = wrapper.find('[data-test="history-pagination"]')
+    expect(pager.exists()).toBe(true)
+    await pager.find('.el-pagination').trigger('click')
+    await flushPromises()
+    expect(mockGetDeleted).toHaveBeenLastCalledWith({ page: 2, page_size: 20 })
+  })
+
+  it('历史空态：说明历史设备是什么、如何恢复（含恢复入口按钮）', async () => {
+    mockGetDeleted.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+    const wrapper = mountList()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    const empty = wrapper.find('[data-test="history-empty"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('历史设备')
+    expect(empty.text()).toContain('数据默认保留')
+    expect(empty.text()).toContain('恢复')
+    expect(empty.text()).toContain('彻底删除')
+    expect(wrapper.find('[data-test="history-empty-restore"]').exists()).toBe(true)
+  })
+
+  it('历史行「恢复」：打开恢复弹窗并传 initialDeviceId 预展开该设备', async () => {
+    const wrapper = mountListWithSlots()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    await wrapper.find('[data-test="history-restore"]').trigger('click')
+    await flushPromises()
+    const { default: DeviceRestoreDialog } = await import('@/components/device/DeviceRestoreDialog.vue')
+    const dialog = wrapper.findComponent(DeviceRestoreDialog)
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.props('visible')).toBe(true)
+    expect(dialog.props('initialDeviceId')).toBe(31)
+  })
+
+  it('历史行「彻底删除」：二次确认文案明确不可恢复 → batchDeleteHistory([id]) → 刷新', async () => {
+    const { feedback } = await import('@/utils/feedback')
+    const confirmSpy = vi.spyOn(feedback, 'confirmDanger').mockResolvedValue(true)
+    const { ElMessage } = await import('element-plus')
+    const wrapper = mountListWithSlots()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    const before = mockGetDeleted.mock.calls.length
+    await wrapper.find('[data-test="history-delete"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalled()
+    const message = String(confirmSpy.mock.calls[0][0])
+    expect(message).toContain('记录与全部历史数据将被后台删除')
+    expect(message).toContain('不可恢复')
+    expect(mockBatchDeleteHistory).toHaveBeenCalledWith([31])
+    // 入队后立即刷新历史列表（小设备可能已消失，属正常）
+    expect(mockGetDeleted.mock.calls.length).toBeGreaterThan(before)
+    expect(ElMessage.success).toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('彻底删除命中「设备不存在」按已完成处理，不弹失败明细', async () => {
+    const { feedback } = await import('@/utils/feedback')
+    const confirmSpy = vi.spyOn(feedback, 'confirmDanger').mockResolvedValue(true)
+    const { ElMessage } = await import('element-plus')
+    mockBatchDeleteHistory.mockResolvedValue({
+      total: 1,
+      succeeded: 0,
+      failed: 1,
+      results: [{ id: 31, success: false, error: '设备不存在' }],
+    })
+    const wrapper = mountListWithSlots()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    await wrapper.find('[data-test="history-delete"]').trigger('click')
+    await flushPromises()
+
+    expect(ElMessage.info).toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('彻底删除失败明细')
+    expect(wrapper.text()).not.toContain('设备不存在')
+    confirmSpy.mockRestore()
+  })
+
+  it('历史多选批量彻底删除 + 导出 CSV', async () => {
+    const { feedback } = await import('@/utils/feedback')
+    const confirmSpy = vi.spyOn(feedback, 'confirmDanger').mockResolvedValue(true)
+    const { ElMessage } = await import('element-plus')
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() }))
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    mockBatchDeleteHistory.mockResolvedValue({
+      total: 2,
+      succeeded: 2,
+      failed: 0,
+      results: [{ id: 31, success: true }, { id: 32, success: true }],
+    })
+    const wrapper = mountListWithSlots()
+    await flushPromises()
+    await switchToHistory(wrapper)
+    ;(wrapper.vm as any).handleHistorySelectionChange([historyRow(), historyRow({ id: 32, name: '旧逆变' })])
+    await flushPromises()
+
+    const batchBar = wrapper.find('[data-test="batch-bar-history"]')
+    expect(batchBar.exists()).toBe(true)
+    expect(batchBar.text()).toContain('2')
+
+    await wrapper.find('[data-test="history-batch-delete"]').trigger('click')
+    await flushPromises()
+    expect(String(confirmSpy.mock.calls[0][0])).toContain('2 台历史设备')
+    expect(mockBatchDeleteHistory).toHaveBeenCalledWith([31, 32])
+
+    ;(wrapper.vm as any).handleHistorySelectionChange([historyRow()])
+    await flushPromises()
+    await wrapper.find('[data-test="history-export"]').trigger('click')
+    expect(createObjectURL).toHaveBeenCalled()
+    expect(ElMessage.success).toHaveBeenCalledWith('导出成功')
+    clickSpy.mockRestore()
+    confirmSpy.mockRestore()
+    vi.unstubAllGlobals()
+  })
+
+  it('在役批量启用/停用：调 batchUpdate(ids, {enabled}) + 刷新 + 清空选择', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    await selectActiveRows(wrapper, [activeDevice(1, 'Device A'), activeDevice(2, 'Device B')])
+    expect(wrapper.find('[data-test="batch-bar-active"]').text()).toContain('2')
+
+    await wrapper.find('[data-test="batch-enable"]').trigger('click')
+    await flushPromises()
+    expect(mockBatchUpdate).toHaveBeenCalledWith([1, 2], { enabled: true })
+    expect((wrapper.vm as any).selectedDevices.length).toBe(0)
+
+    await selectActiveRows(wrapper, [activeDevice(1, 'Device A')])
+    await wrapper.find('[data-test="batch-disable"]').trigger('click')
+    await flushPromises()
+    expect(mockBatchUpdate).toHaveBeenLastCalledWith([1], { enabled: false })
+  })
+
+  it('在役批量部分失败：成功 toast + 失败明细弹窗（#id + 原因）', async () => {
+    mockBatchUpdate.mockResolvedValue({
+      total: 2,
+      succeeded: 1,
+      failed: 1,
+      results: [
+        { id: 1, success: true },
+        { id: 2, success: false, error: '被来源组规则引用，无法停用' },
+      ],
+    })
+    const { ElMessage } = await import('element-plus')
+    const wrapper = mountList()
+    await flushPromises()
+    await selectActiveRows(wrapper, [activeDevice(1, 'Device A'), activeDevice(2, 'Device B')])
+    await wrapper.find('[data-test="batch-disable"]').trigger('click')
+    await flushPromises()
+
+    expect(ElMessage.success).toHaveBeenCalledWith('已停用 1 台设备')
+    expect(wrapper.find('[data-test="batch-failure-dialog"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('批量停用失败明细')
+    expect(wrapper.text()).toContain('被来源组规则引用，无法停用')
+  })
+
+  it('批量设置采集间隔：校验 0–3600000 并提交 interval_ms', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    await selectActiveRows(wrapper, [activeDevice(1, 'Device A')])
+    await wrapper.find('[data-test="batch-interval"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-interval-dialog"]').exists()).toBe(true)
+
+    // 越界：前端拦截，不发请求
+    ;(wrapper.vm as any).batchIntervalMs = 4000000
+    await wrapper.find('[data-test="batch-interval-confirm"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-interval-error"]').text()).toContain('0–3600000')
+    expect(mockBatchUpdate).not.toHaveBeenCalled()
+
+    ;(wrapper.vm as any).batchIntervalMs = 5000
+    await wrapper.find('[data-test="batch-interval-confirm"]').trigger('click')
+    await flushPromises()
+    expect(mockBatchUpdate).toHaveBeenCalledWith([1], { interval_ms: 5000 })
+  })
+
+  it('卡片批量管理：开关出现复选框、点卡片切换选中、全选/取消、关闭清空', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    // 默认卡片视图 + 工具栏批量管理开关
+    const toggle = wrapper.find('.batch-mode-switch')
+    expect(toggle.exists()).toBe(true)
+    await toggle.trigger('click')
+    await flushPromises()
+    expect((wrapper.vm as any).batchMode).toBe(true)
+    expect(wrapper.findAll('.card-batch-checkbox').length).toBe(2)
+
+    // 点卡片切换选中
+    await wrapper.findAll('.device-card')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-bar-active"]').text()).toContain('1')
+
+    // 全选本页
+    const selectAll = wrapper.findAll('.batch-bar button').find(b => b.text().includes('全选本页'))
+    expect(selectAll).toBeTruthy()
+    await selectAll!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-bar-active"]').text()).toContain('2')
+
+    // 取消选择
+    const clear = wrapper.findAll('.batch-bar button').find(b => b.text().includes('取消选择'))
+    await clear!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-bar-active"]').exists()).toBe(false)
+
+    // 关闭开关清空（重新选中后关闭）
+    await wrapper.findAll('.device-card')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="batch-bar-active"]').exists()).toBe(true)
+    await wrapper.find('.batch-mode-switch').trigger('click')
+    await flushPromises()
+    expect((wrapper.vm as any).batchMode).toBe(false)
+    expect((wrapper.vm as any).selectedDevices.length).toBe(0)
+  })
+
+  it('两种删除语义文案严格区分：在役软删可恢复 vs 历史彻底删除不可恢复', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    // 在役单删弹窗：默认保留数据、可恢复；勾选删数据才不可恢复
+    ;(wrapper.vm as any).handleDelete(activeDevice(1, 'Device A'))
+    await flushPromises()
+    const softText = wrapper.text()
+    expect(softText).toContain('恢复已删除设备')
+    expect(softText).toContain('清理开始后不可恢复')
+    // 在役批量条只有「批量删除」（软删）
+    await selectActiveRows(wrapper, [activeDevice(1, 'Device A')])
+    expect(wrapper.find('[data-test="batch-bar-active"]').text()).toContain('批量删除')
+    expect(wrapper.find('[data-test="batch-bar-active"]').text()).not.toContain('彻底删除')
+
+    // 历史批量条只有「批量彻底删除」
+    await switchToHistory(wrapper)
+    ;(wrapper.vm as any).handleHistorySelectionChange([historyRow()])
+    await flushPromises()
+    const historyBar = wrapper.find('[data-test="batch-bar-history"]')
+    expect(historyBar.text()).toContain('批量彻底删除')
+    expect(historyBar.text()).not.toMatch(/批量删除(?!.*彻底)/)
+  })
+})

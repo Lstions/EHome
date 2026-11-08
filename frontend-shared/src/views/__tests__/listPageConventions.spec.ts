@@ -18,8 +18,8 @@
  *   路由表里 component 有两种写法，解析器都覆盖：内联 () => import('...') 与 routeLoaders.ts 导出的
  *   具名 loader（loadNodeList / loadEdgeDeviceList）。**新增第三种写法必须同步本解析器**；
  *   解析不出来时硬失败（toBeTruthy），不是跳过 —— 跳过 = 静默漏检 = 假绿。
- *   当前分母 = 12 个页面（2026-09-15 实测 11 个；P2-A 新增 NotificationDeliveries.vue 后为 12，
- *   跑空守卫见「口径可复现」用例）。
+ *   当前分母 = 11 个页面（2026-09-15 实测 11 个；P2-A 新增 NotificationDeliveries.vue 后为 12；
+ *   2026-10-23 逻辑设备移除删掉 LogicalDeviceList.vue 后回到 11，跑空守卫见「口径可复现」用例）。
  *
  * ── 本门禁**查不了什么**（能力边界，必须与规则一起读）─────────────────────
  * 1. **查不了运行时行为**。「真分页」的实质是「翻页时带着 page/page_size 打一次接口，后端返回当前页
@@ -518,7 +518,9 @@ describe('P1-C 列表页约定门禁（路由级列表页）', () => {
   it('口径可复现：分母非空、每个页面都真判到了 el-pagination、且判定器对每页都给出结论', () => {
     const pages = auditRouteListPages()
     // 跑空守卫：口径失效时下面的 toEqual([]) 会全部假绿（本仓已吃过一次亏，见 i1 守卫文件头）。
-    expect(pages.length, '路由级列表页分母为 0 —— 路由解析器或 el-pagination 判定失效').toBeGreaterThanOrEqual(11)
+    // 11 → 10（2026-10-23）：路由上少了一个列表页（逻辑设备页删除，见
+    // .contract/logical-device-removal.md）。分母随实现如实缩小，判定器一字未改。
+    expect(pages.length, '路由级列表页分母为 0 —— 路由解析器或 el-pagination 判定失效').toBeGreaterThanOrEqual(10)
     for (const p of pages) {
       expect(p.paginationTags.length, p.file + ' 被纳入分母却没有 el-pagination 标签：口径自相矛盾').toBeGreaterThan(0)
       expect(p.findings, p.file + ' 判定器没有对该页给出任何结论（判定器坏了）').toBeInstanceOf(Array)
@@ -530,7 +532,9 @@ describe('P1-C 列表页约定门禁（路由级列表页）', () => {
     for (const f of [
       'src/views/node/NodeList.vue',
       'src/views/edge-device/EdgeDeviceList.vue',
-      'src/views/logical-device/LogicalDeviceList.vue',
+      // 2026-10-23（逻辑设备移除）：原条目 'src/views/logical-device/LogicalDeviceList.vue'
+      // 随该页整体删除（见 .contract/logical-device-removal.md）。分母缩小是如实修订，
+      // 不是放宽断言：其余条目与规则判定一字未改。
       // 2026-10-23（数据流架构 v1 §五 M4）：此处**删除**了原来的
       //   'src/views/data-source/DataSourceList.vue' 条目。
       //

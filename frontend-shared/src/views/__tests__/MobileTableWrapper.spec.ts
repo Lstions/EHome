@@ -178,12 +178,17 @@ describe('F8 移动端宽表横滚合同 — 口径基线与豁免白名单', ()
   it('关键业务页确实被判为「已包裹」（防止上面几条恒真的空集通过）', () => {
     // 这 5 个页面是本任务新包裹的；如果扫描器恒返回 wrapped=true，它们会通过，
     // 但下面的反证用例会红。这里同时断言它们的**每一张**表都被包裹。
+    // 2026-10-23（逻辑设备移除）：原清单里的
+    //   · src/views/data-source/DataSourceList.vue —— 已删除（不在路由表、且是逻辑设备维度死代码）
+    //   · src/views/logical-device/LogicalDeviceList.vue —— 页面整体删除
+    // 换成仍在路由上的 data-source 侧表格 SourceGroupList.vue（数据来源页「来源组」Tab 的
+    // 实际表格），保证这条「关键业务页确实被判为已包裹」的用例分母不缩水。
     for (const f of [
       'src/views/automation/AutomationRules.vue',
-      'src/views/data-source/DataSourceList.vue',
+      'src/views/source-group/SourceGroupList.vue',
       'src/views/dashboard/Dashboard.vue',
       'src/views/firmware/FirmwareManage.vue',
-      'src/views/logical-device/LogicalDeviceList.vue',
+      'src/views/data-source/OverviewTab.vue',
       'src/components/node/LogHistoryPanel.vue',
       'src/views/alert/AlertRules.vue',
     ]) {

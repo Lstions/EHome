@@ -3,14 +3,19 @@ import { mount, flushPromises } from '@vue/test-utils'
 import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
 import type { EdgeDevice } from '@/api/edgeDevice'
 
-// 方案 v3.3 §2.1 单删弹窗: 基本信息即时显示 / 逻辑设备信息异步加载降级 /
+// 方案 v3.3 §2.1 单删弹窗: 基本信息即时显示 / 数据量估算异步加载降级 /
 // radio 默认保留 / delete_data 两条提交路径。
+//
+// 2026-10-23 逻辑设备移除（契约 §3/§4.5）：原「逻辑设备信息区」（实例数 /
+// 逻辑保留天数）改为「本设备历史数据」（数据量估算 + 系统级保留期）。
+// 数据来源从 /edge-devices/:id/logical-device-info 换成
+// /edge-devices/:id/data-summary（本设备作为唯一 source）。
 
-const mockGetLogicalDeviceInfo = vi.fn()
+const mockGetDataSummary = vi.fn()
 
 vi.mock('@/api/edgeDevice', () => ({
   edgeDeviceApi: {
-    getLogicalDeviceInfo: (...args: unknown[]) => mockGetLogicalDeviceInfo(...args),
+    getDataSummary: (...args: unknown[]) => mockGetDataSummary(...args),
   },
 }))
 
@@ -28,7 +33,6 @@ const device: EdgeDevice = {
   last_data: null,
   last_data_time: null,
   created_at: '2026-08-01T00:00:00Z',
-  logical_device_id: 12,
   node: { id: 1, name: 'Collector-A' },
 }
 
@@ -54,7 +58,7 @@ function mountDialog(props: Record<string, unknown> = {}) {
 describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetLogicalDeviceInfo.mockReturnValue(makeDeferred().promise)
+    mockGetDataSummary.mockReturnValue(makeDeferred().promise)
   })
 
   it('打开即显示设备基本信息（本地数据，无延迟）', async () => {
@@ -67,63 +71,66 @@ describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
     // 总线名的完整覆盖见 __tests__/DeviceDeleteDialogChannel.spec.ts。
     expect(wrapper.text()).toContain('—')
     expect(wrapper.text()).toContain('jiabaida_bms')
-    expect(mockGetLogicalDeviceInfo).toHaveBeenCalledWith(7)
+    // 本设备作为唯一 source 查自己的数据量
+    expect(mockGetDataSummary).toHaveBeenCalledWith(7, [7])
   })
 
-  it('逻辑设备信息加载中显示骨架屏', async () => {
+  it('数据量加载中显示骨架屏', async () => {
     const wrapper = mountDialog()
-    expect(wrapper.find('.logical-info-skeleton').exists()).toBe(true)
-    expect(wrapper.find('.logical-info').exists()).toBe(false)
+    expect(wrapper.find('.data-info-skeleton').exists()).toBe(true)
+    expect(wrapper.find('.data-info').exists()).toBe(false)
   })
 
-  it('信息加载成功后展示实例数/数据量估算/保留天数，保留项带天数提示', async () => {
+  it('加载成功后展示数据量估算与系统级保留期（新契约读 target_rows）', async () => {
     const wrapper = mountDialog()
     deferred.resolve({
-      edge_device_id: 7,
-      name: 'BMS 逻辑设备',
-      logical_device_id: 12,
-      retention_days: 30,
-      instance_count: 3,
-      row_estimate: 1200,
+      target: { source_id: 7, rows: 1200, first_time: null, last_time: null, state: 'live' },
+      sources: [],
+      target_rows: 1200,
     })
     await flushPromises()
 
     const text = wrapper.text()
-    expect(wrapper.find('.logical-info').exists()).toBe(true)
-    expect(text).toContain('BMS 逻辑设备')
-    expect(text).toContain('实例数：')
-    expect(text).toContain('3')
+    expect(wrapper.find('.data-info').exists()).toBe(true)
     expect(text).toContain('约 1,200 条')
-    expect(text).toContain('历史数据保留：')
-    expect(text).toContain('30 天')
-    // radio 保留项文案带 retention_days
-    expect(text).toContain('保留 30 天')
+    expect(text).toContain('系统级')
+    // 逻辑设备概念已移除：不得再出现旧文案
+    expect(text).not.toContain('逻辑设备')
+    expect(text).not.toContain('实例数')
   })
 
-  it('估算降级（无 row_estimate）时不显示数据量行', async () => {
+  it('估算降级（target_rows 缺失且 target.rows 为 null）时不显示数据量区，不伪造 0 条', async () => {
+    const wrapper = mountDialog()
+    deferred.resolve({ target: null, sources: [] })
+    await flushPromises()
+
+    expect(wrapper.find('.data-info').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('约 0 条')
+  })
+
+  // 真实的降级形状（2026-10-24 审核发现原用例用「空数组」绕开了它）：
+  // 后端在**任一来源估算失败**时会省略 total_rows，但 items 仍可能有行
+  // （且该行的 rows 为 null）。这才是「估不出总量」的真实响应形状 ——
+  // 必须显示「不可用」，绝不能渲染成「约 0 条」（用户会以为没有数据可删）。
+  it('真实降级形状（target.rows=null 且无 target_rows）时不显示数据量区', async () => {
     const wrapper = mountDialog()
     deferred.resolve({
-      edge_device_id: 7,
-      name: null,
-      logical_device_id: null,
-      retention_days: null,
-      instance_count: 1,
+      target: { source_id: 7, rows: null, first_time: null, last_time: null, state: 'live' },
+      sources: [],
     })
     await flushPromises()
 
-    const text = wrapper.text()
-    expect(wrapper.find('.logical-info').exists()).toBe(true)
-    expect(text).not.toContain('数据量估算')
-    expect(text).not.toContain('历史数据保留')
+    expect(wrapper.find('.data-info').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('约 0 条')
   })
 
-  it('信息请求失败降级为不显示信息区，且不阻塞删除', async () => {
+  it('请求失败降级为不显示信息区，且不阻塞删除', async () => {
     const wrapper = mountDialog()
     deferred.reject(new Error('boom'))
     await flushPromises()
 
-    expect(wrapper.find('.logical-info').exists()).toBe(false)
-    expect(wrapper.find('.logical-info-skeleton').exists()).toBe(false)
+    expect(wrapper.find('.data-info').exists()).toBe(false)
+    expect(wrapper.find('.data-info-skeleton').exists()).toBe(false)
 
     // 仍可提交删除
     await wrapper.find('.el-dialog__footer .el-button--danger').trigger('click')
@@ -149,7 +156,9 @@ describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
     const wrapper = mountDialog()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('将在后台删除，不可恢复')
+    // 2026-10-25 文案修正：区分「删除设备行（软删可恢复）」与「删除数据（清理开始后不可恢复）」
+    expect(wrapper.text()).toContain('后台分批清理；清理开始后不可恢复')
+    expect(wrapper.text()).toContain('恢复已删除设备')
 
     const radios = wrapper.findAll('.data-action-group input[type="radio"]')
     await radios[1].setValue(true)
@@ -173,25 +182,24 @@ describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
     await wrapper.setProps({ visible: false })
     // 旧请求此时才返回
     deferred.resolve({
-      edge_device_id: 7,
-      name: 'stale',
-      logical_device_id: 12,
-      retention_days: 30,
-      instance_count: 2,
+      target: { source_id: 7, rows: 999, first_time: null, last_time: null, state: 'live' },
+      sources: [],
+      target_rows: 999,
     })
     await flushPromises()
     // 弹窗已关闭且不显示陈旧信息
-    expect(wrapper.find('.logical-info').exists()).toBe(false)
+    expect(wrapper.find('.data-info').exists()).toBe(false)
   })
 
-  it('重新打开时 radio 重置为保留、信息重新请求', async () => {
+  it('重新打开时 radio 重置为保留、数据量重新请求', async () => {
     const wrapper = mountDialog()
     await flushPromises()
     const radios = wrapper.findAll('.data-action-group input[type="radio"]')
     await radios[1].setValue(true)
     deferred.resolve({
-      edge_device_id: 7, name: 'x', logical_device_id: 12,
-      retention_days: 7, instance_count: 1,
+      target: { source_id: 7, rows: 7, first_time: null, last_time: null, state: 'live' },
+      sources: [],
+      target_rows: 7,
     })
     await flushPromises()
 
@@ -199,7 +207,7 @@ describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
     await wrapper.setProps({ visible: true })
     await flushPromises()
 
-    expect(mockGetLogicalDeviceInfo).toHaveBeenCalledTimes(2)
+    expect(mockGetDataSummary).toHaveBeenCalledTimes(2)
     const freshRadios = wrapper.findAll('.data-action-group input[type="radio"]')
     expect((freshRadios[0].element as HTMLInputElement).checked).toBe(true)
     expect((freshRadios[1].element as HTMLInputElement).checked).toBe(false)

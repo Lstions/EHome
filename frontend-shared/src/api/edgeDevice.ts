@@ -85,40 +85,157 @@ export interface EdgeDevice {
    * 后端未返回时为 undefined → 不展示约束，行为与改动前一致。
    */
   max_polling_commands?: number
-  // 数据生命周期 P0: 逻辑身份锚点 (后端 omitempty — 未建立时字段缺省为 undefined)
-  logical_device_id?: number
+  /**
+   * 删除设备时勾选了「同时删除历史数据」的待清理标记（后端
+   * edge_devices.data_purge_requested）。软删后由后台 purge 任务分批硬删数据、
+   * 清标记并硬删设备行；在此之前设备处于「已删除 + 数据待清理」状态。
+   * 逻辑设备移除（2026-10-23）后该标记从 logical_devices 迁到本表。
+   */
+  data_purge_requested?: boolean
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
 }
 
-// GET /edge-devices/:id/logical-device-info 响应 (方案 v3.3 §2.1)
-// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
-export interface LogicalDeviceInfo {
-  edge_device_id: number
-  name: string | null
-  logical_device_id: number | null
-  retention_days: number | null
-  instance_count: number
-  row_estimate?: number
-}
-
-// GET /edge-devices/candidates 响应项 (方案 v3.3 §1.3)。
-// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
-export interface LogicalDeviceCandidate {
+/**
+ * GET /api/v1/edge-devices/deleted 的列表项（已软删、可恢复的设备）。
+ *
+ * 除常规身份字段外，额外带四个「值不值得恢复 / 还能不能恢复」的判据：
+ *   · last_data_at  —— 最后一次收到数据的时刻（判断历史数据有多"新鲜"）
+ *   · row_estimate  —— 该 device_id 名下数据行数估算（后端按 reltuples/有界 COUNT
+ *                      估算，可能为 null —— 表示"估算不出来"，**不是 0 行**，
+ *                      展示层必须区分二者）
+ *   · data_purge_requested —— 删除时勾选了「同时删除历史数据」（恢复会撤回该请求）
+ *   · purge_in_progress    —— 后台 DevicePurger 已认领、正在分批硬删数据
+ *                             ⇒ 此时 restore 必然 409，前端必须提前禁用入口
+ */
+export interface DeletedEdgeDevice {
   id: number
   name: string
+  /** 后端同时回 type / device_type（同值）；前端统一用 device_type */
   device_type: string
-  retention_days: number
-  instance_count: number
+  hardware_id: string
+  node_id: number | string
+  channel_id: number
+  deleted_at: string | null
   last_data_at: string | null
-  match_weight: number
-  row_estimate?: number
+  row_estimate: number | null
+  data_purge_requested?: boolean
+  purge_in_progress?: boolean
+  purge_started_at?: string | null
 }
 
-export interface CandidateQueryParams {
-  type: string
-  node_id?: string
-  hardware_id?: string
-  channel_id?: number
+/**
+ * GET /api/v1/edge-devices/deleted 的分页信封（2026-10-25 起后端分页）。
+ * 旧后端返回裸数组时由封装层归一为「单页、total=当前条数」，不伪造更多页。
+ */
+export interface DeletedEdgeDevicePage {
+  items: DeletedEdgeDevice[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/**
+ * 批量操作的逐条结果（POST /edge-devices/batch-update 与
+ * POST /edge-devices/deleted/batch-delete 共用形状）。
+ *
+ * 后端逐条独立事务：一条失败不影响其它条；前端必须把 failed>0 的明细展示给用户，
+ * 不能只用一句"批量操作完成"掩盖部分失败。
+ */
+export interface BatchItemResult {
+  id: number
+  success: boolean
+  /** 该条失败原因（来源组规则引用 / 设备不存在 / 未曾软删 等） */
+  error?: string
+  /** batch-update：该条写入后的 enabled */
+  enabled?: boolean
+  /** batch-update：该条写入后的 interval_ms */
+  interval_ms?: number
+  /** deleted/batch-delete：已提交后台清理队列（重复提交幂等也为 true） */
+  queued?: boolean
+}
+
+export interface BatchUpdateResult {
+  total: number
+  succeeded: number
+  failed: number
+  results: BatchItemResult[]
+}
+
+export interface BatchDeleteHistoryResult {
+  total: number
+  succeeded: number
+  failed: number
+  results: BatchItemResult[]
+}
+
+/** POST /api/v1/edge-devices/:id/restore 的请求体（节点与通道必须成对且相容）。 */
+export interface RestoreEdgeDeviceParams {
+  node_id: string | number
+  channel_id: number
+  name?: string
+  interval_ms?: number
+}
+
+/** data-summary 的来源状态：deleted=已软删 / live=存活在役 / missing=无设备行的孤儿历史。 */
+export type DataSummarySourceState = 'deleted' | 'live' | 'missing'
+
+/**
+ * data-summary 的单个来源条目：该来源有多少行、覆盖什么时间段、处于什么状态。
+ *
+ * `rows` **可以为 null**：后端估算超时/失败时省略该字段。消费者必须先判空再
+ * 格式化 —— 直接 `.toLocaleString()` 在非空分支之外会抛 TypeError。
+ * `device_name`/`state` 是新契约字段：state=missing 表示"没有设备行，但可能有孤儿数据"。
+ * `device_type`（2026-10-25 产品重做）：合并弹窗据此做「同型号」准入校验/展示。
+ */
+export interface EdgeDeviceDataSummaryItem {
+  source_id: number
+  device_name?: string
+  device_type?: string
+  state?: DataSummarySourceState
+  rows: number | null
+  first_time: string | null
+  last_time: string | null
+}
+
+/**
+ * GET /api/v1/edge-devices/:id/data-summary 响应（2026-10-25 新口径）。
+ *
+ * 目标与源**分两组返回**，不再混用：
+ *   · target        —— 目标设备自身（删除确认弹窗用）
+ *   · sources       —— 每个源设备一项（合并预览用）
+ *   · target_rows   —— 目标自身合计（仅目标估算成功时出现）
+ *   · source_rows   —— 源合计（**仅当全部源估算成功才出现**；缺失必须显示「—」，
+ *                      不能兜底成 0 —— 报一个偏小的合计比不报更危险）
+ * 两者绝不相加；「预计迁移行数」只能读 source_rows。
+ */
+export interface EdgeDeviceDataSummary {
+  target: EdgeDeviceDataSummaryItem | null
+  sources: EdgeDeviceDataSummaryItem[]
+  target_rows?: number | null
+  source_rows?: number | null
+}
+
+/**
+ * merge-history 响应里的单源结果（2026-10-25 产品重做后）。
+ *
+ * 后端准入已收紧为「存在 + 已软删 + 与目标同型号」，因此正常响应里 state 只会是
+ * deleted；unknown 仅用于响应形状异常/旧后端时的防御性回填（不谎报状态）。
+ */
+export type MergeHistorySourceState = 'deleted' | 'unknown'
+
+export interface MergeHistorySourceResult {
+  id: number
+  state: MergeHistorySourceState
+  /** 源设备型号（后端回传；理论恒等于目标型号，用于展示/自证） */
+  device_type?: string
+}
+
+/** POST /api/v1/edge-devices/:id/merge-history 响应（幂等：重复调用 rows_migrated=0）。 */
+export interface MergeHistoryResult {
+  rows_migrated: number
+  sources: MergeHistorySourceResult[]
+  /** 非致命问题（如人工 data_sources 冲突保留、台账迁移失败、last_data_at 回写失败），可重试补齐 */
+  warnings: string[]
 }
 
 export interface EdgeDeviceListParams {
@@ -154,10 +271,6 @@ export interface CreateEdgeDeviceParams {
   enabled?: boolean
   interval_ms?: number
   device_config_id?: number
-  // 方案 v3.3 §3.3/§九: 继承目标逻辑设备 (可选)。指定时后端校验
-  // 目标存在/type 匹配/merged_into NULL/purge_requested FALSE +
-  // 存活实例唯一性; 未指定则后端新建逻辑身份。
-  logical_device_id?: number
   // F: inline channel creation — when channel_id is 0/absent and channel is
   // provided, the backend creates the channel inside the same transaction.
   channel?: {
@@ -211,7 +324,7 @@ interface RawEdgeDevice {
   last_error_code?: number
   created_at?: string
   config_version?: string
-  logical_device_id?: number
+  data_purge_requested?: boolean
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -281,12 +394,84 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   created_at: d.created_at || '',
   config_version: d.config_version || undefined,
   max_polling_commands: d.max_polling_commands ?? undefined,
-  logical_device_id: d.logical_device_id ?? undefined,
+  data_purge_requested: d.data_purge_requested ?? undefined,
   device_config: d.device_config
 })
 
 const normalizeList = (items: unknown[]): EdgeDevice[] =>
   items.filter(isRawEdgeDevice).map(normalize)
+
+/**
+ * 把任意来源的 id 收敛为「正整数数组」（去重、保序）。
+ *
+ * 为什么必需：`el-select allow-create` 手输的 id 是 **string**（Element Plus
+ * 用输入框原文当 option value），直接作为 JSON 数组发给 Go 的 `[]uint` 会
+ * 400（`cannot unmarshal string into ... type uint`）。这里在封装层单点收敛，
+ * 任何调用方都不必再各自 map(Number)（也避免漏掉一处就复发）。
+ */
+function normalizeSourceIDs(sourceIds: readonly unknown[]): number[] {
+  const out: number[] = []
+  const seen = new Set<number>()
+  for (const raw of sourceIds) {
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n <= 0) continue
+    if (seen.has(n)) continue
+    seen.add(n)
+    out.push(n)
+  }
+  return out
+}
+
+/** 批量操作响应的防御性归一：缺字段不伪装成成功；results 逐条收敛。 */
+function normalizeBatchResult<T extends { total?: number; succeeded?: number; failed?: number; results?: unknown[] }>(
+  data: T | undefined,
+): { total: number; succeeded: number; failed: number; results: BatchItemResult[] } {
+  const rawResults = Array.isArray(data?.results) ? data.results : []
+  const results: BatchItemResult[] = []
+  for (const raw of rawResults) {
+    if (!isObjectRecord(raw)) continue
+    const id = Number((raw as { id?: unknown }).id)
+    if (!Number.isInteger(id) || id <= 0) continue
+    const item: BatchItemResult = { id, success: (raw as { success?: unknown }).success === true }
+    const errorRaw = (raw as { error?: unknown }).error
+    if (typeof errorRaw === 'string' && errorRaw) item.error = errorRaw
+    const enabledRaw = (raw as { enabled?: unknown }).enabled
+    if (typeof enabledRaw === 'boolean') item.enabled = enabledRaw
+    const intervalRaw = (raw as { interval_ms?: unknown }).interval_ms
+    if (typeof intervalRaw === 'number') item.interval_ms = intervalRaw
+    if ((raw as { queued?: unknown }).queued === true) item.queued = true
+    results.push(item)
+  }
+  return {
+    total: typeof data?.total === 'number' ? data.total : results.length,
+    succeeded: typeof data?.succeeded === 'number' ? data.succeeded : results.filter(r => r.success).length,
+    failed: typeof data?.failed === 'number' ? data.failed : results.filter(r => !r.success).length,
+    results,
+  }
+}
+
+/** data-summary 的单条目归一：非法/无 id 的条目返回 null（由调用方过滤）。 */
+function normalizeSummaryItem(raw: unknown): EdgeDeviceDataSummaryItem | null {
+  if (!isObjectRecord(raw)) return null
+  const sourceID = Number((raw as { source_id?: unknown }).source_id)
+  if (!Number.isInteger(sourceID) || sourceID <= 0) return null
+  const rowsRaw = (raw as { rows?: unknown }).rows
+  const firstRaw = (raw as { first_time?: unknown }).first_time
+  const lastRaw = (raw as { last_time?: unknown }).last_time
+  const nameRaw = (raw as { device_name?: unknown }).device_name
+  const typeRaw = (raw as { device_type?: unknown }).device_type
+  const stateRaw = (raw as { state?: unknown }).state
+  const item: EdgeDeviceDataSummaryItem = {
+    source_id: sourceID,
+    rows: typeof rowsRaw === 'number' ? rowsRaw : null,
+    first_time: typeof firstRaw === 'string' && firstRaw ? firstRaw : null,
+    last_time: typeof lastRaw === 'string' && lastRaw ? lastRaw : null,
+  }
+  if (typeof nameRaw === 'string' && nameRaw) item.device_name = nameRaw
+  if (typeof typeRaw === 'string' && typeRaw) item.device_type = typeRaw
+  if (stateRaw === 'deleted' || stateRaw === 'live' || stateRaw === 'missing') item.state = stateRaw
+  return item
+}
 
 // ============================================================
 // API (edgeDeviceApi)
@@ -365,19 +550,212 @@ export const edgeDeviceApi = {
     return response.data
   },
 
-  // 方案 v3.3 §2.1: 删除弹窗信息区 — 逻辑设备信息 (实例数/数据量估算/保留天数)。
-  // 失败由调用方降级处理 (不显示信息区, 不阻塞删除)。
-  async getLogicalDeviceInfo(id: number): Promise<LogicalDeviceInfo> {
-    const response = await client.get<unknown, ApiEnvelope<LogicalDeviceInfo>>(`/api/v1/edge-devices/${id}/logical-device-info`)
-    return response.data
+  /**
+   * POST /api/v1/edge-devices/batch-update — 在役设备批量管理（启用/停用/采集间隔）。
+   *
+   * body：`{ids, enabled?, interval_ms?}`（至少一个字段；ids 1..100）。
+   * 后端逐条独立事务，返回每一条结果：来源组/规则引用的设备停用 → 该条失败并给原因，
+   * 其余条照常成功（前端必须展示失败明细，不能只 toast "成功 N 台"）。
+   */
+  async batchUpdate(ids: number[], payload: { enabled?: boolean; interval_ms?: number }): Promise<BatchUpdateResult> {
+    const body: { ids: number[]; enabled?: boolean; interval_ms?: number } = {
+      ids: ids.map(Number).filter(n => Number.isInteger(n) && n > 0),
+    }
+    if (typeof payload.enabled === 'boolean') body.enabled = payload.enabled
+    if (typeof payload.interval_ms === 'number') body.interval_ms = payload.interval_ms
+    const response = await client.post<unknown, ApiEnvelope<BatchUpdateResult>>(
+      '/api/v1/edge-devices/batch-update',
+      body,
+    )
+    return normalizeBatchResult(response.data)
   },
 
-  // 方案 v3.3 §1.3/§九: 创建继承候选逻辑设备列表 (Unscoped 聚合,
-  // 权重排序, 数据量估算 + 3s 超时降级)。失败由调用方降级处理。
-  async getCandidates(params: CandidateQueryParams): Promise<LogicalDeviceCandidate[]> {
-    const response = await client.get<unknown, ApiEnvelope<LogicalDeviceCandidate[]>>('/api/v1/edge-devices/candidates', { params })
+  /**
+   * POST /api/v1/edge-devices/deleted/batch-delete — 历史设备「彻底删除」。
+   *
+   * 语义：只接受已软删设备；逐条置 `data_purge_requested=true` 并唤醒 DevicePurger，
+   * 由后台分批硬删记录+全部历史数据，**不可恢复**（与在役「删除=软删可恢复」严格区分）。
+   * 重复提交（已请求清理）幂等成功；在役/不存在 id 该条失败。
+   */
+  async batchDeleteHistory(ids: number[]): Promise<BatchDeleteHistoryResult> {
+    const body = { ids: ids.map(Number).filter(n => Number.isInteger(n) && n > 0) }
+    const response = await client.post<unknown, ApiEnvelope<BatchDeleteHistoryResult>>(
+      '/api/v1/edge-devices/deleted/batch-delete',
+      body,
+    )
+    return normalizeBatchResult(response.data)
+  },
+
+  /**
+   * GET /api/v1/edge-devices/deleted — 已软删（可恢复）的边缘设备列表（分页）。
+   *
+   * 「换节点/删除后重建」场景的第二条路：设备被软删后，它名下的
+   * unified_data/device_data 行仍然挂在**同一个 device_id** 上；恢复这条
+   * edge_devices 行（并改绑定）就让历史数据立刻连续可见，无需搬运任何行。
+   *
+   * 2026-10-25 后端改为分页：`data = {items,total,page,page_size}`。调用方必须消费
+   * total（否则 >page_size 的已删设备会被静默隐藏 —— 恢复入口失去完整性）。
+   * 旧后端返回裸数组时按「单页、total=当前条数」归一，不伪造更多页。
+   *
+   * `device_type`（2026-10-25 产品重做）：服务端精确型号过滤。合并历史弹窗只用
+   * 「与目标同型号」的已删设备，必须传它而不是前端本地过滤（分页下本地过滤会漏数据）。
+   *
+   * `search`（2026-10-25 历史设备视图）：名称/型号模糊（大小写不敏感，服务端过滤）。
+   */
+  async getDeleted(params?: {
+    page?: number
+    page_size?: number
+    device_type?: string
+    search?: string
+  }): Promise<DeletedEdgeDevicePage> {
+    const response = await client.get<unknown, ApiEnvelope<{
+      items?: DeletedEdgeDevice[]
+      total?: number
+      page?: number
+      page_size?: number
+    } | DeletedEdgeDevice[]>>(
+      '/api/v1/edge-devices/deleted',
+      { params },
+    )
     const data = response?.data
-    return Array.isArray(data) ? data : []
+    if (Array.isArray(data)) {
+      return { items: data, total: data.length, page: 1, page_size: data.length }
+    }
+    const items = Array.isArray(data?.items) ? data.items : []
+    return {
+      items,
+      total: typeof data?.total === 'number' ? data.total : items.length,
+      page: typeof data?.page === 'number' ? data.page : (params?.page ?? 1),
+      page_size: typeof data?.page_size === 'number' ? data.page_size : (params?.page_size ?? items.length),
+    }
+  },
+
+  /**
+   * POST /api/v1/edge-devices/:id/restore — 恢复已软删设备并重新绑定节点/通道。
+   *
+   * 成功后返回恢复后的完整 EdgeDevice（与 getDetail 同形状）。
+   * 失败语义（2026-10-25 后端收紧）：
+   *   · 404 设备不存在 / 节点不存在；
+   *   · 400 通道不可服务（disabled / GPIO·PWM 外设 / hardware_type≠bus_type /
+   *         设备配置与通道硬件类型不兼容 / 驱动声明总线不匹配）；
+   *   · 409 设备未被删除、通道不属于节点、三元唯一性冲突（槽位被占）、
+   *         purge 已认领（数据正在后台清理）。
+   * 调用方按 feedback.handleError 展示服务端 message；前端应提前过滤通道。
+   */
+  async restore(id: number, body: RestoreEdgeDeviceParams): Promise<EdgeDevice> {
+    const response = await client.post<unknown, ApiEnvelope<RawEdgeDevice>>(
+      `/api/v1/edge-devices/${id}/restore`,
+      body,
+    )
+    return normalize(response.data)
+  },
+
+  /**
+   * GET /api/v1/edge-devices/:id/data-summary?source_ids=1,2 — 数据量/时间范围估算。
+   *
+   * 2026-10-25 新口径：`data = {target, sources, target_rows?, source_rows?}`。
+   * 目标与源分两组；「预计迁移行数」只能读 source_rows，target_rows 只用于删除确认。
+   * 兼容旧后端 `{items,total_rows}`：items[0] 视为目标自身、其余为源，此时源合计
+   * 不可得（total_rows 含目标，不能拿来冒充 source_rows）⇒ source_rows 保持缺失。
+   */
+  async getDataSummary(id: number, sourceIds: number[]): Promise<EdgeDeviceDataSummary> {
+    const valid = normalizeSourceIDs(sourceIds)
+    const response = await client.get<unknown, ApiEnvelope<{
+      target?: unknown
+      sources?: unknown[]
+      target_rows?: number | null
+      source_rows?: number | null
+      items?: unknown[]
+      total_rows?: number | null
+    }>>(
+      `/api/v1/edge-devices/${id}/data-summary`,
+      { params: { source_ids: valid.join(',') } },
+    )
+    const data = response?.data
+    if (data && (data.target !== undefined || Array.isArray(data.sources))) {
+      const target = normalizeSummaryItem(data.target)
+      const sources = Array.isArray(data.sources)
+        ? data.sources.map(normalizeSummaryItem).filter((it): it is EdgeDeviceDataSummaryItem => it !== null)
+        : []
+      return {
+        target,
+        sources,
+        target_rows: typeof data.target_rows === 'number' ? data.target_rows : undefined,
+        source_rows: typeof data.source_rows === 'number' ? data.source_rows : undefined,
+      }
+    }
+    // 旧后端降级路径（仅兼容，新代码不再依赖）
+    const legacy = Array.isArray(data?.items)
+      ? data.items.map(normalizeSummaryItem).filter((it): it is EdgeDeviceDataSummaryItem => it !== null)
+      : []
+    const legacyTarget = legacy.length > 0 ? legacy[0] : null
+    return {
+      target: legacyTarget,
+      sources: legacy.slice(1),
+      target_rows: legacyTarget && typeof legacyTarget.rows === 'number' ? legacyTarget.rows : undefined,
+      source_rows: undefined,
+    }
+  },
+
+  /**
+   * POST /api/v1/edge-devices/:id/merge-history — 把**同型号已删除**历史设备的数据并到目标设备。
+   *
+   * 语义（docs/分析/合并历史-产品设计重做-2026-10-25.md）：
+   *   · 目标必须存活，且它自己的 type 是源设备准入基准；
+   *   · 源必须「存在 + 已软删 + type 与目标完全相同 + 未被 purge 认领」；
+   *   · 跨型号 400、在役源 409、无设备行 400、purge 认领中 409、源=目标 400；
+   *   · 批量 UPDATE unified_data/device_data（分批 + 幂等）；台账失败 200 + warnings。
+   *
+   * 响应：`{rows_migrated, sources:[{id,state:'deleted',device_type}], warnings?}`。
+   * 2026-10-25 产品重做已**删除** `allow_live_source` 与 `retired_sources`：在役设备
+   * 根本不是合法源，不存在"确认后退役"的语义。
+   *
+   * 封装层强制 source_ids 收敛成正整数数组：`el-select allow-create` 产出的是
+   * **字符串**，直接发出去会被 Go `[]uint` 绑定拒绝（400）。
+   */
+  async mergeHistory(id: number, sourceIds: number[]): Promise<MergeHistoryResult> {
+    const resolved = normalizeSourceIDs(sourceIds)
+    const response = await client.post<unknown, ApiEnvelope<{
+      rows_migrated?: number
+      sources?: unknown[]
+      warnings?: unknown[]
+    }>>(
+      `/api/v1/edge-devices/${id}/merge-history`,
+      { source_ids: resolved },
+    )
+    const data = response?.data
+    const sources: MergeHistorySourceResult[] = []
+    if (Array.isArray(data?.sources)) {
+      for (const raw of data.sources) {
+        if (typeof raw === 'number') {
+          // 更早的响应形状（number[]）：保留但标注 unknown，不谎报状态
+          if (Number.isInteger(raw) && raw > 0) sources.push({ id: raw, state: 'unknown' })
+          continue
+        }
+        if (!isObjectRecord(raw)) continue
+        const sid = Number((raw as { id?: unknown }).id)
+        if (!Number.isInteger(sid) || sid <= 0) continue
+        const rawState = (raw as { state?: unknown }).state
+        const source: MergeHistorySourceResult = {
+          id: sid,
+          state: rawState === 'deleted' ? 'deleted' : 'unknown',
+        }
+        const typeRaw = (raw as { device_type?: unknown }).device_type
+        if (typeof typeRaw === 'string' && typeRaw) source.device_type = typeRaw
+        sources.push(source)
+      }
+    }
+    if (sources.length === 0) {
+      // 响应缺 sources（异常/旧后端）：如实回填请求 id + state unknown，不凭空声称成功
+      for (const sid of resolved) sources.push({ id: sid, state: 'unknown' })
+    }
+    return {
+      rows_migrated: typeof data?.rows_migrated === 'number' ? data.rows_migrated : 0,
+      sources,
+      warnings: Array.isArray(data?.warnings)
+        ? data.warnings.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)
+        : [],
+    }
   },
 
   async getLatestData(id: number): Promise<any> {

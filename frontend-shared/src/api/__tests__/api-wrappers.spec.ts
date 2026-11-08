@@ -275,11 +275,12 @@ describe('dataSourceApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('list calls get with params and unwraps { items, total }', async () => {
-    const payload = { items: [{ id: 1, device_id: 10, category: 'temperature' }], total: 1 }
+    // 2026-10-23 逻辑设备移除：组键维度 device_id → edge_device_id（契约 §6）
+    const payload = { items: [{ id: 1, edge_device_id: 10, category: 'temperature' }], total: 1 }
     mockClient.get.mockResolvedValue({ code: 200, data: payload, message: 'ok' })
-    const res = await dataSourceApi.list({ device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 })
+    const res = await dataSourceApi.list({ edge_device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 })
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources', {
-      params: { device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 },
+      params: { edge_device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 },
     })
     expect(res).toEqual(payload)
   })
@@ -292,7 +293,7 @@ describe('dataSourceApi', () => {
   })
 
   it('get calls get with id and unwraps data', async () => {
-    const source = { id: 1, device_id: 10, category: 'temperature' }
+    const source = { id: 1, edge_device_id: 10, category: 'temperature' }
     mockClient.get.mockResolvedValue({ code: 200, data: source, message: 'ok' })
     const res = await dataSourceApi.get(1)
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources/1')
@@ -300,7 +301,7 @@ describe('dataSourceApi', () => {
   })
 
   it('create posts body and unwraps data', async () => {
-    const req = { device_id: 10, category: 'temperature', edge_device_id: 100 }
+    const req = { category: 'temperature', edge_device_id: 100 }
     const created = { id: 1, ...req, name: 'ds1' }
     mockClient.post.mockResolvedValue({ code: 200, data: created, message: 'ok' })
     const res = await dataSourceApi.create(req)
@@ -317,36 +318,9 @@ describe('dataSourceApi', () => {
     expect(res).toEqual(updated)
   })
 
-  it('remove calls delete and returns undefined', async () => {
-    mockClient.delete.mockResolvedValue(undefined)
-    const res = await dataSourceApi.remove(1)
-    expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/data-sources/1')
-    expect(res).toBeUndefined()
-  })
-
-  it('activate posts and unwraps data', async () => {
-    const source = { id: 1, status: 'active' }
-    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
-    const res = await dataSourceApi.activate(1)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/activate')
-    expect(res).toEqual(source)
-  })
-
-  it('deactivate posts and unwraps data', async () => {
-    const source = { id: 1, status: 'disabled' }
-    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
-    const res = await dataSourceApi.deactivate(1)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/deactivate')
-    expect(res).toEqual(source)
-  })
-
-  it('reset posts and unwraps data', async () => {
-    const source = { id: 1, status: 'standby' }
-    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
-    const res = await dataSourceApi.reset(1)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/reset')
-    expect(res).toEqual(source)
-  })
+  // 2026-10-24（方案 A）：remove / activate / deactivate / reset 四个封装方法
+  // 已删除 —— 后端端点一并删除。它们的测试随之删除，**不留**「方法不存在但测试
+  // 还在跑」的假绿。手工干预能力的覆盖在 sourceGroup 侧的测试里。
 
   it('getHealth passes limit and unwraps array', async () => {
     const records = [{ id: 1, source_id: 1, status: 'failure' }]
@@ -364,11 +338,13 @@ describe('dataSourceApi', () => {
     expect(res).toHaveLength(0)
   })
 
-  it('getFailoverLogs passes deviceId/category/limit and unwraps array', async () => {
-    const logs = [{ id: 1, device_id: 10, reason: 'auto', trigger: 'device_offline' }]
+  it('getFailoverLogs 走边缘设备路径并透传 category/limit', async () => {
+    // 2026-10-23 逻辑设备移除：路由 /devices/:id/failover-logs（:id 曾是逻辑设备 id）
+    // 改为 /edge-devices/:id/failover-logs，响应项 device_id → edge_device_id。
+    const logs = [{ id: 1, edge_device_id: 10, reason: 'auto', trigger: 'device_offline' }]
     mockClient.get.mockResolvedValue({ code: 200, data: logs, message: 'ok' })
     const res = await dataSourceApi.getFailoverLogs(10, { limit: 20, category: 'temperature' })
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/10/failover-logs', {
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/10/failover-logs', {
       params: { limit: 20, category: 'temperature' },
     })
     expect(res).toEqual(logs)
@@ -377,7 +353,7 @@ describe('dataSourceApi', () => {
   it('getFailoverLogs 空数组返回 [] (不是 undefined)', async () => {
     mockClient.get.mockResolvedValue({ code: 200, data: [], message: 'ok' })
     const res = await dataSourceApi.getFailoverLogs(10)
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/10/failover-logs', { params: undefined })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/10/failover-logs', { params: undefined })
     expect(res).toEqual([])
   })
 })
@@ -783,33 +759,268 @@ describe('edgeDeviceApi', () => {
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/edge-devices/2')
   })
 
-  it('getLogicalDeviceInfo unwraps the envelope', async () => {
-    const info = {
-      edge_device_id: 1,
-      name: 'BMS',
-      logical_device_id: 7,
-      retention_days: 30,
-      instance_count: 2,
-      row_estimate: 1200,
-    }
-    mockClient.get.mockResolvedValue({ code: 200, data: info, message: 'ok' })
-    const res = await edgeDeviceApi.getLogicalDeviceInfo(1)
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/1/logical-device-info')
-    expect(res).toEqual(info)
+  // 2026-10-23 逻辑设备移除：getLogicalDeviceInfo / getCandidates 已随逻辑身份层
+  // 一起删除（后端 /edge-devices/:id/logical-device-info、/edge-devices/candidates
+  // 端点不存在）。替代能力是下面三组端点。
+  it('does not expose retired logical-device endpoints', () => {
+    expect(edgeDeviceApi).not.toHaveProperty('getLogicalDeviceInfo')
+    expect(edgeDeviceApi).not.toHaveProperty('getCandidates')
   })
 
-  it('getLogicalDeviceInfo tolerates degraded response without row_estimate', async () => {
-    const info = {
-      edge_device_id: 1,
-      name: null,
-      logical_device_id: null,
-      retention_days: null,
-      instance_count: 1,
-    }
-    mockClient.get.mockResolvedValue({ code: 200, data: info })
-    const res = await edgeDeviceApi.getLogicalDeviceInfo(1)
-    expect(res.row_estimate).toBeUndefined()
-    expect(res.instance_count).toBe(1)
+  it('getDeleted reads paginated {items,total,page,page_size} envelope', async () => {
+    const items = [{
+      id: 3, name: '旧BMS', device_type: 'bms', hardware_id: '1',
+      node_id: 'N1', channel_id: 5, deleted_at: '2026-10-01T00:00:00Z',
+      last_data_at: '2026-09-30T00:00:00Z', row_estimate: 1234,
+      data_purge_requested: false, purge_in_progress: false,
+    }]
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: { items, total: 61, page: 2, page_size: 50 },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.getDeleted({ page: 2, page_size: 50 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/deleted', {
+      params: { page: 2, page_size: 50 },
+    })
+    // 2026-10-25 新契约：必须消费 total（否则 >page_size 的已删设备被静默隐藏）
+    expect(res).toEqual({ items, total: 61, page: 2, page_size: 50 })
+  })
+
+  it('getDeleted 透传 device_type 精确型号过滤（合并弹窗服务端过滤）', async () => {
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: { items: [], total: 0, page: 1, page_size: 200 },
+      message: 'ok',
+    })
+    await edgeDeviceApi.getDeleted({ device_type: 'jiabaida_bms', page: 1, page_size: 200 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/deleted', {
+      params: { device_type: 'jiabaida_bms', page: 1, page_size: 200 },
+    })
+  })
+
+  it('getDeleted 容忍裸数组（按单页归一，不伪造 total）并忽略非数组形状', async () => {
+    mockClient.get.mockResolvedValueOnce({ code: 200, data: [{ id: 1 }] })
+    expect(await edgeDeviceApi.getDeleted()).toEqual({ items: [{ id: 1 }], total: 1, page: 1, page_size: 1 })
+    mockClient.get.mockResolvedValueOnce({ code: 200, data: { unexpected: true } })
+    expect(await edgeDeviceApi.getDeleted()).toEqual({ items: [], total: 0, page: 1, page_size: 0 })
+  })
+
+  it('restore posts binding body and normalizes the returned device', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: { id: 3, name: '旧BMS', node_id: 'N2', channel_id: 9, type: 'bms', status: 'pending' },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.restore(3, { node_id: 'N2', channel_id: 9 })
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices/3/restore', { node_id: 'N2', channel_id: 9 })
+    expect(res.id).toBe(3)
+    expect(res.node_id).toBe('N2')
+    expect(res.channel_id).toBe(9)
+  })
+
+  it('getDataSummary 解析 2026-10-25 新契约：target/sources 分组 + 各自合计', async () => {
+    // 真实后端形状（backend handler_edge_device.go 的 data-summary 响应）
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: {
+        target: { source_id: 1, device_name: '目标设备', device_type: 'jiabaida_bms', state: 'live', rows: 200, first_time: '2026-09-01T00:00:00Z', last_time: '2026-10-01T00:00:00Z' },
+        sources: [
+          { source_id: 2, device_name: '旧BMS', device_type: 'jiabaida_bms', state: 'deleted', rows: 500, first_time: '2026-08-01T00:00:00Z', last_time: '2026-09-01T00:00:00Z' },
+        ],
+        target_rows: 200,
+        source_rows: 500,
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.getDataSummary(1, [2, 3])
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/1/data-summary', {
+      params: { source_ids: '2,3' },
+    })
+    // 目标与源绝不混用：「预计迁移」只能读 source_rows（不含目标自身）
+    expect(res.target_rows).toBe(200)
+    expect(res.source_rows).toBe(500)
+    expect(res.target?.state).toBe('live')
+    // 2026-10-25 产品重做：item 新增 device_type，供合并弹窗做「同型号」准入校验
+    expect(res.target?.device_type).toBe('jiabaida_bms')
+    expect(res.sources[0].device_name).toBe('旧BMS')
+    expect(res.sources[0].device_type).toBe('jiabaida_bms')
+    expect(res.sources[0].state).toBe('deleted')
+  })
+
+  it('getDataSummary 两组合计缺失时保持 undefined（不兜底成 0）', async () => {
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: {
+        target: { source_id: 1, rows: null, first_time: null, last_time: null },
+        sources: [{ source_id: 2, rows: null, first_time: null, last_time: null, state: 'missing' }],
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.getDataSummary(1, [2])
+    // 缺失必须是 undefined，不能是 0（0 会被 UI 渲染成「预计迁移 0 行」，
+    // 而实际可能有百万行 —— 不可逆操作前的规模提示错得最危险）
+    expect(res.source_rows).toBeUndefined()
+    expect(res.target_rows).toBeUndefined()
+    expect(res.sources[0].rows).toBeNull()
+  })
+
+  it('getDataSummary 兼容旧 items/total_rows 形状（items[0]=目标，其余=源）', async () => {
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: {
+        items: [
+          { source_id: 1, rows: 200, first_time: null, last_time: null },
+          { source_id: 2, rows: 500, first_time: null, last_time: null },
+        ],
+        total_rows: 700,
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.getDataSummary(1, [2])
+    expect(res.target?.source_id).toBe(1)
+    expect(res.target_rows).toBe(200)
+    expect(res.sources.map(s => s.source_id)).toEqual([2])
+    // 旧 total_rows 含目标自身，不能拿来冒充 source_rows
+    expect(res.source_rows).toBeUndefined()
+  })
+
+  it('mergeHistory 把 source_ids 收敛为正整数，请求体只有 source_ids（无 allow_live_source）', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: {
+        rows_migrated: 42,
+        sources: [{ id: 2, state: 'deleted', device_type: 'jiabaida_bms' }],
+        warnings: [],
+      },
+      message: 'ok',
+    })
+    // el-select allow-create 产出的是字符串：封装层必须 map(Number)，并过滤 0/负数/NaN、去重
+    const res = await edgeDeviceApi.mergeHistory(1, ['2', 3, 3, 0, -1, Number.NaN] as unknown as number[])
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices/1/merge-history', {
+      source_ids: [2, 3],
+    })
+    // 2026-10-25 产品重做：在役设备不是合法源，请求体不存在 allow_live_source
+    const body = mockClient.post.mock.calls[0][1] as Record<string, unknown>
+    expect(Object.keys(body)).toEqual(['source_ids'])
+    expect(res.rows_migrated).toBe(42)
+    expect(res.sources).toEqual([{ id: 2, state: 'deleted', device_type: 'jiabaida_bms' }])
+    expect(res.warnings).toEqual([])
+  })
+
+  it('mergeHistory 解析新响应：sources 带 device_type、warnings 透传（无 retired_sources）', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: {
+        rows_migrated: 0,
+        sources: [{ id: 2, state: 'deleted', device_type: 'jiabaida_bms' }],
+        warnings: ['人工 data_sources 与目标冲突，已保留在源设备上', 123],
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.mergeHistory(1, [2])
+    expect(res.warnings).toEqual(['人工 data_sources 与目标冲突，已保留在源设备上'])
+    expect(res).not.toHaveProperty('retired_sources')
+    expect(res.sources[0].device_type).toBe('jiabaida_bms')
+    expect(res.sources[0].state).toBe('deleted')
+  })
+
+  it('mergeHistory 响应缺 sources 时回填请求 id（state unknown），不谎报成功/退役', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, data: { rows_migrated: 7 }, message: 'ok' })
+    const res = await edgeDeviceApi.mergeHistory(1, [2])
+    expect(res.sources).toEqual([{ id: 2, state: 'unknown' }])
+    expect(res.warnings).toEqual([])
+    expect(res).not.toHaveProperty('retired_sources')
+  })
+
+  it('getDeleted 透传 search 服务端模糊检索（历史设备视图）', async () => {
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: { items: [], total: 0, page: 1, page_size: 20 },
+      message: 'ok',
+    })
+    await edgeDeviceApi.getDeleted({ search: 'bms', page: 1, page_size: 20 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/deleted', {
+      params: { search: 'bms', page: 1, page_size: 20 },
+    })
+  })
+
+  it('batchUpdate posts enabled and unwraps per-item results', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: {
+        total: 2,
+        succeeded: 1,
+        failed: 1,
+        results: [
+          { id: 1, success: true, enabled: false },
+          { id: 2, success: false, error: '被来源组规则引用' },
+        ],
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.batchUpdate([1, 2], { enabled: false })
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices/batch-update', {
+      ids: [1, 2],
+      enabled: false,
+    })
+    expect(res).toEqual({
+      total: 2,
+      succeeded: 1,
+      failed: 1,
+      results: [
+        { id: 1, success: true, enabled: false },
+        { id: 2, success: false, error: '被来源组规则引用' },
+      ],
+    })
+  })
+
+  it('batchUpdate 透传 interval_ms 并收敛 ids 为正整数', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: { total: 1, succeeded: 1, failed: 0, results: [{ id: 3, success: true, interval_ms: 5000 }] },
+      message: 'ok',
+    })
+    await edgeDeviceApi.batchUpdate([3, 0, Number.NaN] as unknown as number[], { interval_ms: 5000 })
+    const body = mockClient.post.mock.calls[0][1] as Record<string, unknown>
+    expect(body).toEqual({ ids: [3], interval_ms: 5000 })
+  })
+
+  it('batchDeleteHistory posts ids to deleted/batch-delete and maps queued', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: {
+        total: 2,
+        succeeded: 1,
+        failed: 1,
+        results: [
+          { id: 5, success: true, queued: true },
+          { id: 6, success: false, error: '设备不存在' },
+        ],
+      },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.batchDeleteHistory([5, 6])
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices/deleted/batch-delete', { ids: [5, 6] })
+    expect(res.succeeded).toBe(1)
+    expect(res.failed).toBe(1)
+    expect(res.results[0]).toEqual({ id: 5, success: true, queued: true })
+    expect(res.results[1].error).toBe('设备不存在')
+  })
+
+  it('batch 响应缺字段时按 results 统计（不伪造成功/失败数）', async () => {
+    mockClient.post.mockResolvedValue({
+      code: 200,
+      data: { results: [{ id: 1, success: true }, { id: 2, success: false }] },
+      message: 'ok',
+    })
+    const res = await edgeDeviceApi.batchDeleteHistory([1, 2])
+    expect(res).toEqual({
+      total: 2,
+      succeeded: 1,
+      failed: 1,
+      results: [{ id: 1, success: true }, { id: 2, success: false }],
+    })
   })
 
   it('does not expose retired direct control endpoints', () => {
@@ -1428,52 +1639,5 @@ describe('parserApi', () => {
     mockClient.get.mockResolvedValueOnce({ data: [] })
     const res = await parserApi.getList()
     expect(res).toEqual([])
-  })
-})
-
-// ─── unifiedData ───
-import { unifiedDataApi } from '../unifiedData'
-
-describe('unifiedDataApi', () => {
-  beforeEach(() => vi.clearAllMocks())
-
-  it('query calls get with params', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [], total: 0 } })
-    await unifiedDataApi.query({ device_pk: 1, category: 'temp' })
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data', { params: { device_pk: 1, category: 'temp' } })
-  })
-
-  it('getLatest with category', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: {} } })
-    await unifiedDataApi.getLatest(1, 'temp')
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data/latest', { params: { device_pk: 1, category: 'temp' } })
-  })
-
-  it('getLatest without category', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: {} } })
-    await unifiedDataApi.getLatest(1)
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data/latest', { params: { device_pk: 1 } })
-  })
-
-  it('getHistorical passes params', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [] } })
-    await unifiedDataApi.getHistorical({ device_pk: 1, start_time: '2024-01-01', end_time: '2024-12-31' })
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data/historical', {
-      params: { device_pk: 1, start_time: '2024-01-01', end_time: '2024-12-31' },
-    })
-  })
-
-  it('getAggregated passes params', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [] } })
-    await unifiedDataApi.getAggregated({ device_pk: 1, category: 'temp', interval: 'hour', start_time: '2024-01-01', end_time: '2024-12-31' })
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data/aggregated', {
-      params: { device_pk: 1, category: 'temp', interval: 'hour', start_time: '2024-01-01', end_time: '2024-12-31' },
-    })
-  })
-
-  it('getCategories calls get', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [] } })
-    await unifiedDataApi.getCategories()
-    expect(mockClient.get).toHaveBeenCalledWith('/unified-data/categories')
   })
 })

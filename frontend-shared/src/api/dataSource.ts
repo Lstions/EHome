@@ -12,14 +12,18 @@ export type FailoverReason = 'auto' | 'manual' | 'manual_deactivate'
 /** 故障切换触发信号 (auto 时非空) */
 export type FailoverTrigger = 'device_offline' | 'stale_data' | ''
 
-/** 数据源主备记录 (设计 §5/§7) */
+/**
+ * 数据源主备记录 (设计 §5/§7)。
+ *
+ * 2026-10-23（逻辑设备移除）：组键从 (device_id, category) 收敛为
+ * (edge_device_id, category) —— 原 device_id 是**逻辑设备** id，随逻辑身份层
+ * 一起从表里删除（契约 §6）。所以本类型不再有 device_id 字段。
+ */
 export interface DataSource {
   id: number
-  /** 逻辑设备 ID (来源组键) */
-  device_id: number
-  /** 数据类别 (来源组键) */
+  /** 数据类别（与 edge_device_id 一起构成组键） */
   category: string
-  /** 提供数据的边缘设备 (血缘来源) */
+  /** 边缘设备 ID：既是组键的一半，也是提供数据的设备本身 */
   edge_device_id: number
   source_type: DataSourceSourceType
   name: string
@@ -37,7 +41,6 @@ export interface DataSource {
 }
 
 export interface CreateDataSourceRequest {
-  device_id: number
   category: string
   edge_device_id: number
   source_type?: DataSourceSourceType
@@ -62,7 +65,8 @@ export interface UpdateDataSourceRequest {
 export interface DataSourceHealth {
   id: number
   source_id: number
-  device_id: number
+  /** 边缘设备 ID（原 device_id = 逻辑设备 id，随逻辑层删除后改名） */
+  edge_device_id: number
   category: string
   status: 'failure' | 'transition'
   message: string
@@ -73,7 +77,8 @@ export interface DataSourceHealth {
 /** 故障切换日志 */
 export interface FailoverLog {
   id: number
-  device_id: number
+  /** 边缘设备 ID（原 device_id = 逻辑设备 id，随逻辑层删除后改名） */
+  edge_device_id: number
   category: string
   from_source_id: number
   to_source_id: number
@@ -83,7 +88,7 @@ export interface FailoverLog {
 }
 
 export interface DataSourceListParams {
-  device_id?: number
+  edge_device_id?: number
   category?: string
   status?: DataSourceStatus
   page?: number
@@ -114,22 +119,22 @@ export const dataSourceApi = {
   async update(id: number, data: UpdateDataSourceRequest): Promise<DataSource> {
     return unwrap<DataSource>(client.put<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}`, data))
   },
-  async remove(id: number): Promise<void> {
-    await client.delete(`/api/v1/data-sources/${id}`)
-  },
-  async activate(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/activate`))
-  },
-  async deactivate(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/deactivate`))
-  },
-  async reset(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/reset`))
-  },
+  // 2026-10-24（遗留处置方案 A）：remove / activate / deactivate / reset 四个方法
+  // **已删除** —— 后端对应端点一并删了（组键二元化后它们恒 409/恒 400，且删掉的行
+  // 会被投影器以新 id 重建）。手工干预「谁在供数」请用来源组：
+  //   sourceGroup 域的 activateGroup / deactivateGroup（见 stores/sourceGroup.ts）
+  // create/update 保留：它们创建的是 managed_by=manual 的行，投影器永不覆盖。
   async getHealth(id: number, limit?: number): Promise<DataSourceHealth[]> {
     return unwrap<DataSourceHealth[]>(client.get<unknown, ApiEnvelope<DataSourceHealth[]>>(`/api/v1/data-sources/${id}/health`, { params: { limit } }))
   },
-  async getFailoverLogs(deviceId: number, params?: { limit?: number; category?: string }): Promise<FailoverLog[]> {
-    return unwrap<FailoverLog[]>(client.get<unknown, ApiEnvelope<FailoverLog[]>>(`/api/v1/devices/${deviceId}/failover-logs`, { params }))
+  /**
+   * GET /api/v1/edge-devices/:id/failover-logs?category=&limit=
+   *
+   * 2026-10-23（逻辑设备移除）：原路径是 /api/v1/devices/:id/failover-logs，
+   * 其中 :id 是**逻辑设备 id**。逻辑身份层删除后该维度不存在，路由改挂到
+   * 边缘设备上（契约 §6：组键 = (edge_device_id, category)）。
+   */
+  async getFailoverLogs(edgeDeviceId: number, params?: { limit?: number; category?: string }): Promise<FailoverLog[]> {
+    return unwrap<FailoverLog[]>(client.get<unknown, ApiEnvelope<FailoverLog[]>>(`/api/v1/edge-devices/${edgeDeviceId}/failover-logs`, { params }))
   },
 }

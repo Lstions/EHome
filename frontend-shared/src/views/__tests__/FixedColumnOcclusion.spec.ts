@@ -22,6 +22,12 @@ import { parse } from '@vue/compiler-sfc'
  * | /data-sources | 390px | 330/310 | **106.5%** | 「名称」链接等 3 个 | **0/48** |
  * | /data-sources | 360px | 330/280 | **117.9%** | 同上 3 个 | **0/48** |
  *
+ * 2026-10-23（逻辑设备移除）：被审的 /data-sources 表格从已删除的
+ * DataSourceList.vue（data_sources 台账，操作列 330px）换成真正在路由上的
+ * SourceGroupList.vue（来源组，操作列 300px，同样是响应式 fixed）。
+ * 判据不变（窄屏取消固定 / 桌面保持 'right' / 列宽不被顺手改），只换被测页面：
+ * 原页已随逻辑设备维度一起删除，继续审它等于审一段不存在的代码。
+ *
  * 主控的扫描器只报了 /automation：它只统计「固定列 + 非固定列控件」的**非空**组合，
  * 而 /data-sources 在 ehome_uiux 里是空表 ⇒ 控件分母为 0（契约 §2.3 的样本缺失）。
  * 本轮用 \`page.route\` 给该表注入 3 行后实测**确有 3 个被遮挡控件**，两处都已修。
@@ -54,13 +60,12 @@ vi.mock('@/api/automation', () => ({
     setRuleEnabled: vi.fn(), listEvents: vi.fn(), confirmEvent: vi.fn(), triggerRule: vi.fn(),
   },
 }))
-vi.mock('@/api/dataSource', () => ({
-  dataSourceApi: {
+vi.mock('@/api/sourceGroup', () => ({
+  sourceGroupApi: {
     list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(),
-    activate: vi.fn(), deactivate: vi.fn(), reset: vi.fn(), getHealth: vi.fn(), getFailoverLogs: vi.fn(),
+    activate: vi.fn(), deactivate: vi.fn(), health: vi.fn(), failoverLogs: vi.fn(),
   },
 }))
-vi.mock('@/api/logicalDevice', () => ({ logicalDeviceApi: { list: vi.fn() } }))
 vi.mock('@/api/edgeDevice', () => ({ edgeDeviceApi: { getList: vi.fn() } }))
 
 /**
@@ -102,11 +107,22 @@ const FIXTURE_RULE = {
   require_confirmed: false, cooldown_sec: 60, max_daily_exec: 100,
   created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
 }
-const FIXTURE_SOURCE = {
-  id: 1, device_id: 10, category: 'temperature', edge_device_id: 100, source_type: 'edge_device',
-  name: '温度主来源', description: '', priority: 10, is_primary: true, max_fail_count: 3,
-  fail_count: 0, status: 'active', last_success: '2026-09-01T00:00:00Z', last_failure: null,
-  config: '', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
+/**
+ * 来源组夹具（SourceGroupList 的行）。
+ *
+ * 2026-10-23：原夹具是 data_sources 记录（带逻辑设备维度 device_id）—— 该维度与
+ * 承载它的 DataSourceList.vue 一并删除，这里换成来源组的真实形状。
+ */
+const FIXTURE_GROUP = {
+  id: 1, name: '温度主备组', kind: 'primary_backup', category: 'temperature',
+  combine: '', min_members: 1, staleness_sec: 0, on_degrade: 'fail_closed',
+  enabled: true, revision: 1, active_member_id: 1,
+  members: [{
+    id: 1, group_id: 1, edge_device_id: 100, priority: 100, required: false,
+    status: 'active', fail_count: 0, max_fail_count: 3,
+    last_success: null, last_failure: null,
+  }],
+  description: '', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
 }
 
 /**
@@ -183,7 +199,9 @@ function isUnfixed(fixed: unknown): boolean {
 
 const SRC: Record<string, string> = {
   'AutomationRules.vue': readFileSync(resolve(process.cwd(), 'src/views/automation/AutomationRules.vue'), 'utf8'),
-  'DataSourceList.vue': readFileSync(resolve(process.cwd(), 'src/views/data-source/DataSourceList.vue'), 'utf8'),
+  // 2026-10-23：DataSourceList.vue 已删除（逻辑设备维度），换成路由上真实存在的
+  // 来源组表格 —— 同样是「宽操作列 + 响应式 fixed」的页面。
+  'SourceGroupList.vue': readFileSync(resolve(process.cwd(), 'src/views/source-group/SourceGroupList.vue'), 'utf8'),
 }
 
 // 让两个页面各自的数据接口返回确定数据（不依赖 ehome_uiux）
@@ -195,10 +213,10 @@ async function primeMocks(kind: 'automation' | 'datasource') {
     const { edgeDeviceApi } = await import('@/api/edgeDevice')
     vi.mocked(edgeDeviceApi.getList).mockResolvedValue({ items: [] } as never)
   } else {
-    const { dataSourceApi } = await import('@/api/dataSource')
-    vi.mocked(dataSourceApi.list).mockResolvedValue({ items: [FIXTURE_SOURCE as never], total: 1 } as never)
-    const { logicalDeviceApi } = await import('@/api/logicalDevice')
-    vi.mocked(logicalDeviceApi.list).mockResolvedValue({ items: [], total: 0 } as never)
+    const { sourceGroupApi } = await import('@/api/sourceGroup')
+    vi.mocked(sourceGroupApi.list).mockResolvedValue({ items: [FIXTURE_GROUP as never], total: 1 } as never)
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    vi.mocked(edgeDeviceApi.getList).mockResolvedValue({ items: [] } as never)
   }
 }
 
@@ -207,7 +225,7 @@ async function mountPage(kind: 'automation' | 'datasource', width: number) {
   widthRef.value = width
   const mod = kind === 'automation'
     ? await import('@/views/automation/AutomationRules.vue')
-    : await import('@/views/data-source/DataSourceList.vue')
+    : await import('@/views/source-group/SourceGroupList.vue')
   return mountWithProbe(mod.default)
 }
 
@@ -263,25 +281,25 @@ describe('F26 窄屏固定列不得遮挡数据列 — 操作列固定语义', (
     expect(wrapper.find('[data-test="events-cards"]').exists(), '窄屏缺少事件卡片列表').toBe(true)
   })
 
-  it('data-sources @1440px：操作列仍 fixed="right" 且宽 330px', async () => {
+  it('source-groups @1440px：操作列仍 fixed="right" 且宽 300px', async () => {
     const wrapper = await mountPage('datasource', 1440)
-    const cols = operationColumns(wrapper, '330')
+    const cols = operationColumns(wrapper, '300')
     expect(cols.map((c) => c.fixed), '桌面端操作列必须仍然 fixed="right"').toEqual(cols.map(() => 'right'))
     expect(
       cols.map((c) => c.width),
-      '桌面端操作列宽必须保持 330px：收窄会改变桌面密度（96px 实测折 5 行、行高 40→183px，已否决）'
-    ).toEqual(cols.map(() => '330'))
+      '桌面端操作列宽必须保持 300px：收窄会改变桌面密度（96px 实测折 5 行，已否决）'
+    ).toEqual(cols.map(() => '300'))
   })
 
-  it('data-sources @390px：操作列必须取消 fixed（330px > 表格盒 310px，占比 106.5%）', async () => {
+  it('source-groups @390px：操作列必须取消 fixed（300px 接近表格盒 310px）', async () => {
     const wrapper = await mountPage('datasource', 390)
-    for (const c of operationColumns(wrapper, '330')) {
+    for (const c of operationColumns(wrapper, '300')) {
       expect(
         isUnfixed(c.fixed),
-        '窄屏操作列仍是固定列（fixed=' + String(c.fixed) + '）：330px 宽于表格盒 310px，' +
-          '会把「名称」链接与行内操作按钮整列盖住（实测 0/48 命中自身）'
+        '窄屏操作列仍是固定列（fixed=' + String(c.fixed) + '）：300px 与表格盒 310px 同量级，' +
+          '会把「名称」链接与行内操作按钮整列盖住（同类页面实测 0/48 命中自身）'
       ).toBe(true)
-      expect(c.width, '窄屏只是取消固定，列宽不得变化').toBe('330')
+      expect(c.width, '窄屏只是取消固定，列宽不得变化').toBe('300')
     }
   })
 
@@ -332,17 +350,19 @@ describe('F26 窄屏固定列不得遮挡数据列 — 操作列固定语义', (
       // 需要响应式取消固定的操作列：宽 180（automation 规则表）/ 330（data-sources）。
       // 宽 100 的是 automation 事件表操作列 —— 卡片化后它只在桌面渲染（窄屏整表不渲染），
       // 桌面 fixed 语义保持，故仍为静态 fixed="right"。
-      const needReactive = opCols.filter((c) => /width="(180|330)"/.test(c))
-      const staticKept = opCols.filter((c) => !/width="(180|330)"/.test(c))
+      // 2026-10-23：data-sources 侧的被测页面从 DataSourceList.vue（330px）换成
+      // SourceGroupList.vue（300px），故第三档宽从 330 改为 300。
+      const needReactive = opCols.filter((c) => /width="(180|300)"/.test(c))
+      const staticKept = opCols.filter((c) => !/width="(180|300)"/.test(c))
 
       expect(
         needReactive.length,
-        name + ' 没有找到需要响应式取消固定的操作列（width 180/330）—— 说明模板结构已变，' +
+        name + ' 没有找到需要响应式取消固定的操作列（width 180/300）—— 说明模板结构已变，' +
           '本断言失去对象（分母为 0）'
       ).toBeGreaterThan(0)
       for (const col of needReactive) {
         // 必须保留原列宽（借机改密度同样是回归）
-        expect(col, name + ' 操作列缺少原列宽 width="180|330"：' + col).toMatch(/width="(180|330)"/)
+        expect(col, name + ' 操作列缺少原列宽 width="180/300"：' + col).toMatch(/width="(180|300)"/)
         // 必须是响应式 fixed（? 是正则元字符，必须转义）
         expect(
           col,

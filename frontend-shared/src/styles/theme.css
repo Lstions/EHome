@@ -1490,7 +1490,7 @@ html.dark .el-tabs__item.is-active,
 }
 /* ---- 复核复审修复（2026-10-21 独立复核 review3 发现）----
    ① 暗色 el-button 的文字型/链接型 primary 仍用 #1f5ad8 当文字色：
-      实测 /dashboard「查看完整数据」2.91:1、/channel「查看节点」2.43:1、/logical-device「编辑」2.43:1，
+      实测 /dashboard「查看完整数据」2.91:1、/channel「查看节点」2.43:1（另有一处已删除页面同值），
       全站 27 处同类写法（18 个文件）。EP 的 link/text button 用 --el-button-text-color=primary，
       必须在暗色下换成亮色，且**不能**只改 a 标签（这批是 <button>）。
    ② 我上一条给 .el-pager li.is-active 的亮蓝覆盖把**背景式分页**（is-background，白字落在实心主色上）

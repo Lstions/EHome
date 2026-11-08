@@ -11,7 +11,8 @@ import { edgeDeviceApi } from '@/api/edgeDevice'
  * DataPanel「数据 / 原始数据」两列恒显示 — 的回归锁（P2，实测 2026-09-17）。
  *
  * 根因：GET /api/v1/edge-devices/:id/data 只返回 data_json
- * （实测键：created_at, data_json, device_id, id, logical_device_id, node_id, timestamp），
+ * （实测键：created_at, data_json, device_id, id, node_id, timestamp；
+ *   2026-10-23 逻辑设备移除后该行不再有 logical_device_id 列），
  * 而表格读 row.parsed_data || row.data / row.raw_data ⇒ 恒 undefined ⇒ 恒「—」。
  *
  * 本文件刻意分两层：
@@ -33,7 +34,7 @@ const REAL_ROW = {
   data_json: REAL_DATA_JSON,
   timestamp: '2026-09-17T07:01:49.271798Z',
   created_at: '2026-09-17T07:01:49.271798Z',
-  logical_device_id: 2,
+
 }
 
 // ── API / store mocks（与 DataPanel.spec.ts 同一套，缺一即页面挂载失败）──

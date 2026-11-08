@@ -101,9 +101,11 @@ function attach<T extends HTMLElement>(el: T): T {
 }
 
 describe('Phase 0.3 菜单门禁工具自证', () => {
-  it('模型自身：15 个导航目标、路径唯一', () => {
-    expect(NAV_DESTINATIONS).toHaveLength(14)
-    expect(new Set(ALL).size).toBe(14)
+  it('模型自身：14 个导航目标、路径唯一', () => {
+    // 14 → 13（2026-10-23）：/logical-device 随逻辑设备概念移除（见
+    // .contract/logical-device-removal.md）。分母如实缩小，断言仍然 fail-closed。
+    expect(NAV_DESTINATIONS).toHaveLength(13)
+    expect(new Set(ALL).size).toBe(13)
     expect(expectedNavPathsInOrder()).toEqual(ALL)
   })
 
@@ -156,13 +158,13 @@ describe('Phase 0.3 菜单门禁工具自证', () => {
   })
 
   it('有牙：少一项 / 多一项都判得出来（否则门禁形同虚设）', () => {
-    const missing = attach(renderFlat(ALL.slice(0, 13)))
+    const missing = attach(renderFlat(ALL.slice(0, 12)))
     expect(new Set(collectNavPaths(missing))).not.toEqual(new Set(ALL))
 
     const extra = attach(renderFlat([...ALL, '/ghost']))
     expect(new Set(collectNavPaths(extra))).not.toEqual(new Set(ALL))
 
-    const swapped = attach(renderFlat([...ALL.slice(0, 13), '/ghost']))
+    const swapped = attach(renderFlat([...ALL.slice(0, 12), '/ghost']))
     expect(new Set(collectNavPaths(swapped))).not.toEqual(new Set(ALL))
   })
 
@@ -172,7 +174,7 @@ describe('Phase 0.3 菜单门禁工具自证', () => {
     // 组标题文本不应混进路径集合
     expect(paths).not.toContain('设备')
     expect(paths).not.toContain('数据')
-    expect(paths).toHaveLength(14)
+    expect(paths).toHaveLength(13)
   })
 
   it('有牙：无 data-index 的 .el-menu-item 必须被排除（如 sub-menu 标题复用同类名时）', () => {

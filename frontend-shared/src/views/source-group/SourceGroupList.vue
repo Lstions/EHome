@@ -14,9 +14,7 @@
         title="来源组"
         subtitle="把多台边缘设备组合成一个数据来源：主备组按 active 跟随，复合组按 combine 合成"
       >
-        <template #extra>
-          <el-button type="primary" :icon="Plus" data-test="sg-create" @click="openCreate">新建来源组</el-button>
-        </template>
+        <!-- 新建按钮统一放在下方工具栏（embedded 时也存在），这里不再重复 -->
       </PageHeader>
     </template>
 
@@ -40,7 +38,21 @@
           <el-option label="主备组" value="primary_backup" />
           <el-option label="复合组" value="composite" />
         </el-select>
-        <el-button data-test="sg-refresh" @click="loadList">刷新</el-button>
+        <div class="filter-actions">
+          <!--
+            「新建」必须放在**始终渲染**的工具栏里，不能跟着 PageHeader 一起
+            藏在 v-if="!embedded" 里。
+
+            真实缺陷（2026-10-23 用户实测）：本组件被嵌入「数据源管理」页的
+            来源组 Tab 时 embedded=true ⇒ PageHeader 整块不渲染 ⇒ 新建按钮消失，
+            而空态里也没有第二个入口 ⇒ 用户**完全无法创建来源组**。
+            功能存在但不可达，比功能缺失更糟：界面看着正常，就是没按钮。
+          -->
+          <el-button type="primary" :icon="Plus" data-test="sg-create" @click="openCreate">
+            新建来源组
+          </el-button>
+          <el-button data-test="sg-refresh" @click="loadList">刷新</el-button>
+        </div>
       </div>
     </el-card>
 
@@ -127,13 +139,26 @@
           </el-table-column>
         </el-table>
       </div>
+      <!--
+        空态必须自带创建入口。
+        用户看到"还没有来源组"时第一反应就是"那我建一个"；如果这里没按钮，
+        他得回头看工具栏 —— 而工具栏在嵌入模式下曾经也是空的（见 filter-bar 注释），
+        两条路都断 ⇒ 完全无法创建。
+        这与工具栏按钮是**同一动作的两个位置**：空表时注意力在这个居中盒子里。
+      -->
       <EmptyState
         v-else-if="!store.loading"
         kind="empty"
         title="还没有来源组"
         description="来源组把多台边缘设备组合成一个数据来源：主备组用于自动跟 active，复合组用于 1+2 合成等场景。"
         data-test="sg-empty"
-      />
+      >
+        <template #action>
+          <el-button type="primary" :icon="Plus" data-test="sg-create-empty" @click="openCreate">
+            新建来源组
+          </el-button>
+        </template>
+      </EmptyState>
     </section>
 
     <el-dialog
@@ -547,6 +572,13 @@ onMounted(() => {
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
+}
+/* 操作按钮靠右，与左侧筛选区分开 —— 否则"类型下拉 + 新建 + 刷新"挤成一排，
+   用户会以为它们是一组同类操作。 */
+.filter-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
 .mono {
   font-family: var(--el-font-family-monospace, monospace);

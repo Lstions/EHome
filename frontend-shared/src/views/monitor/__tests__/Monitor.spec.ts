@@ -29,6 +29,35 @@ vi.mock('@/api/monitor', () => ({
   ),
 }))
 
+// Mock 回填进度接口：Monitor 页里挂着 BackfillProgressCard，它会自己轮询。
+// 不 mock 的话每个 Monitor 用例都会真的发一次 axios 请求（happy-dom 下必然失败、
+// 靠组件内 catch 兜底成 null）—— 结果虽然正确，但那是"靠巧合通过"，
+// 而且会掩盖"卡片接线断了"这类回归。默认返回 null ⇒ 卡片隐藏，与改造前 DOM 一致。
+/**
+ * 默认值刻意是 **done**（终态），不是 null。
+ *
+ * 理由（实测过）：null 会让轮询**继续排下一次 5s 定时器**，而 Monitor.spec 里
+ * 大量用例并不 unmount ⇒ 每个用例都留一条真实 setTimeout 链在 worker 里，
+ * 全套跑下来会把 95s 拖到 700s（实测），还会挤掉别的用例的超时预算。
+ * done 是终态 ⇒ shouldContinue 立刻 false ⇒ 一次 fetch 后不再排程。
+ */
+const backfillDone = {
+  state: 'done',
+  percent: 100,
+  current_partition: '',
+  frames_done: 0,
+  frames_total: 0,
+  eta_seconds: 0,
+  retention_permanent: false,
+  errors: [] as string[],
+}
+const backfillState = vi.hoisted(() => ({ current: null as null | Record<string, unknown> }))
+backfillState.current = backfillDone as unknown as Record<string, unknown>
+vi.mock('@/api/system', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/system')>()
+  return { ...actual, getBackfillStatus: vi.fn(() => Promise.resolve(backfillState.current)) }
+})
+
 // Mock router
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -68,17 +97,40 @@ const stubs = {
   'el-option': { template: '<option />' },
   'el-icon': { template: '<i class="el-icon"><slot /></i>' },
   'el-descriptions': { template: '<div class="el-descriptions"><slot /></div>' },
-  'el-descriptions-item': { template: '<div class="el-desc-item"><slot /></div>' },
+  // 必须同时渲染 #label 具名插槽与默认插槽 —— 真实 EP 的 descriptions-cell.mjs 就是
+  // `renderLabel = () => cell.children.label?.() || item.label`。只渲染默认插槽的替身会让
+  // 「标签文案」类断言**永远取不到文本**（假绿：无论标签写成什么，断言都取到空串）。
+  'el-descriptions-item': {
+    props: ['label'],
+    template:
+      '<div class="el-desc-item">' +
+      '<span class="el-desc-item__label"><slot name="label">{{ label }}</slot></span>' +
+      '<span class="el-desc-item__content"><slot /></span>' +
+      '</div>',
+  },
   // color 透传到 DOM：用于断言主题切换时进度条颜色随之变化（真实取值，非源码字符串断言）
   'el-progress': ProgressStub,
   'el-tag': { template: '<span class="el-tag"><slot /></span>' },
+  // el-tooltip 替身把 content 落到 title 属性：口径说明是**用户唯一能看到的解释**，
+  // 不渲染内容就无法断言「压缩不是丢失」这句话真的存在（只能断言组件在，形同虚设）。
+  'el-tooltip': {
+    props: ['content', 'placement'],
+    template: '<span class="el-tooltip" :title="content"><slot /></span>',
+  },
   // 真实 ElAlert：有 #title 插槽时用插槽，否则回落到 title prop。替身必须同样支持，
   // 否则错误态内的「重试」按钮会被吞掉，等于把失败态断言做成空断言。
+  // 真实 ElAlert 同时支持 #title 插槽、title prop **和默认插槽（= description）**。
+  // 本替身原先漏了默认插槽 —— 那是**替身缺陷**，不是被测代码的问题：
+  // 任何写在 <el-alert> 正文里的文案都取不到（断言恒真/恒假）。
+  // 与 el-descriptions-item 漏 #label 插槽是同一类缺陷，故一并修复。
   'el-alert': {
     props: ['title', 'type'],
     template:
       '<div class="el-alert" :class="`el-alert--${type}`">' +
-      '<div class="el-alert__content"><slot name="title">{{ title }}</slot></div>' +
+      '<div class="el-alert__content">' +
+      '<slot name="title">{{ title }}</slot>' +
+      '<div class="el-alert__description"><slot /></div>' +
+      '</div>' +
       '</div>',
   },
 }
@@ -401,6 +453,137 @@ describe('Monitor.vue', () => {
     wrapper.unmount()
   })
 
+  // ─── 历史数据回填进度卡接线（契约 §4.6） ───
+  // Monitor 页要能展示回填进度，是因为**启动门禁在 ready=true 就放行**，
+  // 而回填恰在 ready 之后才真正开跑（20~40 分钟）——维护页在那个窗口里早已消失。
+  // 这三条守的是「接线」：卡片挂没挂上、显示条件对不对、会不会在完成后常驻。
+
+  it('回填进行中时，Monitor 页出现进度卡（用户唯一能看到进度的位置）', async () => {
+    backfillState.current = {
+      state: 'running',
+      percent: 42.6,
+      current_partition: 'unified_data_202610',
+      frames_done: 1_234_567,
+      frames_total: 3_419_991,
+      eta_seconds: 1200,
+      retention_permanent: false,
+      errors: [],
+    }
+    try {
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+
+      const card = wrapper.find('[data-test="backfill-card"]')
+      expect(card.exists(), 'Monitor 页没接上回填进度卡').toBe(true)
+      expect(card.text()).toContain('历史数据回填')
+      expect(card.text()).toContain('回填中')
+      expect(card.text()).toContain('43%')
+      wrapper.unmount()
+    } finally {
+      backfillState.current = backfillDone as unknown as Record<string, unknown>
+    }
+  })
+
+  it('回填已完成/未开始时，Monitor 页不渲染该卡（一次性任务完成后不该常驻首屏）', async () => {
+    for (const state of ['done', 'idle'] as const) {
+      backfillState.current = {
+        state,
+        percent: 100,
+        current_partition: '',
+        frames_done: 0,
+        frames_total: 0,
+        eta_seconds: 0,
+        retention_permanent: false,
+        errors: [],
+      }
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+      expect(wrapper.find('[data-test="backfill-card"]').exists(), state + ' 态下卡片仍渲染').toBe(false)
+      wrapper.unmount()
+    }
+    backfillState.current = backfillDone as unknown as Record<string, unknown>
+  })
+
+  it('回填失败时，Monitor 页显示错误（历史数据没迁完必须让用户知道）', async () => {
+    backfillState.current = {
+      state: 'failed',
+      percent: 30,
+      current_partition: 'unified_data_202609',
+      frames_done: 500,
+      frames_total: 0,
+      eta_seconds: 0,
+      retention_permanent: true,
+      errors: ['encode frame 8123: value out of range'],
+    }
+    try {
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+      const card = wrapper.find('[data-test="backfill-card"]')
+      expect(card.exists()).toBe(true)
+      expect(card.text()).toContain('历史数据回填中断')
+      expect(card.text()).toContain('value out of range')
+      wrapper.unmount()
+    } finally {
+      backfillState.current = backfillDone as unknown as Record<string, unknown>
+    }
+  })
+
+  it('回填已关闭（运维关阀 EHOME_BACKFILL_ENABLED=false）时显示信息卡，不空白也不报错', async () => {
+    backfillState.current = {
+      state: 'disabled',
+      percent: 0,
+      current_partition: '',
+      frames_done: 0,
+      frames_total: 0,
+      eta_seconds: 0,
+      retention_permanent: true,
+      errors: [],
+    }
+    try {
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+      const card = wrapper.find('[data-test="backfill-card"]')
+      expect(card.exists(), 'disabled 态下卡片未渲染 ⇒ 用户看不到「回填已关闭」').toBe(true)
+      expect(card.text()).toContain('历史数据回填已关闭')
+      // 必须说明后果：老数据不会迁移
+      expect(card.text()).toContain('不会迁移')
+      // 且不得渲染成错误态（那是运维的有意决策，不是故障）
+      expect(wrapper.find('[data-test="backfill-failed"]').exists()).toBe(false)
+      wrapper.unmount()
+    } finally {
+      backfillState.current = backfillDone as unknown as Record<string, unknown>
+    }
+  })
+
+  it('回填在后台运行不得影响监控指标本身的渲染（两者是独立的两条轮询）', async () => {
+    backfillState.current = {
+      state: 'running',
+      percent: 10,
+      current_partition: 'unified_data_202609',
+      frames_done: 10,
+      frames_total: 100,
+      eta_seconds: 600,
+      retention_permanent: false,
+      errors: [],
+    }
+    try {
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+      // 四个 KPI 与详细面板照常
+      expect(wrapper.findAll('.stat-card')).toHaveLength(4)
+      expect(wrapper.find('.detail-panels').exists()).toBe(true)
+      expect(wrapper.find('[data-test="backfill-card"]').exists()).toBe(true)
+      wrapper.unmount()
+    } finally {
+      backfillState.current = backfillDone as unknown as Record<string, unknown>
+    }
+  })
+
   it('源码不再引用 getThemeColors/THEME_COLORS（F17：进度条配色已完全交给 CSS 变量）', async () => {
     const src = (await import('../Monitor.vue?raw')).default as string
     expect(src).not.toContain('getThemeColors')
@@ -431,6 +614,53 @@ describe('Monitor.vue', () => {
     expect(labelOf('数据点采集总数')).toContain('进程启动以来')
     expect(labelOf('设备在线状态')).toContain('全局')
     expect(labelOf('节点在线状态')).toContain('全局')
+  })
+
+  // ─── L1 口径标注（2026-11-07，回归锁） ───
+  // 背景：unified_data 自 2026-11-07 起按「值变化 + 60s 心跳」落库，行数不再等于采样量。
+  // points_stored 的口径已改为**采样帧数**；points_collected 数的是解析成功的事件（帧），
+  // 两者**不可相减**（窗口不同 + 过滤不同）。文案若沿用「已存储」，用户会把差额读成丢数据。
+
+  it('数据采集卡：标签必须是「已存储帧数」，不得是裸「已存储」', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.el-desc-item__label').map(i => i.text())
+    expect(labels.some(l => l.includes('已存储帧数')), '缺少「已存储帧数」标签：' + JSON.stringify(labels)).toBe(true)
+    // 反向断言：不存在「标签恰为「已存储」」的项（「已存储帧数」contains 它，故必须精确判等）
+    expect(
+      labels.filter(l => l.replace(/\s/g, '') === '已存储').length,
+      '仍有裸「已存储」标签（未标明是帧数）',
+    ).toBe(0)
+  })
+
+  it('两个计数各自标注统计窗口（进程启动以来 / 全局）—— 第一层提示它们不可相减', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.el-desc-item__label').map(i => i.text())
+    expect(labels.find(l => l.includes('已采集')), '缺少「已采集」项').toContain('进程启动以来')
+    expect(labels.find(l => l.includes('已存储帧数')), '缺少「已存储帧数」项').toContain('全局')
+  })
+
+  it('两个计数都有 tooltip 解释，且「已存储帧数」必须写明「压缩不是丢失」', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    // el-tooltip 替身把 content 落到 title —— 这才是用户唯一能看到的解释通道
+    const pairs = wrapper.findAll('.el-desc-item__label .el-tooltip')
+      .map(el => ({ text: el.text(), title: el.attributes('title') || '' }))
+
+    const collected = pairs.find(p => p.text.includes('已采集'))
+    const stored = pairs.find(p => p.text.includes('已存储帧数'))
+    expect(collected, '「已采集」缺 tooltip').toBeTruthy()
+    expect(stored, '「已存储帧数」缺 tooltip').toBeTruthy()
+
+    // 已采集的解释要点：不受「值不变不入库」影响
+    expect(collected!.title, '「已采集」tooltip 未说明它不受 L1 影响').toMatch(/不受|不重复入库/)
+    // 已存储帧数的解释要点：差额是压缩不是丢失（这是本次口径变化的用户认知关键）
+    expect(stored!.title, '「已存储帧数」tooltip 未说明「压缩不是丢失」').toMatch(/压缩/)
+    expect(stored!.title, '「已存储帧数」tooltip 未点明未被丢弃').toMatch(/不是丢失|不是丢弃/)
   })
 
   it('范围词不与数值/标签重叠：是标签内的独立元素而非拼接字符串', async () => {

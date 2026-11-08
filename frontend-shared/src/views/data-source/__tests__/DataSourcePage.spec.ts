@@ -16,7 +16,9 @@ import type { SourceOverviewItem } from '@/api/sourceOverview'
  *
  * 第 2 条来自一次真实的设计错误纠正（2026-10-23）：早期版本把「来源类型/
  * 成员/当前来源/来源组」四列渲染到只读字段目录里 —— 那些属于主备配置，
- * 且「当前来源」与第一列「逻辑设备」完全重复。本文件用**反向断言**锁住。
+ * 且「当前来源」与第一列（设备）完全重复。本文件用**反向断言**锁住。
+ * 2026-10-23 逻辑设备移除：第一列由「逻辑设备」改为「边缘设备」，字段也从
+ * logical_device_id/name 换成 edge_device_id/name（契约 §6）。
  */
 
 vi.mock('@/api/sourceOverview', () => ({
@@ -35,8 +37,8 @@ vi.mock('vue-router', () => ({
 
 const items: SourceOverviewItem[] = [
   {
-    logical_device_id: 14,
-    logical_device_name: 'bms',
+    edge_device_id: 14,
+    edge_device_name: 'bms',
     category: 'rsoc',
     label_zh: '剩余电量百分比',
     value_type: 'number',
@@ -168,7 +170,8 @@ describe('列语义：只展示字段事实，不展示主备配置概念', () =
   })
 
   it('列集合就是字段事实那 7 列', () => {
-    for (const c of ['逻辑设备', '数据类别', '数据类型', '单位', '实时值', '更新时间', '状态']) {
+    // 2026-10-23 逻辑设备移除：首列「逻辑设备」→「边缘设备」
+    for (const c of ['边缘设备', '数据类别', '数据类型', '单位', '实时值', '更新时间', '状态']) {
       expect(overviewRaw, '缺少列 ' + c).toContain('label="' + c + '"')
     }
   })

@@ -1,7 +1,7 @@
 import client from './client'
 
-/** 告警规则目标类型 */
-export type AlertTargetType = 'edge_device' | 'logical_device'
+/** 告警规则目标类型（2026-10-23 逻辑设备移除后只剩边缘设备维度） */
+export type AlertTargetType = 'edge_device'
 
 /** 告警比较符 */
 export type AlertComparator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'

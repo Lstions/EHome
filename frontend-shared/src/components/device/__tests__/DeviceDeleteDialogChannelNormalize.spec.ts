@@ -45,11 +45,11 @@ function channelCellText(wrapper: ReturnType<typeof mount>): string {
 describe('normalize() → 删除对话框「通道」栏 端到端回归', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // 2026-10-23 逻辑设备移除：删除对话框的数据量请求改为 data-summary
+    // （原 /logical-device-info 端点已删除），这里换成同一端点的空估算响应。
     mockClient.get.mockImplementation((url: string) => {
-      if (String(url).includes('/logical-device-info')) {
-        return Promise.resolve({
-          data: { edge_device_id: 7, name: null, logical_device_id: null, retention_days: null, instance_count: 1 },
-        })
+      if (String(url).includes('/data-summary')) {
+        return Promise.resolve({ data: { target: null, sources: [] } })
       }
       return Promise.resolve({ data: rawRainGauge })
     })
@@ -85,10 +85,8 @@ describe('normalize() → 删除对话框「通道」栏 端到端回归', () =>
   it('兼容性：老数据没有 channel 时 normalize() 不产出总线名，对话框回退为 —', async () => {
     const { channel, ...legacy } = rawRainGauge
     mockClient.get.mockImplementation((url: string) => {
-      if (String(url).includes('/logical-device-info')) {
-        return Promise.resolve({
-          data: { edge_device_id: 7, name: null, logical_device_id: null, retention_days: null, instance_count: 1 },
-        })
+      if (String(url).includes('/data-summary')) {
+        return Promise.resolve({ data: { target: null, sources: [] } })
       }
       return Promise.resolve({ data: legacy })
     })

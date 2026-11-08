@@ -14,8 +14,12 @@ describe('DeviceHeader cache consistency', () => {
   })
 
   it('deletes through the store so list, detail and in-flight caches are invalidated', () => {
-    expect(source).toContain('edgeDeviceStore.deleteDevice(deviceId)')
+    // 2026-10-25：内置删除弹窗增加「历史数据处理」radio（默认保留），
+    // 删除仍必须走 store（缓存失效链），并显式透传 delete_data。
+    expect(source).toContain('edgeDeviceStore.deleteDevice(deviceId, { delete_data: deleteData })')
     expect(source).not.toContain('edgeDeviceApi.delete(props.device.id)')
+    // 默认保留历史数据 ⇒ 默认 deleteData=false（可恢复），不能把不可逆选项做成默认
+    expect(source).toContain("const deleteAction = ref<'keep' | 'delete'>('keep')")
   })
 })
 
@@ -56,7 +60,9 @@ describe('DeviceHeader 统一页头 API', () => {
   it('BMS 传 builtin-dialogs=false 时编辑/删除改为 emit 给父页；其它页仍用内置对话框', () => {
     // 分流必须成对存在：只写一半（比如忘记 emit）会让 BMS 的编辑/删除按钮点了没反应
     expect(source).toMatch(/function onEdit\(\) \{\s*if \(props\.builtinDialogs\) editDialogVisible\.value = true\s*else emit\('edit'\)/)
-    expect(source).toMatch(/function onDelete\(\) \{\s*if \(props\.builtinDialogs\) deleteDialogVisible\.value = true\s*else emit\('delete'\)/)
+    // 2026-10-25：内置删除弹窗增加了「历史数据处理」radio（默认保留历史数据），
+    // 因此分流分支多了一行重置默认值；判据放宽为"仍按 builtinDialogs 分流"。
+    expect(source).toMatch(/function onDelete\(\) \{\s*if \(props\.builtinDialogs\) \{[\s\S]{0,160}?deleteDialogVisible\.value = true[\s\S]{0,160}?\} else emit\('delete'\)/)
     expect(source).toContain('v-if="builtinDialogs"')
     // 富文本副标题插槽（BMS 的节点/总线/设备号/固件/轮询数行）
     expect(source).toContain('<slot name="subtitle">')

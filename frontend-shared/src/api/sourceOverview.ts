@@ -31,10 +31,17 @@ export type SourceValueType = 'number' | 'boolean' | 'enum' | 'bitmask' | 'strin
  */
 export type SourceFreshness = 'ok' | 'delay' | 'stale' | 'nodata'
 
-/** 字段目录的一行（= 一个逻辑设备的一个数据类别）。 */
+/**
+ * 字段目录的一行（= 一台边缘设备的一个数据类别）。
+ *
+ * 2026-10-23（逻辑设备移除）：本行原按「逻辑设备 × 类别」聚合，现按
+ * 「边缘设备 × 类别」聚合 —— 顶层身份就是 edge_devices.id，与之对应的
+ * unified_data/device_data 查询键也从 logical_device_id 变成了 device_id
+ * （后端语义：device_id 即边缘设备 id）。
+ */
 export interface SourceOverviewItem {
-  logical_device_id: number
-  logical_device_name: string
+  edge_device_id: number
+  edge_device_name: string
   /** 数据类别 = unified_data.sensor_name 物理名 */
   category: string
 
@@ -69,7 +76,7 @@ export interface SourceOverview {
 
 export interface SourceOverviewQuery {
   category?: string
-  logical_device_id?: number
+  edge_device_id?: number
 }
 
 async function unwrap<T>(p: Promise<ApiEnvelope<T>>): Promise<T> {

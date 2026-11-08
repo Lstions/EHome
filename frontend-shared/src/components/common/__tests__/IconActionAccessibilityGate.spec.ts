@@ -297,6 +297,10 @@ const REGISTERED_EXCEPTIONS = new Map<string, string>([
   // 现该入口为带四件套的 goToNodeChannels（跳 /channel?node=<序列号>），**不得再登记为例外**。
   ['src/views/node/NodeOverview.vue::selectedResourceId = resource.id', '#18 D：行内「资源名」「查看」两个原生 button'],
   ['src/views/node/NodeOverview.vue::viewDevice(row)', '#19 D：视图切「列表」后每行原生「查看」button'],
+  // 2026-10-25 批量管理（task-9 D 类）：「点卡片切换选中」是**批量模式下**的鼠标快捷方式；
+  // 键盘等价入口是每张卡片头部的原生 checkbox（checkbox 本身就是可聚焦控件，Enter/Space 可切换），
+  // 加上批量条的原生按钮「全选本页 / 取消选择」。卡片在非批量模式下 @click 不做任何事。
+  ['src/views/edge-device/EdgeDeviceList.vue::onCardClick(device, $event)', '2026-10-25 批量管理 D：卡片复选框/全选按钮是同等键盘入口'],
 ])
 
 export interface ClickSite {

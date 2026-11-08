@@ -11,10 +11,7 @@ vi.mock('@/api/dataSource', () => ({
     get: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
-    remove: vi.fn(),
-    activate: vi.fn(),
-    deactivate: vi.fn(),
-    reset: vi.fn(),
+    // remove/activate/deactivate/reset 已于 2026-10-24 随方案 A 删除（后端端点同删）。
     getHealth: vi.fn(),
     getFailoverLogs: vi.fn(),
   },
@@ -25,7 +22,6 @@ const mockedApi = vi.mocked(dataSourceApi)
 function makeSource(overrides: Partial<DataSource> = {}): DataSource {
   return {
     id: 1,
-    device_id: 10,
     category: 'temperature',
     edge_device_id: 100,
     source_type: 'edge_device',
@@ -54,8 +50,8 @@ describe('useDataSourceStore', () => {
   it('fetchList 成功写入 items/total 并复位 loading', async () => {
     mockedApi.list.mockResolvedValue({ items: [makeSource()], total: 7 })
     const store = useDataSourceStore()
-    await store.fetchList({ device_id: 10 })
-    expect(mockedApi.list).toHaveBeenCalledWith({ device_id: 10 })
+    await store.fetchList({ edge_device_id: 100 })
+    expect(mockedApi.list).toHaveBeenCalledWith({ edge_device_id: 100 })
     expect(store.items).toHaveLength(1)
     expect(store.items[0].id).toBe(1)
     expect(store.total).toBe(7)
@@ -75,7 +71,7 @@ describe('useDataSourceStore', () => {
     mockedApi.create.mockResolvedValue(created)
     const store = useDataSourceStore()
     store.items = [makeSource({ id: 1 })]
-    await store.createSource({ device_id: 10, category: 'temperature', edge_device_id: 100 })
+    await store.createSource({ category: 'temperature', edge_device_id: 100 })
     expect(store.items.map(s => s.id)).toEqual([2, 1])
     expect(store.items[0].name).toBe('new')
   })
@@ -92,51 +88,18 @@ describe('useDataSourceStore', () => {
     expect(store.items).toHaveLength(2)
   })
 
-  it('removeSource 成功后本地过滤', async () => {
-    mockedApi.remove.mockResolvedValue(undefined)
-    const store = useDataSourceStore()
-    store.items = [makeSource({ id: 1 }), makeSource({ id: 2 })]
-    await store.removeSource(1)
-    expect(store.items.map(s => s.id)).toEqual([2])
-  })
-
   it('createSource 失败写入 error 且 rethrow', async () => {
     mockedApi.create.mockRejectedValue(new Error('创建失败'))
     const store = useDataSourceStore()
-    await expect(store.createSource({ device_id: 10, category: 'temperature', edge_device_id: 100 }))
+    await expect(store.createSource({ category: 'temperature', edge_device_id: 100 }))
       .rejects.toThrow('创建失败')
     expect(store.error).toBe('创建失败')
     expect(store.loading).toBe(false)
   })
 
-  it('activateSource 用返回值替换本地项并更新 status', async () => {
-    mockedApi.activate.mockResolvedValue(makeSource({ id: 2, status: 'active' }))
-    const store = useDataSourceStore()
-    store.items = [makeSource({ id: 2, status: 'standby' })]
-    await store.activateSource(2)
-    expect(store.items[0].status).toBe('active')
-  })
-
-  it('deactivateSource 用返回值替换本地项并更新 status', async () => {
-    mockedApi.deactivate.mockResolvedValue(makeSource({ id: 1, status: 'disabled' }))
-    const store = useDataSourceStore()
-    store.items = [makeSource({ id: 1, status: 'active' })]
-    await store.deactivateSource(1)
-    expect(store.items[0].status).toBe('disabled')
-  })
-
-  it('resetSource 用返回值替换本地项并更新 status/fail_count', async () => {
-    mockedApi.reset.mockResolvedValue(makeSource({ id: 1, status: 'standby', fail_count: 0 }))
-    const store = useDataSourceStore()
-    store.items = [makeSource({ id: 1, status: 'error', fail_count: 3 })]
-    await store.resetSource(1)
-    expect(store.items[0].status).toBe('standby')
-    expect(store.items[0].fail_count).toBe(0)
-  })
-
   it('fetchHealth 写入 health 并复位 healthLoading', async () => {
     const records = [{
-      id: 1, source_id: 1, device_id: 10, category: 'temperature',
+      id: 1, source_id: 1, edge_device_id: 10, category: 'temperature',
       status: 'failure' as const, message: 'offline', response_time: 12, created_at: '2026-09-12T01:00:00Z',
     }]
     mockedApi.getHealth.mockResolvedValue(records)
@@ -157,7 +120,7 @@ describe('useDataSourceStore', () => {
 
   it('fetchFailoverLogs 写入 failoverLogs 并复位 failoverLoading', async () => {
     const logs = [{
-      id: 1, device_id: 10, category: 'temperature', from_source_id: 1, to_source_id: 2,
+      id: 1, edge_device_id: 10, category: 'temperature', from_source_id: 1, to_source_id: 2,
       reason: 'auto' as const, trigger: 'device_offline' as const, created_at: '2026-09-12T02:00:00Z',
     }]
     mockedApi.getFailoverLogs.mockResolvedValue(logs)

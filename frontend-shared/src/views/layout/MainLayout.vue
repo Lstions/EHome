@@ -287,7 +287,6 @@ import {
   Odometer,
   Connection,
   Cpu,
-  Share,
   Link,
   DataLine,
   Files,
@@ -429,7 +428,6 @@ const menuIcons: Record<string, unknown> = {
 	'/dashboard': Odometer,
 	'/node': Connection,
 	'/edge-device': Cpu,
-	'/logical-device': Share,
 	'/data-sources': Link,
 	'/source-groups': Link,
 	'/channel': Connection,
@@ -788,7 +786,6 @@ const BREADCRUMB_LABELS: Record<string, string> = {
   channel: '通道管理',
   data: '数据面板',
   'data-sources': '数据源',
-  'logical-device': '逻辑设备',
   'device-configs': '配置模板',
   firmware: '固件管理',
   monitor: '系统监控',
@@ -804,7 +801,6 @@ const BREADCRUMB_DETAIL_LABELS: Record<string, string> = {
   'edge-device': '边缘设备详情',
   node: '节点详情',
   channel: '通道详情',
-  'logical-device': '逻辑设备详情',
 }
 
 /**
@@ -901,19 +897,11 @@ const handleNotificationClick = async (item: ApiNotification) => {
   }
   // 通知跳转 (方案 v3.3 §六 D-2): 优先按 Notification.source 结构化路由,
   // 替代脆弱的 title 字符串匹配; 离线通知保留原 title 匹配行为。
-  //   source=merge_failed       → /logical-device (合并搬迁失败→管理页,
-  //     source_id 是 merge_job id, 管理页可按任务查看进度/重试)
-  //   source=retention_expiring → /logical-device?retention=<logical_id>
-  //     (到期提醒→管理页 retention 编辑深链)
-  if (item.source === 'merge_failed') {
-    router.push('/logical-device')
-    return
-  }
-  if (item.source === 'retention_expiring') {
-    const logicalId = item.source_id
-    router.push(logicalId != null && logicalId !== '' ? `/logical-device?retention=${logicalId}` : '/logical-device')
-    return
-  }
+  //
+  // 2026-10-23（逻辑设备移除）：原 merge_failed / retention_expiring 两个分支
+  // 都深链到已删除的 /logical-device 页面（合并任务管理 + 逻辑保留期编辑）。
+  // 合并任务与逻辑身份整体下线，两个 source 类别不会再产生 ⇒ 分支删除，
+  // 落回下方的离线通知规则；历史遗留通知不会跳到 404。
   if (item.title.includes('离线')) {
     router.push('/edge-device')
   }

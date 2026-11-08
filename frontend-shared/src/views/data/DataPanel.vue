@@ -451,11 +451,15 @@ const asHex = (value: unknown): string | null => {
 
 /**
  * 非指标字段（行元数据 + 原始帧）。扁平兜底分支必须排除它们，否则会把
- * id / device_id / logical_device_id 这类**元数据数字**当成传感器读数渲染出来
- * （实测真实行就带这三个数字键 —— 本文件新增用例抓到过）。
+ * id / device_id 这类**元数据数字**当成传感器读数渲染出来
+ * （实测真实行就带这两个数字键 —— 本文件新增用例抓到过）。
+ *
+ * 2026-10-23（逻辑设备移除）：原来这里还有一个 logical_device_id，
+ * 后端已删除该列（契约 §2），故从排除表里一并去掉 —— 保留它等于给一个
+ * 不可能再出现的键留位。
  */
 const NON_METRIC_KEYS = new Set([
-  'id', 'device_id', 'node_id', 'logical_device_id', 'channel_id', 'error_code',
+  'id', 'device_id', 'node_id', 'channel_id', 'error_code',
   'timestamp', 'created_at', 'collected_at', 'updated_at',
   'raw_data', 'raw_hex', 'data_json', 'parsed_data',
 ])

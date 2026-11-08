@@ -10,7 +10,7 @@ import client, { type ApiEnvelope } from './client'
  * 一个来源组 = 一个「数据来源」产品对象：
  *   - kind=primary_backup：组内同一时刻至多一个 active 成员（R1–R11 状态机维护）；
  *   - kind=composite：多成员值按 combine 合成，**没有 active 概念**（禁激活）。
- * 组的成员**跨逻辑设备**，与 data_sources（某逻辑设备某类别的候选成员台账）是两套对象。
+ * 组的成员**跨边缘设备**，与 data_sources（某边缘设备某类别的候选成员台账）是两套对象。
  */
 
 /** 组类型（models.SourceGroupKind*） */

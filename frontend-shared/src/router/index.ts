@@ -75,12 +75,6 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '边缘设备详情', hidden: true },
       },
       {
-        path: 'logical-device',
-        name: 'LogicalDeviceList',
-        component: () => import('@/views/logical-device/LogicalDeviceList.vue'),
-        meta: { title: '逻辑设备', icon: 'Share' },
-      },
-      {
         // 数据来源（数据流架构 v1 §五 M4）：单页两个 Tab。
         //   Tab1「来源总览」只读（自动派生）
         //   Tab2「来源组」可写（用户手动创建，唯一的主备/复合入口）

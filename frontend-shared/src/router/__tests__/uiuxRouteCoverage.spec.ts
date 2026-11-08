@@ -263,7 +263,10 @@ describe('UI/UX 门禁分母守卫（router 路由级页面 ⊆ ROUTES）', () =
     // 跑空守卫（本仓范式）：解析器坏掉 → 0 个页面 → 下面的 toEqual([]) 会全部假绿。
     expect(scan.pages.length, '路由级页面分母为 0 —— 路由解析器失效（这正是假绿的成因）')
       .toBeGreaterThan(0)
-    expect(scan.pages.length, '路由级页面数少于已知的 15 个 —— 解析器漏页').toBeGreaterThanOrEqual(15)
+    // 15 → 14（2026-10-23）：逻辑设备页已删除（见 .contract/logical-device-removal.md），
+    // 路由表少一个页面。这是分母随实现缩小的如实修订，不是放宽断言 ——
+    // 上一条 toBeGreaterThan(0) 与下一条「核心断言」仍然 fail-closed。
+    expect(scan.pages.length, '路由级页面数少于已知的 14 个 —— 解析器漏页').toBeGreaterThanOrEqual(14)
     // 分母里必须同时含“具名 loader”与“内联 import”两种写法的代表，证明解析器覆盖两种。
     expect(scan.pages.find((p) => p.rawPath === 'node')?.componentRef, '具名 loader 写法未解析')
       .toBe('loadNodeList')

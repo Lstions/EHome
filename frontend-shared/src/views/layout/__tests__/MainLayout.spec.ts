@@ -342,22 +342,26 @@ describe('MainLayout.vue', () => {
     return wrapper
   }
 
-  it('merge_failed 通知跳转逻辑设备管理页', async () => {
+  // 2026-10-23（逻辑设备移除）：原 merge_failed / retention_expiring 两条深链
+  // 目标页 /logical-device 与产生这两类通知的后台任务一起删除（合并任务管理 +
+  // 逻辑保留期编辑）。两个 source 分支已从 MainLayout 删除，这里改为锁住
+  // 「它们不再把用户送到一个不存在的路由」——历史遗留通知落回 title 规则。
+  it('merge_failed 通知不再深链到已删除的逻辑设备页', async () => {
     const wrapper = await mountWithNotifications([
       { id: 1, type: 'error', title: '数据合并失败（已放弃重试）', description: '', source: 'merge_failed', source_id: '42', read: false, created_at: '' },
     ])
     const item = wrapper.find('.notification-item')
     expect(item.exists()).toBe(true)
     await item.trigger('click')
-    expect(mockPush).toHaveBeenCalledWith('/logical-device')
+    expect(mockPush).not.toHaveBeenCalledWith('/logical-device')
   })
 
-  it('retention_expiring 通知带 retention 深链跳转', async () => {
+  it('retention_expiring 通知不再带 retention 深链', async () => {
     const wrapper = await mountWithNotifications([
       { id: 2, type: 'warning', title: '数据即将到期', description: '', source: 'retention_expiring', source_id: '7', read: false, created_at: '' },
     ])
     await wrapper.find('.notification-item').trigger('click')
-    expect(mockPush).toHaveBeenCalledWith('/logical-device?retention=7')
+    expect(mockPush).not.toHaveBeenCalledWith('/logical-device?retention=7')
   })
 
   it('离线通知保留原 title 字符串匹配行为', async () => {
@@ -368,13 +372,13 @@ describe('MainLayout.vue', () => {
     expect(mockPush).toHaveBeenCalledWith('/edge-device')
   })
 
-  it('source 优先于 title 匹配 (source=merge_failed 但 title 含"离线")', async () => {
+  it('历史 merge_failed 通知落回 title 规则（跳边缘设备页，不跳已删除页）', async () => {
     const wrapper = await mountWithNotifications([
       { id: 4, type: 'error', title: '离线设备合并搬迁失败', description: '', source: 'merge_failed', source_id: '9', read: false, created_at: '' },
     ])
     await wrapper.find('.notification-item').trigger('click')
-    expect(mockPush).toHaveBeenCalledWith('/logical-device')
-    expect(mockPush).not.toHaveBeenCalledWith('/edge-device')
+    expect(mockPush).toHaveBeenCalledWith('/edge-device')
+    expect(mockPush).not.toHaveBeenCalledWith('/logical-device')
   })
 
   // ── 分组菜单在深色侧栏上的样式契约（防回退围栏）────────────────────────

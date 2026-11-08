@@ -324,7 +324,7 @@
         <!-- sensor_threshold 字段组 -->
         <template v-if="form.trigger_type === 'sensor_threshold'">
           <!-- 数据来源（方案 v0.3 §4.3）：①某台边缘设备（存量语义，NULL 同义）②来源组（主备/复合）。
-               来源组是跨逻辑设备的"一个数据来源"对象，规则只绑 source_group_id；目标设备锚点由后端保存期双写。 -->
+               来源组是跨设备的"一个数据来源"对象，规则只绑 source_group_id；目标设备锚点由后端保存期双写。 -->
           <el-form-item label="数据来源">
             <el-select v-model="form.source_kind" data-test="field-source-kind" @change="onSourceKindChange">
               <el-option label="边缘设备" value="edge_device" />
@@ -1940,7 +1940,8 @@ onUnmounted(() => {
 .trigger-summary, .action-summary { font-size: 12px; }
 .event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
-/* 分页控件换行（窄屏真实裁切修复，与 LogicalDeviceList.vue 同根因）。
+/* 分页控件换行（窄屏真实裁切修复，与 notification/NotificationChannels.vue 同根因；
+   原参照页 LogicalDeviceList.vue 已于 2026-10-23 随逻辑设备概念移除）。
    .events-pagination 的 flex-wrap 只管多个 item 之间；内层 el-pagination 自身
    white-space:nowrap + display:flex 且宽 676.94px，在 768px（.events-pagination 宽 488px）
    就已把「共 N 条」推出容器左界 153px —— 实测 el-pagination x=47.06 < 容器 x=236，

@@ -88,65 +88,6 @@ export const useDataSourceStore = defineStore('dataSource', () => {
     }
   }
 
-  /** 删除来源; 成功后本地过滤 */
-  async function removeSource(id: number) {
-    loading.value = true
-    try {
-      await dataSourceApi.remove(id)
-      items.value = items.value.filter(s => s.id !== id)
-    } catch (err) {
-      captureError(err)
-      throw err
-    } finally {
-      loading.value = false
-    }
-  }
-
-  /** 手动切换为权威来源; 成功后用返回值替换本地项 */
-  async function activateSource(id: number) {
-    loading.value = true
-    try {
-      const updated = await dataSourceApi.activate(id)
-      replaceItem(updated)
-      return updated
-    } catch (err) {
-      captureError(err)
-      throw err
-    } finally {
-      loading.value = false
-    }
-  }
-
-  /** 停用来源; 成功后用返回值替换本地项 */
-  async function deactivateSource(id: number) {
-    loading.value = true
-    try {
-      const updated = await dataSourceApi.deactivate(id)
-      replaceItem(updated)
-      return updated
-    } catch (err) {
-      captureError(err)
-      throw err
-    } finally {
-      loading.value = false
-    }
-  }
-
-  /** 重置熔断来源; 成功后用返回值替换本地项 */
-  async function resetSource(id: number) {
-    loading.value = true
-    try {
-      const updated = await dataSourceApi.reset(id)
-      replaceItem(updated)
-      return updated
-    } catch (err) {
-      captureError(err)
-      throw err
-    } finally {
-      loading.value = false
-    }
-  }
-
   /** 拉取来源健康记录 */
   async function fetchHealth(id: number, limit?: number) {
     healthLoading.value = true
@@ -160,11 +101,11 @@ export const useDataSourceStore = defineStore('dataSource', () => {
     }
   }
 
-  /** 拉取设备切换日志 */
-  async function fetchFailoverLogs(deviceId: number, params?: { limit?: number; category?: string }) {
+  /** 拉取设备切换日志（维度 = 边缘设备，见 api/dataSource.ts getFailoverLogs） */
+  async function fetchFailoverLogs(edgeDeviceId: number, params?: { limit?: number; category?: string }) {
     failoverLoading.value = true
     try {
-      failoverLogs.value = await dataSourceApi.getFailoverLogs(deviceId, params)
+      failoverLogs.value = await dataSourceApi.getFailoverLogs(edgeDeviceId, params)
     } catch (err) {
       captureError(err)
       throw err
@@ -194,10 +135,10 @@ export const useDataSourceStore = defineStore('dataSource', () => {
     fetchList,
     createSource,
     updateSource,
-    removeSource,
-    activateSource,
-    deactivateSource,
-    resetSource,
+    // removeSource / activateSource / deactivateSource / resetSource 已于 2026-10-24
+    // 删除：后端对应端点按方案 A 一并删除（组键二元化后恒 409/恒 400；删掉的行会被
+    // 投影器以新 id 重建）。手工干预请用来源组（stores/sourceGroup.ts 的
+    // activateGroup / deactivateGroup）。
     fetchHealth,
     fetchFailoverLogs,
     clearError,

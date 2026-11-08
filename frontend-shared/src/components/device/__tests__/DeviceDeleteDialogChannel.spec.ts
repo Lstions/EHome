@@ -14,11 +14,14 @@ import type { EdgeDevice } from '@/api/edgeDevice'
 //   ② 无 channel（老数据/紧凑列表）时回退为 UNKNOWN '—'，不崩；
 //   ③ 回归点：设备 hardware_id="1" 且 channel.hardware_id="UART0" 时，绝不出现 "UART 1"。
 
-const mockGetLogicalDeviceInfo = vi.fn()
+// 2026-10-23 逻辑设备移除：数据量信息改由 data-summary 提供（本文件只测「通道」栏，
+// 故该 mock 只需存在且不抛错）。
+const mockGetDataSummary = vi.fn((..._args: unknown[]) =>
+  Promise.resolve({ target: null, sources: [] }))
 
 vi.mock('@/api/edgeDevice', () => ({
   edgeDeviceApi: {
-    getLogicalDeviceInfo: (...args: unknown[]) => mockGetLogicalDeviceInfo(...args),
+    getDataSummary: (...args: unknown[]) => mockGetDataSummary(...args),
   },
 }))
 
@@ -60,7 +63,7 @@ function channelCellText(wrapper: ReturnType<typeof mountDialog>): string {
 describe('DeviceDeleteDialog 通道栏 = 真实总线标识（回归 2026-09-17 "UART 1" 显示缺陷）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockGetLogicalDeviceInfo.mockReturnValue(new Promise(() => {}))
+    mockGetDataSummary.mockReturnValue(new Promise(() => {}))
   })
 
   it('显示后端通道的总线名，而不是设备 Modbus 地址（雨量计: hardware_id="1" / channel="UART0"）', () => {

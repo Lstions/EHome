@@ -118,8 +118,20 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-if="builtinDialogs" v-model="deleteDialogVisible" title="删除边缘设备" width="400px">
-      <p class="dh-delete-tip">确定要删除边缘设备 <strong>{{ device?.name }}</strong> 吗？此操作不可恢复。</p>
+    <el-dialog v-if="builtinDialogs" v-model="deleteDialogVisible" title="删除边缘设备" width="430px">
+      <p class="dh-delete-tip">确定要删除边缘设备 <strong>{{ device?.name }}</strong> 吗？</p>
+      <p class="dh-delete-tip dh-delete-tip--hint">
+        删除设备行是<strong>软删</strong>：历史数据默认保留，可在边缘设备列表页
+        「恢复已删除设备」中找回。勾选同时删除历史数据后，后台清理开始即不可恢复。
+      </p>
+      <el-radio-group v-model="deleteAction" class="dh-delete-action">
+        <el-radio value="keep" class="dh-delete-radio">
+          保留历史数据（可在「恢复已删除设备」中找回）
+        </el-radio>
+        <el-radio value="delete" class="dh-delete-radio">
+          <span class="dh-danger">同时删除历史数据（后台清理开始后不可恢复）</span>
+        </el-radio>
+      </el-radio-group>
       <template #footer>
         <el-button @click="deleteDialogVisible = false">取消</el-button>
         <el-button type="danger" :loading="deleteLoading" @click="submitDelete">删除</el-button>
@@ -204,6 +216,8 @@ const editLoading = ref(false)
 const editForm = ref({ name: '' })
 const deleteDialogVisible = ref(false)
 const deleteLoading = ref(false)
+/** 历史数据处理：默认保留（删除是可恢复的软删，不该默认勾选不可逆的数据清理）。 */
+const deleteAction = ref<'keep' | 'delete'>('keep')
 let operationGeneration = 0
 
 watch(editDialogVisible, (v) => {
@@ -217,8 +231,10 @@ function onEdit() {
 }
 
 function onDelete() {
-  if (props.builtinDialogs) deleteDialogVisible.value = true
-  else emit('delete')
+  if (props.builtinDialogs) {
+    deleteAction.value = 'keep'
+    deleteDialogVisible.value = true
+  } else emit('delete')
 }
 
 async function submitEdit() {
@@ -251,10 +267,13 @@ async function submitDelete() {
   const operation = operationGeneration
   deleteLoading.value = true
   try {
-    await edgeDeviceStore.deleteDevice(deviceId)
+    const deleteData = deleteAction.value === 'delete'
+    await edgeDeviceStore.deleteDevice(deviceId, { delete_data: deleteData })
     if (operation !== operationGeneration) return
     if (props.device?.id !== deviceId) throw new Error('设备已变更')
-    ElMessage.success('设备已删除')
+    ElMessage.success(deleteData
+      ? '设备已删除，历史数据将在后台清理（清理开始后不可恢复）'
+      : '设备已删除，可在「恢复已删除设备」中找回')
     deleteDialogVisible.value = false
     emit('deleted')
     router.replace('/edge-device')
@@ -368,6 +387,9 @@ onUnmounted(() => {
 }
 .dh-danger { color: var(--el-color-danger); }
 .dh-delete-tip { margin: 0; }
+.dh-delete-tip--hint { margin-top: 8px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
+.dh-delete-action { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.dh-delete-radio { height: auto; }
 
 .dh-mobile-actions { display: none; }
 

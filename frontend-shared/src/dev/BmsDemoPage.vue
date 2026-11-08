@@ -416,7 +416,8 @@ const navItems = [
   { label: '仪表盘', icon: Odometer },
   { label: '节点', icon: Connection },
   { label: '边缘设备', icon: Box },
-  { label: '逻辑设备', icon: Cpu },
+  // 2026-10-23：设计稿里的「逻辑设备」导航项随该概念移除（本页只是静态视觉稿，
+  // 与真实路由表无关，但同样不该再向评审者展示一个已删除的概念）。
   { label: '通道管理', icon: DataAnalysis },
   { label: '数据面板', icon: Monitor },
   { label: '固件管理', icon: Document },

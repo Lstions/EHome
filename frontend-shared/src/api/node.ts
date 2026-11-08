@@ -281,7 +281,7 @@ export const nodeApi = {
   /**
    * GET /api/v1/nodes — 真分页列表 (负债 I-11)。
    *
-   * 契约 (架构评估 P1.2 裁决, 与 /automation-events、/logical-devices 一致):
+   * 契约 (架构评估 P1.2 裁决, 与 /automation-events 等分页端点一致):
    * `data = { items, total, page, page_size }`; total 是**过滤后全量**条数
    * (不是当前页条数), page/page_size 是后端 clamp 后的回显。
    *

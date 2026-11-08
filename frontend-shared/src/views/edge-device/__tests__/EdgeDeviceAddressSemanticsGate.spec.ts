@@ -25,20 +25,20 @@ import { parseDeviceAddress, isValidDeviceAddress } from '@/utils/deviceAddress'
  * 这些用例在设计上**对改前代码必须变红**（见最终报告里的变异自证）。
  */
 
-const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands, mockGetCapabilities, mockClientGet } = vi.hoisted(() => ({
+// 2026-10-23 逻辑设备移除：原 mockGetLogicalDeviceInfo 已被 data-summary 取代
+// （删除弹窗的数据量来源变了），本文件改为注入 getDataSummary。
+const { mockEdgeDeviceGetList, mockGetDataSummary, mockGetDriverCommands, mockGetCapabilities, mockClientGet } = vi.hoisted(() => ({
   // G4 的 normalize 行为断言要打到**真实实现**上：本文件用 importActual 取真模块，
   // 只把它的 HTTP 出口 client.get 换成这个 mock（否则 normalize 根本没被执行）。
   mockClientGet: vi.fn(() => Promise.resolve({ data_count_today: 0 })),
   mockGetCapabilities: vi.fn((..._args: any[]) => Promise.resolve({ buses: {} })),
   mockEdgeDeviceGetList: vi.fn((..._args: any[]) => Promise.resolve({
     items: [
-      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
+      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
     ],
     total: 1,
   })),
-  mockGetLogicalDeviceInfo: vi.fn(() => Promise.resolve({
-    edge_device_id: 1, name: 'Logic-A', logical_device_id: 11, retention_days: 30, instance_count: 2, row_estimate: 500,
-  })),
+  mockGetDataSummary: vi.fn(() => Promise.resolve({ target: null, sources: [] })),
   mockGetDriverCommands: vi.fn((..._args: any[]) => Promise.resolve([])),
 }))
 
@@ -73,8 +73,10 @@ vi.mock('@/api/edgeDevice', () => ({
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
-    getLogicalDeviceInfo: mockGetLogicalDeviceInfo,
-    getCandidates: vi.fn(() => Promise.resolve([])),
+    getDataSummary: mockGetDataSummary,
+    getDeleted: vi.fn(() => Promise.resolve([])),
+    restore: vi.fn(),
+    mergeHistory: vi.fn(() => Promise.resolve({ rows_migrated: 0, sources: [] })),
     getDriverCommands: mockGetDriverCommands,
   },
 }))
@@ -250,8 +252,11 @@ describe('G4 — 编辑-保存回路：地址为空时保存不得产生写入',
     const wrapper = mountList()
     await flushPromises()
     const vm = wrapper.vm as any
+    // 2026-10-23（契约 §4.1）：编辑模式现在**必须**同时提交 node_id + channel_id
+    // （换节点后历史连续的主路径）。夹具补上真实设备一定有的 channel_id；
+    // 本用例守护的仍是「地址没改就不发 hardware_id」，与外键字段无关。
     vm.handleEdit({
-      id: 7, name: '无地址设备', node_id: 'node-1', device_type: 'sn3001_rain',
+      id: 7, name: '无地址设备', node_id: 'node-1', channel_id: 3, device_type: 'sn3001_rain',
       hardware_type: 'uart', hardware_id: '', interval_ms: 1000, config: { interval_ms: 1000 },
     })
     await flushPromises()
@@ -273,7 +278,7 @@ describe('G4 — 编辑-保存回路：地址为空时保存不得产生写入',
     await flushPromises()
     const vm = wrapper.vm as any
     vm.handleEdit({
-      id: 8, name: 'D', node_id: 'node-1', device_type: 'sn3001_rain',
+      id: 8, name: 'D', node_id: 'node-1', channel_id: 3, device_type: 'sn3001_rain',
       hardware_type: 'uart', hardware_id: '1', interval_ms: 1000, config: { interval_ms: 1000 },
     })
     await flushPromises()
@@ -289,7 +294,7 @@ describe('G4 — 编辑-保存回路：地址为空时保存不得产生写入',
     await flushPromises()
     const vm = wrapper.vm as any
     vm.handleEdit({
-      id: 9, name: 'D', node_id: 'node-1', device_type: 'sn3001_rain',
+      id: 9, name: 'D', node_id: 'node-1', channel_id: 3, device_type: 'sn3001_rain',
       hardware_type: 'uart', hardware_id: '1', interval_ms: 1000, config: { interval_ms: 1000 },
     })
     await flushPromises()

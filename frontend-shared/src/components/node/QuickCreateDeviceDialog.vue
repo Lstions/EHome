@@ -119,28 +119,6 @@
         @load-error="handleDriverCommandsLoadError"
       />
 
-      <!-- 继承历史数据 (方案 v3.3 §3.1 入口2: 可折叠区, 默认折叠) -->
-      <el-collapse v-model="inheritCollapsed" class="inherit-collapse">
-        <el-collapse-item name="inherit">
-          <template #title>
-            <span class="inherit-collapse-title">
-              继承历史数据（可选）
-              <el-tag v-if="inheritLogicalDeviceId !== null" size="small" type="success" style="margin-left: 8px;">已选择</el-tag>
-            </span>
-          </template>
-          <div class="inherit-collapse-body">
-            <div class="inherit-collapse-tip">若为更换/重建的同一台物理设备，可继承其历史数据；默认作为新设备创建</div>
-            <LogicalDeviceCandidateSelect
-              v-model="inheritLogicalDeviceId"
-              :type="form.parserId"
-              :node-id="props.nodeId"
-              :hardware-id="selectedChannel?.hardware_id || ''"
-              :channel-id="selectedChannel?.id"
-              :active="inheritExpanded"
-            />
-          </div>
-        </el-collapse-item>
-      </el-collapse>
     </el-form>
 
     <template #footer>
@@ -159,7 +137,6 @@ import { InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useParserStore } from '@/stores/parser'
 import { edgeDeviceApi } from '@/api/edgeDevice'
-import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import type { Parser } from '@/api/parser'
 import type { Channel } from '@/api/channel'
@@ -304,13 +281,6 @@ const canSubmit = computed(() =>
   Boolean(form.parserId && form.channelId && form.name.trim()),
 )
 
-// 方案 v3.3 §3.1 入口2 — "继承历史数据（可选）"折叠区, 默认折叠。
-// el-collapse v-model 为激活 name 数组; 空数组 = 全部折叠。
-// active=inheritExpanded 传给候选组件: 折叠时不发请求 (延迟加载)。
-const inheritCollapsed = ref<string[]>([])
-const inheritExpanded = computed(() => inheritCollapsed.value.includes('inherit'))
-const inheritLogicalDeviceId = ref<number | null>(null)
-
 const onParserChange = () => {
   // 切换设备型号时清空已选通道(可能不再匹配)
   form.channelId = undefined
@@ -376,8 +346,6 @@ const reset = () => {
   form.name = ''
   form.interval_ms = 1000
   form.deviceAddress = ''
-  inheritCollapsed.value = []
-  inheritLogicalDeviceId.value = null
   // EDGE-WIZ-004/005: 重置逐指令间隔状态
   commandIntervalsError.value = ''
   commandIntervalsSnapshot.value = null
@@ -405,8 +373,9 @@ const handleSubmit = async () => {
     }
 
     // driver-backed 创建: device_config_id=0(无模板),type=parser.id
-    // 方案 v3.3 §3.2/§3.3: 折叠区已选候选时携带 logical_device_id 继承
-    // 历史数据; 未选 (默认折叠) 不传, 后端新建逻辑身份。
+    // 2026-10-23 逻辑设备移除：原「继承历史数据」折叠区（携带 logical_device_id）
+    // 整体删除 —— 换节点后承接历史改由「恢复已删除设备」与「合并历史数据」
+    // 两个显式入口完成（见 EdgeDeviceList），创建流程不再需要做身份选择。
     // EDGE-WIZ-004: 仅驱动声明 schedulable 指令时携带 command_intervals。
     // R1 主修：提交的 hardware_id 必须是**设备地址**，绝不能直接复制通道的
     // 总线标识（"UART1"）。通道值本身是合法地址时沿用它；否则用用户在
@@ -430,9 +399,6 @@ const handleSubmit = async () => {
       type: selectedParser.value.id,
       interval_ms: form.interval_ms,
       ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
-      ...(inheritLogicalDeviceId.value !== null
-        ? { logical_device_id: inheritLogicalDeviceId.value }
-        : {}),
     })
     ElMessage.success('创建成功')
     visible.value = false
@@ -502,25 +468,4 @@ watch(() => props.modelValue, (val) => {
   margin-bottom: 8px;
 }
 
-/* 方案 v3.3 §3.1 入口2 — 继承历史数据折叠区 (默认折叠) */
-.inherit-collapse {
-  margin-top: 4px;
-  border-top: none;
-}
-
-.inherit-collapse-title {
-  display: inline-flex;
-  align-items: center;
-  font-size: 14px;
-}
-
-.inherit-collapse-body {
-  padding: 4px 2px 8px;
-}
-
-.inherit-collapse-tip {
-  margin-bottom: 10px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
 </style>

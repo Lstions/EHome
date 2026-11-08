@@ -36,13 +36,16 @@ export function useDeviceDelete(options: {
     try {
       await edgeDeviceApi.delete(device.id, { delete_data: deleteData })
       deleted = true
-      ElMessage.success(deleteData ? '删除成功，历史数据将在后台删除' : '删除成功')
+      ElMessage.success(deleteData
+        ? '删除成功，历史数据将在后台清理（清理开始后不可恢复）'
+        : '删除成功，可在「恢复已删除设备」中找回')
       showDeleteDialog.value = false
       onSuccess?.([device.id], deleteData)
       return { success: true, id: device.id }
-    } catch {
+    } catch (e) {
       if (!deleted) {
-        feedback.error('删除失败')
+        // 用 handleError 保留服务端原因（如来源组/规则引用导致的 409），不再吞成通用"删除失败"
+        feedback.handleError(e, '删除失败')
       }
       return { success: false }
     } finally {

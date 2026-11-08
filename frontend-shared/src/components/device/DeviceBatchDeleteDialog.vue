@@ -8,13 +8,14 @@
     aria-label="批量删除边缘设备确认"
   >
     <template v-if="devices.length > 0">
-      <!-- 汇总视图 (方案 v3.3 §2.2): 不逐台展示实例数, 详情引导单删流程 -->
+      <!-- 汇总视图: 不逐台展示数据量 (批量查询成本不可控), 详情引导单删流程。
+           2026-10-23 逻辑设备移除：原「其中 N 台属于逻辑设备」的统计口径已不存在，
+           保留它只会让用户以为数据处置策略因设备而异。 -->
       <p class="batch-summary">
-        将删除 <strong>{{ devices.length }}</strong> 台设备<span v-if="logicalCount > 0">，其中
-        <strong>{{ logicalCount }}</strong> 台属于逻辑设备（数据默认保留）</span><span v-else>（均不属于逻辑设备）</span>。
+        将删除 <strong>{{ devices.length }}</strong> 台设备。
       </p>
       <p class="batch-hint">
-        逐台删除可查看每台设备的逻辑设备详情，如需请在设备列表中单独删除。
+        逐台删除可查看该设备的数据量估算，如需请在设备列表中单独删除。
       </p>
 
       <!-- 统一一个 radio: 全部保留 (默认) / 全部删除 -->
@@ -25,9 +26,13 @@
             全部保留历史数据
           </el-radio>
           <el-radio value="delete" class="data-action-radio">
-            <span class="danger-text">全部删除历史数据（将在后台删除，不可恢复）</span>
+            <span class="danger-text">全部删除历史数据（后台分批清理；清理开始后不可恢复）</span>
           </el-radio>
         </el-radio-group>
+        <p class="data-action-note">
+          只删设备行是<strong>软删</strong>：保留数据的删除可在「恢复已删除设备」中找回；
+          勾选删除数据后，后台清理开始前仍可恢复并撤回删除请求。
+        </p>
       </div>
     </template>
 
@@ -60,11 +65,6 @@ const dialogVisible = computed({
   get: () => props.visible,
   set: (value: boolean) => emit('update:visible', value),
 })
-
-// 属于逻辑设备的台数 (后端 omitempty: 未建立时字段缺省)
-const logicalCount = computed(
-  () => props.devices.filter(d => typeof d.logical_device_id === 'number').length,
-)
 
 // 统一 radio，默认全部保留 (方案 §2.2: 不逐台查询信息, 避免成本不可控)
 const dataAction = ref<'keep' | 'delete'>('keep')
@@ -122,5 +122,12 @@ const handleConfirm = () => {
 
 .danger-text {
   color: var(--el-color-danger, #f56c6c);
+}
+
+.data-action-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 </style>

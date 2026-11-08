@@ -40,10 +40,10 @@
           列顺序按「读数据」的思维顺序：我在看哪个设备的哪个量 →
           它是什么/叫什么 → 现在值多少 → 什么时候更新的。
         -->
-        <el-table-column label="逻辑设备" min-width="140">
+        <el-table-column label="边缘设备" min-width="140">
           <template #default="{ row }">
-            <span>{{ asItem(row).logical_device_name || '—' }}</span>
-            <span class="mono muted">#{{ asItem(row).logical_device_id }}</span>
+            <span>{{ asItem(row).edge_device_name || '—' }}</span>
+            <span class="mono muted">#{{ asItem(row).edge_device_id }}</span>
           </template>
         </el-table-column>
 
@@ -120,10 +120,10 @@
  * 早期版本渲染了四个**主备配置概念**的列，它们都不属于字段目录：
  *   · 「来源类型」与「来源组」描述的是"多设备里用哪台供数"的配置状态，
  *     而本页只读、用户无法在这里配置它 —— 属于「来源组」页的职责；
- *   · 「当前来源」与第一列「逻辑设备」完全重复（同一行两次显示 bms）；
+ *   · 「当前来源」与第一列（设备名）完全重复（同一行两次显示 bms）；
  *   · 「成员」在单设备时恒为 1，零信息量。
  *
- * 现在只保留字段事实：逻辑设备 / 数据类别（+中文描述）/ 数据类型 / 单位 /
+ * 现在只保留字段事实：边缘设备 / 数据类别（+中文描述）/ 数据类型 / 单位 /
  * 实时值 / 更新时间 / 状态（= 数据新鲜度）。
  *
  * # 只读的三层保证

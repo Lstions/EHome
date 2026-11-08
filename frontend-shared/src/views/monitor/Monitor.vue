@@ -181,6 +181,24 @@
       </el-col>
     </el-row>
 
+    <!--
+      历史数据回填进度（契约 §4.6）。
+
+      **位置刻意在此**：启动门禁在 ready=true 时就放行到业务页，而回填恰在 ready
+      之后才真正开跑（生产实测 20~40 分钟）——维护页在那个窗口里早已消失，
+      业务页才是用户唯一能看到进度的地方。
+
+      显示条件见 views/maintenance/backfill.ts 的 shouldShowBackfill：
+        · running  → 进度卡（用户在等这个数）；
+        · failed   → 错误卡（历史数据没迁完，必须告知）；
+        · disabled → 信息卡（运维关阀 ⇒ 老数据永远不会迁移，同样必须告知，
+                     静默隐藏等于让"数据没迁"永不可见）；
+        · done/idle → 整卡不渲染（没有未完成的工作可汇报，不该占首屏）。
+      因此对绝大多数请求零视觉影响。轮询是本组件独立的一条（5s），与页头的
+      指标刷新间隔解耦：指标可以关自动刷新或调到 60s，回填进度不能跟着变慢。
+    -->
+    <BackfillProgressCard />
+
     <!-- 失败时不得渲染「0 项需要关注」——那是把"未知"说成"正常" -->
     <el-alert
       v-if="controlAlertVisible"
@@ -349,10 +367,37 @@
               </div>
             </template>
             <el-descriptions :column="isMobile ? 1 : 2" border>
-              <el-descriptions-item label="已采集">
+              <!-- 这两个数**不可相减**（2026-11-07，L1「值不变不入库」无条件生效后）：
+                     两者差在两处，且这两处都不是"丢失"：
+                     ① **统计窗口不同** —— 已采集是 Prometheus Counter（进程启动以来，服务重启归零）；
+                        已存储帧数是全表累计（受保留期约束）。故标签上分别标「进程启动以来」/「全局」，
+                        这本身就是给用户的第一层提示：两个数不属于同一个窗口。
+                     ② **落库过滤不同** —— L1 无条件生效后，"所有字段值都没变且未到 60s 心跳"的帧
+                        不再写库。已采集仍然 +1（它数的是解析成功的事件），已存储帧数不 +1。
+                   若照旧并排叫「已采集 / 已存储」，随运行时间差额越来越大，用户必然读成
+                   「采了 1 万只存了 3 千 ⇒ 丢了 7 千」。实际一条都没丢：值不变的行不重复入库
+                   是**压缩**，不是丢弃（回归实测：帧级跳过率 17.7%，仍保留 82% 的帧）。
+                   tooltip 必须把「压缩不是丢失」说清楚 —— 这是本次改造的用户认知关键。 -->
+              <el-descriptions-item>
+                <template #label>
+                  <el-tooltip
+                    content="收到并解析成功的采样帧累计数（进程启动以来，服务重启归零）。它数的是「帧」，不受「值不变不入库」影响 —— 每一帧都计数。"
+                    placement="top"
+                  >
+                    <span class="desc-term">已采集<span class="desc-scope">{{ SCOPE_PROCESS }}</span></span>
+                  </el-tooltip>
+                </template>
                 {{ metricText(metrics?.data?.points_collected, true) }}
               </el-descriptions-item>
-              <el-descriptions-item label="已存储">
+              <el-descriptions-item>
+                <template #label>
+                  <el-tooltip
+                    content="数据库中已落库的采样帧总数（全表累计，受保留期约束）。值不变且未到 60 秒心跳的帧不重复入库，故它的增长慢于「已采集」——差额是压缩，不是丢失。"
+                    placement="top"
+                  >
+                    <span class="desc-term">已存储帧数<span class="desc-scope">{{ SCOPE_GLOBAL }}</span></span>
+                  </el-tooltip>
+                </template>
                 {{ metricText(metrics?.data?.points_stored, true) }}
               </el-descriptions-item>
             </el-descriptions>
@@ -397,6 +442,7 @@ import {
   Connection, Monitor, Cpu, DataLine, Promotion, Refresh, Operation, WarningFilled
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
+import BackfillProgressCard from '@/views/maintenance/BackfillProgressCard.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -842,6 +888,28 @@ onUnmounted(() => {
  * 范围词（§4.3 统计卡 MUST）。
  * 移动端 2×2 栅格下卡宽仅约 165px，范围词因此另起一行并禁止逐字断行（§4.2.5）。
  */
+/* 描述列表里的术语（悬停出 tooltip）：与 .control-metric .term 同一交互范式，
+   但不能复用那个类 —— 它被限定在 .control-metric 作用域内。 */
+.desc-term {
+  cursor: help;
+  text-decoration: underline dotted var(--el-text-color-placeholder);
+  text-underline-offset: 3px;
+}
+
+/* 描述列表里的范围词：与统计卡 .stat-scope 同一视觉（浅底 chip），
+   但字号更小一档 —— 描述列表的标签栏本身已是次级字号。 */
+.desc-scope {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  vertical-align: 1px;
+}
+
 .stat-scope {
   display: inline-block;
   margin-left: 6px;

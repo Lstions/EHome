@@ -31,14 +31,15 @@ export const UIUX_PASS = process.env.UIUX_PASS || 'UiuxAudit2026!'
  *
  * ## 为什么每条路由要带一个"数据承载信号"（2026-09-14 门禁假绿修复）
  *
- * 旧判据是 `scanned > 50`（结构分母）。主控在 360×800 实测 `/logical-device`：
+ * 旧判据是 `scanned > 50`（结构分母）。主控在 360×800 实测 `/logical-device`
+ * （该页已于 2026-10-23 随逻辑设备概念移除，此处保留的是当时的实测记录）：
  *   t+  0ms  {scanned:149, clips:0, rows:0, loadingMask:1, bodyLen:154}   ← 旧判据在这里就认为"就绪"
  *   t+300ms  {scanned:705, clips:12, maxClip:365, rows:20, loadingMask:1}
  *   t+500ms  {scanned:701, clips:12, maxClip:365, rows:20, loadingMask:0}
  * 即"元素够多"完全不等于"布局已终态"：t+0 时表格 0 行、bodyLen=154（只有工具栏和表头）、
  * loadmask 还挂着，而真实裁切 300ms 后才出现。门禁于是在数据未渲染的瞬间取数并判为合规。
  *
- * 更严重的是它**已经造成过真实假绿**：删掉 `.ld-pagination :deep(.el-pagination){flex-wrap:wrap}`
+ * 更严重的是它**已经造成过真实假绿**：删掉该页的 `.ld-pagination :deep(.el-pagination){flex-wrap:wrap}`
  * 并重新构建后（产物 CSS 中该规则确实消失），旧门禁仍 1 passed，而独立探针在同一份产物上
  * 测得 clips=12 / maxClip=365px / btn-prev x=-118（视口外不可达）。
  *
@@ -97,14 +98,6 @@ export const ROUTES: RouteProbe[] = [
     root: '.device-page',
     visible: '.device-card, .empty-state',
     settle: '.stats-row, .empty-state',
-    dataShaped: true,
-  },
-  {
-    name: 'logical-device-list',
-    path: '/logical-device',
-    root: '.logical-device-page',
-    visible: '.el-table__row, .empty-state, .el-table__empty-text',
-    settle: '.ld-pagination, .el-table__row, .empty-state, .el-table__empty-text',
     dataShaped: true,
   },
   {
@@ -360,10 +353,12 @@ async function structuralFacts(page: Page, probe: RouteProbe): Promise<Structura
         // 详情区顶层另用 .detail-skeleton（即 [data-test="monitor-loading"] 所在节点）。
         // 修复前只认 .el-skeleton ⇒ 接口挂起时实测 skeletons=0、blockers=[]，门禁在
         // **只有骨架的 DOM**（scanned=181 vs 真实数据 295）上做了裁切判定 —— 真实假绿。
-        // 其余自研骨架（.logical-info-skeleton/.candidate-skeleton/.skeleton-grid）一并纳入，
+        // 其余自研骨架（.data-info-skeleton/.skeleton-grid）一并纳入，
         // 避免同类盲区在别的路由复现。
+        // 2026-10-23 逻辑设备移除：.logical-info-skeleton 随「逻辑设备信息区」删除，
+        // 该区改为「本设备历史数据」区后类名是 .data-info-skeleton（否则会漏判一个骨架）。
         skeletons: countVisible(
-          '.el-skeleton, .skeleton-card, .detail-skeleton, .logical-info-skeleton, .candidate-skeleton, .skeleton-grid'
+          '.el-skeleton, .skeleton-card, .detail-skeleton, .data-info-skeleton, .skeleton-grid'
         ),
         rows: document.querySelectorAll('.el-table__row').length,
         empties: countVisible('.empty-state, .el-table__empty-text, .el-table__empty-block'),
@@ -555,23 +550,29 @@ export async function mockListFailure(page: Page, urlPattern: string, status = 5
   )
 }
 
-/** 造 N 行逻辑设备（D2-02：1003 行曾无分页） */
-export function logicalDevicePage(total: number, size = 20, page = 1) {
+/**
+ * 造 N 行通知通道（真分页表格；用于 UI/UX 门的「宽操作列 + 分页折行」校准）。
+ *
+ * 2026-10-23：取代已删除的 logicalDevicePage()（逻辑设备页整体下线）。
+ * 形状与 api/notificationChannel.ts 的 NotificationChannel 一致。
+ */
+export function notificationChannelPage(total: number, size = 20, page = 1) {
   const start = (page - 1) * size
   const items = Array.from({ length: Math.min(size, Math.max(total - start, 0)) }, (_, i) => ({
     id: start + i + 1,
-    identity_key: `jiabaida_bms:mock-${start + i + 1}`,
-    name: `MOCK-LD-${String(start + i + 1).padStart(4, '0')}`,
-    device_type: 'jiabaida_bms',
-    retention_days: 365,
-    merged_into: null,
-    merge_status: null,
-    purge_requested: false,
+    name: `MOCK-NC-${String(start + i + 1).padStart(4, '0')}`,
+    type: 'webhook',
+    target_url: `https://example.invalid/hook/${start + i + 1}`,
+    secret_hint: '****',
+    has_secret: true,
+    template: '',
+    min_level: 'warning',
+    enabled: true,
+    timeout_sec: null,
+    max_retries: null,
+    allow_private: false,
     created_at: '2026-09-01T00:00:00+08:00',
     updated_at: '2026-09-01T00:00:00+08:00',
-    instance_count: 1,
-    row_estimate: 1234,
-    last_data_at: '2026-09-13T00:00:00Z',
   }))
   return { code: 200, message: 'ok', data: { items, page, page_size: size, total } }
 }

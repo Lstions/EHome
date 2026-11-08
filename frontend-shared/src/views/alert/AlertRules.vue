@@ -278,11 +278,13 @@
           <el-input v-model="form.name" placeholder="如：电池过压告警" data-test="field-name" />
         </el-form-item>
         <!-- 数据来源（方案 v0.3 §4.3）：
-             ① 边缘/逻辑设备 = 存量 target_type+target_id 老路（source_kind 为 NULL）；
-             ② 来源组 = 跨逻辑设备的数据来源（主备自动跟 active / 复合按 combine 合成）。 -->
+             ① 边缘设备 = 存量 target_type+target_id 老路（source_kind 为 NULL）；
+             ② 来源组 = 跨设备的数据来源（主备自动跟 active / 复合按 combine 合成）。
+             2026-10-23 逻辑设备移除：target_type 只剩 edge_device，故 ① 的标签
+             不再叫「边缘 / 逻辑设备」。 -->
         <el-form-item label="数据来源" required>
           <el-select v-model="form.source_kind" data-test="field-source-kind" @change="onSourceKindChange">
-            <el-option label="边缘 / 逻辑设备" value="edge_device" />
+            <el-option label="边缘设备" value="edge_device" />
             <el-option label="来源组（主备 / 复合）" value="source_group" />
           </el-select>
         </el-form-item>
@@ -299,11 +301,11 @@
           </el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="目标类型" required>
-            <el-select v-model="form.target_type" data-test="field-target-type">
-              <el-option label="边缘设备" value="edge_device" />
-              <el-option label="逻辑设备" value="logical_device" />
-            </el-select>
+          <!-- 目标类型只有一种取值（edge_device）。逻辑设备概念移除后保留一个
+               单选下拉等于提供一个没有任何替代项的选择题 —— 改为固定值展示，
+               form.target_type 仍是 'edge_device'（提交体不变）。 -->
+          <el-form-item label="目标类型">
+            <el-tag size="small" type="info" data-test="field-target-type">边缘设备</el-tag>
           </el-form-item>
           <el-form-item label="目标设备" required>
             <el-select v-model="form.target_id" filterable data-test="field-target-id">
@@ -410,9 +412,12 @@ const devices = ref<EdgeDevice[]>([])
 // （设备尚未上报该类别时仍可手填，不阻塞建规则）。
 //
 // 端点是 `GET /api/v1/unified-data/categories?device_pk=<id>`，与 DataPanel.vue:577 同一
-// 生产用法（**带 `/api/v1` 前缀**）。注意不要改用 `api/unifiedData.ts:85` 的
-// `client.get('/unified-data/categories')` —— 那处缺 `/api/v1` 前缀是已登记缺陷，
-// 跟着用会必然 404。
+// 生产用法（**带 `/api/v1` 前缀**）。
+//
+// 历史教训（2026-11-08）：曾有一个 `api/unifiedData.ts` 的封装把这批端点写成
+// 裸相对路径 `/unified-data/*`（缺 `/api/v1`），同源部署下必然打不中后端。
+// 那个文件已整体删除（5 个方法都指向不存在的路由，生产零调用方）。
+// 结论不变：**调数据接口一律用绝对 `/api/v1/...` 路径**，别指望 baseURL 补版本段。
 const sensorCategories = ref<MeasurementCategory[]>([])
 const sensorCategoriesLoading = ref(false)
 /** 已拉取过类别的设备 id，避免同一设备反复请求。 */
@@ -471,7 +476,7 @@ function targetText(rule: AlertRule): string {
     const g = sourceGroups.value.find(x => x.id === rule.source_group_id)
     return `来源组 · ${g ? g.name : `#${rule.source_group_id}`}`
   }
-  return `${rule.target_type === 'edge_device' ? '边缘设备' : '逻辑设备'} #${rule.target_id}`
+  return `边缘设备 #${rule.target_id}`
 }
 function comparatorText(c: AlertComparator): string {
   return comparators.find(x => x.value === c)?.label ?? c

@@ -28,25 +28,22 @@
         </div>
       </div>
 
-      <!-- 逻辑设备信息区：异步加载，loading 骨架，失败降级为不显示 (方案 v3.3 §2.1) -->
-      <div v-if="infoLoading" class="logical-info-skeleton" aria-label="正在加载逻辑设备信息">
+      <!-- 数据规模区：异步加载，loading 骨架，失败降级为不显示
+           （2026-10-23 逻辑设备移除后，这里展示的是**本设备自己的**数据量与
+           系统级保留期 —— 原「逻辑设备信息」区展示的是逻辑身份的实例数/保留天数，
+           那是用户无法操作、也无法验证的内部概念。） -->
+      <div v-if="infoLoading" class="data-info-skeleton" aria-label="正在加载设备数据量">
         <div class="skeleton-line skeleton-line--long" />
         <div class="skeleton-line skeleton-line--short" />
       </div>
-      <div v-else-if="logicalInfo" class="logical-info">
-        <div class="logical-info-title">逻辑设备信息</div>
-        <div class="logical-info-items">
-          <span v-if="logicalInfo.name" class="logical-info-item">
-            逻辑设备：<strong>{{ logicalInfo.name }}</strong>
+      <div v-else-if="rowEstimate !== null" class="data-info">
+        <div class="data-info-title">本设备历史数据</div>
+        <div class="data-info-items">
+          <span class="data-info-item">
+            数据量估算：<strong>约 {{ formatRowCount(rowEstimate) }} 条</strong>
           </span>
-          <span class="logical-info-item">
-            实例数：<strong>{{ logicalInfo.instance_count }}</strong>
-          </span>
-          <span v-if="logicalInfo.row_estimate !== undefined" class="logical-info-item">
-            数据量估算：<strong>约 {{ formatRowCount(logicalInfo.row_estimate) }} 条</strong>
-          </span>
-          <span v-if="logicalInfo.retention_days !== null" class="logical-info-item">
-            历史数据保留：<strong>{{ logicalInfo.retention_days }} 天</strong>
+          <span class="data-info-item">
+            保留期：<strong>系统级（默认 90 天）</strong>
           </span>
         </div>
       </div>
@@ -59,9 +56,13 @@
             保留历史数据<span v-if="retentionSuffix" class="data-action-hint">（{{ retentionSuffix }}）</span>
           </el-radio>
           <el-radio value="delete" class="data-action-radio data-action-radio-danger">
-            <span class="danger-text">同时删除历史数据（将在后台删除，不可恢复）</span>
+            <span class="danger-text">同时删除历史数据（后台分批清理；清理开始后不可恢复）</span>
           </el-radio>
         </el-radio-group>
+        <p class="data-action-note">
+          只删设备行是<strong>软删</strong>：保留数据的删除可在「恢复已删除设备」中找回。
+          勾选删除数据后，后台清理开始前仍可恢复并撤回删除请求；清理开始即不可恢复。
+        </p>
       </div>
     </template>
 
@@ -74,7 +75,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { edgeDeviceApi, type EdgeDevice, type LogicalDeviceInfo } from '@/api/edgeDevice'
+import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { UNKNOWN } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
@@ -115,31 +116,43 @@ const channelLabel = computed(() => {
 // 数据处置：默认保留历史数据
 const dataAction = ref<'keep' | 'delete'>('keep')
 
-// 逻辑设备信息异步加载 (失败降级为不显示该区域，不阻塞删除)
+// 数据量估算异步加载 (失败降级为不显示该区域，不阻塞删除)
+//
+// 口径（2026-10-23 逻辑设备移除后）：原来的 /edge-devices/:id/logical-device-info
+// 已随逻辑身份层一起删除。现在用 data-summary 以「本设备自己作为唯一来源」
+// 查询 —— 该端点返回的是 unified_data/device_data 中 WHERE device_id=该设备
+// 的行数估算，正是删除确认要告诉用户的东西。
+//
+// null 的语义是「估算不出来」（请求失败/超时），**不是 0 行**：为 null 时整块
+// 信息区不渲染，而不是显示「约 0 条」这种会误导用户的假事实。
 const infoLoading = ref(false)
-const logicalInfo = ref<LogicalDeviceInfo | null>(null)
+const rowEstimate = ref<number | null>(null)
 let infoRequestSeq = 0
 
-const retentionSuffix = computed(() => {
-  const days = logicalInfo.value?.retention_days
-  return typeof days === 'number' ? `保留 ${days} 天` : ''
-})
+// 保留期后缀：系统级保留期统一生效（契约 §4.5，不再有 per-device retention），
+// 因此这里不再是「该设备保留 N 天」，而是一个与设备无关的系统事实。
+const retentionSuffix = computed(() => '受系统级保留期约束（默认 90 天）')
 
 watch(() => props.visible, (open) => {
   if (open && props.device) {
     dataAction.value = 'keep'
-    logicalInfo.value = null
+    rowEstimate.value = null
     const seq = ++infoRequestSeq
+    const deviceId = props.device.id
     infoLoading.value = true
-    edgeDeviceApi.getLogicalDeviceInfo(props.device.id)
-      .then((info) => {
+    edgeDeviceApi.getDataSummary(deviceId, [deviceId])
+      .then((summary) => {
         if (seq !== infoRequestSeq) return
-        logicalInfo.value = info
+        // 2026-10-25 新契约：目标自身行数在 target_rows（兼容旧字段 target.rows）。
+        const rows = typeof summary.target_rows === 'number'
+          ? summary.target_rows
+          : (typeof summary.target?.rows === 'number' ? summary.target.rows : null)
+        rowEstimate.value = rows
       })
       .catch(() => {
-        // 降级：请求失败时不显示信息区，删除流程不受阻 (方案 §2.1)
+        // 降级：请求失败时不显示信息区，删除流程不受阻
         if (seq !== infoRequestSeq) return
-        logicalInfo.value = null
+        rowEstimate.value = null
       })
       .finally(() => {
         if (seq === infoRequestSeq) infoLoading.value = false
@@ -190,7 +203,7 @@ const handleConfirm = () => {
   word-break: break-all;
 }
 
-.logical-info-skeleton {
+.data-info-skeleton {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -228,21 +241,21 @@ const handleConfirm = () => {
   100% { background-position: -200% 0; }
 }
 
-.logical-info {
+.data-info {
   margin-top: 12px;
   padding: 12px;
   border-radius: 8px;
   border: 1px solid var(--el-border-color-lighter, #ebeef5);
 }
 
-.logical-info-title {
+.data-info-title {
   margin-bottom: 8px;
   font-size: 13px;
   font-weight: 600;
   color: var(--el-text-color-primary, #303133);
 }
 
-.logical-info-items {
+.data-info-items {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
@@ -250,7 +263,7 @@ const handleConfirm = () => {
   color: var(--el-text-color-regular, #606266);
 }
 
-.logical-info-item strong {
+.data-info-item strong {
   color: var(--el-text-color-primary, #303133);
 }
 
@@ -281,6 +294,13 @@ const handleConfirm = () => {
 
 .danger-text {
   color: var(--el-color-danger, #f56c6c);
+}
+
+.data-action-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 
 /* 危险 radio 选中时圆圈变红 */

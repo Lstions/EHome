@@ -59,8 +59,8 @@ import {
   CONTRAST_BODY,
   CONTRAST_LARGE,
   gotoRoute,
-  logicalDevicePage,
   loginViaApi,
+  notificationChannelPage,
   measureRouteWhenReady,
   mockOverviewFailure,
   pollUntil,
@@ -171,7 +171,8 @@ test.describe('横向溢出与真实裁切', () => {
    * 那条守的是"分母是 0 还是真的没缺陷"；这条守的是**横向裁切探针在真实页面上确实能变红**。
    *
    * ### 注入的缺陷就是历史上真实发生过的那个
-   * `LogicalDeviceList.vue` 的 `.ld-pagination :deep(.el-pagination) { flex-wrap: wrap }`。
+   * 分页条缺 `:deep(.el-pagination) { flex-wrap: wrap }`（原发页 LogicalDeviceList.vue 的
+   * `.ld-pagination` 规则；该页 2026-10-23 随逻辑设备移除，现由 `.nc-pagination` 承载同一规则）。
    * 删掉它后（主控已用"删除规则 → pnpm build → grep 产物 CSS"证实规则消失），
    * 360px 下 `el-pagination`（实测宽 676.94px，layout="total, sizes, prev, pager, next, jumper"
    * 自带 white-space:nowrap）在 .el-main 内容宽 352px 里被右对齐后整体左移出容器，
@@ -202,16 +203,23 @@ test.describe('横向溢出与真实裁切', () => {
     // 在宽屏下 nowrap 也不会裁切 —— 那会让这条校准用例变成永远为绿的假证据）
     await page.setViewportSize({ width: 360, height: 800 })
     await loginViaApi(page, 'light')
-    // 用与门禁同源的 mock（1003 条逻辑设备，走真分页），不依赖 ehome_uiux 的现存数据
-    await page.route('**/api/v1/logical-devices**', (route) =>
+    // 用与门禁同源的 mock（103 条通知通道，走真分页），不依赖 ehome_uiux 的现存数据。
+    //
+    // 2026-10-23（逻辑设备移除）：本用例原在 /logical-device 上校准 —— 该页已随
+    // 逻辑设备概念整体删除（见 .contract/logical-device-removal.md）。校准对象改为
+    // /notification-channels：它同样有「宽操作列 + 真分页 + .nc-pagination
+    // :deep(.el-pagination){flex-wrap:wrap}」，即同一个缺陷族（单个过宽的
+    // el-pagination 被右对齐后推出容器 ⇒ 上一页按钮永久不可达）在真实页面上仍可复现。
+    // 断言 A–H 一条未放宽。
+    await page.route('**/api/v1/notification-channels**', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(logicalDevicePage(1003)),
+        body: JSON.stringify(notificationChannelPage(103)),
       })
     )
 
-    const probe = ROUTES.find((r) => r.path === '/logical-device')!
+    const probe = ROUTES.find((r) => r.path === '/notification-channels')!
     // 与上一条溢出用例**完全相同**的就绪判据（否则校准的就不是门禁真正用的那条路径）
     const before = await measureRouteWhenReady(page, probe)
 
@@ -237,7 +245,7 @@ test.describe('横向溢出与真实裁切', () => {
     // 下面 A–H 八条断言（含 F: left < 0 与 G: elementFromPoint 取不到）全部原样保留。
     await page.addStyleTag({
       content:
-        '.ld-pagination .el-pagination{flex-wrap:nowrap !important}' +
+        '.nc-pagination .el-pagination{flex-wrap:nowrap !important}' +
         '.el-pager{flex-wrap:nowrap !important}',
     })
     // 等布局吸收新样式：用"探针连续两次报同一结果"代替 sleep
@@ -262,7 +270,7 @@ test.describe('横向溢出与真实裁切', () => {
     ).toBeGreaterThan(0)
 
     // D. 裁切确实发生在分页控件上
-    const onPagination = stable.clips.filter((c) => c.by.includes('ld-pagination') || c.cls.includes('pagination'))
+    const onPagination = stable.clips.filter((c) => c.by.includes('nc-pagination') || c.cls.includes('pagination'))
     expect(
       onPagination.length,
       '裁切不在分页控件上，断言指向了别的缺陷：' + JSON.stringify(stable.clips.slice(0, 5))
@@ -270,7 +278,7 @@ test.describe('横向溢出与真实裁切', () => {
 
     // E/F/G/H. 上一页按钮的实际可达性（走真实几何，不看截图观感）
     const reach = await page.evaluate(() => {
-      const btn = document.querySelector('.ld-pagination .btn-prev')
+      const btn = document.querySelector('.nc-pagination .btn-prev')
       if (!btn) return null
       const r = btn.getBoundingClientRect()
       const cx = r.left + r.width / 2
@@ -286,7 +294,7 @@ test.describe('横向溢出与真实裁切', () => {
         pageOverflow: de.scrollWidth - de.clientWidth,
       }
     })
-    expect(reach, '页面上找不到 .ld-pagination .btn-prev，无法校准可达性').not.toBeNull()
+    expect(reach, '页面上找不到 .nc-pagination .btn-prev，无法校准可达性').not.toBeNull()
     expect(
       reach!.left,
       `上一页按钮 left=${reach!.left} 未移出视口左侧 —— 注入的缺陷没有复现出"不可达"`
@@ -383,11 +391,13 @@ test.describe('触控热区实际可点击区域', () => {
    * 确定的行数，避免依赖 `ehome_uiux`。
    */
   const TABLE_ROUTES: Array<{ name: string; path: string; pattern: string; body: unknown }> = [
+    // 2026-10-23 逻辑设备移除：原第一条是 /logical-device（已删除页面），
+    // 换成 /notification-channels —— 同样是有行内操作按钮的真分页表格。
     {
-      name: 'logical-device-list',
-      path: '/logical-device',
-      pattern: '**/api/v1/logical-devices**',
-      body: logicalDevicePage(1003),
+      name: 'notification-channels',
+      path: '/notification-channels',
+      pattern: '**/api/v1/notification-channels**',
+      body: notificationChannelPage(20),
     },
     {
       name: 'automation',

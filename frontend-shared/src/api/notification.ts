@@ -6,8 +6,8 @@ export interface Notification {
   title: string
   description: string
   source: string
-  // 后端 models.Notification.SourceID 是 size:64 字符串列 (如 merge_job id /
-  // logical_device id 的十进制文本); 前端按字符串处理。
+  // 后端 models.Notification.SourceID 是 size:64 字符串列（各类业务对象的十进制 id
+  // 文本，如自动化事件 id）; 前端按字符串处理。
   source_id?: number | string
   read: boolean
   created_at: string
