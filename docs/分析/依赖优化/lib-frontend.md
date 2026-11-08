@@ -594,7 +594,7 @@ declare module 'vue-router' {
 
 **复跑方式**：
 
-```bash
+```bash requires-local-artifacts
 # 体积 A/B（约 5 s/次）
 cd frontend-shared && npx vite build --outDir ../.tmp-probe/build-base --emptyOutDir
 # 首屏闭包 + gzip

@@ -535,7 +535,7 @@ $ grep -rn 'uuid\.' --include='*.go' backend/ | grep -oE 'uuid\.[A-Za-z]+' | sor
 
 本机 `/home/sun/go/pkg/mod` 是**只读**挂载，导致 `go build` 写 lock 文件失败。可用的环境组合（我实测）：
 
-```bash
+```bash requires-local-artifacts
 export PATH=/home/sun/.local/toolchains/go1.27.3/bin:$PATH
 export GOPATH=/mnt/storage/WorkSpace/EHome/.tmp-deps/gopath   # 已有完整 1.6.3 等依赖
 export GOCACHE=/mnt/storage/WorkSpace/EHome/.tmp-go/cache

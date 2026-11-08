@@ -93,7 +93,7 @@ ssh root@192.168.20.6 'cd /srv/ehomesystem \
 
 ## 5. 上线验收（必须全过）
 
-```bash
+```bash requires-local-artifacts
 ssh root@192.168.20.6 'curl -s http://127.0.0.1:18090/health'   # {"status":"ok"}
 # 5.1 索引 valid + 实际被使用
 ssh root@192.168.20.6 'docker exec ehome-prod-postgres psql -U ehome -d ehome -c \

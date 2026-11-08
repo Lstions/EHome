@@ -233,7 +233,7 @@
 
 （见下方代码块；注意本机 hub.docker.com 与 registry-1.docker.io **均不可达**，凡涉及 Docker Hub 的命令都会超时，已给出替代方案。）
 
-```bash
+```bash requires-local-artifacts
 # ── 0) 环境（本机实测：系统无 go，必须用仓内 gotool + 可写 GOPATH + goproxy.cn）
 cd /mnt/storage/WorkSpace/EHome
 export GOPATH=$PWD/.tmp-deps/gopath

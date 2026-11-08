@@ -25,6 +25,64 @@
 
 ## 变更清单
 
+
+### 2026-10-25（**二审：恢复已删除设备 / 合并历史数据的功能逻辑修复** —— 三路独立审计 + 全量回归）
+
+- **触发**：产品负责人反馈「合并历史数据、恢复已删除设备目前功能逻辑还有大问题！」。本轮组织**三路并行独立审计**：后端代码审计（12 条）、前端交互审计（15 条）、scratch PG + 真实 HTTP 运行时矩阵（13 条），报告在 [.analysis/rr2/](../.analysis/rr2/)（backend / frontend / runtime 三份 findings）。
+- **两个 P0（均已修 + 回归守卫）**：
+  1. **purge 与 restore 竞态（不可恢复数据丢失）**：DevicePurger 只在扫描时判断一次 `deleted_at`，之后按内存快照删到底 —— purge 运行期间恢复的设备会返回 200、DB 已清标记，但 purge 仍把历史与设备行硬删。修法：新增 `data_purge_started_at` 认领列（原子认领 + restore 行锁互斥 + 条件删除 + 每轮只清 >1h 陈旧认领），并连带清理 `sensor_field_obs`/`data_sources`/`calibration_cache`。
+  2. **前端「合并历史」三处独立断路**：手输源 id 是 string（Go `[]uint` 绑定 400）；候选只列存活设备（新语义下全部 409）；data-summary 形状变更未同步（预览恒「—」+ 空表）。三处全修后「合并已删设备历史」才第一次真正可用。
+- **主要 P1 修复**：restore 与 create/update 对齐（传输通道/驱动总线/命令容量/地址门禁、状态与 init 复位、enabled/last_data_at、hardware_id 可在恢复请求中修正）；配置模板改为**幂等 ensure**（按 `(node_id, write_data, read_length)` 复用，修掉「删→恢复」每次净增模板、16 次后整节点 config sync 被拒）；merge 语义收紧（存活源默认 409、源不存在 400、源=目标 400、孤儿救援保留、与 purge 互斥、退役失败回滚）；merge 台账**按源逐个迁移**（修多源同名复合键冲突导致的永久半迁移）；data_sources manual 行冲突保留 + warning；data-summary 拆 `target/sources/target_rows/source_rows`（「预计迁移」不再把目标自己算进去）；离线判定对「从未上报」设备改用 `max(created_at, updated_at)`（恢复后不再立刻被判离线）；模板容量类错误 500→400。
+- **前端**（首轮；晚间的产品重做已取代其中"存活源风险确认 / retired"部分）：合并弹窗接入已删设备候选、手输 id number 收敛、新 summary 口径、warnings 展示；恢复弹窗按通道可服务性过滤、每节点本地缓存通道、purge 状态禁用恢复、分页；删除文案与恢复能力对齐（「保留数据的删除可在恢复入口找回」）。
+- **契约与文档**：[.contract/logical-device-removal.md](../.contract/logical-device-removal.md) §14（当前权威语义）、[设计/边缘设备数据生命周期.md](设计/边缘设备数据生命周期.md) §3/§5.2 重写、[设计/边缘设备历史归属-产品规格-2026-10-24.md](设计/边缘设备历史归属-产品规格-2026-10-24.md) §八（G-1..G-5 裁决与落地）。同时更正上一轮审核结论：基线 `rowsKnown` 是「任一项成功即为真」，不是「全部成功」。
+- **门禁**：`go build ./...` / `go vet ./...` / `go test ./...`（SQLite）全绿；`pnpm test:run` / `pnpm typecheck` / `pnpm build` 全绿；scratch PG + 真实 HTTP 矩阵复验（restore 16 场景 / merge 12 场景 / purge 竞态）通过。
+- **残余（明确未做）**：创建向导「同址已删设备提示/一键转恢复」（G-4 前半）；merge 后台任务化 + 进度接口（当前同步长请求、可取消、幂等可重试）；DevicePurger 多实例租约（当前单实例部署）；恢复弹窗节点下拉 remote 搜索（>200 节点）；本轮未上生产。
+- **升级注意（上生产前必读）**：新增列 `edge_devices.data_purge_started_at`（AutoMigrate，毫秒级）；新增 `unified_data/device_data (device_id, timestamp)` 索引会在**已分区母表首次启动时** CREATE INDEX（SHARE 锁，34M 行级可能数十秒–分钟写阻塞）——建议维护窗口升级，或提前用 `CREATE INDEX CONCURRENTLY`（PG18 支持分区表）建好，补齐逻辑按列清单命中即跳过。DevicePurger 必须**单实例**运行。
+- **2026-10-25（批量管理 + 历史设备）**：需求「边缘设备要支持批量管理、显示历史边缘设备，能够批量删除」已落地——列表页双 Tab（在役/历史）；在役批量启用/停用/设置采集间隔/删除/导出（表格多选 + 卡片"批量管理"模式，逐条结果与失败明细）；历史设备列表（数据量/最后采集/删除时间/清理状态，行操作 恢复/彻底删除，批量彻底删除）；`GET /edge-devices/deleted` 增加 `search`；新增 `POST /edge-devices/batch-update` 与 `POST /edge-devices/deleted/batch-delete`；DevicePurger 增加 `Wake()`，历史设备彻底删除入队后立即清理（不必等 24h）。设计：[分析/边缘设备批量管理与历史设备-2026-10-25.md](分析/边缘设备批量管理与历史设备-2026-10-25.md)，契约 §15。
+- **2026-10-25 晚（产品重做）**：产品负责人实测指出合并历史的**功能设计根本错误**——目标 bms，源候选却列出逆变器/雨量计（跨型号），且列的是现役设备而不是历史设备。已重做：**合并只允许「已删除 + 与目标同型号」的设备**（跨型号 400、在役源 409、无设备行孤儿 400；删除 `allow_live_source`/自动退役路径）；合并弹窗改为「目标设备 → 同型号已删除历史设备」列表（服务端 `device_type` 过滤 + 手输 ID 类型校验 + 空态三路径引导）；`data-summary` item 与 `GET /edge-devices/deleted` 增加 `device_type`。设计文档：[分析/合并历史-产品设计重做-2026-10-25.md](分析/合并历史-产品设计重做-2026-10-25.md)。
+
+### 2026-10-24（**生产已完成部署**：逻辑设备层从生产库彻底消失）
+
+- **执行**：按 runbook 在 2026-10-24 10:32–10:37 UTC 完成生产迁移。**数据零丢失**：`unified_data` 34,946,938→34,948,541、`device_data` 3,317,068→3,317,250（增量为停写前在途写入）、`edge_devices` 10、`data_sources` 71 全部保留。
+- **结果**：逻辑列/表/索引 **0/0/0**；`uniq_ds_source` 已变为 `(edge_device_id, category)` 2 列；`ux_ds_one_active` 按新组键重建；数据库 11 GB → **7.8 GB**，磁盘可用 4.4 GB → **9.5 GB**。
+- **服务验证**：`/health` 200（`commit=c76744d3+uncommitted-2026-10-24`）、`/login` 200、`GET /data-sources` 200、4 个已删端点 404、设备 60 秒内 122 次 `StatusReport`（设备 16 在线）、无 panic/error。
+- **上线前演练**：先把生产备份（374 MB / 677 TOC / 59 表 / 10 分区，`pg_restore -l` 校验通过）恢复到本地 `ehome_dry2` 跑完整迁移 + 起新镜像验证，**确认无误后**才动生产。演练纠正了一个误判：`rows touched=0` 是统计口径（迁移不删行），不是「没执行」。
+- **执行记录与回滚路径**：[操作/生产迁移-逻辑设备层移除-v3.5.md](操作/生产迁移-逻辑设备层移除-v3.5.md) §六（含踩坑：网络名是 `ehomesystem_ehome-internal` 且需 `--network-alias ehome`；回滚必须整库恢复，旧镜像会因列已删而报错）。
+- **镜像 tag 已对齐**：首次部署是 dirty 构建（如实标注 `+uncommitted-2026-10-24`，未伪造 commit）。随后改动分 4 个 commit 提交（HEAD `fe8af2b0`），按该 commit 重建 `ehome-new:sg-fe8af2b0`（image label / 二进制内嵌 / `/health` 三处一致），生产替换后 `/health` 返回完整 commit。旧镜像与 `ehome-prod-web-prev` 保留作回滚。
+- **顺带修掉一个 UI 缺陷**（用户实机截图发现）：设备卡片在网格里不等高、且加第 4 个操作按钮后溢出被裁切。根因两条——`.device-card` 不是 flex 列容器所以 `margin-top:auto` 从未生效；`overflow:hidden` 把溢出按钮裁掉一半。另修 `.el-card__body` 选择器缺 `:deep()`。playwright 几何验证：等高 244/244、无溢出、0 个被裁按钮。
+
+### 2026-10-24（独立审核 + 遗留问题处置：修 1 个 P0 数据丢失、删 4 个死端点）
+
+- **审核组织**：三名独立审核员（后端移除 / 前端移除+新入口 / 遗留问题深度分析），报告在 [.analysis/review-removal/](../.analysis/review-removal/)。审核员被明确要求「发现 Lead 说错就指出来」，实际修正了 Lead 4 处描述。
+- **[P0 已修] 恢复设备后历史仍被静默硬删**：`data_purge_requested` 是**单向闩锁** —— `DELETE?delete_data=true` 只写 `true`，restore 不清它，于是「删(勾选删数据) → 恢复(后悔了) → 再删(明确不删数据)」会让 purge 任务硬删用户要求保留的历史，而 API 应答还谎报 `false`（回显入参而非读库）。**三处修复**：restore 清标记、单删/批删双向显式写、应答改回读库值。回归守卫 `TestEdgeDevice_PurgeLatch_*`（初版曾假绿，变异自证发现后改为直接读库断言）。
+- **[P1 已修] 性能修复只做了一半**：旧复合索引 `idx_devdata_logical_created` / `idx_unified_logical_sensor_ts` 随逻辑列删除但**无 device 维度替代** ⇒ 生产 `/latest-data` 0.39 ms → 400~2000 ms、30 天图表 0.46 s → 5.3 s。补两条复合索引（PG 版加 `INCLUDE (value)`）。**A/B 实测（250 万行、90% 偏斜、目标设备陈旧）**：latest-data 399.6 ms → **0.098 ms**；30 天图表 96.4 ms → 39.0 ms（recheck 归零）。
+- **[P1 已修] `merge-history` 只搬 2 张时序表**：合并后 `GET /unified-data/categories`（读 `unified_data`）与 `GET /sensor-fields`（读 `sensor_field_obs`）对同一设备给出矛盾答案。已补 `sensor_field_obs`（含冲突行统计量合并）与 `data_sources`；PG 实测 `rsoc` 100+80→180、源设备行清零、重跑幂等。
+- **[P0 已修] 前端读后端从不返回的字段**：`data-summary` 后端只发 `items`，前端读 `total_rows` 并兜底成 0 ⇒ 合并历史弹窗显示「预计迁移 0 行」而同弹窗明细显示 352,579；删除确认显示「约 0 条」。**测试全绿是因为 mock 自造了该字段**。已后端补 `total_rows`（任一源估算失败时整体省略，不报偏小合计）+ 前端可空类型 + 「—」降级 + **API 封装层**回归守卫（组件测试 mock 掉 API，抓不到该缺陷）。
+- **遗留问题按方案 A 处置完毕**：删除 `data_sources` 四个手工运维端点（`DELETE`/`activate`/`deactivate`/`reset`）及其 Service 方法与整条通知链。依据：组键二元化后 Deactivate **恒 409**（候选集恒空，数学必然）、Reset **恒 400**（`status='error'` 无写入者，熔断链路已死）、Delete 会被投影器以新 id 重建、手工改 status 被覆盖（25–37s）、无数据面消费者，而能力已在来源组完整具备且真接入 UI。新增 `TestDataSourceWriteEndpointsRemoved` 门禁；接线门禁 needle 从 `datasourceSvc` 迁到 `sourceGroupSvc`（数据源域唯一通知生产者）。
+- **顺带修掉 `is_primary` 漂移死列**：它可与 status 并存为 `active + false`（两处记载谁是主来源）。已改为 status 的派生量，Create/Update 不接收入参；`TestIsPrimaryIsDerivedFromStatus` + 变异自证。
+- **环境事故（披露）**：审核期间本机 `ehome-postgres` 容器被销毁（数据卷仍是 PG 16 格式、与原 PG 18 不符）。已用 2026-10-23 01:34 的 `pg_dump` 完整恢复 dev 库（179,532 / 568,617 / 2 设备 / 2 逻辑设备 / `sv=7`，逐项与备份前一致），dev 库逻辑设备层未被动过。
+- **门禁**：`go build` / `go vet`（含 `-tags=simulation`）/ `go test ./...` / `pnpm test:run`（2294 passed）/ `pnpm typecheck` / `pnpm build` 全绿；改动文件 gofmt 干净。
+- **契约**：[.contract/logical-device-removal.md](../.contract/logical-device-removal.md) §11（审核结果与返工）+ §12（方案 A 处置清单、门禁、变异自证）。
+
+### 2026-10-23（逻辑设备层**整体移除**：从抽象回到设备维度）
+
+- **裁决**：产品负责人明确「根本不需要什么逻辑设备概念」，原始需求只有一条 —— 换节点后历史不丢（可合并旧数据或直接复用）。逻辑身份层（identity_key / merged_into / merge_status / purge_requested / retention_days / 保形去重 / 合并搬迁 worker）全部是**过度设计**。本轮**一步到位干净移除**，并实现真正需求。
+- **移除范围**：DB 3 张表（`logical_devices` / `merge_jobs` / `backfill_jobs`）+ 4 处逻辑身份列（`edge_devices` / `unified_data` / `device_data` / `data_sources`）+ 全部相关索引；后端 10 个 `datalifecycle` 文件 + 3 个 `api` 文件；前端 1 个页面 + 1 个 api + 1 个组件 + 1 个死代码页；`alert` / `automation` / `ingest` / `databus` / `source` / `datasource` / `dbschema` / `config` / `simulation` 全部改 edge_device 维度。
+- **实现真正需求（三条设备维度路径）**：① **原地换节点** `PUT /edge-devices/:id {node_id, channel_id}`（同一个 id，历史天然连续，前端已开放编辑）；② **恢复已删除设备** `GET /edge-devices/deleted` + `POST /edge-devices/:id/restore`；③ **合并历史数据** `GET /edge-devices/:id/data-summary?source_ids=` + `POST /edge-devices/:id/merge-history`（`UPDATE device_id` 分批 + 幂等）。删除语义回到设备自身：`edge_devices.data_purge_requested` + 后台 `DevicePurger`。
+- **顺带修掉的性能根因**：旧 `Scope.Cond()` 的 `OR (logical_device_id IS NULL AND device_id IN …)` 让 PG 放弃前导列索引（生产实测 26.9–32.3 s，等价两分支 UNION ALL 0.644–5.6 ms）。移除后数据读取一律 `device_id = ?` 直查，无 scope 解析、无 OR 兜底、无保形去重。
+- **契约与验收**：[.contract/logical-device-removal.md](../.contract/logical-device-removal.md)（含实际执行结果 §10：迁移幂等实测、全仓门禁、10 项真实 HTTP E2E）
+- **生产迁移 Runbook**：[操作/生产迁移-逻辑设备层移除-v3.5.md](操作/生产迁移-逻辑设备层移除-v3.5.md)（含备份要求、预计 <2 分钟、效果层验证清单、**唯一回滚路径 = 恢复整库**）
+- **设计文档同步（12 份）**：[设计/边缘设备数据生命周期.md](设计/边缘设备数据生命周期.md) 整篇重写（113→434 行，三条历史连续路径 + 系统级保留期 + §6「为什么没有逻辑设备层」）；[概念模型.md](设计/概念模型.md) 删 §3.4 身份层、[术语表.md](设计/术语表.md) 删 §2.5（保留编号不重排）、[边缘设备.md](设计/边缘设备.md) API 表删 2 增 4 + 创建流程去继承；[场景仿真验证框架.md](设计/场景仿真验证框架.md) 三域按 `simulation/catalog/*.go` 实际代码重写；其余 7 份历史方案/接口文档一律「只标不改」（头部加现状说明 + 就地标注，避免历史方案被误读为现行）
+- **门禁**：`go build` / `go vet`（含 `-tags=simulation` / `-tags=e2e`）/ `go test ./...`（SQLite + PostgreSQL 双跑）/ `pnpm test:run`（2298 passed）/ `pnpm build` 全绿；构建产物中「逻辑设备」0 次
+- **边界澄清（`data_sources` 不受本变更影响）**：它本来就是**自动管理**的 —— 投影器按「设备 × 观测字段」自动派生，启动一次 + 每 60s 对账（生产 71/71 行 `managed_by=auto`）；**用户手动创建的只有来源组**（SourceGroup）。本次移除只把它的组键维度从 `(逻辑设备, 类别)` 换成 `(edge_device_id, 类别)`，自动管理本身不变（实测：移除后灌 3 条观测 → `created=3`，三行均 `managed_by=auto`）。见[操作/数据源自动管理-落地说明-2026-10-23.md](操作/数据源自动管理-落地说明-2026-10-23.md)
+
+### 2026-10-23（逻辑设备：需求回溯与设计合理性评估）
+
+- **评估报告（本轮主产出）**：[分析/逻辑设备-业务逻辑与需求偏差评估-2026-10-23.md](分析/逻辑设备-业务逻辑与需求偏差评估-2026-10-23.md)（产品负责人澄清原始需求只有一条「换节点后历史不丢、可合并或直接复用」，并明确否认需要逻辑身份层；本次按 L0 用户需求 / L1 方案自述需求 / L2 实现三层重判，得出**需求被重新定义 + 过度设计**的结论；含生产实测证据链与三档建议）
+- **证据全文（4 份，均带可复跑命令）**：[.analysis/logical-device/](../.analysis/logical-device/)（req-trace 需求→实现矩阵 / backend-audit 后端不变量审计 / frontend-cross 前端信息架构 / runtime-evidence 生产运行时证据）
+- **关键实测（生产只读）**：`GET /logical-devices`（16 行）默认参数 **92.5–131 s**；根因 `Scope.Cond()` 的 OR 使索引降级为 Filter（`Rows Removed by Filter` 2936 万行，26.9–32.3 s vs 等价 UNION ALL 0.644–5.6 ms）；成本与「该设备停更时长」正相关、与数据量反相关（2,782 万行 1 ms / 1.4 万行 45 s）；13/16 逻辑设备无存活实例，其中 314 万行历史**无任何 API 可读**而 retention 仍会按保留期硬删
+- **未改动生产代码**；本轮全部为只读采集 + 本机 dev 库一次写验证（已复原）
+
 ### 2026-10-21（三域架构审计 + 数据源自动纳入需求分析 + 逆变器解析器与锯齿续查）
 
 - **GB3024 协议原件核对（本轮新增）**：[协议/GB3024协议核对-2026-10-21.md](协议/GB3024协议核对-2026-10-21.md)（拿到 docx 原件（64,255 B / `beee61e5…`）逐字段核对 12 条只读命令；**发现并修正 4 处**：HTEMP 完整形状是 **10 字段**而非 11（`HI` 连写、`KKK` 与 `O` 无空格）、**HBMS1 数值位整体错开一位**（把标志串当平均温度，真机接上 BMS 会全字段假数据）、补 `c7 = BMS 温度过高`、HSTS 未知模式字符 fail-closed；另确认归档摘录两处错误（原件**明确写了 `CRC-16/XMODEM`**；摘录缺字段级布局且记录的字节数/SHA 与现文件不符）。验证：单测 164 全绿、生产 70,115 帧回放仍 100%）

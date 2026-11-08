@@ -378,7 +378,7 @@ v2.8 → v2.9 是 v2 内 minor，无破坏性公告。**可批量**（实测绿�
 
 覆盖：sonic 1.15.2→1.15.4、sonic/loader 0.5.1→0.5.3、mimetype 1.4.15→1.4.16、cors 1.7.7→1.7.9、gzip 1.2.6→1.2.8、sse 1.1.1→1.1.2、locales 0.14.1→0.14.2、universal-translator 0.18.1→0.18.2、validator 10.30.3→10.30.5、puddle 2.2.2→2.2.3、cpuid/v2 2.4.0→2.4.1、go-sqlite3 1.14.48→1.14.52、client_model 0.6.2→0.6.3、ugorji/codec 1.3.1→1.3.2、protobuf 1.36.11→1.36.12、driver/postgres 1.6.0→1.6.3、x/crypto 0.54→0.57、x/net 0.57→0.58、x/sync 0.22→0.23、x/sys 0.47→0.48、x/text 0.40→0.42、mongo-driver 2.8.0→2.8.2。
 
-```bash
+```bash requires-local-artifacts
 cd /mnt/storage/WorkSpace/EHome/backend
 export PATH=/mnt/storage/WorkSpace/EHome/.tools/gotool/bin:$PATH
 export GOPROXY=https://goproxy.cn,direct GOPATH=/mnt/storage/WorkSpace/EHome/.tmp-deps/gopath
@@ -570,7 +570,7 @@ ad79b0c5a2f6a42c0bbe392da28f959b  scripts/bench/ehload/go.sum
 
 > ⚠️ 执行前先 commit / stash。升级必然改动 `go.mod` + `go.sum`。
 
-```bash
+```bash requires-local-artifacts
 # ══════ 通用环境（每个新 shell 都要重设）══════
 cd /mnt/storage/WorkSpace/EHome/backend
 export PATH=/mnt/storage/WorkSpace/EHome/.tools/gotool/bin:$PATH

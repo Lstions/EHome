@@ -463,7 +463,7 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 
 ## 7. 可复现命令（本文所有测量，只读）
 
-```bash
+```bash requires-local-artifacts
 # 0) 登录生产只读（凭据见 .secrets/prod.env；本文使用 sshpass 内联口令，勿入库）
 S='sshpass -p *** ssh -F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.20.6'
 

@@ -512,7 +512,7 @@ Lead 提到 8 个注册表结构（`deviceaction/definition.go:98`、`drivers/re
 
 ## 附录 A：测量命令（可复现）
 
-```bash
+```bash requires-local-artifacts
 export GOROOT=/mnt/storage/WorkSpace/EHome/.tmp-deps/dl/go1.27.3
 export PATH=$GOROOT/bin:$PATH
 export GOPATH=/mnt/storage/WorkSpace/EHome/.tmp-deps/gopath
