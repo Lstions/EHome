@@ -35,20 +35,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// sgFullChain 是一条最小但完整的光照链路：两台 prs3001（跨逻辑设备）+ 一个来源组。
+// sgFullChain 是一条最小但完整的光照链路：两台 prs3001 边缘设备 + 一个来源组。
+//
+// 2026-10-23: 逻辑设备概念层移除后，两台设备不再"跨逻辑设备"，就是两台独立边缘设备。
 type sgFullChain struct {
-	db       *gorm.DB
-	node     models.Node
-	channel  models.Channel
-	logicalA models.LogicalDevice
-	logicalB models.LogicalDevice
-	edgeA    models.EdgeDevice
-	edgeB    models.EdgeDevice
-	gsvc     *datasource.GroupService
-	reg      *sourceref.Registry
-	eval     *automation.Evaluator
-	bus      *databus.DataEventBus
-	done     *signalingConsumer
+	db      *gorm.DB
+	node    models.Node
+	channel models.Channel
+	edgeA   models.EdgeDevice
+	edgeB   models.EdgeDevice
+	gsvc    *datasource.GroupService
+	reg     *sourceref.Registry
+	eval    *automation.Evaluator
+	bus     *databus.DataEventBus
+	done    *signalingConsumer
 }
 
 // newSGChain 建两台光照设备 + 数据面 + 引擎，全部走真实构造。
@@ -102,23 +102,14 @@ func newSGFullChain(t *testing.T, rules ...*models.AutomationRule) *sgFullChain 
 		t.Fatalf("set hardware_info: %v", err)
 	}
 
-	// 两台**跨逻辑设备**的光照传感器：来源组的意义就是把不同逻辑设备上的
-	// 同类传感器合成一个来源（同逻辑设备装两台会被 v3.3 单存活实例约束挡住）。
-	c.logicalA = models.LogicalDevice{IdentityKey: "prs3001:sg-e2e:A:1", Name: "光照A", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&c.logicalA).Error; err != nil {
-		t.Fatalf("create logical A: %v", err)
-	}
-	c.logicalB = models.LogicalDevice{IdentityKey: "prs3001:sg-e2e:B:1", Name: "光照B", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&c.logicalB).Error; err != nil {
-		t.Fatalf("create logical B: %v", err)
-	}
+	// 两台独立边缘设备：来源组的意义就是把不同物理来源上的同类传感器合成一个来源。
 	c.edgeA = models.EdgeDevice{Name: "光照A", NodeID: c.node.NodeID, ChannelID: c.channel.ID,
-		Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &c.logicalA.ID, IntervalMs: 1000}
+		Type: "prs3001", Enabled: true, Status: "active", IntervalMs: 1000}
 	if err := db.Create(&c.edgeA).Error; err != nil {
 		t.Fatalf("create edge A: %v", err)
 	}
 	c.edgeB = models.EdgeDevice{Name: "光照B", NodeID: c.node.NodeID, ChannelID: c.channel.ID,
-		Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &c.logicalB.ID, IntervalMs: 1000}
+		Type: "prs3001", Enabled: true, Status: "active", IntervalMs: 1000}
 	if err := db.Create(&c.edgeB).Error; err != nil {
 		t.Fatalf("create edge B: %v", err)
 	}

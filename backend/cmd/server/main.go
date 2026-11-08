@@ -3,10 +3,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,6 +17,8 @@ import (
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
+	"ehome/backend/internal/backfill"
+	"ehome/backend/internal/bootstrap"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
@@ -30,9 +35,11 @@ import (
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/seed"
 	"ehome/backend/internal/sourceref"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/internal/transport"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/parser"
 	"encoding/json"
 
 	"github.com/gin-contrib/cors"
@@ -68,7 +75,78 @@ func main() {
 	logger.Infof("Config: DB=%s:%d/%s, API=%s, device_listener=%v",
 		cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr(), cfg.Device.Enabled)
 
+	// ════════════════════════════════════════════════════════════════════════
+	// 启动进度 + 提前监听（契约 docs/设计/启动期数据库优化与进度展示-契约-2026-11-06.md §2）
+	//
+	// 这是本次改造**唯一**的时序变化: 监听提前到 database.Connect 之前，其余依赖
+	// 顺序一律不动。为什么必须这样 —— 下面这段是数据库连接 + 一串分钟级 DDL
+	// （补建父表索引实测 +4.51 GB / 69.6M 行；DROP 死索引取 ACCESS EXCLUSIVE）。
+	// 改造前全程同步阻塞，端口**根本没有监听**，浏览器只看到连接失败/网关超时，
+	// 用户无法区分"正在升级"与"服务挂了"。
+	//
+	// 三件事按序做:
+	//   1) 建进度状态机（DefaultSteps 与契约 §3.1 的 10 个步骤逐字对应）；
+	//   2) 把 datalifecycle 的迁移埋点接到同一台状态机上（月/批次级细粒度进度由它驱动，
+	//      main 不重复实现埋点 —— 契约 §3.2 要求埋点只在真正耗时处，都由 datalifecycle 上报）；
+	//   3) 用「维护引擎 + RootHandler」起 http.Server，早于数据库连接。
+	// ════════════════════════════════════════════════════════════════════════
+	startupTracker := bootstrap.NewTracker(bootstrap.DefaultSteps())
+	startupTracker.SetBuildCommit(buildCommit)
+	progressAdapter := &startupProgressAdapter{tracker: startupTracker, touched: map[string]bool{}}
+	datalifecycle.SetMigrationProgress(progressAdapter)
+
+	// 静态资源目录**只读一次**：维护引擎（此刻）与全量引擎（装配完成后）必须服务
+	// 同一份产物。两处各自 os.Getenv 会让"维护页能开、正式页 404"这类问题变得可能。
+	staticDir := os.Getenv("EHOME_STATIC_DIR")
+
+	// gin 的输出模式必须在**任何引擎构造之前**定：维护引擎先于 r 创建，若沿用
+	// debug 模式，生产启动会多出成百上千行 [GIN-debug] 路由注册日志（r 的路由在
+	// 启动末尾注册，那些日志对排障毫无价值）。
+	gin.SetMode(gin.ReleaseMode)
+
+	// 维护引擎：只做健康探针 + 进度接口 + 静态资源 + 维护态 503（见 api/maintenance.go）。
+	// 进度源用函数适配（api 包刻意不 import bootstrap，见该文件顶部的镜像类型说明）。
+	maintenanceEngine := api.NewMaintenanceEngine(api.MaintenanceSourceFunc(func() api.MaintenanceSnapshot {
+		return maintenanceSnapshotFromTracker(startupTracker)
+	}), staticDir)
+
+	// rootHandler: nil 全量引擎 ⇒ 维护引擎；SetEngine 一次原子写入 ⇒ 全量引擎。
+	// 绝不在 Serve 期间 AddRoute（gin 的路由树没有读锁，那是数据竞争）。
+	rootHandler := api.NewRootHandler(maintenanceEngine)
+
+	srv := &http.Server{
+		Addr:    cfg.APIAddr(),
+		Handler: rootHandler,
+	}
+
+	// httpListenGate 把「起监听」与「何时真正 Accept」解耦（只为 §3.4 的排障开关）：
+	//   · 默认（维护页开启）⇒ 立刻 close ⇒ 立即监听，请求全部由维护引擎应答；
+	//   · EHOME_STARTUP_MAINTENANCE_PAGE=false ⇒ goroutine 在此阻塞，等全量路由装配
+	//     完成后再 close ⇒ 与改造前"先做完再监听"完全等价（排障时用来隔离变量）。
+	httpListenGate := make(chan struct{})
+	// listenOnce 保证门只关一次：默认路径在下面立刻关，排障路径在装配完成后关。
+	// 用 Once 而不是裸 close —— 两处 close 撞车时的 panic 会发生在启动最早期，
+	// 现场只有一行 "close of closed channel"，极难定位。
+	var listenOnce sync.Once
+	listenNow := func() { listenOnce.Do(func() { close(httpListenGate) }) }
+	go func() {
+		<-httpListenGate
+		logger.Infof("API server listening on %s", cfg.APIAddr())
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatalf("API server failed: %v", err)
+		}
+	}()
+	if startupMaintenancePageEnabled() {
+		listenNow()
+		logger.Infof("startup maintenance page ENABLED: listening on %s BEFORE database connect (progress: GET /api/v1/system/maintenance)", cfg.APIAddr())
+	} else {
+		logger.Warnf("EHOME_STARTUP_MAINTENANCE_PAGE=false: 回退旧行为 —— 启动完成前不监听（仅供排障）")
+	}
+	// 可选的启动看门狗（默认关闭，EHOME_STARTUP_FAIL_FAST_SECONDS=0）。
+	startupFailFast(startupTracker)
+
 	dbCfg := cfg.DBConfig()
+	startupTracker.Begin(bootstrap.StepDBConnect)
 	if err := database.Connect(database.Config{
 		Host:     dbCfg.Host,
 		Port:     dbCfg.Port,
@@ -77,11 +155,17 @@ func main() {
 		DBName:   dbCfg.DBName,
 		SSLMode:  dbCfg.SSLMode,
 	}); err != nil {
-		logger.Fatalf("Failed to connect database: %v", err)
+		startupTracker.Fail(bootstrap.StepDBConnect, err)
+		abortStartup("Failed to connect database: %v", err)
 	}
+	startupTracker.Done(bootstrap.StepDBConnect, fmt.Sprintf("%s:%d/%s", dbCfg.Host, dbCfg.Port, dbCfg.DBName))
+
+	startupTracker.Begin(bootstrap.StepAutoMigrate)
 	if err := database.AutoMigrate(); err != nil {
-		logger.Fatalf("Failed to migrate database: %v", err)
+		startupTracker.Fail(bootstrap.StepAutoMigrate, err)
+		abortStartup("Failed to migrate database: %v", err)
 	}
+	startupTracker.Done(bootstrap.StepAutoMigrate, "表结构已同步")
 	logger.Infof("Database connected and migrated")
 
 	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data / device_data 分区迁移 +
@@ -91,17 +175,117 @@ func main() {
 	// 而"带着未完成的迁移继续跑"会让后半段行为与预期不符且极难排查。
 	// 非 PG 方言 (SQLite 测试) 下两个迁移函数均为 no-op 返回 nil, 不受影响。
 	db := database.GetDB()
-	if err := datalifecycle.MigrateUnifiedDataToPartitioned(db); err != nil {
-		logger.Fatalf("unified_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
-	}
+	// 剩余时序表的迁移各自 Begin/…/Done。注意 parent_indexes 与 retire_dead_indexes
+	// **不是独立调用**：它们嵌在 MigrateTableToPartitioned 内部（幂等补齐路径
+	// partition_mgr.go: finalizePartitionParentIndexes）。因此这里只能"外面包一层"，
+	// 细粒度进度（第几条索引 / 第几条 DROP）由 datalifecycle 经
+	// SetMigrationProgress 回调上报 —— main 不重复实现埋点（契约 §3.2）。
+	//
+	// ⚠ 2026-11-08 起 unified_data **不在这个清单里**（见下方说明）。
+	// ============ unified_data 不再迁移（2026-11-08 硬切换）============
+	//
+	// 这里原本是：
+	//
+	//	startupTracker.Begin(bootstrap.StepPartitionUnifiedData)
+	//	if err := datalifecycle.MigrateUnifiedDataToPartitioned(db); err != nil { ... abortStartup }
+	//	startupTracker.Done(bootstrap.StepPartitionUnifiedData, "unified_data 分区就绪")
+	//
+	// 删掉它有两个理由，第二个才是决定性的：
+	//
+	//  ① 该表已停写（EHOME_TELEMETRY_UNIFIED_WRITE=false），不再产生新数据，
+	//     分区维护没有意义；
+	//
+	//  ② **更危险的是它会把 DROP 掉的表重新建出来**。MigrateTableToPartitioned 的
+	//     判定链是：IsTablePartitioned(relkind='p') → 否；flatExists(relkind='r') → 否；
+	//     于是走「原表不存在（全新部署）→ createPartitionedParent」这条分支。
+	//     代码无法区分「全新部署」与「我们刚把表 DROP 了」——
+	//     ⇒ DROP 之后每次重启都会得到一张**空的** unified_data（5 个月分区、0 行）。
+	//     磁盘没省，数据没了，而 `pg_class` 里它看起来一切正常。
+	//
+	// 一次性测试证明这条分支真实存在（走的就是 DROP 之后的路径）：
+	//
+	//	TestMigrateUnifiedData_FreshDeploy_PartitionedParentAtFinalName
+	//	  INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent
+	//	  --- PASS
+	//
+	// 保留 MigrateUnifiedDataToPartitioned 函数本身（partition_mgr 的泛化入口，
+	// device_data / telemetry_frame 仍在用同一套机制），只是不再为 unified_data 调用。
+	//
+	// 同时从 bootstrap.DefaultSteps 移除 StepPartitionUnifiedData，其 22 权重按比例
+	// 分给剩余步骤（合计仍必须 100，TestDefaultStepsTable 守着）。
+	startupTracker.Begin(bootstrap.StepPartitionDeviceData)
 	if err := datalifecycle.MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
-		logger.Fatalf("device_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
+		startupTracker.Fail(bootstrap.StepPartitionDeviceData, err)
+		abortStartup("device_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
 	}
+	startupTracker.Done(bootstrap.StepPartitionDeviceData, "device_data 分区就绪")
+
+	// L2 帧表 telemetry_frame + slot 字典表 telemetry_slot
+	// (设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.4/§3.5)。
+	//
+	// ==================== 为什么这里是 Fatal（对比下面的 rollup）====================
+	// 2026-11-07 用户裁决「L2 无条件启用、删除开关」后，帧表从**影子旁路**变成
+	// **主路径之一**：每一帧解析结果都要写进去。此时"表没建但服务照跑"是一条
+	// 静默丢数据的路径 —— unified_data 还在写，所有面板都正常，只有帧表空的，
+	// 而它要等到下一轮读路径切换/影子校验才会被发现，代价是那一整天的帧数据。
+	// 因此迁移失败必须中止启动（与 unified_data / device_data 同一口径）。
+	//
+	// 对比：下面 telemetry_rollup_1m 仍是 Warn —— 那是**派生数据**（丢了下一分钟
+	// 重新累积），且有 fail-open 回落到原始表。两者语义不同，不要统一。
+	//
+	// 顺序也重要: telemetry_slot 先建（帧行的 slot_id 指向它），再建分区母表。
+	startupTracker.Begin(bootstrap.StepPartitionTelemetryFrame)
+	if err := datalifecycle.MigrateTelemetryFrameToPartitioned(db); err != nil {
+		startupTracker.Fail(bootstrap.StepPartitionTelemetryFrame, err)
+		abortStartup("telemetry_frame partition migration failed (aborting startup: L2 frames are the main write path, a missing frame table would silently drop every frame): %v", err)
+	}
+	startupTracker.Done(bootstrap.StepPartitionTelemetryFrame, "telemetry_frame 分区就绪")
+	// L3 分钟级宽行预聚合表 (设计/遥测存储优化方案-2026-11-06.md §5.2): 建/迁移分区母表。
+	//
+	// 与上面两张表的关键差别 —— **失败不 Fatal**:
+	//   unified_data / device_data 是真值来源, 迁移失败必须中止启动 (半迁移状态会让
+	//   行为与预期不符且极难排查); 而 telemetry_rollup_1m 是**派生数据** (由原始表
+	//   旁路聚合而来, 丢了下一分钟会重新累积), 且读路径对它有 fail-open 回落
+	//   (api/rollup_read.go: 表空/坏/不存在 ⇒ 回落原始路径)。为一张派生表挡住整个
+	//   服务启动, 是把「预聚合不可用」升级成「服务不可用」—— 方向错了。
+	// 因此这里只 Warn, 并明确记录「本进程内 rollup 不可用」的后果。
+	startupTracker.Begin(bootstrap.StepPartitionRollup)
+	if err := datalifecycle.MigrateTelemetryRollup1mToPartitioned(db); err != nil {
+		logger.Warnf("telemetry_rollup_1m partition migration failed (non-fatal: derived data, read path falls back to raw tables): %v", err)
+		// 失败仍是 Warn（语义不变），但进度里必须留下痕迹：Skip 计满权重，
+		// 否则总体百分比会永远卡在这一步，维护页看起来像卡死。
+		startupTracker.Skip(bootstrap.StepPartitionRollup, "非致命失败，读路径回落原始表: "+err.Error())
+	} else {
+		startupTracker.Done(bootstrap.StepPartitionRollup, "telemetry_rollup_1m 分区就绪")
+	}
+	// parent_indexes / retire_dead_indexes 的收尾判定（这两步嵌在迁移函数内部，
+	// 见上方说明）。判据用 progressAdapter 的"实际被回调过"标记 —— 这是**唯一**能
+	// 区分「确实建了索引/删了死索引」与「本就没缺、无事可做」的信号：
+	//   · 回调过 ⇒ Done（这一步真的花了时间，维护页应看到它完成）
+	//   · 未回调 ⇒ Skip（幂等补齐无事可做；计满权重，否则总进度永远 <100%）
+	// 不用"是否 PG"/"是否有缺失"去猜：那等于把 datalifecycle 的探测逻辑重写一遍。
+	settleNestedIndexSteps := func() {
+		if progressAdapter.wasTouched(bootstrap.StepParentIndexes) {
+			startupTracker.Done(bootstrap.StepParentIndexes, "父表索引已补齐")
+		} else {
+			startupTracker.Skip(bootstrap.StepParentIndexes, "父表索引已齐备（无需补建）")
+		}
+		if progressAdapter.wasTouched(bootstrap.StepRetireDeadIndexes) {
+			startupTracker.Done(bootstrap.StepRetireDeadIndexes, "死索引已退役")
+		} else {
+			startupTracker.Skip(bootstrap.StepRetireDeadIndexes, "无死索引需要退役")
+		}
+	}
+	settleNestedIndexSteps()
+
 	// 滚动分区保障: 已分区的时序表各自确保 [上月, 未来 3 月] 分区存在。
 	// 未分区表 (迁移失败/非 PG) 跳过, 避免对普通表执行 PARTITION OF 报错。
 	pm := datalifecycle.NewPartitionManager(db)
 	ensurePartitions := func() {
-		for _, table := range []string{"unified_data", "device_data"} {
+		// 表清单与生命周期清单同源（datalifecycle.TimeseriesTables + rollup）：
+		// telemetry_frame 是 L2 主写入路径（2026-11-07 无条件启用），漏掉它会让
+		// 「下个月没有分区」在月初静默变成写入失败（PG 分区表无兜底 default 分区）。
+		for _, table := range append(timeseriesTableNames(), datalifecycle.TelemetryRollupTable) {
 			if !datalifecycle.IsTablePartitioned(db, table) {
 				continue
 			}
@@ -110,8 +294,45 @@ func main() {
 			}
 		}
 	}
+	startupTracker.Begin(bootstrap.StepEnsurePartitions)
 	ensurePartitions()
-	// 每日滚动检查: 创建下月分区（retention 到期分区由 retention_task 触发 DROP）。
+	startupTracker.Done(bootstrap.StepEnsurePartitions, "滚动分区就绪")
+
+	// startup_tasks 覆盖「后台任务启动」这一整段（purger / retention / notify /
+	// 设备传输 / 驱动 / 字段解析 / websocket / ota / offline / alert / automation /
+	// source_group …）。它从下面一行开始，到 rootHandler.SetEngine 之前结束：
+	// 中途会嵌套 warmup（最新值缓存预热），嵌套是安全的 —— tracker 是每步独立
+	// 状态机，没有全局顺序要求。
+	startupTracker.Begin(bootstrap.StepStartupTasks)
+	// L3 rollup 的保留期（方案 §5.2/§5.4 的硬要求之一）。
+	//
+	// 为什么必须在这里接: 旧 rollup 表 (unified_data_rollup_1m) 退役理由之一是
+	// 「无界增长的第二张表」。新表若不配保留期，就是同一个问题的复刻。
+	// 实现复用统一窗口 (datalifecycle.SystemRetentionDays = EHOME_DATA_RETENTION_DAYS)，
+	// 且走「整月分区 DROP」这条 O(1) 路径 —— 与 unified_data/device_data 同款。
+	//
+	// 为什么不挂进 RetentionTask（那里的表清单是 unified_data/device_data 两张，
+	// 由 retention_task.go 维护）: 本任务不动该文件（并行改动区），改为在此按同一
+	// 保留期语义独立驱动；两者都用 datalifecycle.SystemRetentionDays() 取值，口径一致。
+	// 失败只 Warn: 派生数据的清理失败不该阻断服务（分区 DROP 是幂等的，下一轮重试）。
+	reapRollupPartitions := func() {
+		days := datalifecycle.SystemRetentionDays()
+		if days <= 0 {
+			return
+		}
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+		dropped, err := datalifecycle.DropTelemetryRollup1mPartitionsBefore(db, cutoff)
+		if err != nil {
+			logger.Warnf("telemetry_rollup_1m retention: drop expired partitions failed (will retry next tick): %v", err)
+			return
+		}
+		if len(dropped) > 0 {
+			logger.Infof("telemetry_rollup_1m retention: dropped expired partitions %v (retention_days=%d)", dropped, days)
+		}
+	}
+	reapRollupPartitions()
+	// 每日滚动检查: 创建下月分区 + 回收到期 rollup 分区
+	//（unified_data/device_data 的到期分区由 retention_task 触发 DROP）。
 	partitionStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
@@ -122,6 +343,7 @@ func main() {
 				return
 			case <-ticker.C:
 				ensurePartitions()
+				reapRollupPartitions()
 			}
 		}
 	}()
@@ -145,55 +367,41 @@ func main() {
 
 	// db 已在上方分区迁移处获取 (database.GetDB())。
 
-	// 数据生命周期 P0 (方案 v3.3 §2.3.1 路径 1 + §4.1): 注册系统级保留期
-	// 快照源, 并对全量 edge_devices (含软删) 幂等补建 logical_device。
+	// 系统级数据保留期 (EHOME_DATA_RETENTION_DAYS，默认 90 天)。
+	//
+	// 2026-10-23 逻辑设备层移除后，保留期不再按「身份」配置与快照 —— 它是
+	// 一条系统级策略：全库同一个时间窗，每日任务按月 DROP 分区 + 按 timestamp
+	// 精确分批删除过期行（见 datalifecycle/retention_task.go）。
 	datalifecycle.SetSystemRetentionDays(cfg.DataRetentionDays())
-	if backfilled, err := datalifecycle.BackfillLogicalDevices(db, cfg.DataRetentionDays()); err != nil {
-		logger.Errorf("Logical device backfill failed: %v", err)
-	} else if backfilled > 0 {
-		logger.Infof("Logical device backfill: %d instance(s) attached", backfilled)
-	} else {
-		logger.Infof("Logical device backfill: all instances already attached")
-	}
 
-	// purge 后台任务 (§4.3 任务 2): 每日分批硬删 purge_requested 的逻辑设备数据。
-	purger := datalifecycle.NewPurger(db)
+	// 设备数据清除任务：处理 edge_devices.data_purge_requested=true 的行。
+	// 语义与旧 purge 任务一致（删除设备时勾选「同时删除数据」→ 后台分批硬删
+	// 该设备的历史数据 → 清标记 → 硬删设备行），只是标记从已删除的
+	// logical_devices.purge_requested 搬到了设备自身。
+	purger := datalifecycle.NewDevicePurger(db)
 	purger.Start()
+	// 历史设备「彻底删除」入队后立即唤醒清理任务，避免等每日周期。
+	api.SetDevicePurger(purger)
 
-	// 数据生命周期 M 迁移步骤 (方案 v3.3 §七 + §1.1): 复合索引
-	// CONCURRENTLY 创建 + 大表 logical_device_id 分批回填, 全部在后台
-	// goroutine 内执行——墙钟随存量数据量增长, 不能阻塞启动; 回填进度
-	// 持久化在 backfill_jobs 水位表, 中断重启自动续跑 (§4.3); 两者均幂等,
-	// 失败下次启动重试。运维可用 `ehomectl datalifecycle backfill`
-	// 同步执行并以退出码判定校验结果。
-	// 前置: P0 身份补建 (上方 BackfillLogicalDevices) 必须先完成,
-	// 回填依赖实例已挂载 logical_device_id。
-	backfiller := datalifecycle.NewBackfiller(db)
-	backfiller.Start()
-
-	// 数据生命周期 P3 (方案 v3.3 §4.3 任务 3): 合并搬迁 worker — 处理
-	// merge_status='pending' 源的数据搬迁, 水位断点续跑 + 失败通知/重试。
 	// 外发通知通道 (D-1 步骤 3, 设计/外发通知通道.md §2.1 取向 A): Dispatcher 是
 	// **所有通知写入点的唯一落库入口** —— 它写 notifications 行 (保持现有语义),
 	// 再按 notification_channels 配置外发投递 (出站 HTTP/SSRF 判定/超时/重试/
 	// 投递审计/指标全部封装在 internal/notify 内)。
 	//
-	// 接线必须早于下面所有通知生产者 (migrator / retention / alert / datasource /
+	// 接线必须早于下面所有通知生产者 (retention / alert / datasource /
 	// automation): 漏掉任何一个, 它的 notifySink 就保持 nil 而走"直接落库"回落 ——
-	// 通知照旧出现在通知中心, 但**永远不会外发**, 正是本步骤要消灭的"引擎孤儿"。
+	// 通知照旧出现在通知中心, 但**永远不会外发**。
 	//
 	// 必须在 database.AutoMigrate() 之后构造: Dispatcher 要读 notification_channels /
 	// notification_deliveries 表。
 	notifyDispatcher := notify.NewDispatcher(db)
 
-	migrator := datalifecycle.NewMigrator(db)
-	migrator.SetNotifier(notifyDispatcher)
-	migrator.Start()
-
-	// 数据生命周期 P3 (方案 v3.3 §4.1/§4.2/§4.3 任务 1): retention 每日
-	// 任务 — 到期前 30/7 天通知 + 到期分批硬删。
+	// 数据保留期每日任务 — 系统级窗口到期硬删（分区 DROP + 精确 DELETE），
+	// 并顺带驱动 8 个无关表的清理器（notifications / deliveries /
+	// automation_events / 命令域三表 / 审计 / node_events）。
+	// 注: RetentionTask 不再是通知生产者（临期通知随 per-identity retention 移除，
+	// 见 datalifecycle/retention_task.go 的字段注释），因此没有 SetNotifier 接线。
 	retentionTask := datalifecycle.NewRetentionTask(db)
-	retentionTask.SetNotifier(notifyDispatcher)
 	retentionTask.Start()
 
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
@@ -317,28 +525,129 @@ func main() {
 		api.SetLatestValue(record)
 		fieldResolver.registry.Observe(record.DeviceID, record.SensorName, record.Unit, record.Timestamp)
 	})
-	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
-	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
+	// ============ 启动预热：只保留帧表那一趟（2026-11-08）============
 	//
-	// 为什么放在这里：`api.WarmupLatestValues` 自 2026-08-21 引入起**一直没有调用者**
-	// （git 历史确认引入那次提交就没有；实施计划 §3.2.4 却明确要求「启动回填」）——
-	// 属未完成的实现（验收项「latest-value 缓存命中/回落双路径一致」至今未勾选）。
-	// 不 warmup 不影响**正确性**（Miss 回落 SQL 结果相同），影响的是性能与两条路径形状一致。
+	// 原实现有**两趟**：
 	//
-	// 失败不 Fatal：回填只是预热，Miss 路径仍是正确兜底（与 WarmupLatestValues 内部
-	// 「回填失败不阻塞启动」的约定一致）。
+	//	趟 1（已删）：SetLatestValuesSource + WarmupLatestValues —— 从 unified_data 取，
+	//	              DROP 之后那条 SQL 报 42P01（生产实测启动时 1 条 ERROR）。
+	//	              ⚠ 它本来就已经是纯冗余：停写后 unified_data 尾部不会有新行。
+	//	趟 2（保留）：WarmupLatestValuesFromFrames —— 帧表覆盖所有有帧的设备，是唯一有效来源。
 	//
-	// SQL 与 /overview、边缘设备列表的**回落查询同构**（DISTINCT ON 取最新时间戳 +
-	// JOIN 取该时刻全部行），保证「缓存命中」与「缓存 miss」两条路径形状一致。
-	api.SetLatestValuesSource(func() ([]models.UnifiedData, error) {
-		var rows []models.UnifiedData
-		err := db.Raw("SELECT u.* FROM unified_data u " +
-			"INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data " +
-			"WHERE device_id IS NOT NULL ORDER BY device_id, created_at DESC) latest " +
-			"ON u.device_id = latest.device_id AND u.created_at = latest.created_at").Scan(&rows).Error
-		return rows, err
+	// 为什么把「注入点」也一起删掉（只删调用会留下 SetLatestValuesSource + warmupSource）：
+	// 一个**没人注入的注入点**比死代码更误导 —— 下一个人会以为「有两条预热路径」，
+	// 然后去修那条永远 no-op 的。
+	//
+	// 趟 2 在下面 telemetryDict 就绪之后执行（见 WarmupLatestValuesFromFrames 的调用点）。
+
+	// ── L3 分钟级宽行预聚合：**无条件启用**（2026-11-07 用户裁决，删除开关）──
+	//
+	// 契约：docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §1/§3.5。
+	// 写入侧常驻：collector 恒构造、sink 恒注入、60s ticker 恒运行。
+	//
+	// 读侧开关（EHOME_TELEMETRY_ROLLUP_READ）**保留** —— 用户只要求 L1/L2，读切换
+	// 有独立风险（见 internal/api/rollup_read.go 的 fail-open 约定）。
+	//
+	// 两条旁路都挂在「解析成功路径」上（consumers_heavy.go 的 telemetryRollupSink /
+	// telemetrySink 调用点），与 L1 的「是否入库」解耦 —— L1 跳过入库的帧仍然是
+	// 真实采样，必须进分钟桶与帧表。
+	//
+	// 失败语义（契约 §3.4）：rollup 是派生数据，flush 失败只 Warn 并下轮重试；
+	// 它绝不能影响 unified_data 主写入。
+	rollupCollector := datalifecycle.NewRollupCollector(db)
+	// 注入：collector 只做内存累加，flush 由下面的 60s ticker 驱动。
+	collectSink := rollupCollector.Sink()
+	nodeMgr.SetTelemetryRollupSink(func(edgeDeviceID uint, fields []parser.Field, at time.Time) {
+		samples := make([]datalifecycle.RollupSample, len(fields))
+		for i := range fields {
+			samples[i] = datalifecycle.RollupSample{Name: fields[i].Name, Value: fields[i].Value}
+		}
+		collectSink(edgeDeviceID, samples, at)
 	})
-	logger.Infof("Latest value cache warmed up: %d rows", api.WarmupLatestValues())
+	logger.Infof("telemetry: L3 rollup write ACTIVE (1min wide-row buckets -> telemetry_rollup_1m)")
+	// ── L2 帧级编码：**无条件启用**（2026-11-07 用户裁决，删除开关）──
+	//
+	// 契约：docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §1/§3.4。
+	// 帧表 telemetry_frame 从「影子旁路」变成主写入路径之一：每一帧解析结果都
+	// 编码进去。因此这里**没有开关判断**：
+	//
+	//   · 构造失败（表缺失/字典不可用）⇒ Fatal。半残状态（主写成功、帧表空）
+	//     会让帧数据静默缺失，比启动失败更难发现（契约 §3.4）。
+	//   · 运行期编码/写库失败 ⇒ 只 Warn + 计数（在 DualWriter 内部），绝不影响
+	//     unified_data 主写入 —— 表示层不能把主路径拖垮。
+	//
+	// slot 字典先 WarmUp：它只有几十行，启动时一次全量装载后读路径零查询
+	// （解码要靠 slot 还原字段名与量化规格快照）。
+	telemetryDict := telemetry.NewDBSlots(db)
+	if err := telemetryDict.WarmUp(); err != nil {
+		abortStartup("telemetry: slot dictionary warmup failed (L2 frames cannot be decoded without it): %v", err)
+	}
+	// task-18: 把**同一份** slot 字典交给历史图表读路径（帧表解码要用它还原字段名
+	// 与量化规格快照）。
+	//
+	// 为什么必须是同一份：与写路径共用才能保证"编码时用的 slot 规格"与"解码时
+	// 用的"逐位一致。两套字典会解出错位的值 —— 而且**不报错**，只是数值看起来
+	// 合理但已经偏了（本仓 §8 的静默错数）。
+	//
+	// 不注入也能工作（api 侧有惰性装载兜底），但那样首个图表请求要多付一次全量
+	// WarmUp（生产约 7,400 个 slot / 约 100 ms），而且是第二份内存副本。
+	api.SetHistoryFrameDictionary(telemetryDict)
+
+	// ── 最新值缓存：帧表补全（task-24 步骤 3）──
+	//
+	// 上面那趟 warmup 读的是 unified_data。**步骤 4 停写之后它会返回 0 行且不报错**：
+	// rows=0 -> 缓存空 -> 服务照常启动 -> 首次请求 Miss 回落 SQL -> SQL 读的也是空表
+	// => 接口静默返回空，没有任何错误信号。
+	//
+	// 所以字典一旦就绪（就在上一行），立刻用帧表把还空着的设备补齐。
+	// 过渡期两趟都有数据 => 本趟几乎不做事；停写之后本趟就是唯一的预热来源。
+	// 详见 internal/api/latest_values_frames.go 的文件头。
+	// ============ StepWarmup 的记账移到这里（2026-11-08）============
+	//
+	// 原来那趟 unified_data 预热（已删）承担了 startupTracker.Done(StepWarmup, ...)。
+	// 删掉它之后，StepWarmup 在 steps.go 的清单里**永远等不到 Done/Skip**：
+	//
+	//	=> tracker 永不 ready => /readyz 永远 503 => 容器健康检查失败。
+	//
+	// 这不是理论风险：TestStartupAllStepsMarked 会直接红（它断言每一步都有终态记账）。
+	//
+	// 现在由**帧表那一趟**（唯一有效的预热来源）记账。无论补了多少行都 Done ——
+	// 预热是「尽力而为」，0 行也是正常终态（全新部署 / 设备都没上报）。
+	startupTracker.Begin(bootstrap.StepWarmup)
+	warmedFromFrames := api.WarmupLatestValuesFromFrames(db, telemetryDict)
+	if warmedFromFrames > 0 {
+		logger.Infof("Latest value cache topped up from frame table: %d rows", warmedFromFrames)
+	}
+	startupTracker.Done(bootstrap.StepWarmup, fmt.Sprintf("帧表预热完成: %d 行", warmedFromFrames))
+	telemetryDual, dualErr := telemetry.NewDualWriter(db, telemetryDict, telemetry.ConfigFromEnv())
+	if dualErr != nil {
+		abortStartup("telemetry: L2 frame writer construction failed (frames are the main write path; refusing to start with a half-broken telemetry pipeline): %v", dualErr)
+	}
+	defer telemetryDual.Close()
+	nodeMgr.SetTelemetrySink(telemetry.SinkOrNil(telemetryDual))
+	logger.Infof("telemetry: L2 frame encoding ACTIVE (every parsed frame -> telemetry_frame, queue=%d)",
+		telemetry.ConfigFromEnv().QueueSize)
+	// L3 的分钟级 flush：只落「已结束」的桶（FlushCompleted 内部判定），失败只 Warn
+	// （派生数据，下一轮重试）。与上面 24h 的 partitionStop ticker 各自独立 ——
+	// 不复用同一个变量，避免「关掉一个把另一个也停了」。
+	rollupFlusher := rollupCollector.FlushSink()
+	rollupFlushStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-rollupFlushStop:
+				return
+			case <-ticker.C:
+				if _, err := rollupFlusher(context.Background()); err != nil {
+					logger.Warnf("telemetry rollup flush failed (derived data, will retry): %v", err)
+				}
+			}
+		}
+	}()
+	defer close(rollupFlushStop)
+
 	// 阈值告警引擎 (方案 v0.4 §5 任务C): 求值器构造 + 解析后回调接线。
 	alertEvaluator := alert.NewEvaluator(db, wsHub.BroadcastEvent)
 	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的
@@ -381,19 +690,17 @@ func main() {
 	// 数据源主备领域服务 (B1 已实现)。显式 Options{} 即 §4 默认语义:
 	// Cooldown 5m / MinResidency 2m / Staleness 5m / ScanInterval 60s。
 	datasourceSvc := datasource.New(db, datasource.Options{})
-	// 数据源主备通知经 Dispatcher 落库 + 外发 (D-1 步骤 3)。Dispatcher 优先级高于
-	// 下面既有的 SetNotifier 回调; 那个回调保留为未接线时的回落。
-	datasourceSvc.SetDispatchNotifier(notifyDispatcher)
-	// 数据源主备引擎接线 (设计/数据源主备与故障转移.md §4/§6):
-	//   解析成功 → MarkSuccess; 边缘设备离线 → MarkFailure; 停滞扫描 → Start。
-	// 硬约束: sink 注入必须在 nodemgr.NewManager 之后 (nodeMgr 已构建);
-	// SetSourceHealthSink 会把回调推送到所有已构建 parserConsumers, 否则
-	// consumer 持有的 sink 永远为 nil, 引擎"从未触发"。
-	datasourceSvc.SetNotifier(func(n models.Notification) {
-		if err := db.Create(&n).Error; err != nil {
-			logger.Warn("datasource: failed to write notification", "source_id", n.SourceID, "error", err)
-		}
-	})
+	// 2026-10-24（遗留处置方案 A）：这里原有两条通知接线
+	//   datasourceSvc.SetDispatchNotifier(notifyDispatcher)
+	//   datasourceSvc.SetNotifier(func(n models.Notification) { db.Create(&n) })
+	// **已删除**，因为 datasource.Service 上的四个手工运维方法
+	// （Delete/Activate/Deactivate/Reset）已删 —— 那 4 个方法是本服务**唯一**的
+	// 通知来源，删掉后 SetNotifier/SetDispatchNotifier 没有调用点，留着就是死接线。
+	// 组域通知不受影响：它走 GroupService 自己的
+	//   sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)（见下方）。
+	//
+	// 数据源主备引擎的 sink 接线 (SetSourceHealthSink / SetDeviceOfflineHook)
+	// 仍在下方统一注入（那两个钩子喂的是 GroupService 的自动主备状态机，不是本服务）。
 	// ⚠ 此处**不再**注入 SetSourceHealthSink / SetDeviceOfflineHook。
 	//
 	// M3（数据流架构 v1 §六）发现：原代码在这里注入了一次只喂 datasourceSvc 的
@@ -625,7 +932,9 @@ func main() {
 	otaMgr.Start()
 	offlineDetector.Start()
 
-	gin.SetMode(gin.ReleaseMode)
+	// 全量引擎（gin 输出模式已在启动最前面设定，这里不再重复 SetMode）。
+	// API 服务器的监听**早已开始**（见 main 顶部维护引擎段）：此刻起所有新请求由
+	// 维护引擎应答；装配完成后 rootHandler.SetEngine(r) 一次性原子切到本引擎。
 	r := gin.New()
 	r.Use(gin.Recovery())
 	// Gzip compression for API responses (20MB JSON → ~3MB).
@@ -682,8 +991,8 @@ func main() {
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
 
-	staticDir := os.Getenv("EHOME_STATIC_DIR")
-	// P2：静态资源缓存头（/assets immutable、SPA 入口 no-cache）封装在 static.go
+	// P2：静态资源缓存头（/assets immutable、SPA 入口 no-cache）封装在 static.go。
+	// staticDir 在 main 顶部已读取一次（维护引擎与全量引擎必须服务同一份产物）。
 	setupStaticRoutes(r, staticDir)
 
 	r.GET("/ping", func(c *gin.Context) {
@@ -694,18 +1003,334 @@ func main() {
 		})
 	})
 
-	// Start HTTP server with graceful shutdown support
-	srv := &http.Server{
-		Addr:    cfg.APIAddr(),
-		Handler: r,
+	// ════════════════════════════════════════════════════════════════════════
+	// 原子切换：维护引擎 → 全量引擎（契约 §2）
+	//
+	// 时机是硬约束（有源码级门禁 cmd/server/maintenance_gate_test.go 守着）：
+	// 必须在 api.SetupRoutes(...) **与** setupStaticRoutes(...) 都完成之后。
+	// 早一步切换 ⇒ 用户会看到 404（路由还没注册完）；
+	// 晚一步 ⇒ 装配完毕却仍在维护页，看起来像卡死。
+	// ════════════════════════════════════════════════════════════════════════
+	// 顺序有意如此：先把最后一步记账成 done，**再**切换引擎 —— 这样
+	// 「/readyz 变 200」与「全量引擎开始服务」是同一时刻，不会出现"路由已是全量、
+	// 探针仍 503"（K8s 会把正在接客的实例摘掉）或反之的窗口。
+	// ════════════════════════════════════════════════════════════════════════
+	// 老数据回填（契约 docs/设计/老数据迁移到帧表-分析与契约-2026-11-07.md §4）
+	//
+	// **后台 goroutine，绝不阻塞 ready**：生产 3.42M 帧 / 20~40 分钟，同步做会让
+	// 维护页挂 40 分钟。这里只启动 goroutine 就返回，服务照常 ready。
+	//
+	// 失败语义：回填失败**不影响服务**（它是历史数据的派生表示，主写入
+	// unified_data 照常）。只打日志 + 在进度里可见。崩了下次启动从 watermark
+	// 继续 —— 这就是状态表存在的意义。
+	//
+	// 位置要求：必须在 telemetry_frame 分区迁移（第 11 步）与 slot 字典 WarmUp
+	// 之后；放在 StepStartupTasks 的 Done 之前是因为它属于「后台任务启动」这一
+	// 步的一部分（只是启动的是长任务而不是 ticker）。
+	// ════════════════════════════════════════════════════════════════════════
+	{
+		backfillCfg, backfillEnabled, backfillWarns := backfill.ConfigFromEnv()
+		for _, w := range backfillWarns {
+			logger.Warnf("backfill: %s", w)
+		}
+		if err := datalifecycle.EnsureBackfillProgressTable(db); err != nil {
+			// 状态表建不出来 ⇒ 回填无法断点续跑。不 Fatal（不挡主写入），只跳过回填。
+			logger.Warnf("backfill: 建状态表失败，跳过回填（不阻塞启动）: %v", err)
+			backfillEnabled = false
+		}
+		backfillRunner := backfill.NewRunner(db, telemetryDict, backfillCfg, !backfillEnabled, backfillWarns)
+		// ── 回填进度接口注入（契约 §4.6：GET /api/v1/system/backfill，免鉴权）──
+		//
+		// 为什么在这里注册而不是塞进 api.SetupRoutes：
+		//   SetupRoutes 的 option 机制按**具体类型**做 switch 匹配，加一个新 option
+		//   要改路由主文件；而本端点只需要一个"读进度"的函数值。更关键的是，
+		//   这里是**同时拿得到 Runner 与 gin.Engine 的唯一位置** —— 把"谁提供进度"
+		//   和"谁注册路由"放在同一视野内，读代码时不用在 main.go 与 api 之间来回跳。
+		//
+		// ⚠ 必须在 rootHandler.SetEngine(r) 之前完成（本块位于其上方若干行）：
+		//   gin 的路由树没有读锁，Serve 期间 AddRoute 是数据竞争 —— 与维护页契约 §2
+		//   的红线是同一条。
+		//
+		// ⚠ 注册在 r 上（不是 v1 鉴权组）：免鉴权。载荷只有阶段/计数/耗时，
+		//   没有任何业务数据或凭据（与 /api/v1/system/maintenance 同级别）。
+		//
+		// ETA 由 API 侧跟踪器外推（引擎侧的 Progress.ETASeconds 恒 0 —— 引擎没有
+		// "总量"概念，见 backfill_status.go 的论证）：每次轮询喂一个
+		// (rowsDone, percent, now) 样本，按**行速率**外推，比帧速率稳。
+		backfillETA := api.NewBackfillETATracker()
+		api.RegisterBackfillStatus(r, api.BackfillSourceFunc(func() api.BackfillSnapshot {
+			prog := backfillRunner.Progress()
+			return api.BackfillSnapshot{
+				State:              prog.State,
+				Percent:            prog.Percent,
+				CurrentPartition:   prog.CurrentPartition,
+				FramesDone:         prog.FramesDone,
+				FramesTotal:        prog.FramesTotal,
+				ETASeconds:         backfillETA.Observe(prog.State, prog.RowsDone, prog.Percent, time.Now()),
+				RetentionPermanent: prog.RetentionPermanent,
+				Errors:             prog.Errors,
+			}
+		}))
+		if backfillRunner.Enabled() {
+			go func() {
+				logger.Infof("backfill: 老数据回填已启动（batch=%d frames, keyframe=%s）—— 后台执行，不阻塞服务",
+					backfillCfg.BatchFrames, backfillCfg.KeyFrameInterval)
+				prog, err := backfillRunner.RunOnce(context.Background())
+				if err != nil {
+					logger.Warnf("backfill: 回填中断（下次启动将从 watermark 继续）: %v", err)
+					return
+				}
+				logger.Infof("backfill: 回填完成 state=%s frames=%d rows=%d percent=%.1f",
+					prog.State, prog.FramesDone, prog.RowsDone, prog.Percent)
+			}()
+		} else {
+			logger.Infof("backfill: 已关闭（EHOME_BACKFILL_ENABLED=false）或不可用，跳过")
+		}
 	}
 
-	go func() {
-		logger.Infof("API server listening on %s", cfg.APIAddr())
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("API server failed: %v", err)
+	// ════════════════════════════════════════════════════════════════════════
+	// 存量 device_data 剥离冗余 sensors（task-21）
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// 为什么是「剥离」而不是「压缩」：实测 PostgreSQL 的 TOAST/pglz 一直在压缩
+	// data_json —— 那 4.4 GB 是**压缩后**的体积（A 类行原始 5.5 GB → 存储 1.98 GB，
+	// 2.78x）。再加一层应用层 gzip 只能再省 210 MB。而 sensors 与 unified_data /
+	// telemetry_frame 存的是同一份 (name,value,unit)，100% 重复 ——
+	// 压缩是在给一个不该存在的副本减肥，剥离是直接切掉它。
+	//
+	// 实测（2000 行真实样本 jsonb - 'sensors'）：1,278 kB → 468 kB。
+	// 全表外推 A 类 1,981 MB → 约 665 MB，省约 1.3 GB。
+	//
+	// ── 发布顺序由代码自证，不靠人工记忆（task-21 依赖 task-19）──
+	// RunIfSafe 会先看**最新一行** sensor_parser 形状的数据里还有没有 sensors：
+	// 有 ⇒ 写侧仍是旧版本，本轮跳过并 Warn；没有 ⇒ 写侧已升级，开始剥离。
+	// 这样「本任务镜像先上、写侧镜像后上」不会造成「剥了又被写回、下轮再剥」的循环。
+	//
+	// ── ⚠ 磁盘不会立刻变小 ──
+	// UPDATE 产生死元组，表文件不缩小。plain VACUUM 只是把空间标记为可重用
+	//（效果 = 阻止表继续增长），要真正还给操作系统必须 VACUUM FULL（独占锁 +
+	// 约等于表大小的临时空间，需维护窗口）。所以本任务**不**自动跑 VACUUM FULL，
+	// 只在日志与 /api/v1/system/backfill 之外的运维动作里提示。
+	stripCfg := datalifecycle.StripConfigFromEnv()
+	for _, w := range stripCfg.Warnings {
+		logger.Warnf("device_data strip: %s", w)
+	}
+	if stripCfg.Enabled {
+		stripper := datalifecycle.NewDeviceDataSensorStripper(db)
+		stripper.SetBatchSize(stripCfg.BatchSize)
+		go func() {
+			logger.Infof("device_data strip: 存量 sensors 剥离已启动（后台执行，不阻塞服务；batch=%d）",
+				stripCfg.BatchSize)
+			rep, err := stripper.RunIfSafe(context.Background())
+			if err != nil {
+				logger.Warnf("device_data strip: 中断（下次启动将从 watermark 继续）: %v", err)
+				return
+			}
+			if rep.Skipped {
+				logger.Infof("device_data strip: 本轮跳过（写侧仍在写 sensors 或没有可剥离的行）")
+				return
+			}
+			// selected / stripped / skipped 三个数一起打：
+			// skipped>0 意味着有行被 jsonb_typeof 守卫跳过（sensors 不是数组），
+			// 而那些行的 id 已被游标越过、**不会再重试** —— 必须让人看见。
+			logger.Infof("device_data strip: 完成 selected=%d stripped=%d skipped=%d "+
+				"bytes_before=%d bytes_after=%d logical_reclaimed=%d",
+				rep.RowsSelected, rep.RowsStripped, rep.RowsSkipped,
+				rep.BytesBefore, rep.BytesAfter, rep.BytesReclaimed())
+			if rep.RowsSkipped > 0 {
+				logger.Warnf("device_data strip: %d 行被跳过（sensors 不是 JSON 数组），"+
+					"其 id 已越过游标、不会重试；如需处理请用 device_data_strip_progress 的 "+
+					"watermark 排查后手动修复", rep.RowsSkipped)
+			}
+			if rep.BytesReclaimed() > 0 {
+				// 明确提示：账面省了，磁盘要 VACUUM FULL 才还回去 —— 否则运维会去 du 一下
+				// 发现没变，进而以为任务没生效。
+				logger.Infof("device_data strip: 逻辑空间已释放，但物理文件不会自动缩小；" +
+					"如需把空间还给操作系统，请在维护窗口执行 VACUUM FULL device_data（或 pg_repack）")
+			}
+		}()
+	} else {
+		logger.Infof("device_data strip: 已关闭（EHOME_DEVICE_DATA_STRIP_ENABLED=false），跳过")
+	}
+
+	startupTracker.Done(bootstrap.StepStartupTasks, "后台任务已启动")
+	// 收尾自检：任何一步既非 done 也非 skipped 都是**漏标**（新增步骤时最容易犯），
+	// 宁可在这里吵一句，也不要让运维对着永远 99% 的进度条猜。
+	if !startupTracker.Ready() {
+		logger.Errorf("startup tracker NOT ready before engine switch (some step never finished — check Begin/Done pairs); snapshot=%+v", startupTracker.Snapshot())
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// L3 rollup 历史回填（task-22）
+	// ════════════════════════════════════════════════════════════════════════
+	//
+	// 为什么要它：帧表已完整覆盖历史，但读路径分派仍是
+	//   ≤1h → 帧表 / 1h~6h → unified_data / >6h → rollup（开关关）→ unified_data。
+	// 只要 >1h 的窗口还读 unified_data，老的 12 GB 分区就删不掉。
+	// 本回填把 rollup 的历史补齐，让长窗改读 rollup。
+	//
+	// 三条启动纪律（与上面帧表回填同款）：
+	//   1. **绝不阻塞启动** —— 只建一次便宜的元数据表，真正的回填在 goroutine 里；
+	//   2. 元数据表建不出来 ⇒ 只 Warn 并跳过回填，不 Fatal（不挡主写入）；
+	//   3. 幂等可续跑 —— 已 complete/missing 的 (设备,日) 单元直接跳过，容器重启
+	//      只会从断点继续，不会重复劳动。
+	{
+		rollupBackfillCfg, rollupBackfillWarns := datalifecycle.RollupBackfillConfigFromEnv()
+		for _, w := range rollupBackfillWarns {
+			logger.Warnf("rollup-backfill: %s", w)
 		}
-	}()
+		rollupBackfillEnabled := rollupBackfillCfg.Enabled
+		if err := datalifecycle.EnsureRollupCoverageTable(db); err != nil {
+			// 覆盖元数据表建不出来 ⇒ 读路径永远判"未覆盖"⇒ 长窗永远回落。
+			// 这是**降级**不是故障（服务可用、只是慢），所以 Warn + 跳过，不 Fatal。
+			logger.Warnf("rollup-backfill: 建覆盖元数据表失败，跳过回填（不阻塞启动）: %v", err)
+			rollupBackfillEnabled = false
+		}
+		// ── 帧表聚合源注入（P0 残留缺口修复，2026-11-07）──
+		//
+		// 为什么是注入而不是直接 import：internal/telemetry 的**测试包** import 了
+		// datalifecycle（pg_partition_test.go），所以 datalifecycle 的生产代码一旦
+		// import telemetry 就是 test-only 的 import cycle（go vet ./... 会红）。
+		// 用注入把依赖方向掰回来：datalifecycle 只认中性类型 FramePoint。
+		//
+		// 段宽护栏在 datalifecycle 侧：`framesBatchLimit`，现在是 1h。
+		//
+		// ============ 它是**上限（cap）**，不是步长 ============
+		//
+		//	外层（rollup_backfill.go）: for t := dayStart; t.Before(dayEnd); t = t.Add(batch)
+		//	内层（rollup_backfill_frames.go）: for t := from; t.Before(to); t = t.Add(framesBatchLimit)
+		//	                                  segTo := min(t+framesBatchLimit, to)   ← 被外层 to 卡住
+		//
+		// 所以 **实际段宽 = min(framesBatchLimit, BatchSeconds)**。
+		// BatchSeconds 默认 3600（1h，见 defaultRollupBackfillBatchSeconds），
+		// 因此默认段宽 = 1h => 1h × 1fps = 3,600 帧，上限 32,768 => **余量 9 倍**。
+		//
+		// framesBatchLimit 只在「有人把 BatchSeconds 设成 > 1h」时才起作用 ——
+		// 那时它把窗口切小，防止一次解码太多帧。把它从 6h 收到 1h 是**纯防御性收紧**：
+		// 即使有人设 BatchSeconds=24h，单段也最多 1h（余量从 1.5 倍提到 9 倍），
+		// 默认行为完全不变。
+		//
+		// ⚠ 但段宽多大都**不能**替代下面的截断检查：10 fps 的设备（interval_ms=100 合法）
+		// 在 1h 段内就是 36,000 帧 > 32,768。只有显式检查能保证「超了就知道」。
+		//
+		// （2026-11-08 修正：我先把它误读成「实现用 6h、注释算 1h」，据此写过一版
+		//   声称「注释和实现不一致」的注释。核代码后确认**实现也是 1h** —— cap 被
+		//   外层 batch 卡住。原注释是对的。这段留在这里是为了记住那次误读。）
+		datalifecycle.SetFrameDecoder(func(ctx context.Context, db *gorm.DB, deviceID uint, from, to time.Time) ([]datalifecycle.FramePoint, error) {
+			window := to.Sub(from)
+			pts, stats, err := telemetry.DecodeRangeAnchoredBounded(
+				ctx, db, telemetryDict, deviceID, from, to, nil,
+				window*2, telemetry.MaxDecodeFrames)
+			if err != nil {
+				return nil, err
+			}
+			// ============ 截断即失败（2026-11-08）============
+			//
+			// 为什么必须在这里失败，而不是「照常返回部分点」：
+			//
+			//	部分点 => 回填照常写 rollup 行 + coverage 标 complete
+			//	        => RollupCoverageVerified 认可 complete => **永不重试**
+			//	        => 长窗图表读 rollup，显示错误数字且看起来完全正常
+			//	        => 而 rollup 是预聚合，**没有任何独立来源能对拍它**
+			//
+			// 相比之下，图表少一段是「用户能看见」，这个错了是「用户看不见」。
+			//
+			// ⚠ 当前默认段宽 1h × 1fps = 3,600 帧，远低于上限，**这个分支在生产
+			//   不会触发**。它是防线不是现场 bug —— 触发条件是一台 ≥10 fps 的设备
+			//   （interval_ms=100，合法配置）。加它是因为「触发时无声」，不是因为
+			//   「现在已经在错」。
+			if stats.FramesTruncated > 0 {
+				return nil, fmt.Errorf("rollup backfill segment truncated: device=%d [%s,%s) "+
+					"dropped %d oldest frames (seg=%s, limit=%d); 段内帧数超上限 —— "+
+					"继续回填会把不完整统计标成 complete（永不重试）",
+					deviceID, from.Format(time.RFC3339), to.Format(time.RFC3339),
+					stats.FramesTruncated, to.Sub(from), telemetry.MaxDecodeFrames)
+			}
+			out := make([]datalifecycle.FramePoint, len(pts))
+			for i := range pts {
+				out[i] = datalifecycle.FramePoint{TS: pts[i].TS, Name: pts[i].Name, Value: pts[i].Value}
+			}
+			return out, nil
+		})
+		rollupBackfillRunner := datalifecycle.NewRollupBackfillRunner(db, rollupBackfillCfg)
+		// 进度接口（免鉴权，与 /api/v1/system/backfill 同级）：载荷只有计数/状态，
+		// 没有业务数据。⚠ 必须在 SetEngine 之前注册（gin 路由树无读锁）。
+		api.RegisterRollupBackfillStatus(r, func() api.RollupBackfillSnapshot {
+			p := rollupBackfillRunner.Progress()
+			return api.RollupBackfillSnapshot{
+				State:          p.State,
+				UnitsTotal:     p.UnitsTotal,
+				UnitsDone:      p.UnitsDone,
+				UnitsSkipped:   p.UnitsSkipped,
+				BucketsWritten: p.BucketsWritten,
+				CurrentDay:     p.CurrentDay,
+				CurrentDevice:  p.CurrentDevice,
+				Errors:         p.Errors,
+			}
+		})
+		if rollupBackfillEnabled {
+			go func() {
+				logger.Infof("rollup-backfill: L3 历史回填已启动（batch=%ds, sleep=%s）—— 后台执行，不阻塞服务",
+					rollupBackfillCfg.BatchSeconds, rollupBackfillCfg.BatchSleep)
+				if err := rollupBackfillRunner.RunOnce(context.Background()); err != nil {
+					logger.Warnf("rollup-backfill: 回填中断（下次启动将从覆盖元数据继续）: %v", err)
+					return
+				}
+				p := rollupBackfillRunner.Progress()
+				logger.Infof("rollup-backfill: 完成 state=%s 单元=%d/%d 分钟桶=%d 跳过=%d",
+					p.State, p.UnitsDone, p.UnitsTotal, p.BucketsWritten, p.UnitsSkipped)
+			}()
+			// ── 每日 rollover（A-改，2026-11-07）──
+			//
+			// 为什么需要：coverage 只在回填**跑起来**时才推进，而上一条 goroutine 只在
+			// 进程启动跑一次。服务连续运行多日 => coverage 停在启动那天 =>
+			// RollupWindowCovered=false => 长窗回落 => 停写后图表静默截断（HTTP 200，无告警）。
+			//
+			// 为什么是「再跑一次 RunOnce」而不是「让 live collector 写 coverage」：
+			// RollupWindowCovered **跳过今天**（今天交给 live collector），所以写今天的
+			// coverage 不会让任何窗口变成 covered；窗口要 covered 需要「昨天」有行。
+			// 而 RunOnce 对已 complete 的单元是**跳过**的，重复跑几乎零成本。
+			//
+			// 两条路径（启动 + 每日）都调同一个 RunOnce，天然幂等：
+			// 进程若在 00:05 那一刻不在运行（重启/部署窗口），启动那次会滚动补上。
+			//
+			// ── 每次每日推进的开销估算（Lead 2026-11-07 要求写清，免得被当成常数）──
+			//
+			// 单元数 = 设备数 x 回填天数。跳过判定 unitAlreadyDone 是**逐单元一次**
+			// coverage 表主键查询 (device_id, day)，索引命中、亚毫秒级。
+			//
+			//	当前 10 设备 x 45 天 = 450 单元 => 约 450 次轻量查询，可忽略
+			//	设备数 x 保留期涨到 5,000 单元 => 约 5,000 次 => 每日一次仍可接受，但**不是常数**
+			//
+			// 若将来单元数再上一个量级，优化路径是：把逐单元 unitAlreadyDone 换成
+			// ReadRollupCoverage 一次性取回整个日期区间（1 次查询 + 内存比对）。
+			// 现在不提前做 —— 当前量级下它只是把 450 次索引查询换成 1 次全区间扫描，收益不明。
+			go func() {
+				for {
+					next := datalifecycle.NextRollupRolloverAt(time.Now())
+					logger.Infof("rollup-backfill: 每日推进已排程，下次 %s", next.Format(time.RFC3339))
+					time.Sleep(time.Until(next))
+					began := time.Now()
+					err := rollupBackfillRunner.RunOnce(context.Background())
+					p := rollupBackfillRunner.Progress()
+					// 必须打日志：否则「跑了但什么都没做」与「没跑」在日志上同形。
+					logger.Infof("rollup-backfill: 每日推进 state=%s 单元=%d/%d 跳过=%d 分钟桶=%d 耗时=%s err=%v",
+						p.State, p.UnitsDone, p.UnitsTotal, p.UnitsSkipped, p.BucketsWritten,
+						time.Since(began).Round(time.Millisecond), err)
+				}
+			}()
+		} else {
+			logger.Infof("rollup-backfill: 已关闭（%s=false）或不可用，跳过", datalifecycle.EnvRollupBackfillEnabled)
+		}
+	}
+
+	rootHandler.SetEngine(r)
+	logger.Infof("root handler switched to FULL engine (翻转为正式服务，维护页退出): percent=%.1f", startupTracker.Snapshot().Percent)
+
+	// 排障开关 EHOME_STARTUP_MAINTENANCE_PAGE=false 时，监听一直被上面那道门挡着，
+	// 此刻才放行 —— 与改造前"启动完成后才开始 Accept"完全等价。
+	// 默认（true）情况下这道门在 main 顶部就关了，listenNow 是幂等的空操作。
+	listenNow()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -714,13 +1339,7 @@ func main() {
 	logger.Infof("Received signal %v, shutting down gracefully...", sig)
 
 	purger.Stop()
-	logger.Infof("Data lifecycle purger stopped")
-
-	backfiller.Stop()
-	logger.Infof("Data lifecycle backfiller stopped")
-
-	migrator.Stop()
-	logger.Infof("Data lifecycle merge migrator stopped")
+	logger.Infof("Edge device data purger stopped")
 
 	retentionTask.Stop()
 	logger.Infof("Data lifecycle retention task stopped")
@@ -743,6 +1362,176 @@ func main() {
 	}
 
 	logger.Infof("EHomeSystem Server stopped")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 启动进度接线（契约 §3.1/§3.2/§3.4）
+// ════════════════════════════════════════════════════════════════════════════
+
+// startupProgressAdapter 把 datalifecycle 的迁移埋点转投到 bootstrap.Tracker。
+//
+// 为什么需要这层适配：datalifecycle 刻意不 import bootstrap（依赖方向保持
+// datalifecycle → 标准库/GORM，见 partition_mgr.go 顶部说明），它只认
+// 自己的 MigrationProgress 窄接口。适配器是两边唯一的接缝，放在 cmd/server ——
+// 启动编排的归属地。
+//
+// touched 记录「哪些步骤真的被回调过」：parent_indexes / retire_dead_indexes
+// 嵌在迁移函数内部，main 只能在外面 Begin，无法从返回值判断"到底建没建索引"。
+// 回调与否就是那个判据（Done vs Skip），见 settleNestedIndexSteps。
+type startupProgressAdapter struct {
+	tracker *bootstrap.Tracker
+
+	mu      sync.Mutex
+	touched map[string]bool
+}
+
+// StepProgress 实现 datalifecycle.MigrationProgress。由迁移 goroutine 调用，
+// 必须并发安全（touched 有自己的锁，tracker 内部也有锁）。
+func (a *startupProgressAdapter) StepProgress(stepID string, pct float64, detail string) {
+	if a == nil || a.tracker == nil || stepID == "" {
+		return
+	}
+	a.mu.Lock()
+	if a.touched == nil {
+		a.touched = map[string]bool{}
+	}
+	a.touched[stepID] = true
+	a.mu.Unlock()
+	a.tracker.StepProgress(stepID, pct, detail)
+}
+
+// wasTouched 报告某个 step 是否收到过至少一次进度回调。
+func (a *startupProgressAdapter) wasTouched(stepID string) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.touched[stepID]
+}
+
+// maintenanceSnapshotFromTracker 把 bootstrap.Snapshot 映射成 api 的镜像类型。
+//
+// 为什么手写映射而不让 api import bootstrap：api 是路由/协议层，bootstrap 是启动
+// 编排层，让前者依赖后者会把「HTTP 契约」与「谁负责跑迁移」焊死。镜像类型的
+// JSON tag 由 internal/api/maintenance_test.go 的 TestMaintenanceSnapshotJSONShape
+// MatchesContract 钉在契约 §3.1 上，两边漂移会立刻变红。
+func maintenanceSnapshotFromTracker(t *bootstrap.Tracker) api.MaintenanceSnapshot {
+	if t == nil {
+		return api.MaintenanceSnapshot{}
+	}
+	snap := t.Snapshot()
+	out := api.MaintenanceSnapshot{
+		Ready:        snap.Ready,
+		Failed:       snap.Failed,
+		Percent:      snap.Percent,
+		CurrentStep:  snap.CurrentStep,
+		CurrentLabel: snap.CurrentLabel,
+		StartedAt:    snap.StartedAt,
+		ElapsedMS:    snap.ElapsedMS,
+		Version:      snap.Version,
+		BuildCommit:  snap.BuildCommit,
+		Steps:        make([]api.MaintenanceStep, len(snap.Steps)),
+	}
+	for i, step := range snap.Steps {
+		out.Steps[i] = api.MaintenanceStep{
+			ID:         step.ID,
+			Label:      step.Label,
+			Weight:     step.Weight,
+			State:      string(step.State),
+			Progress:   step.Progress,
+			Detail:     step.Detail,
+			Error:      step.Error,
+			StartedAt:  step.StartedAt,
+			FinishedAt: step.FinishedAt,
+		}
+	}
+	return out
+}
+
+// timeseriesTableNames 返回参与生命周期与分区保障的时序表名（顺序固定）。
+//
+// 为什么从 datalifecycle 取而不是在 main 里再抄一份清单：这张清单已经在
+// retention / purge / data-summary / merge-history / latestTimestamp 五处被
+// 使用（评审 B-3 的修复点）。main 里再抄一份就等于第七处，早晚漂移 ——
+// 「下个月没有分区」在月初会静默变成写入失败（PG 分区表无兜底 default 分区）。
+func timeseriesTableNames() []string {
+	specs := datalifecycle.TimeseriesTables()
+	out := make([]string, 0, len(specs))
+	for _, t := range specs {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
+// startupFailureGrace 是「标记失败 → 进程真正退出」之间留给前端的窗口。
+//
+// 为什么需要（2026-11-06 契约 §5 的硬要求）：Fatal 会立刻终止进程，浏览器只看到
+// 连接断开，看不到失败原因。留一点时间让已经在轮询的维护页抓到一次 failed 快照，
+// 用户才能看到"连接数据库…失败：xxx"，而不是白屏。
+//
+// 800ms 是折中：短于前端的 2s 轮询间隔就**可能**错过（但前端门禁首次探测就是
+// 立刻发的，加上失败前的运行时间通常足够）；再长则拖慢容器编排的重启决策。
+const startupFailureGrace = 800 * time.Millisecond
+
+// abortStartup = 「记录失败 → 留窗口 → Fatal」的统一出口。
+//
+// 调用方必须先 tracker.Fail(stepID, err) 再调本函数（保持步骤归属清晰）；
+// 本函数只负责让失败**可见**，退出语义与改造前完全一致（仍是 logger.Fatalf，
+// 仍是非 0 退出）。maintenance page 关掉时同样生效（只是没人看得到）。
+func abortStartup(format string, args ...interface{}) {
+	if startupMaintenancePageEnabled() {
+		time.Sleep(startupFailureGrace)
+	}
+	logger.Fatalf(format, args...)
+}
+
+// startupMaintenancePageEnabled 读 EHOME_STARTUP_MAINTENANCE_PAGE（默认 true）。
+//
+// 默认 true 是刻意的：这条改造的价值全在"升级期间用户能看见进度"，
+// 默认开启才符合契约 §3.4。=false 时退化为旧行为（先做完再监听），只用于排障：
+// 排障时要能一键判断题现的异常是不是"提前监听"引入的。
+func startupMaintenancePageEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("EHOME_STARTUP_MAINTENANCE_PAGE"))
+	if raw == "" {
+		return true
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		// 拼错的布尔值不该让运维以为开关生效了：按默认值走并明确告警。
+		logger.Warnf("EHOME_STARTUP_MAINTENANCE_PAGE=%q 不是合法布尔值，按默认 true 处理", raw)
+		return true
+	}
+	return enabled
+}
+
+// startupFailFast 可选看门狗（契约 §3.4 第二行，默认关闭）。
+//
+// EHOME_STARTUP_FAIL_FAST_SECONDS > 0 时：启动超过该秒数仍未就绪 ⇒ 进程以非 0
+// 退出。为什么需要它：提前监听后端口是通的，容器编排与负载均衡会认为"这个实例
+// 起来了"，而实际上它可能卡在一条几十分钟的索引 DDL 上。设置阈值让"卡死"
+// 能被编排层识别并以重启收敛，而不是永远挂着一个不通业务的实例。
+func startupFailFast(tracker *bootstrap.Tracker) {
+	raw := strings.TrimSpace(os.Getenv("EHOME_STARTUP_FAIL_FAST_SECONDS"))
+	if raw == "" {
+		return
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		logger.Warnf("EHOME_STARTUP_FAIL_FAST_SECONDS=%q 无效或 <=0，启动看门狗关闭", raw)
+		return
+	}
+	go func() {
+		timer := time.NewTimer(time.Duration(seconds) * time.Second)
+		defer timer.Stop()
+		<-timer.C
+		if !tracker.Ready() {
+			snap := tracker.Snapshot()
+			logger.Fatalf("startup exceeded EHOME_STARTUP_FAIL_FAST_SECONDS=%d without becoming ready (percent=%.1f current=%s): failing fast so the orchestrator can restart",
+				seconds, snap.Percent, snap.CurrentStep)
+		}
+	}()
+	logger.Infof("startup fail-fast watchdog armed: %d s", seconds)
 }
 
 func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {

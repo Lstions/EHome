@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"time"
@@ -12,7 +11,6 @@ import (
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
-	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
 )
 
@@ -26,11 +24,17 @@ func main() {
 			usage()
 		}
 		runAuth()
-	case "datalifecycle":
-		if len(os.Args) < 3 {
-			usage()
+	case "retire-logical-device":
+		// 逻辑设备概念层的数据层拆除 (2026-10-23, .contract/logical-device-removal.md)。
+		// 服务端启动时 database.AutoMigrate() 也会自动幂等执行同一动作；本命令
+		// 供部署维护窗口**先行**执行（在停旧容器之后、起新容器之前），这样
+		// 大表 DROP COLUMN 的锁窗口与启动流程解耦，可控且可重试。
+		db := connectDB()
+		rows, err := database.RetireLogicalDeviceLayer(db)
+		if err != nil {
+			fatal(fmt.Sprintf("retire logical device layer failed: %v", err))
 		}
-		runDatalifecycle()
+		fmt.Printf("logical device layer retired (rows touched=%d)\n", rows)
 	case "command-intervals":
 		runCommandIntervalsCleanupCLI()
 	default:
@@ -40,7 +44,7 @@ func main() {
 
 func usage() {
 	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
-		"       ehomectl datalifecycle <backfill|ensure-indexes>\n" +
+		"       ehomectl retire-logical-device\n" +
 		"       ehomectl command-intervals cleanup")
 }
 
@@ -56,58 +60,12 @@ func connectDB() *gorm.DB {
 	return db
 }
 
-// runDatalifecycle 数据生命周期 M 迁移步骤的同步执行入口 (方案 v3.3 §七)。
-// 与服务端启动钩子不同, 本命令同步执行并以退出码报告校验结果——
-// 校验自检 (§七-3) 非 0 或执行失败时 exit 非零, 供运维脚本判定。
-func runDatalifecycle() {
-	switch os.Args[2] {
-	case "ensure-indexes":
-		// 显式索引入口 (BMS 页慢修复-实施契约-2026-10-20 §1.4): 只建索引,
-		// 不跑回填。供部署维护窗口使用: 停旧容器 → ensure-indexes → 起新容器
-		// (分区母表上的普通 CREATE INDEX 会短暂阻塞写入, 见 indexes.go 注释)。
-		db := connectDB()
-		if err := datalifecycle.EnsureLogicalDataIndexes(context.Background(), db); err != nil {
-			fatal(fmt.Sprintf("index creation failed: %v", err))
-		}
-		fmt.Println("composite indexes ensured")
-	case "backfill":
-		db := connectDB()
-		ctx := context.Background()
-
-		if err := datalifecycle.EnsureLogicalDataIndexes(ctx, db); err != nil {
-			fatal(fmt.Sprintf("index creation failed: %v", err))
-		}
-		fmt.Println("composite indexes ensured")
-
-		results, err := datalifecycle.NewBackfiller(db).RunOnce(ctx)
-		if err != nil {
-			fatal(err.Error())
-		}
-		failed := false
-		for _, r := range results {
-			if r.Err != "" {
-				fmt.Fprintf(os.Stderr, "backfill %s FAILED: %s\n", r.Table, r.Err)
-				failed = true
-				continue
-			}
-			fmt.Printf("backfill %s: rows_updated=%d batches=%d resumed_from=%d\n",
-				r.Table, r.RowsUpdated, r.Batches, r.ResumedFrom)
-			if !r.VerifyPassed {
-				fmt.Fprintf(os.Stderr, "verify %s FAILED: %d row(s) still NULL while instance has logical_device_id\n",
-					r.Table, r.RowsMissing)
-				failed = true
-				continue
-			}
-			fmt.Printf("verify %s: PASSED (0 rows missing)\n", r.Table)
-		}
-		if failed {
-			os.Exit(1)
-		}
-	default:
-		fatal("unknown datalifecycle command")
-	}
-}
-
+// runMaintenance 是运维维护窗口的同步入口。
+//
+// 历史: 这里曾有 runDatalifecycle（ensure-indexes / backfill），用于给
+// 「逻辑设备身份」建复合索引并回填大表 logical_device_id。逻辑设备概念层
+// 已整体移除 (2026-10-23, .contract/logical-device-removal.md)，索引与回填
+// 都不再有对象，命令随之删除；保留的是同形态的退役入口。
 func runAuth() {
 	db := connectDB()
 

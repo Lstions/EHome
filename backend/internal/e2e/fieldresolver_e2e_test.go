@@ -14,9 +14,9 @@ package e2e
 
 import (
 	"context"
-	"math"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,15 +26,15 @@ import (
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/databus"
-	"errors"
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
-	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/downlink"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
 	"ehome/backend/pkg/parser"
 	"ehome/backend/testutil"
+	"errors"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -55,7 +55,7 @@ type bmsSample struct {
 	cycles            uint16
 	protectStatus     uint16
 	version           byte
-	rsoc              byte    // %
+	rsoc              byte // %
 	fetStatus         byte
 	cellCount         byte    // 串
 	temps             []int16 // 0.1°C 原始值
@@ -104,7 +104,7 @@ type signalingConsumer struct {
 	done  atomic.Int64
 }
 
-func (c *signalingConsumer) Name() string                     { return c.inner.Name() }
+func (c *signalingConsumer) Name() string                          { return c.inner.Name() }
 func (c *signalingConsumer) ShouldHandle(e databus.DataEvent) bool { return c.inner.ShouldHandle(e) }
 func (c *signalingConsumer) Handle(e databus.DataEvent) {
 	c.inner.Handle(e)
@@ -145,20 +145,19 @@ type e2eChain struct {
 	node       models.Node
 	channel    models.Channel
 	device     models.EdgeDevice
-	logical    models.LogicalDevice
 	dataSource models.DataSource
 	registry   *sensorfield.Registry
 	dsSvc      *datasource.Service
 	// groupSvc 是来源组服务（M3 后 health sink 的唯一消费者）。
 	// 可为 nil：本 e2e 的多数用例只关心"解析→观测→规则"，不依赖来源组。
-	groupSvc *datasource.GroupService
-	bus        *databus.DataEventBus
-	consumer   *signalingConsumer
-	eval       *automation.Evaluator
-	alertEval  *alert.Evaluator
-	pub        downlink.Publisher
-	cmdSvc     *commandexec.Service
-	disp       *commandexec.Dispatcher
+	groupSvc  *datasource.GroupService
+	bus       *databus.DataEventBus
+	consumer  *signalingConsumer
+	eval      *automation.Evaluator
+	alertEval *alert.Evaluator
+	pub       downlink.Publisher
+	cmdSvc    *commandexec.Service
+	disp      *commandexec.Dispatcher
 }
 
 func newE2EChain(t *testing.T, rules ...*models.AutomationRule) *e2eChain {
@@ -194,18 +193,17 @@ func newE2EChainWithPublisher(t *testing.T, pub downlink.Publisher, rules ...*mo
 	if err := db.Create(&models.User{Username: "e2e-admin", PasswordHash: "hash", Enabled: true, SubjectKey: &sk, SessionVersion: 1, LastLoginAt: &adminNow}).Error; err != nil {
 		t.Fatalf("create system admin: %v", err)
 	}
-	c.logical = models.LogicalDevice{IdentityKey: "jiabaida_bms:3001-e2e:1:1", Name: "BMS-e2e", DeviceType: "jiabaida_bms", RetentionDays: 90}
-	if err := db.Create(&c.logical).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
-	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms", Enabled: true, Status: "active", LogicalDeviceID: &c.logical.ID}
+	// 逻辑设备概念层已整体移除 (2026-10-23): 边缘设备行直接就是数据主语,
+	// 不再挂 logical_device_id。
+	c.device = models.EdgeDevice{Name: "BMS-e2e", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "jiabaida_bms", Enabled: true, Status: "active"}
 	if err := db.Create(&c.device).Error; err != nil {
 		t.Fatalf("create edge device: %v", err)
 	}
 
 	// 数据源域：一个 active 来源，category = 物理名 rsoc（与 unified_data.sensor_name 同域）
+	// 组键 = (edge_device_id, category); DeviceID(逻辑设备) 列已删除。
 	c.dataSource = models.DataSource{
-		DeviceID: c.logical.ID, Category: "rsoc", EdgeDeviceID: c.device.ID,
+		Category: "rsoc", EdgeDeviceID: c.device.ID,
 		SourceType: "edge_device", Name: "BMS-RSOC", Priority: 100, IsPrimary: true,
 		MaxFailCount: 3, Status: datasource.StatusActive,
 	}
@@ -311,9 +309,9 @@ func (c *e2eChain) publish(t *testing.T, frame []byte, requestID uint64) {
 func TestEdgeDeviceDataFlow_FullChain(t *testing.T) {
 	rule := &models.AutomationRule{
 		Name: "SOC 低电量通知", Enabled: true,
-		TriggerType: models.AutomationTriggerSensorThreshold,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: 0, // any-device（验证 R3：deviceID 必须取 Evaluate 入参）
-		TriggerSensorName: "@soc", TriggerComparator: "lt", TriggerThreshold: 30,
+		TriggerSensorName:   "@soc", TriggerComparator: "lt", TriggerThreshold: 30,
 		ActionType: models.AutomationActionNotification,
 	}
 	c := newE2EChain(t, rule)
@@ -527,16 +525,16 @@ func (c *e2eChain) dispatchOnce(t *testing.T) bool {
 	return ok
 }
 
-
 // E2ECapabilitiesJSON 节点上报的命令引擎能力（commandexec 门禁读取）。
 const E2ECapabilitiesJSON = `{"supports_channel_cmd_v2":true,"supports_bounded_batch":true,"supports_finally":true,"max_batch_steps":8,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`
 
 // addSecondEdgeDevice 在同节点同通道下再建一台同型号边缘设备（主备的第二来源）。
-// 来源组键 = (逻辑设备, 类别)，来源 = 边缘设备 ⇒ 备来源必须是**另一台**物理设备。
+// 来源组键 = (edge_device_id, category)，来源 = 边缘设备 ⇒ 备来源必须是**另一台**
+// 物理设备（同键只能有一条，见 uniq_ds_source 唯一索引）。
 func (c *e2eChain) addSecondEdgeDevice(t *testing.T, name string) models.EdgeDevice {
 	t.Helper()
 	dev := models.EdgeDevice{Name: name, NodeID: c.node.NodeID, ChannelID: c.channel.ID,
-		Type: "jiabaida_bms", Enabled: true, Status: "active", LogicalDeviceID: &c.logical.ID}
+		Type: "jiabaida_bms", Enabled: true, Status: "active"}
 	if err := c.db.Create(&dev).Error; err != nil {
 		t.Fatalf("create backup edge device: %v", err)
 	}

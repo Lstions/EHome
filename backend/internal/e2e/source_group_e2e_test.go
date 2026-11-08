@@ -12,12 +12,12 @@ package e2e
 //     报告里必须区分 SKIP 与 PASS）。
 //
 // 夹具纪律（方案 §8.4 + F-6 豁免）：
-//   - 两台 prs3001 光照设备必须**跨逻辑设备**（各自 logical_device），避免 v3.3
-//     "一逻辑设备一存活实例" 约束把主备组拆开；
-//   - 设备/逻辑行允许 fixture 直写 DB（与既有无 HTTP 引擎的 e2e 先例一致，等价基线
+//   - 两台 prs3001 光照设备是两台**独立边缘设备**（逻辑设备概念层已整体移除,
+//     2026-10-23 —— 来源组本来就是把不同物理来源的同类传感器合成一个来源,
+//     与身份层无关）；
+//   - 设备行允许 fixture 直写 DB（与既有无 HTTP 引擎的 e2e 先例一致，等价基线
 //     internal/e2e/fieldresolver_e2e_test.go 的 newE2EChain）；**来源组与规则必须走产品
-//     路径**（service.Create），禁止 db.Create 直插组表；
-//   - E6 的 ID 分歧夹具允许直写 logical/edge 行（方案 F-6 明示豁免）并在此登记。
+//     路径**（service.Create），禁止 db.Create 直插组表。
 //
 // 跑法：
 //   EHOME_TEST_DB=postgres EHOME_DB_HOST=127.0.0.1 EHOME_DB_PORT=5432 \
@@ -56,11 +56,13 @@ import (
 // ── 夹具：两台跨逻辑设备的 prs3001 光照设备 ─────────────────────────────────
 
 // sgFixture 是来源组 e2e 的最小夹具。
+//
+// 2026-10-23: 逻辑设备概念层移除后，两台光照设备不再"跨逻辑设备"，直接就是两台
+// 独立的边缘设备 —— 来源组的意义本来就是「把不同物理来源上的同类传感器合成一个
+// 来源」，与身份层无关。
 type sgFixture struct {
-	LogicalA models.LogicalDevice
-	LogicalB models.LogicalDevice
-	EdgeA    models.EdgeDevice
-	EdgeB    models.EdgeDevice
+	EdgeA models.EdgeDevice
+	EdgeB models.EdgeDevice
 }
 
 // prs3001Frame4B 构 prs3001 的 2 寄存器（4 数据字节）modbus 响应帧。
@@ -107,23 +109,12 @@ func newSGFixture(t *testing.T) *sgFixture {
 	}
 
 	f := &sgFixture{}
-	now := time.Now().UTC()
-	_ = now
-	// 1) 两个独立逻辑设备（跨逻辑设备是需求③的前提）。
-	f.LogicalA = models.LogicalDevice{IdentityKey: "prs3001:sgA:1:1", Name: "光照A", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&f.LogicalA).Error; err != nil {
-		t.Fatalf("create logical A: %v", err)
-	}
-	f.LogicalB = models.LogicalDevice{IdentityKey: "prs3001:sgB:1:1", Name: "光照B", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&f.LogicalB).Error; err != nil {
-		t.Fatalf("create logical B: %v", err)
-	}
-	// 2) 各挂一台边缘设备（fixture 直写；与既有 e2e 的 newE2EChain 同口径）。
-	f.EdgeA = models.EdgeDevice{Name: "光照A-edge", NodeID: "sg-node", ChannelID: 1, Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &f.LogicalA.ID}
+	// 两台独立边缘设备（fixture 直写；与既有 e2e 的 newE2EChain 同口径）。
+	f.EdgeA = models.EdgeDevice{Name: "光照A-edge", NodeID: "sg-node", ChannelID: 1, Type: "prs3001", Enabled: true, Status: "active"}
 	if err := db.Create(&f.EdgeA).Error; err != nil {
 		t.Fatalf("create edge A: %v", err)
 	}
-	f.EdgeB = models.EdgeDevice{Name: "光照B-edge", NodeID: "sg-node", ChannelID: 1, Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &f.LogicalB.ID}
+	f.EdgeB = models.EdgeDevice{Name: "光照B-edge", NodeID: "sg-node", ChannelID: 1, Type: "prs3001", Enabled: true, Status: "active"}
 	if err := db.Create(&f.EdgeB).Error; err != nil {
 		t.Fatalf("create edge B: %v", err)
 	}
@@ -245,8 +236,6 @@ type sgChain struct {
 	db       *gorm.DB
 	node     models.Node
 	channel  models.Channel
-	logicalA models.LogicalDevice
-	logicalB models.LogicalDevice
 	edgeA    models.EdgeDevice
 	edgeB    models.EdgeDevice
 	registry *sensorfield.Registry
@@ -273,27 +262,13 @@ func newSGChain(t *testing.T) *sgChain {
 	if err := db.Create(&c.channel).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	// F-6 夹具豁免：先造 2 条占位逻辑设备，保证后面真实 logical ID 与 edge ID 序列错位
-	//（E6 要求 logical_id ∉ {edge ids}，SQLite 两表各自从 1 起会让 ID 相等）。
-	for i := 0; i < 2; i++ {
-		pad := models.LogicalDevice{IdentityKey: "prs3001:sgpad:" + string(rune('a'+i)), Name: "pad", DeviceType: "prs3001", RetentionDays: 90}
-		if err := db.Create(&pad).Error; err != nil {
-			t.Fatalf("create padding logical: %v", err)
-		}
-	}
-	c.logicalA = models.LogicalDevice{IdentityKey: "prs3001:sgA:1:1", Name: "光照A", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&c.logicalA).Error; err != nil {
-		t.Fatalf("create logical A: %v", err)
-	}
-	c.logicalB = models.LogicalDevice{IdentityKey: "prs3001:sgB:1:1", Name: "光照B", DeviceType: "prs3001", RetentionDays: 90}
-	if err := db.Create(&c.logicalB).Error; err != nil {
-		t.Fatalf("create logical B: %v", err)
-	}
-	c.edgeA = models.EdgeDevice{Name: "光照A-edge", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &c.logicalA.ID}
+	// 两台独立边缘设备（逻辑设备层移除后不再需要"跨逻辑设备"夹具；
+	// 原先为 E6 造的两个占位 logical 行也随之作废）。
+	c.edgeA = models.EdgeDevice{Name: "光照A-edge", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "prs3001", Enabled: true, Status: "active"}
 	if err := db.Create(&c.edgeA).Error; err != nil {
 		t.Fatalf("create edge A: %v", err)
 	}
-	c.edgeB = models.EdgeDevice{Name: "光照B-edge", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "prs3001", Enabled: true, Status: "active", LogicalDeviceID: &c.logicalB.ID}
+	c.edgeB = models.EdgeDevice{Name: "光照B-edge", NodeID: c.node.NodeID, ChannelID: c.channel.ID, Type: "prs3001", Enabled: true, Status: "active"}
 	if err := db.Create(&c.edgeB).Error; err != nil {
 		t.Fatalf("create edge B: %v", err)
 	}
@@ -640,22 +615,33 @@ func TestE5_DurationSecAcrossMembersNotContinuous(t *testing.T) {
 	}
 }
 
-// ── E6：F4 断链回归（规则绑逻辑设备 ID，非 edge ID）───────────────────────────
-
-func TestE6_F4PinsTriggerMemberOnLogicalIDDivergence(t *testing.T) {
+// ── E6：trigger_edge_device_id 只有一种口径（edge device id），没有身份兜底 ────
+//
+// 原用例 TestE6_F4PinsTriggerMemberOnLogicalIDDivergence 钉的是 F4 缺陷: 规则
+// trigger_edge_device_id 里存的是**逻辑设备 ID**，而帧匹配用 edge device ID，
+// 于是一条合法规则永远匹配不上（断链）。当时的修复是「解析成逻辑身份再比一次」。
+//
+// 2026-10-23 逻辑设备概念层整体移除 (.contract/logical-device-removal.md §7):
+// 身份解析分支删除，trigger_edge_device_id 语义就只剩 edge device id 一种。
+// 该用例的对象（"逻辑 ID 与 edge ID 分歧"）已不存在，故替换为**新语义的正向钉**:
+//   - 绑真实 edge id 的规则照常命中（链没断）；
+//   - 绑一个不对应任何边缘设备的 id 的规则**绝不**命中 —— 若有人重新引入
+//     "按身份/别名兜底解析" 的分支，第二条会变红。
+func TestE6_TriggerEdgeDeviceIDHasSingleMeaning(t *testing.T) {
 	c := newSGChain(t)
 	c.warm(t)
-	// ID 分歧前置：逻辑 ID 必须不等于任何 edge ID（N-12 要求显式断言）
-	if c.logicalA.ID == c.edgeA.ID {
-		t.Fatalf("E6 夹具前提不成立: logicalA.ID == edgeA.ID == %d", c.logicalA.ID)
-	}
-	r := c.createRule(t, "绑逻辑设备", 0, c.logicalA.ID, 500, 0, 0)
+	rHit := c.createRule(t, "绑真实边缘设备", 0, c.edgeA.ID, 500, 0, 0)
+	// 一个不对应任何边缘设备的 id (远大于夹具里分配的 id)。
+	rMiss := c.createRule(t, "绑不存在的设备", 0, 999999, 500, 0, 0)
 	c.start(t)
 	c.publish(t, c.edgeA, 600, c.now)
 
-	if n := len(c.eventsForRule(t, r)); n != 1 {
-		ev := c.eventsForRule(t, r)
-		t.Fatalf("E6 红判据: 绑逻辑设备的规则事件数=%d（M0 修复后应恰有 1 条 executed；当前事件=%+v）", n, ev)
+	if n := len(c.eventsForRule(t, rHit)); n != 1 {
+		t.Fatalf("E6 红判据: 绑真实 edge id 的规则事件数=%d（期望恰 1 条）；事件=%+v", n, c.eventsForRule(t, rHit))
+	}
+	if n := len(c.eventsForRule(t, rMiss)); n != 0 {
+		t.Fatalf("E6 红判据: 绑不存在设备的规则事件数=%d（期望 0 —— 不存在身份兜底解析）；事件=%+v",
+			n, c.eventsForRule(t, rMiss))
 	}
 }
 

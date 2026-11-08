@@ -54,9 +54,19 @@ var notifyWiringRequired = []notifyWiringNeedle{
 	{"构造 Dispatcher", "notify.NewDispatcher(db)"},
 	{"alert 接线", "alertEvaluator.SetNotifier(notifyDispatcher)"},
 	{"automation 接线", "automationPlanner.SetNotifier(notifyDispatcher)"},
-	{"datalifecycle Migrator 接线", "migrator.SetNotifier(notifyDispatcher)"},
-	{"datalifecycle RetentionTask 接线", "retentionTask.SetNotifier(notifyDispatcher)"},
-	{"datasource 接线", "datasourceSvc.SetDispatchNotifier(notifyDispatcher)"},
+	// datalifecycle 的两条接线（Migrator / RetentionTask）已于 2026-10-23 随
+	// 逻辑设备层移除：
+	//   - Migrator 是「合并搬迁 worker」，整个 worker 已删除；
+	//   - RetentionTask 的临期通知（30/7 天两档）随 per-identity retention 消失，
+	//     它现在只删过期数据，不是通知生产者。
+	// 保留这条注释而不是静默删项：下次有人新增通知生产者时必须回来加 needle，
+	// 否则本门禁不再是「所有生产者都接线」的证据。
+	// 2026-10-24（遗留处置方案 A）：datasource.Service 的四个手工运维方法
+	// （Delete/Activate/Deactivate/Reset）已删除 —— 它们是该服务**唯一**的通知来源，
+	// 因此 datasourceSvc.SetDispatchNotifier 接线一并移除。
+	// 数据源域的通知生产者现在是 **GroupService**（来源组主备状态机），
+	// needle 随之迁移。漏了这条 = 组域通知永不外发，且不会有任何测试变红。
+	{"sourceGroup 接线", "sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)"},
 }
 
 // missingWiring 返回 src 中缺失的接线项。抽成纯函数以便变异自检直接喂字符串
@@ -147,7 +157,11 @@ func setupRoutesCall(t *testing.T, src string) string {
 // 要求逐条判红。自检用例是硬编码字符串, 不读磁盘 —— 因此"有人把 main.go 改坏"
 // 不会让自检跟着失效 (那是被测门禁的职责, 不是自检的)。
 func TestNotifyWiringGate_MutationSelfCheck(t *testing.T) {
-	// 变异 1: 接线前的 main.go — 只有既有的 datasource 旧回调, 完全不提 notify 包。
+	// 变异 1: 接线前的 main.go — 只有既有的回调式通知, 完全不提 notify 包。
+	//
+	// 说明：datasourceSvc.SetNotifier 本身也已在 2026-10-24 删除（方案 A），
+	// 这里的字符串只是**「一个尚未做 D-1 接线的 main.go 长什么样」的样本**，
+	// 不要求与当前 main.go 逐字一致 —— 自检本来就不读磁盘。
 	beforeWiring := `func main() {
 	datasourceSvc := datasource.New(db, datasource.Options{})
 	datasourceSvc.SetNotifier(func(n models.Notification) {
@@ -165,26 +179,22 @@ func TestNotifyWiringGate_MutationSelfCheck(t *testing.T) {
 		t.Errorf("变异 1: 构造计数 = %d, 期望 0", got)
 	}
 
-	// 变异 2: 只漏掉 datalifecycle 的 RetentionTask 接线 (一个包两个写入点, 最易漏)。
-	missingRetention := `notifyDispatcher := notify.NewDispatcher(db)
+	// 变异 2: 漏掉 automation 接线（规则引擎这条链最容易被一次重构静默摘掉）。
+	missingAutomation := `notifyDispatcher := notify.NewDispatcher(db)
 alertEvaluator.SetNotifier(notifyDispatcher)
-automationPlanner.SetNotifier(notifyDispatcher)
-migrator.SetNotifier(notifyDispatcher)
-datasourceSvc.SetDispatchNotifier(notifyDispatcher)`
-	missing := missingWiring(missingRetention)
+sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)`
+	missing := missingWiring(missingAutomation)
 	if len(missing) != 1 {
-		t.Fatalf("变异 2 (漏 RetentionTask): 判定出 %d 项缺失, 期望恰好 1 项", len(missing))
+		t.Fatalf("变异 2 (漏 automation): 判定出 %d 项缺失, 期望恰好 1 项", len(missing))
 	}
-	if !strings.Contains(missing[0], "RetentionTask") {
-		t.Errorf("变异 2: 判红的是 %q, 期望指出 RetentionTask", missing[0])
+	if !strings.Contains(missing[0], "automation") {
+		t.Errorf("变异 2: 判红的是 %q, 期望指出 automation", missing[0])
 	}
 
 	// 变异 3: 漏掉 alert 接线。
 	missingAlert := `notifyDispatcher := notify.NewDispatcher(db)
 automationPlanner.SetNotifier(notifyDispatcher)
-migrator.SetNotifier(notifyDispatcher)
-retentionTask.SetNotifier(notifyDispatcher)
-datasourceSvc.SetDispatchNotifier(notifyDispatcher)`
+sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)`
 	missing = missingWiring(missingAlert)
 	if len(missing) != 1 {
 		t.Fatalf("变异 3 (漏 alert): 判定出 %d 项缺失, 期望恰好 1 项", len(missing))
@@ -204,9 +214,7 @@ b := notify.NewDispatcher(db)`
 	complete := `notifyDispatcher := notify.NewDispatcher(db)
 alertEvaluator.SetNotifier(notifyDispatcher)
 automationPlanner.SetNotifier(notifyDispatcher)
-migrator.SetNotifier(notifyDispatcher)
-retentionTask.SetNotifier(notifyDispatcher)
-datasourceSvc.SetDispatchNotifier(notifyDispatcher)`
+sourceGroupSvc.SetDispatchNotifier(notifyDispatcher)`
 	if missing := missingWiring(complete); len(missing) != 0 {
 		t.Errorf("正向对照 (完整接线) 判定出 %d 项缺失, 期望 0 项: %v", len(missing), missing)
 	}
