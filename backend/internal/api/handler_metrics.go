@@ -2,10 +2,12 @@ package api
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
 	"github.com/gin-gonic/gin"
@@ -69,6 +71,79 @@ type MetricsResponse struct {
 	Timestamp int64 `json:"timestamp"`
 }
 
+// ==================== D3：points_stored 的采样帧数口径 ====================
+//
+// 背景见 getMetricsSummaryHandler 里 D3 注释块。这里只放实现。
+//
+// 实现已迁到 metrics_points_stored_frames.go（改从帧表计数，2026-11-08）。
+//
+// 为什么必须缓存：count(DISTINCT (device_id, timestamp)) 是全表操作，生产
+// 72.36M 行实测 19.8 s；而 /metrics/summary 被 Monitor.vue 以 10 s 间隔轮询。
+// 不缓存 = 监控页每 10 s 有一条查询跑 20 s ⇒ 连接池被拖垮。
+//
+// 缓存语义（懒加载，不是后台刷新）：
+//   - 命中且未过期 ⇒ 直接返回，零查询；
+//   - 过期/为空 ⇒ **同步**重算一次（该请求变慢，但只有一个请求变慢，不会堆积）；
+//     重算失败 ⇒ 记 Warn 并返回上一次的旧值（首次则回落行数），绝不让
+//     /metrics/summary 返回 5xx。
+//
+// 为什么 TTL=60 s：比前端轮询间隔（10 s）长 6 倍，稳态下每分钟只付一次全表扫描；
+// 这是「已存储总量」这类累计指标，60 s 滞后对判读没有影响。
+const pointsStoredCacheTTL = 60 * time.Second
+
+var (
+	pointsStoredMu     sync.Mutex
+	pointsStoredValue  int64
+	pointsStoredAt     time.Time
+	pointsStoredPrimed bool
+)
+
+// cachedPointsStored 返回缓存的「采样帧数」；缓存过期时同步重算。
+//
+// db 为 nil 时返回 0（测试/降级路径不应 panic）。
+func cachedPointsStored(db *gorm.DB) int64 {
+	if db == nil {
+		return 0
+	}
+	pointsStoredMu.Lock()
+	defer pointsStoredMu.Unlock()
+	if pointsStoredPrimed && time.Since(pointsStoredAt) < pointsStoredCacheTTL {
+		return pointsStoredValue
+	}
+	frames, err := countStoredFrames(db)
+	if err != nil {
+		logger.Warnf("[metrics] count stored frames failed (serving last known value): %v", err)
+		if pointsStoredPrimed {
+			return pointsStoredValue
+		}
+		// 首次就失败：退化为行数（旧口径）。偏小但不会让面板转圈。
+		var rows int64
+		if e := db.Model(&models.UnifiedData{}).Count(&rows).Error; e == nil {
+			return rows
+		}
+		return 0
+	}
+	pointsStoredValue = frames
+	pointsStoredAt = time.Now()
+	pointsStoredPrimed = true
+	return frames
+}
+
+// countStoredFrames 数「采样帧数」= DISTINCT (device_id, timestamp)。
+//
+// SQL 用「子查询 + GROUP BY」而不是 PG 的 count(DISTINCT (a,b)) 行构造器：
+// 后者是 PG 专有语法；前者 SQLite/PG 都能执行（SQLite 分支由单测覆盖），
+// 与 handler_overview.go 的 D2 保持同一形状（两处口径必须一致，改一处要改两处）。
+
+// resetPointsStoredCache 清空缓存（仅测试用：包级状态会跨用例串味）。
+func resetPointsStoredCache() {
+	pointsStoredMu.Lock()
+	defer pointsStoredMu.Unlock()
+	pointsStoredValue = 0
+	pointsStoredAt = time.Time{}
+	pointsStoredPrimed = false
+}
+
 // registerMetricsRoutes wires /api/v1/metrics endpoints
 func registerMetricsRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	v1.GET("/metrics", getMetricsHandler(db))
@@ -115,9 +190,28 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		resp.Node.Online = nodeOnline
 		resp.Node.Offline = nodeOffline
 
-		var points int64
-		db.Model(&models.UnifiedData{}).Count(&points)
-		resp.Data.PointsStored = points
+		// ==================== D3：points_stored 口径 = 采样帧数（2026-11-07）====================
+		//
+		// L1（值不变不入库）无条件生效后，unified_data 的行数不再等于「采了多少点」。
+		// 旧口径 COUNT(*) 会随 L1 掉到约 1/5（真实数据回归：142,467 帧/天 → 117,192 行/天），
+		// 而前端 Monitor.vue 把它标成「已存储」，与旁边的「已采集」（points_collected，
+		// 计数器，不受影响）并排显示 ⇒ 看起来像「采了 5000 只存了 900」。
+		//
+		// 新口径 = 采样帧数 = DISTINCT (device_id, timestamp)。它对 L1 不敏感：
+		// L1 只减少「同一帧写几个字段」，不减少「有过几帧」。
+		//
+		// ⚠ **这个查询是全表的，很贵**（生产实测 72.36M 行：
+		//   count(*)                              2.9 s
+		//   count(DISTINCT (device_id,timestamp))  19.8 s
+		// 前端 Monitor.vue 默认 10s 轮询一次）。因此这里**不直接算**，
+		// 而是复用 metricsSnapshotCache 的懒加载缓存（见 getMetricsSummaryHandler 顶部）。
+		// 缓存 TTL 60s：比轮询间隔长，因此稳态下每个 TTL 只付一次全表扫描。
+		//
+		// 若缓存里还没有值（首次请求或上一轮失败），退化为行数并在日志里 Warn 一次 ——
+		// **宁可给个偏小的旧口径数字，也不让 /metrics/summary 超时**（监控页不能因为
+		// 一个统计卡而整页转圈）。
+		pointsStored := cachedPointsStored(db)
+		resp.Data.PointsStored = pointsStored
 		resp.Data.PointsCollected = readCounterTotal(metrics.DataReportsProcessed)
 
 		var otaTotal int64

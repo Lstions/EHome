@@ -8,8 +8,13 @@ package api
 //       · source_kind=source_group ⇒ 组存在 + enabled + 锚点非 0；
 //       · primary_backup 组 ⇒ cooldown_sec ≥ 成员采集间隔推导下限（F-3）；
 //       · 锚点双写（N-7）：automation=trigger_edge_device_id；alert=target_type/target_id。
-//   - 删除守卫（V-13 / SG-20）：删除/批量删除边缘设备、合并逻辑设备前，若其边缘设备
-//     是 source_group_members 成员 ⇒ 409，文案给出组名与引用它的规则名。
+//   - 删除守卫（V-13 / SG-20）：删除/批量删除/停用边缘设备前，若该设备是
+//     source_group_members 成员且其组被规则引用 ⇒ 409，文案给出组名与引用它的规则名。
+//
+// 2026-10-23（逻辑设备概念层移除，契约 §3）: 原 `guardLogicalDeviceDelete` /
+// `findGroupReferencesByLogicalDevice` 一并删除。它们的唯一职责是"先经
+// edge_devices.logical_device_id 找到该逻辑设备下的全部实例，再间接判断引用"——
+// 那个列和那个身份层都不存在了，守卫的直接对象只剩边缘设备本身。
 //
 // 为什么 GroupService 用"注入优先 + 按 db 兜底构造"：
 //   routes.go 中 automation/alert 的路由注册签名没有 gsvc 参数（且本次写范围不含
@@ -84,8 +89,8 @@ func ruleGroupServiceFor(db *gorm.DB) *datasource.GroupService {
 
 // ruleSourceBinding 是保存期解析出的来源绑定。
 type ruleSourceBinding struct {
-	IsGroup           bool
-	GroupID           uint
+	IsGroup            bool
+	GroupID            uint
 	AnchorEdgeDeviceID uint
 }
 
@@ -255,17 +260,6 @@ func findGroupReferencesByEdgeDevices(db *gorm.DB, edgeDeviceIDs []uint) (groupR
 	return info, nil
 }
 
-// findGroupReferencesByLogicalDevice 经其下边缘设备间接判断逻辑设备是否被组引用。
-func findGroupReferencesByLogicalDevice(db *gorm.DB, logicalDeviceID uint) (groupReferenceInfo, error) {
-	var edgeIDs []uint
-	if err := db.Model(&models.EdgeDevice{}).
-		Where("logical_device_id = ?", logicalDeviceID).
-		Pluck("id", &edgeIDs).Error; err != nil {
-		return groupReferenceInfo{}, err
-	}
-	return findGroupReferencesByEdgeDevices(db, edgeIDs)
-}
-
 // guardReferences 若 info 非空 ⇒ 写 409 并返回 false（调用方应立即 return）。
 func guardReferences(c *gin.Context, info groupReferenceInfo, subject string) bool {
 	if info.empty() {
@@ -280,7 +274,7 @@ func guardReferences(c *gin.Context, info groupReferenceInfo, subject string) bo
 		rules = "（无规则直接引用，仅成员关系）"
 	}
 	ErrorWithCode(c, 409, SourceRefCodeDeleteGuard,
-		fmt.Sprintf("%s被来源组引用，禁止删除/合并：引用组=[%s]；引用规则=[%s]。请先解除成员关系或删除规则。",
+		fmt.Sprintf("%s被来源组引用，禁止删除：引用组=[%s]；引用规则=[%s]。请先解除成员关系或删除规则。",
 			subject, groups, rules))
 	return false
 }
@@ -327,16 +321,6 @@ func guardEdgeDevicesBatchDelete(c *gin.Context, db *gorm.DB, edgeDeviceIDs []ui
 	return guardReferences(c, info, fmt.Sprintf("边缘设备（批量 %d 台）", len(edgeDeviceIDs)))
 }
 
-// guardLogicalDeviceDelete 删除/合并逻辑设备前的守卫（经其下边缘设备判断）；true=放行。
-func guardLogicalDeviceDelete(c *gin.Context, db *gorm.DB, logicalDeviceID uint) bool {
-	info, err := findGroupReferencesByLogicalDevice(db, logicalDeviceID)
-	if err != nil {
-		Error(c, 500, "检查来源组引用失败: "+err.Error())
-		return false
-	}
-	return guardReferences(c, info, fmt.Sprintf("逻辑设备 %d ", logicalDeviceID))
-}
-
 // ptrString / ptrUint 是 DTO 指针小工具（避免 tests/其他文件重复定义冲突时用）。
 func ptrString(s string) *string { return &s }
-func ptrUint(v uint) *uint      { return &v }
+func ptrUint(v uint) *uint       { return &v }

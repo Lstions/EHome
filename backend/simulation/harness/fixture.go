@@ -10,10 +10,10 @@ package harness
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -277,28 +277,63 @@ func (f *Fixture) tolerance(category string) float64 {
 	return f.quantum[category]/2 + 1e-9
 }
 
-// Latest 从场景库读取该夹具某个类别的最新落库值（只读断言，设计 §3 原则 2）。
+// ============ 2026-11-08 硬切换：断言读数改走帧表 ============
+//
+// unified_data 已 DROP，夹具原来的两条断言 SQL 指向它，必然 42P01：
+//
+//	SELECT value FROM unified_data WHERE device_id=$1 AND sensor_name=$2 ...
+//	SELECT count(*) FROM unified_data WHERE device_id=$1 AND sensor_name=$2
+//
+// 改造原则：**断言走生产读路径，而不是自己拼一条新的 SQL**。
+// 后者会验的是「我拼的查询对不对」，前者验的是「数据真的能从界面读到」——
+// 而夹具的存在意义正是后者（设计 §3 原则 2：直连 DB 只用于界面看不到的事实）。
+//
+//	Latest     => GET /api/v1/edge-devices/:id/latest-values（与详情页同端点）
+//	CountRows  => telemetry_frame 的帧数（帧是落库的最小单位）
+//
+// ⚠ CountRows 的语义变了，必须说清：曾经是「该 sensor 的 unified_data 行数」
+//   （一帧 N 个字段 = N 行），现在是「该设备的帧数」（一帧 = 1 行）。
+//   所有调用点用的都是「数据有没有增长」这个相对判断（before/after、>= want），
+//   没有一处依赖绝对值 —— 但帧数比行数小 N 倍，如果将来有人写
+//   AwaitRows(cat, 29) 这类按字段数推算的期望值，会永远等不到。
+//   所以下面 AwaitRows 的注释也补了这一句。
+
+// Latest 从场景库读取该夹具某个类别的最新落库值。
+//
+// 走 /latest-values 端点而不是直接解帧：帧表 payload 是位打包的量化数据，
+// 自己解一遍等于在本仓库里实现第二份解码器 —— 而两份实现必然漂移。
 func (f *Fixture) Latest(category string) (float64, error) {
-	var value float64
-	err := f.env.SQL().QueryRow(
-		"SELECT value FROM unified_data WHERE device_id = $1 AND sensor_name = $2 ORDER BY timestamp DESC, id DESC LIMIT 1",
-		f.EdgeDeviceID, category).Scan(&value)
-	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("unified_data 中尚无 (edge_device=%d, sensor=%s) 的行", f.EdgeDeviceID, category)
+	if f.session == nil {
+		return 0, fmt.Errorf("夹具未初始化（session 为空）")
 	}
-	if err != nil {
-		return 0, fmt.Errorf("查询 unified_data 失败: %w", err)
+	resp := f.session.Get(fmt.Sprintf("/api/v1/edge-devices/%d/latest-values", f.EdgeDeviceID))
+	if resp.Status != http.StatusOK {
+		return 0, fmt.Errorf("GET /latest-values 返回 %d: %s", resp.Status, resp.Message)
 	}
-	return value, nil
+	var items []struct {
+		SensorName string  `json:"sensor_name"`
+		Value      float64 `json:"value"`
+	}
+	if err := json.Unmarshal(resp.Data, &items); err != nil {
+		return 0, fmt.Errorf("解析 /latest-values 响应失败: %w", err)
+	}
+	for _, it := range items {
+		if it.SensorName == category {
+			return it.Value, nil
+		}
+	}
+	return 0, fmt.Errorf("帧表中尚无 (edge_device=%d, sensor=%s) 的最新值（/latest-values 返回 %d 项）",
+		f.EdgeDeviceID, category, len(items))
 }
 
-// CountRows 统计该夹具某类别已落库的行数。
+// CountRows 统计该设备已落库的**帧数**（不是 sensor 行数，见上方语义说明）。
 func (f *Fixture) CountRows(category string) (int64, error) {
+	_ = category // 帧是整帧落库的，帧数与该帧含哪些 category 无关
 	var count int64
 	if err := f.env.SQL().QueryRow(
-		"SELECT count(*) FROM unified_data WHERE device_id = $1 AND sensor_name = $2",
-		f.EdgeDeviceID, category).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计 unified_data 失败: %w", err)
+		"SELECT count(*) FROM telemetry_frame WHERE device_id = $1",
+		f.EdgeDeviceID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("统计 telemetry_frame 失败: %w", err)
 	}
 	return count, nil
 }

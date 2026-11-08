@@ -19,7 +19,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.AutomationRule{}, &models.AutomationEvent{}, &models.AutomationRuleAction{},
-		&models.Notification{}, &models.EdgeDevice{}, &models.LogicalDevice{},
+		&models.Notification{}, &models.EdgeDevice{},
 		&models.CommandExecution{}, &models.User{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -269,15 +269,16 @@ func TestRebuildCooldownsNoHistory(t *testing.T) {
 	}
 }
 
-// H2 回归: 规则匹配语义不变 — 逻辑身份命中 (resolveLogicalID 移出 RLock 后)。
-// 规则 TriggerEdgeDeviceID=逻辑设备 ID, 上报设备=绑定该逻辑身份的边缘设备, 应触发。
-func TestEvaluateLogicalIdentityMatch(t *testing.T) {
+// H2 回归: 规则匹配语义不变 —— TriggerEdgeDeviceID 直接就是上报设备时命中。
+//
+// 历史: 本用例曾是 TestEvaluateLogicalIdentityMatch（规则 TriggerEdgeDeviceID 存
+// 逻辑设备 ID，靠 resolveLogicalID 解析后命中）。逻辑设备概念层已整体移除
+// （2026-10-23, .contract/logical-device-removal.md §7），trigger_edge_device_id
+// 本来就该是 edge device id —— E6 缺陷正是「配置列存逻辑 id、帧查询用 edge id」
+// 这条双口径造成的，删除逻辑层同时也消灭了该缺陷的成因。
+func TestEvaluateEdgeDeviceIdentityMatch(t *testing.T) {
 	db := newTestDB(t)
-	ld := models.LogicalDevice{IdentityKey: "test:ld-1", Name: "逻辑设备1"}
-	if err := db.Create(&ld).Error; err != nil {
-		t.Fatal(err)
-	}
-	ed := models.EdgeDevice{HardwareID: "edge-1", Name: "边缘设备1", LogicalDeviceID: &ld.ID}
+	ed := models.EdgeDevice{HardwareID: "edge-1", Name: "边缘设备1"}
 	if err := db.Create(&ed).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +286,7 @@ func TestEvaluateLogicalIdentityMatch(t *testing.T) {
 	h := &captureHandler{}
 	ev := NewEvaluator(db, h)
 	r := automationRule(1, "illuminance", "gt", 500, 0)
-	r.TriggerEdgeDeviceID = ld.ID // 指向逻辑身份
+	r.TriggerEdgeDeviceID = ed.ID
 	if err := db.Create(&r).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +294,7 @@ func TestEvaluateLogicalIdentityMatch(t *testing.T) {
 
 	ev.Evaluate(ed.ID, illuminanceField(600), time.Now())
 	if len(h.events) != 1 {
-		t.Fatalf("expect 1 trigger via logical identity match, got %d", len(h.events))
+		t.Fatalf("expect 1 trigger via edge device match, got %d", len(h.events))
 	}
 }
 

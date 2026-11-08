@@ -72,7 +72,16 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 	defer mgr.Stop()
 
 	// 4-byte lk_th01 payload: temperature+humidity (driver parses 2 fields).
-	raw := []byte{0x11, 0x02, 0x1F, 0x80}
+	//
+	// ⚠ 2026-11-07（L1 值不变不入库无条件生效）：**每一波必须变值**。
+	// 旧写法是固定 4 字节、20 波完全相同 ⇒ 首个字段值在全 20 波里不变，L1 会
+	// 只写首帧 2 行、后 19 波全部跳过（实测每设备 2 行 / 期望 40 行）。
+	// 那不是回归，而是收窄生效的正确结果 —— 本用例要考的是「分片并发下每个样本
+	// 恰好落库一次」，因此必须让样本**彼此不相等**，否则测的就不是分片而是 L1。
+	// 做法：低字节随波次变化（temperature 与 humidity 都会变）。
+	payloadForWave := func(w int) []byte {
+		return []byte{0x11, byte(w + 1), 0x1F, byte(w + 1)}
+	}
 
 	// Publish in waves and drain between waves: the bus deliberately drops
 	// oldest events when ingress (256) and shard mailboxes (64×N) saturate
@@ -88,7 +97,7 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 			mgr.dataBus.Publish(databus.DataEvent{
 				DeviceID:     serial,
 				EdgeDeviceID: uint64(edgeIDs[i]),
-				RawData:      raw,
+				RawData:      payloadForWave(w),
 				ErrorCode:    0,
 				ReceivedAt:   time.Now(),
 			})

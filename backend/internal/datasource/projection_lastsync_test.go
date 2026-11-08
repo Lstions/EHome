@@ -46,7 +46,7 @@ func TestReconcile_BackfillsLastSuccessFromMember(t *testing.T) {
 
 	// 一台设备 + 一个启用组 + 该设备是成员，成员成功过。
 	dev := models.EdgeDevice{ID: 1, Name: "d1", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)}
+		Enabled: true}
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestReconcile_BackfillsLastSuccessFromMember(t *testing.T) {
 	}
 
 	var row models.DataSource
-	if err := db.Where("device_id = ? AND category = ? AND edge_device_id = ?", 10, "rsoc", 1).
+	if err := db.Where("edge_device_id = ? AND category = ?", 1, "rsoc").
 		First(&row).Error; err != nil {
 		t.Fatalf("derived row not found: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestReconcile_UpdatesLastSuccessWhenStatusUnchanged(t *testing.T) {
 	svc := projSvc(db)
 
 	dev := models.EdgeDevice{ID: 1, Name: "d1", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)}
+		Enabled: true}
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestReconcile_UpdatesLastSuccessWhenStatusUnchanged(t *testing.T) {
 	}
 
 	var row models.DataSource
-	if err := db.Where("device_id = ? AND category = ?", 10, "rsoc").First(&row).Error; err != nil {
+	if err := db.Where("edge_device_id = ? AND category = ?", 1, "rsoc").First(&row).Error; err != nil {
 		t.Fatal(err)
 	}
 	if row.LastSuccess == nil {
@@ -153,7 +153,7 @@ func TestReconcile_DirectSourceLastSuccessStaysEmpty(t *testing.T) {
 	svc := projSvc(db)
 
 	dev := models.EdgeDevice{ID: 1, Name: "d1", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)}
+		Enabled: true}
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestReconcile_DirectSourceLastSuccessStaysEmpty(t *testing.T) {
 	}
 
 	var row models.DataSource
-	if err := db.Where("device_id = ? AND category = ?", 10, "rsoc").First(&row).Error; err != nil {
+	if err := db.Where("edge_device_id = ? AND category = ?", 1, "rsoc").First(&row).Error; err != nil {
 		t.Fatal(err)
 	}
 	if row.LastSuccess != nil {

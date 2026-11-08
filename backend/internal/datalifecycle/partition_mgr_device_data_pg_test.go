@@ -1,7 +1,7 @@
 package datalifecycle
 
 import (
-	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,30 +13,21 @@ import (
 
 // ==================== device_data 分区迁移 (PG-only) ====================
 
-// seedDeviceDataLogical creates a logical device with retentionDays plus one
-// attached edge-device instance (mounting logical_device_id before any write).
-func seedDeviceDataLogical(t *testing.T, db *gorm.DB, key string, retentionDays int) (*models.LogicalDevice, *models.EdgeDevice) {
+// seedDeviceDataDevice creates one edge device (no logical identity — 该概念层
+// 已整体移除, 2026-10-23).
+func seedDeviceDataDevice(t *testing.T, db *gorm.DB, key string) *models.EdgeDevice {
 	t.Helper()
-	ld := &models.LogicalDevice{IdentityKey: key, Name: key, DeviceType: "bms_jbd", RetentionDays: retentionDays}
-	if err := db.Create(ld).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
-	dev := seedDevice(t, db, key+"-inst", "bms_jbd", key, false)
-	if err := db.Model(dev).Update("logical_device_id", ld.ID).Error; err != nil {
-		t.Fatalf("mount logical_device_id: %v", err)
-	}
-	return ld, dev
+	return seedDevice(t, db, key+"-inst", "bms_jbd", key, false)
 }
 
 // seedDeviceDataRow inserts one device_data row routed by its timestamp.
-func seedDeviceDataRow(t *testing.T, db *gorm.DB, deviceID, logicalID uint, ts time.Time, dataJSON string) {
+func seedDeviceDataRow(t *testing.T, db *gorm.DB, deviceID uint, ts time.Time, dataJSON string) {
 	t.Helper()
 	row := models.DeviceData{
-		DeviceID:        deviceID,
-		NodeID:          "NODE001",
-		DataJSON:        dataJSON,
-		Timestamp:       ts,
-		LogicalDeviceID: &logicalID,
+		DeviceID:  deviceID,
+		NodeID:    "NODE001",
+		DataJSON:  dataJSON,
+		Timestamp: ts,
 	}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatalf("seed device_data row: %v", err)
@@ -143,60 +134,108 @@ func TestMigrateDeviceData_FreshDeploy_PartitionedParentAtFinalName(t *testing.T
 	}
 }
 
-// TestDeviceDataLogicalIndexSurvivesPartitionMigration pins the indexes.go
-// partitioned branch: after the flat table carried the canonical composite
-// index, the partition migration rebuilds it on the partitioned parent. Since
-// the legacy snapshot is now DROPped after verification, the canonical index
-// name is naturally free, but this test still guards that the
-// (logical_device_id, timestamp DESC) index ends up owned by device_data and
-// remains valid across repeated EnsureLogicalDataIndexes.
-func TestDeviceDataLogicalIndexSurvivesPartitionMigration(t *testing.T) {
+// TestDeviceDataPartitionParentIndexes — 分区迁移后父表索引必须齐备、有效、归属正确。
+//
+// 2026-10-23 语义变更: 原用例 TestDeviceDataLogicalIndexSurvivesPartitionMigration
+// 钉的是 indexes.go 的 (logical_device_id, timestamp DESC) 复合索引在分区迁移后
+// 仍归 device_data 所有。逻辑设备概念层移除后，indexes.go 与
+// EnsureLogicalDataIndexes / IndexDevDataLogicalTS / IndexExists 一并删除 ——
+// 该列已不存在，索引不可能存在。
+//
+// 但**同类性质仍然成立且必须守着**: 分区迁移会把平表的 b-tree 索引在分区母表上
+// 按 partitionParentIndexes 重建；若重建失败或索引挂到 legacy 快照上，查询会退化成
+// 全分区扫描。因此改为钉住「迁移后 device_data 上确实存在覆盖各列的合法索引」。
+//
+// 为什么按**列**断言而不是按索引名断言（实测教训）:
+// 旧库路径的母表先建成 <table>_new，索引也就命名为 device_data_new_<col>_idx；
+// PG 的 ALTER TABLE ... RENAME TO 不会重命名索引，所以迁移完成后索引名仍是
+// device_data_new_ 前缀。按名字断言会对着正确的行为报红（写成名字断言后本用例
+// 在 PG 上确实红了）。索引名不是契约，**能服务这些查询**才是。
+func TestDeviceDataPartitionParentIndexes(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
-	ctx := context.Background()
 
-	// 迁移前先在平表上建好既有复合索引 (生产迁移时的真实前置状态)。
-	if err := EnsureLogicalDataIndexes(ctx, db); err != nil {
-		t.Fatalf("pre-migration ensure: %v", err)
-	}
 	if err := MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
 		t.Fatalf("migrate device_data: %v", err)
 	}
-	if err := EnsureLogicalDataIndexes(ctx, db); err != nil {
-		t.Fatalf("post-migration ensure: %v", err)
+	if !IsTablePartitioned(db, "device_data") {
+		t.Fatal("device_data must be a partitioned parent after migration")
 	}
 
-	var owner string
-	if err := db.Raw(`SELECT t.relname FROM pg_class i
-JOIN pg_index x ON x.indexrelid = i.oid
+	// 期望的索引列集由生产模板推导 (模板形如 "CREATE INDEX %s_<col>_idx ON %s (<cols>)")，
+	// 避免测试与生产各抄一份清单后静默漂移。
+	var wantCols []string
+	for _, tmpl := range partitionParentIndexes["device_data"] {
+		open := strings.LastIndex(tmpl, "(")
+		closeIdx := strings.LastIndex(tmpl, ")")
+		if open < 0 || closeIdx <= open {
+			t.Fatalf("无法解析索引模板 %q (期望 ... ON <table> (<cols>))", tmpl)
+		}
+		cols := strings.TrimSpace(tmpl[open+1 : closeIdx])
+		if cols == "" {
+			t.Fatalf("索引模板 %q 的列清单为空", tmpl)
+		}
+		wantCols = append(wantCols, "("+cols+")")
+	}
+	if len(wantCols) == 0 {
+		t.Fatal("partitionParentIndexes[device_data] 为空 —— 迁移不再重建任何父表索引")
+	}
+
+	// indexesOn 返回当前 schema 下挂在 table 上且 valid 的索引定义。
+	indexesOn := func(t *testing.T) []string {
+		t.Helper()
+		var defs []string
+		if err := db.Raw(`SELECT pg_get_indexdef(x.indexrelid)
+FROM pg_index x
 JOIN pg_class t ON t.oid = x.indrelid
-JOIN pg_namespace n ON n.oid = i.relnamespace
-WHERE i.relname = ? AND n.nspname = current_schema()`, IndexDevDataLogicalTS).
-		Scan(&owner).Error; err != nil {
-		t.Fatalf("resolve owner of %s: %v", IndexDevDataLogicalTS, err)
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE t.relname = ? AND n.nspname = current_schema() AND x.indisvalid`, "device_data").
+			Scan(&defs).Error; err != nil {
+			t.Fatalf("list indexes on device_data: %v", err)
+		}
+		return defs
 	}
-	if owner != "device_data" {
-		t.Fatalf("%s attached to %q, want device_data partitioned parent", IndexDevDataLogicalTS, owner)
+	assertColsCovered := func(t *testing.T, stage string) {
+		t.Helper()
+		defs := indexesOn(t)
+		if len(defs) == 0 {
+			t.Fatalf("%s: device_data 上没有任何有效索引 —— 查询会退化成全分区扫描", stage)
+		}
+		for _, cols := range wantCols {
+			found := false
+			for _, def := range defs {
+				// pg_get_indexdef 会给保留字加引号 ("timestamp")，比对前统一去掉。
+				norm := func(s string) string { return strings.ReplaceAll(s, "\"", "") }
+				if strings.HasSuffix(norm(strings.TrimSpace(def)), norm(cols)) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s: device_data 上缺少覆盖 %s 的索引；现有索引=%v", stage, cols, defs)
+			}
+		}
 	}
-	exists, err := IndexExists(ctx, db, IndexDevDataLogicalTS)
-	if err != nil || !exists {
-		t.Fatalf("IndexExists(%s) = %v, %v; want true (valid)", IndexDevDataLogicalTS, exists, err)
+
+	assertColsCovered(t, "迁移后")
+
+	// 幂等: 二次迁移不得报错, 也不得丢掉索引。
+	if err := MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
+		t.Fatalf("second migration must be idempotent, got: %v", err)
 	}
-	// 幂等: 再次 ensure 不得报错或遗失索引。
-	if err := EnsureLogicalDataIndexes(ctx, db); err != nil {
-		t.Fatalf("third ensure: %v", err)
-	}
+	assertColsCovered(t, "幂等二次迁移后")
 }
 
-// TestDeviceDataPartitionDropRespectsMaxRetention — device_data 侧的 P0 防回归。
-// 与 unified_data 的 TestRetention_PartitionDropUsesMaxRetention 同构: cutoff 由
-// 所有逻辑设备中最长 retention 决定, 一个分区只有对每一个数据所有者都已到期
-// 才可整月 DROP。
+// TestDeviceDataPartitionDropUsesSystemWindow — device_data 侧的分区清扫测试。
 //
-// 场景: A=30 天, B=365 天; now=2026-08-01。
-//   - 生存分区 2026-02 (≈180 天): 对 A 到期、对 B 未到期 → 必须保留, B 行仍在。
-//   - 全到期分区 2025-06 (≈426 天): 对 A/B 均到期 → 必须 DROP。
-func TestDeviceDataPartitionDropRespectsMaxRetention(t *testing.T) {
+// 2026-10-23 语义变更: cutoff 不再是「所有逻辑设备中最长 retention」，而是
+// 一条系统级窗口（SystemRetentionDays）。因此场景简化为: 窗口内的分区必须保留，
+// 整月都已早于 cutoff 的分区必须 DROP。
+//
+// 场景: retention=90 天, now=2026-08-01 → cutoff=2026-05-03。
+//   - 分区 2026-08（窗口内）→ 必须保留；
+//   - 分区 2025-06（整月都早于 cutoff）→ 必须 DROP。
+func TestDeviceDataPartitionDropUsesSystemWindow(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
 	if err := db.Exec("DROP TABLE IF EXISTS device_data CASCADE").Error; err != nil {
@@ -207,25 +246,21 @@ func TestDeviceDataPartitionDropRespectsMaxRetention(t *testing.T) {
 	}
 
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	surviveStart := monthStart(now).AddDate(0, -6, 0) // 2026-02
-	dropStart := monthStart(now).AddDate(0, -14, 0)   // 2025-06
+	SetSystemRetentionDays(90)
+	defer SetSystemRetentionDays(90)
+	keepStart := monthStart(now)                    // 2026-08: 窗口内
+	dropStart := monthStart(now).AddDate(0, -14, 0) // 2025-06: 整月都早于 cutoff
 
 	pm := NewPartitionManager(db)
-	for _, s := range []time.Time{surviveStart, dropStart} {
+	for _, s := range []time.Time{keepStart, dropStart} {
 		if err := pm.createPartitionIfNotExists(partitionName("device_data", s), "device_data", s, addMonths(s, 1)); err != nil {
 			t.Fatalf("create partition %s: %v", partitionName("device_data", s), err)
 		}
 	}
 
-	// A: 30 天保留; B: 365 天保留。
-	ldA, devA := seedDeviceDataLogical(t, db, "ddA", 30)
-	ldB, devB := seedDeviceDataLogical(t, db, "ddB", 365)
-
-	// 生存分区内 A/B 各一行；全到期分区内 A/B 各一行。
-	seedDeviceDataRow(t, db, devA.ID, ldA.ID, surviveStart.Add(24*time.Hour), `{"a":1}`)
-	seedDeviceDataRow(t, db, devB.ID, ldB.ID, surviveStart.Add(48*time.Hour), `{"b":1}`)
-	seedDeviceDataRow(t, db, devA.ID, ldA.ID, dropStart.Add(24*time.Hour), `{"a":2}`)
-	seedDeviceDataRow(t, db, devB.ID, ldB.ID, dropStart.Add(48*time.Hour), `{"b":2}`)
+	dev := seedDeviceDataDevice(t, db, "ddA")
+	seedDeviceDataRow(t, db, dev.ID, keepStart.Add(24*time.Hour), `{"a":1}`)
+	seedDeviceDataRow(t, db, dev.ID, dropStart.Add(24*time.Hour), `{"a":2}`)
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }
@@ -234,25 +269,24 @@ func TestDeviceDataPartitionDropRespectsMaxRetention(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// (1) 生存分区未被 DROP: B 的 365 天尚未到期。
-	if tableExistsInSchema(t, db, partitionName("device_data", surviveStart), "r") == 0 {
-		t.Errorf("partition %s must NOT be dropped: device B(retention=365d) still needs it",
-			partitionName("device_data", surviveStart))
+	// (1) 窗口内分区必须保留，行仍在。
+	if tableExistsInSchema(t, db, partitionName("device_data", keepStart), "r") == 0 {
+		t.Errorf("partition %s must NOT be dropped: it is inside the 90-day window",
+			partitionName("device_data", keepStart))
 	}
-	// (2) B 在生存分区内的行仍在 (未被 A 的 30 天保留期连带 DROP)。
-	var bRows int64
+	var kept int64
 	if err := db.Model(&models.DeviceData{}).
-		Where("logical_device_id = ? AND timestamp >= ? AND timestamp < ?",
-			ldB.ID, surviveStart, addMonths(surviveStart, 1)).
-		Count(&bRows).Error; err != nil {
-		t.Fatalf("count B rows: %v", err)
+		Where("device_id = ? AND timestamp >= ? AND timestamp < ?",
+			dev.ID, keepStart, addMonths(keepStart, 1)).
+		Count(&kept).Error; err != nil {
+		t.Fatalf("count kept rows: %v", err)
 	}
-	if bRows != 1 {
-		t.Errorf("device B rows in surviving partition = %d, want 1 (A's 30d retention must not touch B's 365d data)", bRows)
+	if kept != 1 {
+		t.Errorf("rows in surviving partition = %d, want 1", kept)
 	}
-	// (3) 正向断言: 对所有设备都已到期的分区必须 DROP (防"假修复": 关掉清扫)。
+	// (2) 正向断言: 整月都已过期的分区必须 DROP (防「假修复」: 关掉清扫)。
 	if tableExistsInSchema(t, db, partitionName("device_data", dropStart), "r") != 0 {
-		t.Errorf("all-expired partition %s must be dropped (sweep must keep reaping fully expired partitions)",
+		t.Errorf("all-expired partition %s must be dropped",
 			partitionName("device_data", dropStart))
 	}
 }

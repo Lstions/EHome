@@ -32,7 +32,7 @@ import (
 func newOverviewTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	db := setupTestDB(t)
-	if err := db.AutoMigrate(&models.Node{}, &models.EdgeDevice{}, &models.UnifiedData{}); err != nil {
+	if err := db.AutoMigrate(&models.Node{}, &models.EdgeDevice{}, &models.TelemetryFrame{}); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
 	overviewCacheMu.Lock()
@@ -88,11 +88,19 @@ func TestOverview_ExposesDataCountToday(t *testing.T) {
 	}
 }
 
-// TestOverview_DataCountToday_CountsOnlyToday 钉住"今日"语义：
-// 昨天/更早的行不得进分母，今天的行必须进。
+// TestOverview_DataCountToday_CountsOnlyToday 钉住"今日"语义 + D2 口径（采样帧数）：
+// 昨天/更早的行不得计入，今天的行必须计入；且**同一设备同一 timestamp 的多行只算一帧**。
+//
+// 2026-11-07 (D2): L1「值不变不入库」无条件生效后，这张卡的旧口径（数行）会掉到
+// 17.7%，用户以为数据丢了。新口径数「采样帧数」= DISTINCT (device_id, timestamp)。
+// 本用例因此同时验证两件事，缺一不可：
+//
+//	(a) 时间边界（>= 今日零点，不 > ；昨天与 1ns 前都不算）—— 原有断言，未放宽；
+//	(b) 去重语义 —— 同一设备同一时刻的多个字段只算 1 帧（若实现忘了去重，
+//	    (b) 会数成 3 而不是 2，用例变红）。
 func TestOverview_DataCountToday_CountsOnlyToday(t *testing.T) {
 	db := setupTestDB(t)
-	if err := db.AutoMigrate(&models.Node{}, &models.EdgeDevice{}, &models.UnifiedData{}); err != nil {
+	if err := db.AutoMigrate(&models.Node{}, &models.EdgeDevice{}, &models.TelemetryFrame{}); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
 	overviewCacheMu.Lock()
@@ -100,6 +108,19 @@ func TestOverview_DataCountToday_CountsOnlyToday(t *testing.T) {
 	overviewCacheTime = time.Time{}
 	overviewCacheMu.Unlock()
 
+	// ============ 造数改为 telemetry_frame（2026-11-08）============
+	//
+	// 原实现造 unified_data 的 7 行，断言「帧数 = 3」，其中包含一条：
+	//
+	//	「设备1@today 的 voltage + current 两行 = 同一帧，只算 1」
+	//
+	// 那条断言在帧表口径下**没有对应物**：telemetry_frame 的主键是
+	// (device_id, ts, seq)，一帧本来就是**一行** —— 多个物理量是同一帧 payload 里的多个 slot，
+	// 不是「多行合并成一帧」。所以它不是「数据源变了」，是**语义变了**。
+	//
+	// 处置：删掉「同 ts 合并」这条断言，保留全部**时间边界**断言（那才是本用例的主干：
+	// 判据是 ts >= 本地零点）。「同 ts 多字段算一帧」由帧表的建模本身保证，无需用例。
+	//
 	// 数据以**本地零点**为基准播种，而不是以 time.Now() 为基准：
 	// 若用 now 播种，测试在 23:59:59.9 启动、handler 在 00:00:00.1 取 now 时，
 	// 那 3 条「今天」会落到 handler 眼中的「昨天」，结果变成 0 而非 3 ——
@@ -108,21 +129,25 @@ func TestOverview_DataCountToday_CountsOnlyToday(t *testing.T) {
 	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	today := startOfToday.Add(time.Minute)      // 恒在「今天」（即使测试刚过零点）
 	yesterday := startOfToday.Add(-time.Minute) // 恒在「昨天」
-	rows := []models.UnifiedData{
-		{DeviceID: 1, SensorName: "t", Value: 1, Timestamp: today},
-		{DeviceID: 1, SensorName: "t", Value: 2, Timestamp: today},
-		{DeviceID: 2, SensorName: "t", Value: 3, Timestamp: today},
-		// 恰好等于零点的那一行必须计入（判据是 >=，不是 >）
-		{DeviceID: 1, SensorName: "t", Value: 5, Timestamp: startOfToday},
+
+	// 只数行，不解析 payload —— 本用例验的是**时间边界与计数口径**，不是解码。
+	// payload 给一个字节占位（列是 not null；空切片在 PG 上会报 NOT NULL 违反）。
+	// 解码路径由帧表那一套用例覆盖。
+	frames := []models.TelemetryFrame{
+		// 计入的 3 帧：两台设备各在 today，一台在零点整。
+		{DeviceID: 1, TS: today, Seq: 0, Payload: []byte{0}},
+		{DeviceID: 2, TS: today, Seq: 0, Payload: []byte{0}},
+		// 恰好等于零点的那一帧必须计入（判据是 >=，不是 >）
+		{DeviceID: 1, TS: startOfToday, Seq: 0, Payload: []byte{0}},
 		// 零点前 1ns：不得计入（边界另一侧）
-		{DeviceID: 1, SensorName: "t", Value: 6, Timestamp: startOfToday.Add(-time.Nanosecond)},
+		{DeviceID: 1, TS: startOfToday.Add(-time.Nanosecond), Seq: 0, Payload: []byte{0}},
 		// 昨天：不得计入
-		{DeviceID: 1, SensorName: "t", Value: 4, Timestamp: yesterday},
+		{DeviceID: 1, TS: yesterday, Seq: 0, Payload: []byte{0}},
 		// 更早：不得计入
-		{DeviceID: 1, SensorName: "t", Value: 7, Timestamp: startOfToday.AddDate(0, 0, -3)},
+		{DeviceID: 1, TS: startOfToday.AddDate(0, 0, -3), Seq: 0, Payload: []byte{0}},
 	}
-	if err := db.Create(&rows).Error; err != nil {
-		t.Fatalf("seed unified_data: %v", err)
+	if err := db.Create(&frames).Error; err != nil {
+		t.Fatalf("seed telemetry_frame: %v", err)
 	}
 
 	w := httptest.NewRecorder()
@@ -143,8 +168,12 @@ func TestOverview_DataCountToday_CountsOnlyToday(t *testing.T) {
 	if !ok {
 		t.Fatalf("data_count_today 应是数字，实际 %T = %v", raw, raw)
 	}
-	// 计入：today 三条 + 恰好零点一条 = 4；不计入：零点前 1ns、昨天、3 天前
-	if int(n) != 4 {
-		t.Fatalf("今日行数应为 4（3 条今天 + 1 条恰好零点；零点前 1ns / 昨天 / 3 天前均不计），实际 %s", fmt.Sprint(n))
+	// 计入的**帧**：设备1@today + 设备2@today + 设备1@零点 = 3。
+	// 不计入：零点前 1ns、昨天、3 天前。
+	// ⚠ 不要再用「按行数会得到 4」这类对照：帧表里一帧就是一行，行数=帧数，
+	//   没有「按行数 vs 按帧数」两种口径可分（那条对照属于 unified_data 时代）。
+	if int(n) != 3 {
+		t.Fatalf("今日采样帧数应为 3（设备1@today + 设备2@today + 设备1@零点）；"+
+			"零点前 1ns / 昨天 / 3 天前均不计。实际 %s", fmt.Sprint(n))
 	}
 }

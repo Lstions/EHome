@@ -54,7 +54,7 @@ func (o decodeOutcome) ok() bool { return len(o.Sample.Fields) > 0 }
 //   - outcome.ok() ⇒ 成功
 //   - 否则失败，outcome.FailReason 给出分类原因
 func (c *SensorParserConsumer) decodeFrame(device models.EdgeDevice, merged []byte,
-	logicalID *uint, at time.Time, commandTemplateID uint64) decodeOutcome {
+	at time.Time, commandTemplateID uint64) decodeOutcome {
 
 	if c.ingestResolver == nil {
 		// 未接线：按 no_adapter 处理（安全降级 —— 绝不静默丢弃）。
@@ -90,7 +90,6 @@ func (c *SensorParserConsumer) decodeFrame(device models.EdgeDevice, merged []by
 	dctx := ingest.DecodeContext{
 		EdgeDevice:       device,
 		Raw:              merged,
-		LogicalDeviceID:  logicalID,
 		At:               at,
 		ConfigParserJSON: parserJSON,
 		ConfigName:       configName,

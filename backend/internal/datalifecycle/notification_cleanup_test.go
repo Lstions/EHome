@@ -191,9 +191,17 @@ func TestRetentionTask_RunsNotificationCleanup(t *testing.T) {
 
 	// 一条远早于未读窗口的未读通知 (与逻辑设备无关, 纯全局表)。
 	seedNotification(t, db, "ancient-unread", false, now.AddDate(0, 0, -1000))
-	// 一个到期的逻辑设备, 证明清理不会打断 retention 主流程。
-	ld := seedRetentionDevice(t, db, "d2-expired", 365, now.AddDate(0, 0, -400))
-	_ = ld
+	// 一台设备 + 一行到期数据, 证明清理不会打断 retention 主流程。
+	// (原 seedRetentionDevice 随逻辑设备层删除; 保留期现为系统级单一窗口。)
+	retDev := seedDevice(t, db, "d2-expired", "bms_jbd", "d2-expired-hw", false)
+	if err := db.Create(&models.UnifiedData{
+		DeviceID:   retDev.ID,
+		SensorName: "voltage",
+		Value:      1,
+		Timestamp:  now.AddDate(0, 0, -400),
+	}).Error; err != nil {
+		t.Fatalf("seed retention row: %v", err)
+	}
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }

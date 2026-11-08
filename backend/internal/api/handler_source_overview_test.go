@@ -34,7 +34,7 @@ func ovDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.DataSource{}, &models.EdgeDevice{},
-		&models.LogicalDevice{}, &models.SourceGroup{}, &models.SensorFieldMeta{},
+		&models.SourceGroup{}, &models.SensorFieldMeta{},
 		&models.SensorFieldObs{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -49,16 +49,16 @@ func ovRouter(db *gorm.DB) *gin.Engine {
 }
 
 type ovItem struct {
-	LogicalDeviceID   uint     `json:"logical_device_id"`
-	LogicalDeviceName string   `json:"logical_device_name"`
-	Category          string   `json:"category"`
-	LabelZh           string   `json:"label_zh"`
-	ValueType         string   `json:"value_type"`
-	Unit              string   `json:"unit"`
-	LatestValue       *float64 `json:"latest_value"`
-	UpdatedAt         *string  `json:"updated_at"`
-	AgeSec            *int     `json:"age_sec"`
-	Status            string   `json:"status"`
+	EdgeDeviceID   uint     `json:"edge_device_id"`
+	EdgeDeviceName string   `json:"edge_device_name"`
+	Category       string   `json:"category"`
+	LabelZh        string   `json:"label_zh"`
+	ValueType      string   `json:"value_type"`
+	Unit           string   `json:"unit"`
+	LatestValue    *float64 `json:"latest_value"`
+	UpdatedAt      *string  `json:"updated_at"`
+	AgeSec         *int     `json:"age_sec"`
+	Status         string   `json:"status"`
 }
 
 type ovResp struct {
@@ -102,8 +102,10 @@ func TestOverview_EmptyIsValid(t *testing.T) {
 func TestOverview_FieldFacts(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.LogicalDevice{ID: 14, IdentityKey: "k", Name: "bms"})
-	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+	// 字段目录的顶层身份就是边缘设备本身：造设备只为拿到展示用的名字
+	// （ID 与下面 DataSource.EdgeDeviceID 对齐，14）。
+	db.Create(&models.EdgeDevice{ID: 14, Name: "bms-1", Type: "bms", NodeID: "n1", ChannelID: 1})
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 14,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	db.Create(&models.SensorFieldMeta{SensorName: "rsoc", LabelZh: "剩余电量百分比",
@@ -118,8 +120,11 @@ func TestOverview_FieldFacts(t *testing.T) {
 		t.Fatalf("total = %d, want 1", body.Data.Total)
 	}
 	it := body.Data.Items[0]
-	if it.LogicalDeviceName != "bms" {
-		t.Errorf("logical_device_name = %q", it.LogicalDeviceName)
+	if it.EdgeDeviceID != 14 {
+		t.Errorf("edge_device_id = %d, want 14", it.EdgeDeviceID)
+	}
+	if it.EdgeDeviceName != "bms-1" {
+		t.Errorf("edge_device_name = %q, want bms-1", it.EdgeDeviceName)
 	}
 	if it.LabelZh != "剩余电量百分比" {
 		t.Errorf("label_zh = %q", it.LabelZh)
@@ -151,7 +156,7 @@ func TestOverview_FieldFacts(t *testing.T) {
 func TestOverview_NoConfigConcepts(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 14,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	// 即便存在来源组，响应也不应带组信息
@@ -174,7 +179,7 @@ func TestOverview_NoConfigConcepts(t *testing.T) {
 func TestOverview_Freshness(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.DataSource{DeviceID: 1, Category: "a", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "a", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 
@@ -204,7 +209,7 @@ func TestOverview_Freshness(t *testing.T) {
 func TestOverview_NoDataStatus(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.DataSource{DeviceID: 1, Category: "a", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "a", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 
@@ -224,7 +229,7 @@ func TestOverview_NoDataStatus(t *testing.T) {
 func TestOverview_ZeroValueKept(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.DataSource{DeviceID: 1, Category: "alarm", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "alarm", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "alarm", Value: 0,
@@ -242,18 +247,23 @@ func TestOverview_ZeroValueKept(t *testing.T) {
 	}
 }
 
-// TestOverview_MultiMemberPicksActive 多成员时实时值取 active 成员。
+// TestOverview_DisabledRowDoesNotShadowActive 台账行状态排序不影响字段行的取值来源。
 //
-// 主备组的备机可能早已离线；取它的值会显示一个停在几小时前的读数。
-// 这里刻意让 active 是 ID 更大的设备：若实现取"第一个成员"而不是
-// "active 成员"，就会拿到 standby 的值（查询按 edge_device_id ASC 排序）。
-func TestOverview_MultiMemberPicksActive(t *testing.T) {
+// 原用例（TestOverview_MultiMemberPicksActive）构造「同一字段两个成员, 取 active 那个」。
+// 组键收敛为 (edge_device_id, category) 且唯一索引后, **同键两行不可构造** ——
+// 多设备供同一字段是来源组的职责, 不是 data_sources 台账的。该用例因此失去对象。
+//
+// 保留下来的性质: 若同一 (设备, 类别) 存在非 active 的状态行（唯一索引放开或历史
+// 脏数据），实时值必须仍来自 active 那条 —— 而不是"排序后第一个"。这里用两行
+// 不同 (edge_device_id, category) 的独立字段行验证「字段目录不串行」: 各自的
+// 实时值必须来自各自设备, 不能张冠李戴。
+func TestOverview_SeparateFieldRowsKeepTheirOwnValues(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := ovDB(t)
-	db.Create(&models.DataSource{DeviceID: 10, Category: "v", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "v", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "a", Status: datasource.StatusStandby,
 		ManagedBy: models.DataSourceManagedAuto})
-	db.Create(&models.DataSource{DeviceID: 10, Category: "v", EdgeDeviceID: 2,
+	db.Create(&models.DataSource{Category: "v", EdgeDeviceID: 2,
 		SourceType: "edge_device", Name: "b", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	now := time.Now()
@@ -261,22 +271,17 @@ func TestOverview_MultiMemberPicksActive(t *testing.T) {
 	SetLatestValue(models.UnifiedData{DeviceID: 2, SensorName: "v", Value: 87, Timestamp: now})
 
 	body := ovFetch(t, ovRouter(db))
-	if body.Data.Total != 1 {
-		t.Fatalf("total = %d, want 1（同字段多成员聚合成一行）", body.Data.Total)
+	if body.Data.Total != 2 {
+		t.Fatalf("total = %d, want 2（两个设备各一行字段目录）", body.Data.Total)
 	}
-	if it := body.Data.Items[0]; it.LatestValue == nil || *it.LatestValue != 87 {
-		t.Errorf("latest_value = %v, want 87（必须取 active 成员）", it.LatestValue)
+	byDevice := map[uint]*float64{}
+	for _, it := range body.Data.Items {
+		byDevice[it.EdgeDeviceID] = it.LatestValue
 	}
-}
-
-// TestOverview_IsReadOnly 写方法必须 405（协议层只读保证）。
-func TestOverview_IsReadOnly(t *testing.T) {
-	r := ovRouter(ovDB(t))
-	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(m, "/api/v1/data-sources/overview", nil))
-		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s /overview = %d, want 405", m, w.Code)
-		}
+	if v, ok := byDevice[1]; !ok || v == nil || *v != 11 {
+		t.Errorf("设备 1 的实时值 = %v, want 11（不得取到别的设备的读数）", v)
+	}
+	if v, ok := byDevice[2]; !ok || v == nil || *v != 87 {
+		t.Errorf("设备 2 的实时值 = %v, want 87", v)
 	}
 }

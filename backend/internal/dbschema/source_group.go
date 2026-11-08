@@ -36,8 +36,14 @@ func EnsureSourceGroupSchema(db *gorm.DB) error {
 	// 2) 旧表补洞（D-3）：data_sources 的「每组至多一条 active」此前只有
 	//    应用层约束，一旦 active 被规则消费，双 active 会变成「规则读到哪条」
 	//    的不确定性。生产 data_sources=0 行，零风险。
+	//
+	// 组键口径（2026-10-23）：逻辑设备层移除后，data_sources 不再有 device_id 列，
+	// 组键回到 (edge_device_id, category)。旧索引 ux_ds_one_active 是按
+	// device_id 建的，必须先 DROP 再按新键重建；否则它会因为缺少 device_id 列
+	// 而无法创建，或者（旧库）继续按逻辑 id 分组，让本该互斥的两行同时 active。
 	if db.Migrator().HasTable("data_sources") {
-		if err := ensureSingleActiveIndex(db, "data_sources", "device_id, category", "CAST(device_id AS TEXT) || ',' || category"); err != nil {
+		_ = db.Exec("DROP INDEX IF EXISTS ux_ds_one_active").Error
+		if err := ensureSingleActiveIndex(db, "data_sources", "edge_device_id, category", "CAST(edge_device_id AS TEXT) || ',' || category"); err != nil {
 			return err
 		}
 	}

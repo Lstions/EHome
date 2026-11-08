@@ -36,7 +36,6 @@ func setupDriverCommandsTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
 		&models.PendingWriteRecord{},
-		&models.LogicalDevice{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")

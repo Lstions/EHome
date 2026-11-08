@@ -260,14 +260,14 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 				}
 			}
 			if count > limits.maxTemplateIDs {
-				return fmt.Errorf("channel %d has %d template ids; collector limit is %d", channel.ID, count, limits.maxTemplateIDs)
+				return newManifestValidationError(fmt.Sprintf("channel %d has %d template ids; collector limit is %d", channel.ID, count, limits.maxTemplateIDs))
 			}
 			continue
 		}
 
 		edges := snap.edgesByChannel[channel.ID]
 		if len(edges) > maxEdgeDevicesPerChannel {
-			return fmt.Errorf("channel %d has %d edge devices; collector limit is %d", channel.ID, len(edges), maxEdgeDevicesPerChannel)
+			return newManifestValidationError(fmt.Sprintf("channel %d has %d edge devices; collector limit is %d", channel.ID, len(edges), maxEdgeDevicesPerChannel))
 		}
 		for _, edge := range edges {
 			var drv drivers.Driver
@@ -292,7 +292,7 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 				commandCount = 1
 			}
 			if commandCount > limits.maxCommandsPerDevice {
-				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, limits.maxCommandsPerDevice)
+				return newManifestValidationError(fmt.Sprintf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, limits.maxCommandsPerDevice))
 			}
 		}
 	}

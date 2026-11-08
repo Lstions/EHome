@@ -24,8 +24,13 @@ var (
 	validLevels = map[string]bool{
 		models.AlertLevelInfo: true, models.AlertLevelWarning: true, models.AlertLevelCritical: true,
 	}
+	// target_type 的取值域只剩 edge_device（契约 §7）。
+	//
+	// 为什么保留白名单而不是直接删列：target_type 列仍在表上（存量契约），
+	// 但「逻辑设备」这个取值随概念层一起消失 —— 存量 0 行（生产/本机均无），
+	// 因此不需要数据迁移，只需在写路径拒收该值。
 	validTargetTypes = map[string]bool{
-		models.AlertTargetEdgeDevice: true, models.AlertTargetLogicalDevice: true,
+		models.AlertTargetEdgeDevice: true,
 	}
 )
 
@@ -466,7 +471,7 @@ func readAlertEvents(db *gorm.DB) gin.HandlerFunc {
 
 func validateAlertRuleFields(targetType string, targetID *uint, sensorName, comparator, level string) string {
 	if !validTargetTypes[targetType] {
-		return "target_type 需为 edge_device 或 logical_device"
+		return "target_type 需为 edge_device"
 	}
 	if targetID == nil || *targetID == 0 {
 		return "target_id 不能为空"
@@ -496,16 +501,22 @@ func defaultAlertSilenceSec(v *int) int {
 // 下的特殊 selector ⇒ 400 + error_code；语法合法但当前解析不到（unbound）**不阻塞**
 // （符号可能尚未上报，属于软告警，precheck 的 warnings 才负责提示）。
 //
-// target_type=logical_device 时 TargetID 不是 EdgeDevice.ID：无法按设备解析
-// （unbound 判定需要设备已知集合），因此只用 deviceID=0 做**语法/语义**校验。
+// 2026-10-23（逻辑设备概念层移除，契约 §7）: 曾经 target_type=logical_device 时
+// TargetID 不是 EdgeDevice.ID，无法按设备解析（unbound 判定需要设备已知集合），
+// 于是只用 deviceID=0 做**语法/语义**校验。该分支已删除 —— target_id 现在恒为
+// EdgeDevice.ID，因此总能带着真实设备上下文做 unbound 判定。
 func validateAlertSensorSelector(targetType string, targetID uint, sensorName string) (string, string) {
 	resolver := currentSelectorResolver()
 	if resolver == nil || strings.TrimSpace(sensorName) == "" {
 		return "", "" // 未接线：保持旧行为（不校验）
 	}
-	deviceID := uint(0)
-	if targetType == models.AlertTargetEdgeDevice {
-		deviceID = targetID
+	// target_type 只剩 edge_device（白名单已拒收其它取值），target_id 恒为
+	// EdgeDevice.ID，直接用它做设备上下文解析。
+	deviceID := targetID
+	if targetType != models.AlertTargetEdgeDevice {
+		// 防御性兜底：白名单之外的取值不该走到这里（validateAlertRuleFields 先拦），
+		// 但存量脏数据/未来新目标类型应退回"仅语法校验"，不要拿错 id 去解析。
+		deviceID = 0
 	}
 	if _, err := resolver.Resolve(deviceID, sensorName); err != nil {
 		code := sensorfield.ErrorCode(err)

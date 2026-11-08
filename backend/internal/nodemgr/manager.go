@@ -17,6 +17,7 @@ import (
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/pendingwrite"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/frame"
@@ -62,6 +63,12 @@ type Manager struct {
 	// sourceHealthSink 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功
 	// 健康回调, main.go 经 SetSourceHealthSink 二阶段注入到所有已构建 consumer。
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
+	// telemetryRollupSink L3 分钟级预聚合采样回调 (方案 §5.2): main.go 经
+	// SetTelemetryRollupSink 二阶段注入到所有已构建 consumer, 与上面几个 sink 同范式。
+	telemetryRollupSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
+	// telemetrySink L2 帧级编码双写旁路 (方案 §7 阶段2 第2步): main.go 经
+	// SetTelemetrySink 注入。nil = 未启用 (默认), 主写入路径零额外开销。
+	telemetrySink telemetry.Sink
 
 	// deviceOps pairs node-level device-op ACKs (0x23) with their requests
 	// (0x22). Node-level because a collector reboot has no channel, manifest
@@ -146,6 +153,30 @@ func (m *Manager) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames [
 	m.sourceHealthSink = sink
 	for _, p := range m.parserConsumers {
 		p.SetSourceHealthSink(sink)
+	}
+}
+
+// SetTelemetryRollupSink 注入 L3 分钟级预聚合采样回调 (方案 §5.2, main.go 接线)。
+// 完全仿 SetSourceHealthSink: 必须同时推送到所有已构建的 parserConsumers ——
+// NewManager 注册时 sink 还是 nil, 只赋值字段不推送则 consumer 持有的 sink 永远为 nil
+// (本仓「引擎从未触发」复发的根因, 见 SetSourceHealthSink 注记)。
+//
+// 命名: 不能叫 SetRollupSink —— 那是已退役符号 (旧 unified_data_rollup_1m 的写入件),
+// datalifecycle/rollup_retirement_gate_test.go 的源码门禁会判红。
+func (m *Manager) SetTelemetryRollupSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
+	m.telemetryRollupSink = sink
+	for _, p := range m.parserConsumers {
+		p.SetTelemetryRollupSink(sink)
+	}
+}
+
+// SetTelemetrySink 注入 L2 帧级编码双写旁路 (方案 §7 阶段2 第2步, main.go 接线)。
+// 同 SetSourceHealthSink 范式: 赋值 + 推送给所有已构建 consumer。
+// sink 为 nil (开关关闭时的 SinkOrNil 返回 nil) ⇒ consumer 侧整条旁路不存在。
+func (m *Manager) SetTelemetrySink(sink telemetry.Sink) {
+	m.telemetrySink = sink
+	for _, p := range m.parserConsumers {
+		p.SetTelemetrySink(sink)
 	}
 }
 
@@ -249,6 +280,10 @@ func (mgr *Manager) buildParserConsumers() {
 	// 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功健康回调 (main.go
 	// 经 SetSourceHealthSink 接线), 与 alertEval/automationEval 并列。
 	sourceHealthSink := mgr.sourceHealthSink
+	// L3 分钟级预聚合 + L2 帧级编码双写 (方案 §5.2 / §7 阶段2): 与上面几个 sink 同范式,
+	// main.go 在 NewManager 之后二阶段注入; 这里取快照供首次构建时注入(通常仍为 nil)。
+	telemetryRollupSink := mgr.telemetryRollupSink
+	telemetrySink := mgr.telemetrySink
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -276,6 +311,14 @@ func (mgr *Manager) buildParserConsumers() {
 		// 与 alertSink/automationSink 同点并列。
 		if sourceHealthSink != nil {
 			parser.SetSourceHealthSink(sourceHealthSink)
+		}
+		// L3 分钟级预聚合采样回调 (方案 §5.2): 解析成功路径上调用, 与写库解耦。
+		if telemetryRollupSink != nil {
+			parser.SetTelemetryRollupSink(telemetryRollupSink)
+		}
+		// L2 帧级编码双写旁路 (方案 §7 阶段2 第2步): nil = 未启用(默认)。
+		if telemetrySink != nil {
+			parser.SetTelemetrySink(telemetrySink)
 		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {

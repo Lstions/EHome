@@ -8,6 +8,7 @@ package alert
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,10 +125,10 @@ func TestM0AlertCompositeAlternatingFires(t *testing.T) {
 	})
 
 	base := time.Now()
-	ev.Evaluate(101, fields("temperature", 20), base)                       // A
-	ev.Evaluate(102, fields("temperature", 20), base.Add(20*time.Second))  // B
-	ev.Evaluate(101, fields("temperature", 20), base.Add(35*time.Second))  // A
-	ev.Evaluate(102, fields("temperature", 20), base.Add(65*time.Second))  // B
+	ev.Evaluate(101, fields("temperature", 20), base)                     // A
+	ev.Evaluate(102, fields("temperature", 20), base.Add(20*time.Second)) // B
+	ev.Evaluate(101, fields("temperature", 20), base.Add(35*time.Second)) // A
+	ev.Evaluate(102, fields("temperature", 20), base.Add(65*time.Second)) // B
 	// 最后两点 (35s,65s) 是不同成员，但组值连续满足 30s ⇒ 必须 firing（S7）。
 	if n := eventCount(db, 1); n != 1 {
 		t.Fatalf("S7: composite 身份不含触发成员，A/B 交替 + 组值持续满足 30s 必须触发，got %d", n)
@@ -287,50 +288,71 @@ func TestM0AlertInvalidSourceKindWarnedButLoadsAndEvaluates(t *testing.T) {
 	}
 }
 
-
-
-// ── 锁放大回归：Evaluate 不得在 RLock 内查 DB ──────────────────────────────
-
-func TestM0AlertEvaluateResolvesLogicalIDOutsideLock(t *testing.T) {
+// ── 热路径零身份查库：Evaluate 不得为「目标解析」查任何表 ──────────────────
+//
+// 历史：本用例曾是 TestM0AlertEvaluateResolvesLogicalIDOutsideLock —— 它证明的是
+// 「resolveLogicalID 的 SQL 往返发生在锁外」（H2 锁放大的修复）。逻辑设备概念层
+// 整体移除后（2026-10-23, .contract/logical-device-removal.md §7），那条 SQL
+// 往返本身不存在了。
+//
+// 现在的判据（比原来更强、也更准确）：
+//
+//	Evaluate 期间**只允许**触碰告警自身的簿记表 alert_events（firing→resolved
+//	的状态机本来就要读它：onResolve 要找到最近一条 firing 行就地关闭）。
+//	任何对身份/设备表（edge_devices、logical_devices）的查询都判红 ——
+//	那正是「每帧一次身份解析」的表现形式。
+//
+// 为什么不能简单断言「零 SQL」：状态机自身的 bookkeeping 是**必须**的 DB 读写
+// （否则 firing→resolved 无法闭环）。把「零 SQL」当判据会逼着实现把簿记挪到别处，
+// 那不是本用例守护的目标。
+//
+// 实现注意（踩过）：查询计数必须注册在 **After**("gorm:query")，此时
+// Statement.Table 才由 BuildQuerySQL 解析出来；注册在 Before 时 Table 恒空，
+// 判据会恒绿 —— 那是一条假测试。
+func TestM0AlertEvaluateIssuesNoIdentityQueries(t *testing.T) {
 	db := newTestDB(t)
-	lid := uint(50)
-	if err := db.Create(&models.LogicalDevice{
-		ID: lid, IdentityKey: "test:logical:50", Name: "测试逻辑设备", DeviceType: "bms",
-	}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Create(&models.EdgeDevice{ID: 1, LogicalDeviceID: &lid}).Error; err != nil {
+	if err := db.Create(&models.EdgeDevice{ID: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
 	r := rule(1, "temperature", "gt", 50, 0)
-	r.TargetType = models.AlertTargetLogicalDevice
-	r.TargetID = lid
+	r.TargetType = models.AlertTargetEdgeDevice
+	r.TargetID = 1
 	if err := db.Create(&r).Error; err != nil {
 		t.Fatal(err)
 	}
-	ev := NewEvaluator(db, nil)
+	ev := NewEvaluator(db, nil) // NewEvaluator 内部 LoadRules 已在计数注册之前完成
 
-	// 在 gorm Query 回调里调用 LoadRules（要写锁）：若 Evaluate 持读锁查 DB，
-	// 这里会死锁 ⇒ 超时即失败（回归锁的判据是"能返回"，不是"没报错"）。
-	var fired atomic.Bool
-	if err := db.Callback().Query().Before("gorm:query").Register("test:lock_out_db", func(tx *gorm.DB) {
-		// 只在第一次 Query（即 resolveLogicalID 的 edge_devices 查询）时触发写锁；
-		// 用 atomic 而不是 sync.Once：LoadRules 自身的 Query 会再次进入回调，
-		// 而 sync.Once 在 Do 执行中不可重入（会自锁，制造假红）。
-		if fired.CompareAndSwap(false, true) {
-			ev.LoadRules()
-		}
-	}); err != nil {
+	// identityTables 是「解析帧目标身份」会碰的表。Evaluate 期间出现它们即回归。
+	identityTables := map[string]bool{"edge_devices": true, "logical_devices": true}
+	var identityQueries atomic.Int32
+	var mu sync.Mutex
+	var offending []string
+	if err := db.Callback().Query().After("gorm:query").
+		Register("test:count_identity_queries", func(tx *gorm.DB) {
+			if identityTables[tx.Statement.Table] {
+				identityQueries.Add(1)
+				mu.Lock()
+				offending = append(offending, tx.Statement.Table+" :: "+tx.Statement.SQL.String())
+				mu.Unlock()
+			}
+		}); err != nil {
 		t.Fatalf("register callback: %v", err)
 	}
-	done := make(chan struct{})
-	go func() {
-		ev.Evaluate(1, fields("temperature", 60), time.Now())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Evaluate 疑似持锁查 DB（LoadRules 写锁被阻塞）——resolveLogicalID 必须移到锁外")
+
+	// 求值三条帧，覆盖 触发 / 恢复 / 不匹配 三路（不匹配那路历史上会触发 identity 解析）。
+	now := time.Now()
+	ev.Evaluate(1, fields("temperature", 60), now)
+	ev.Evaluate(1, fields("temperature", 40), now.Add(time.Second))
+	ev.Evaluate(999, fields("temperature", 60), now.Add(2*time.Second))
+
+	if got := identityQueries.Load(); got != 0 {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("Evaluate 为身份解析查询了 %d 次边设备/逻辑设备表 —— 热路径必须零身份查库；明细: %v",
+			got, offending)
+	}
+	// 求值确实发生了（否则"零查询"是因为什么都没做，属于假绿）。
+	if n := eventCount(db, 1); n == 0 {
+		t.Fatal("规则应已触发（本用例断言的是「零身份查库」，不是「什么都不做」）")
 	}
 }

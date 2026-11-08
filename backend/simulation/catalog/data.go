@@ -65,9 +65,9 @@ func init() {
 	})
 	Register(Scenario{
 		ID:     "SIM-DATA-006",
-		Title:  "多实例合并后按逻辑设备维度查到合并后的数据",
+		Title:  "合并历史后按在役设备就能查到旧设备的历史数据（换节点/重建场景）",
 		Domain: dataDomain,
-		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DATA；docs/设计/边缘设备数据生命周期.md §多源合并",
+		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DATA；.contract/logical-device-removal.md §4.3（merge-history）",
 		Run:    dataScenario006,
 	})
 	Register(Scenario{
@@ -99,13 +99,12 @@ func dataProvision(e *harness.Env, scenarioID, suffix string) *harness.Fixture {
 
 // dataPoint 是 unified_data 查询结果的元素子集。
 type dataPoint struct {
-	ID              uint      `json:"id"`
-	DeviceID        uint      `json:"device_id"`
-	SensorName      string    `json:"sensor_name"`
-	Value           float64   `json:"value"`
-	Unit            string    `json:"unit"`
-	Timestamp       time.Time `json:"timestamp"`
-	LogicalDeviceID *uint     `json:"logical_device_id"`
+	ID         uint      `json:"id"`
+	DeviceID   uint      `json:"device_id"`
+	SensorName string    `json:"sensor_name"`
+	Value      float64   `json:"value"`
+	Unit       string    `json:"unit"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // dataHistoryQuery 是历史查询的参数集（/devices/:id/history 支持的子集）。
@@ -553,88 +552,85 @@ func dataScenario005(e *harness.Env) {
 
 // ---------------------------------------------------------------------------
 // SIM-DATA-006
-// ---------------------------------------------------------------------------
-
-// dataEdgeLogicalID 读取边缘设备当前挂载的逻辑身份。
-func dataEdgeLogicalID(e *harness.Env, edgeDeviceID uint) uint {
-	e.T.Helper()
-	resp := e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices/%d", edgeDeviceID))
-	resp.Expect(http.StatusOK)
-	var device struct {
-		LogicalDeviceID *uint `json:"logical_device_id"`
-	}
-	resp.Decode(&device)
-	if device.LogicalDeviceID == nil || *device.LogicalDeviceID == 0 {
-		e.T.Fatalf("边缘设备 %d 没有逻辑身份（logical_device_id 为空）", edgeDeviceID)
-	}
-	return *device.LogicalDeviceID
-}
-
-// 守护的不变量：两个实例合并到一个逻辑设备后，按任一实例查询都必须看到合并
-// 后的全量数据（查询走逻辑身份解析，而不是单实例 device_id）。
+// 守护的不变量（契约 §1 R0）：**同一物理设备从节点 A 换到节点 B 后，历史数据不丢、
+// 连续可查**。
 //
-// 为什么先删实例再合并：合并前置校验要求源逻辑设备没有存活实例
-// （datalifecycle.MergeDevices → livingInstanceInfo），而删除实例只软删行、
-// 历史数据仍在——这正是"换新设备后合并历史"的真实运维动作。
+// 历史：本场景曾是「两个实例合并到一个逻辑设备后，按任一实例查询都必须看到合并后的
+// 全量数据」—— 那条断言的实现依赖「查询走逻辑身份解析」的 scope 层（ResolveScope +
+// OR 兜底 + 保形去重）。逻辑设备概念层整体移除后（.contract §2/§5），查询回到
+// `WHERE device_id = ?` 等值条件，合并历史改由**数据级迁移**实现（§4.3）：
+// 一条 UPDATE 把旧 device_id 的行改成新 device_id。
+//
+// 本场景验证的正是这条新路径在**数据面**的效果（而非 API 是否返回 200）：
+//  1. 两台设备各自入库、各自只能看到自己的数据（合并前的反例基线）；
+//  2. 把设备 B 的历史合并到设备 A 后，按 A 查询能看到 B 的全部历史；
+//  3. 合并幂等（第二次 0 行）；
+//  4. B 侧不再能查到那些行（数据确实迁走了，不是复制）。
+//
+// 为什么用两台真实设备而不是造 id：只有真实设备才能证明「迁移后行归属正确、查询端点
+// 不依赖任何身份解析」。
 func dataScenario006(e *harness.Env) {
 	first := dataProvision(e, "SIM-DATA-006", "a")
 	second := dataProvision(e, "SIM-DATA-006", "b")
 
 	if err := first.Report(harness.FixtureTempCategory, 11.1); err != nil {
-		e.T.Fatalf("实例 A 上报失败: %v", err)
+		e.T.Fatalf("设备 A 上报失败: %v", err)
 	}
 	if err := second.Report(harness.FixtureTempCategory, 22.2); err != nil {
-		e.T.Fatalf("实例 B 上报失败: %v", err)
+		e.T.Fatalf("设备 B 上报失败: %v", err)
 	}
 
 	window := dataHistoryQuery{Sensor: harness.FixtureTempCategory, Hours: 1}
 	e.Eventually(45*time.Second, func() error {
 		if !dataHasValue(dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory), 11.1) {
-			return fmt.Errorf("实例 A 的数据尚未入库")
+			return fmt.Errorf("设备 A 的数据尚未入库")
 		}
 		if !dataHasValue(dataValuesOf(dataHistory(e, second.EdgeDeviceID, window), harness.FixtureTempCategory), 22.2) {
-			return fmt.Errorf("实例 B 的数据尚未入库")
+			return fmt.Errorf("设备 B 的数据尚未入库")
 		}
 		return nil
 	})
 
 	// 合并前：各自只看得到自己的数据（合并规则的反例基线）。
 	if values := dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory); dataHasValue(values, 22.2) {
-		e.T.Fatalf("合并前实例 A 就看到了实例 B 的数据: %v", values)
+		e.T.Fatalf("合并前设备 A 就看到了设备 B 的数据: %v", values)
 	}
+	e.Evidence("before_merge_a", dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory))
+	e.Evidence("before_merge_b", dataValuesOf(dataHistory(e, second.EdgeDeviceID, window), harness.FixtureTempCategory))
 
-	firstLogical := dataEdgeLogicalID(e, first.EdgeDeviceID)
-	secondLogical := dataEdgeLogicalID(e, second.EdgeDeviceID)
-
-	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", first.EdgeDeviceID)).Expect(http.StatusOK)
-	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", second.EdgeDeviceID)).Expect(http.StatusOK)
-
-	merge := e.Admin.Post("/api/v1/logical-devices/merge", map[string]any{
-		"target_name": "合并后的采集设备-" + first.NodeID,
-		"source_ids":  []uint{firstLogical, secondLogical},
-	})
-	merge.Expect(http.StatusCreated)
-	targetID := merge.DataInt("target_id")
-	if targetID == 0 {
-		e.T.Fatalf("合并未返回目标逻辑设备: %s", merge.BodyString())
+	// 合并历史：把设备 B 的全部历史行迁到设备 A（契约 §4.3）。
+	merged := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", first.EdgeDeviceID),
+		map[string]any{"source_ids": []int64{int64(second.EdgeDeviceID)}})
+	merged.Expect(http.StatusOK)
+	if n := merged.DataInt("rows_migrated"); n <= 0 {
+		e.T.Fatalf("merge-history 没有迁移任何行: %s", merged.BodyString())
 	}
+	e.Evidence("merge_history", merged.BodyString())
 
-	// 合并后：按任一实例查都必须看到两边的数据（迁移进行中也必须可见，
-	// scope 解析会把待迁移源一并纳入）。
+	// 合并后：按在役设备 A 查必须看到两边数据（含 unified_data 与 device_data 两类表）。
 	e.Eventually(45*time.Second, func() error {
 		values := dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory)
 		if !dataHasValue(values, 11.1) || !dataHasValue(values, 22.2) {
-			return fmt.Errorf("按实例 A 查询未合并出两边数据: %v", values)
+			return fmt.Errorf("按设备 A 查询未合并出两边数据: %v", values)
 		}
 		return nil
 	})
-	viaSecond := dataValuesOf(dataHistory(e, second.EdgeDeviceID, window), harness.FixtureTempCategory)
-	if !dataHasValue(viaSecond, 11.1) || !dataHasValue(viaSecond, 22.2) {
-		e.T.Fatalf("按实例 B 查询未合并出两边数据: %v", viaSecond)
+
+	// 迁移是**搬走**不是复制：源设备 B 侧不应再有那些行。
+	if left := dataValuesOf(dataHistory(e, second.EdgeDeviceID, window), harness.FixtureTempCategory); len(left) != 0 {
+		e.T.Fatalf("合并后源设备 B 仍有 %d 条历史（迁移未生效或做成了复制）: %v", len(left), left)
 	}
 
-	e.Evidence("merge_target_id", targetID)
-	e.Evidence("merged_temperature_values", dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory))
+	// 幂等：第二次调用迁移 0 行（源已无数据）。
+	again := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", first.EdgeDeviceID),
+		map[string]any{"source_ids": []int64{int64(second.EdgeDeviceID)}})
+	again.Expect(http.StatusOK)
+	if n := again.DataInt("rows_migrated"); n != 0 {
+		e.T.Fatalf("merge-history 不幂等：第二次仍迁移了 %d 行", n)
+	}
+
+	e.Evidence("merged_temperature_values",
+		dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory))
 }
 
 // ---------------------------------------------------------------------------

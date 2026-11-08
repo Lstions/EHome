@@ -176,20 +176,20 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// commandService 供 §5.3 校验补强 (action_id Catalog 存在性 + params 规范化)。
 		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt, automationManualTriggerOpt, commandService)
 
-		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
-		registerLogicalDeviceRoutes(v1, db)
-
 		// Data reports (placeholder)
 		registerDataReportRoutes(v1, db)
 
-		// Data source CRUD routes + /devices/:id/failover-logs (v1.0 §7)。
+		// Data source CRUD routes + /edge-devices/:id/failover-logs (v1.0 §7)。
 		// 未注入领域服务时注册显式 503 占位，避免 nil 解引用 panic，并保持路由存在。
+		//
+		// 2026-10-23: failover-logs 从 /devices/:id 挂到 /edge-devices/:id ——
+		// 逻辑设备层移除后，故障切换日志的主语就是边缘设备本身。
 		if datasourceSvc == nil {
 			registerDataSourceUnavailable(v1.Group("/data-sources"))
-			registerFailoverLogUnavailable(v1)
+			registerFailoverLogUnavailable(v1.Group("/edge-devices"))
 		} else {
 			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc, db)
-			registerFailoverLogRoutes(v1, datasourceSvc)
+			registerFailoverLogRoutes(v1.Group("/edge-devices"), datasourceSvc)
 		}
 		// 来源总览（数据流架构 v1 §4.1）：**只读投影**端点。
 		//

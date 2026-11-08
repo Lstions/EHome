@@ -50,6 +50,18 @@ func readGormSource() (string, error) {
 
 // 注：DDL 常量复用同包既有的 legacyOperationLogsDDL（retire_operation_logs_test.go）
 // 与 legacyRollupDDL（retire_rollup_test.go）—— 不另起一份，避免两个副本漂移。
+//
+// ===== 2026-11-06 (L3 rollup) 对本文件的增补 =====
+//
+// 「退役名单」本身不变：死表仍然只有 operation_logs 与 unified_data_rollup_1m。
+// 但新增了一条**反向断言**（TestAutoMigrate_DoesNotTouchTelemetryRollup）：
+// L3 新表 telemetry_rollup_1m 是**活表**，AutoMigrate 必须既不能创建它（它由
+// partition_mgr 的分区 DDL 建，AutoMigrate 会把它建成/改成普通表 ⇒ 分区 DROP
+// 保留期静默失效），也不能删除它（退役步骤不得误伤）。
+//
+// 为什么把它放在**端到端**文件里而不是只放在 retire_rollup_test.go：
+// 端到端测的是「生产启动那一次 AutoMigrate 里，退役与建表**同时**发生」的相互
+// 作用；单函数测试覆盖不到"同一批 DDL 里有人误删/误建"这种情况。
 
 // seedLegacyDeadTables 在库中制造两张已退役表的残留，并确认它们确实存在。
 func seedLegacyDeadTables(t *testing.T, db *gorm.DB) {
@@ -102,6 +114,50 @@ func TestAutoMigrate_RetiresDeadTablesEndToEnd(t *testing.T) {
 		if db.Migrator().HasTable(tbl) {
 			t.Errorf("二次 AutoMigrate 后 %s 复活", tbl)
 		}
+	}
+}
+
+// TestAutoMigrate_DoesNotTouchTelemetryRollup 是 L3 的**反向断言**（2026-11-06）：
+// 生产 AutoMigrate 不得创建、也不得删除 L3 新表 telemetry_rollup_1m。
+//
+// 两个方向都会出事，且都是静默的：
+//
+//	· 创建（= 把 &models.TelemetryRollup1m{} 加进 AutoMigrate 清单）⇒ PG 上会把
+//	  partition_mgr 建好的分区母表降级改写为普通表 ⇒ DropPartitionsBeforeFor 找不到
+//	  <table>_YYYYMM 分区 ⇒ 保留期静默失效 ⇒ 新表退回"无界增长的第二张表"，
+//	  正是旧 rollup 的退役理由；
+//	· 删除（= 把新表名写进退役步骤）⇒ 活表在下次启动消失，读者拿不到数据。
+//
+// 本断言在 SQLite 与 PG 隔离 schema 下都跑（生产是 PG，故 PG 那次最关键）。
+func TestAutoMigrate_DoesNotTouchTelemetryRollup(t *testing.T) {
+	logger.Init("error")
+	db := testutil.OpenTestDB(t)
+
+	// 先造一张"活表"（模拟 partition_mgr 已经建好、且已有数据）。
+	if err := db.Exec(telemetryRollupDDLFor(db)).Error; err != nil {
+		t.Fatalf("创建 telemetry_rollup_1m: %v", err)
+	}
+	if err := db.Exec("INSERT INTO telemetry_rollup_1m (device_id, bucket, payload) VALUES (14, ?, ?)",
+		"2026-11-04 10:00:00", []byte{1, 0, 1, 1, 'a'}).Error; err != nil {
+		t.Fatalf("写活表行: %v", err)
+	}
+
+	prev := DB
+	DB = db
+	t.Cleanup(func() { DB = prev })
+	if err := AutoMigrate(); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+
+	if !db.Migrator().HasTable("telemetry_rollup_1m") {
+		t.Fatal("AutoMigrate 删掉了 L3 活表 telemetry_rollup_1m —— 退役步骤误伤新表")
+	}
+	var count int64
+	if err := db.Raw("SELECT count(*) FROM telemetry_rollup_1m").Scan(&count).Error; err != nil {
+		t.Fatalf("读活表: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("活表行数 = %d, want 1（AutoMigrate 不得动活表数据）", count)
 	}
 }
 

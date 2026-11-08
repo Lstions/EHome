@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
-	"ehome/backend/internal/config"
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -53,11 +56,13 @@ func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Regis
 		&models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
 		&models.PendingWriteRecord{},
-		&models.LogicalDevice{},
 		// 2026-10-03：向导内联建 UART 通道现在会按能力补齐 bus_config，
 		// 于是 validateChannelPeripheralConflicts 会真的执行（旧实现 bus_config 为空时跳过），
 		// 必须像 setupDeviceTest 一样迁移这两张表，否则报 "no such table: gpio_configs"。
 		&models.GPIOConfig{}, &models.PWMConfig{},
+		// 2026-10-25：合并历史的台账/投影表（sensor_field_obs / data_sources）也要在
+		// 测试库里存在，否则 merge-history 的台账迁移分支永远走「跳过」，测试假绿。
+		&models.SensorFieldObs{}, &models.DataSource{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -653,31 +658,63 @@ func TestEdgeDevice_Delete_NonExistent(t *testing.T) {
 
 // ==================== EdgeDevice Sub-resource Tests ====================
 
-func TestEdgeDevice_LatestData_DeletedInstanceReturns404(t *testing.T) {
-	// §十二: 实例已删 (或不存在) → 404, 不再返回空 200。
-	r, _ := setupEdgeDeviceTest(t)
+// TestEdgeDevice_LatestData_DeletedDeviceStillReadable — 契约变更 (2026-10-23)。
+//
+// 旧语义: 实例已删 → 404（"实例语义"）。但那条规则的真正目的是**阻止把
+// 逻辑身份的数据当成实例自己的数据**，逻辑身份层移除后它失去依据。
+// 新语义: 数据端点按 device_id 直查，软删设备的历史**仍然可读** ——
+// 这正是用户要的「换节点/重建后历史不丢」；只有配置类端点（GET
+// /edge-devices/:id 等）对已删设备 404。
+func TestEdgeDevice_LatestData_DeletedDeviceStillReadable(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"}
+	db.Create(&dev)
+	db.Create(&models.DeviceData{DeviceID: dev.ID, NodeID: "NODE001", DataJSON: `{"v":1}`})
+	db.Delete(&dev) // 设备行软删，数据还在
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/latest-data", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing/deleted instance, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (soft-deleted device's data stays readable), got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestEdgeDevice_Data_DeletedInstanceReturns404(t *testing.T) {
-	// §十二: /:id/data 同样按实例语义 — 已删实例 404。
-	r, _ := setupEdgeDeviceTest(t)
+// TestEdgeDevice_Data_DeletedDeviceStillReadable — 同上的 /:id/data 版本。
+func TestEdgeDevice_Data_DeletedDeviceStillReadable(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"}
+	db.Create(&dev)
+	db.Create(&models.DeviceData{DeviceID: dev.ID, NodeID: "NODE001", DataJSON: `{"v":1}`})
+	db.Delete(&dev)
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=2&page_size=5", nil)
+	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=1&page_size=5", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing/deleted instance, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (soft-deleted device's data stays readable), got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Items []json.RawMessage `json:"items"`
+			Total int64             `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if resp.Data.Total != 1 || len(resp.Data.Items) != 1 {
+		t.Errorf("total/items = %d/%d, want 1/1 (history must survive soft delete)", resp.Data.Total, len(resp.Data.Items))
 	}
 }
 
@@ -1029,9 +1066,12 @@ func TestEdgeDevice_Create_AllowsDifferentTypeAtSameAddress(t *testing.T) {
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.EdgeDevice{Name: "TempSensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
 
+	// 2026-10-25：create 路径补齐「驱动声明的总线类型必须覆盖通道」门禁后，原先
+	// 用 lk_th01（只支持 uart）建在 I2C 通道上的 fixture 会被正确拒绝。本用例要
+	// 验证的是**唯一性守卫不误伤不同 type**，换成同样支持 I2C 的 generic_i2c。
 	body, _ := json.Marshal(map[string]interface{}{
 		"name": "HumiditySensor", "node_id": "NODE001", "channel_id": 1,
-		"type": "lk_th01", "hardware_id": "0x76",
+		"type": "generic_i2c", "hardware_id": "0x76",
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
@@ -1118,7 +1158,14 @@ func TestEdgeDevice_Update_AllowsSelfResave(t *testing.T) {
 	}
 }
 
-// ==================== 数据生命周期: delete_data / logical-device-info ====================
+// ==================== 数据生命周期: delete_data / data-summary / restore ====================
+
+// 2026-10-23 语义变更（逻辑设备概念层移除，.contract/logical-device-removal.md）:
+//   - 删除时「同时删除数据」的标记从 logical_devices.purge_requested 搬到
+//     edge_devices.data_purge_requested（设备自己就是数据的所有者）；
+//   - /logical-device-info 被 /data-summary 取代（只需要知道「有多少行、什么时间范围」）；
+//   - 新增 /deleted、/:id/restore、/:id/merge-history，实现用户真正要的
+//     「换节点后历史不丢」（原地复用 / 恢复 / 历史合并三条路径）。
 
 func TestEdgeDevice_Delete_DefaultKeepsDataNoPurgeFlag(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
@@ -1136,29 +1183,16 @@ func TestEdgeDevice_Delete_DefaultKeepsDataNoPurgeFlag(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// 删除事务内补建了逻辑身份并回写 (Unscoped 可见软删行)。
+	// 软删行仍在 (Unscoped 可见)，且未请求删数据 ⇒ 标记为 false。
 	var inst models.EdgeDevice
 	if err := db.Unscoped().First(&inst, 1).Error; err != nil {
 		t.Fatalf("soft-deleted instance must still exist: %v", err)
 	}
-	if inst.LogicalDeviceID == nil {
-		t.Fatalf("deleted instance must have logical_device_id backfilled")
+	if !inst.DeletedAt.Valid {
+		t.Error("device row must be soft-deleted")
 	}
-	var ld models.LogicalDevice
-	if err := db.First(&ld, *inst.LogicalDeviceID).Error; err != nil {
-		t.Fatalf("logical device must exist: %v", err)
-	}
-	if ld.IdentityKey != "bms_jbd:0x76" {
-		t.Errorf("expected identity_key bms_jbd:0x76, got %q", ld.IdentityKey)
-	}
-	if ld.PurgeRequested {
-		t.Errorf("purge_requested must stay false without delete_data")
-	}
-	// 绑定单一真源: 默认保留期由 config.DefaultDataRetentionDays 定义,
-	// datalifecycle/retention.go 的 init 默认值必须与其一致(该文件注释已声明)。
-	// 用常量而非字面量, 避免默认值调整时此处静默失配。
-	if ld.RetentionDays != config.DefaultDataRetentionDays {
-		t.Errorf("expected default retention %d, got %d", config.DefaultDataRetentionDays, ld.RetentionDays)
+	if inst.DataPurgeRequested {
+		t.Error("data_purge_requested must stay false without delete_data")
 	}
 }
 
@@ -1168,7 +1202,7 @@ func TestEdgeDevice_Delete_DeleteDataSetsPurgeRequestedOnly(t *testing.T) {
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-	// 该实例名下有数据行 — API 事务内不得删除 (§2.3: 只置标记)。
+	// 该设备名下有数据行 — API 事务内不得删除（只置标记，删数据由后台任务做）。
 	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12})
 	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: "{}"})
 
@@ -1183,15 +1217,10 @@ func TestEdgeDevice_Delete_DeleteDataSetsPurgeRequestedOnly(t *testing.T) {
 
 	var inst models.EdgeDevice
 	db.Unscoped().First(&inst, 1)
-	if inst.LogicalDeviceID == nil {
-		t.Fatalf("deleted instance must have logical_device_id backfilled")
+	if !inst.DataPurgeRequested {
+		t.Error("data_purge_requested must be TRUE with delete_data=true")
 	}
-	var ld models.LogicalDevice
-	db.First(&ld, *inst.LogicalDeviceID)
-	if !ld.PurgeRequested {
-		t.Errorf("purge_requested must be TRUE with delete_data=true")
-	}
-	// 数据行仍在 (异步 purge, 不在 API 事务里删)。
+	// 数据行仍在（异步 purge，不在 API 事务里删）。
 	var unified, devdata int64
 	db.Model(&models.UnifiedData{}).Count(&unified)
 	db.Model(&models.DeviceData{}).Count(&devdata)
@@ -1200,256 +1229,1116 @@ func TestEdgeDevice_Delete_DeleteDataSetsPurgeRequestedOnly(t *testing.T) {
 	}
 }
 
-func TestEdgeDevice_Delete_DeleteDataReusesExistingLogicalDevice(t *testing.T) {
-	r, db := setupEdgeDeviceTest(t)
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	// 既有逻辑身份 (无存活实例, 也无 purge 标记)。
-	ld := models.LogicalDevice{IdentityKey: "bms_jbd:0x76", Name: "old", DeviceType: "bms_jbd", RetentionDays: 100}
-	db.Create(&ld)
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-
+// rr2Do 发一个带 JWT 的测试请求（query/body 可空）。
+func rr2Do(t *testing.T, r *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = bytes.NewReader([]byte(body))
+	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1?delete_data=true", nil)
+	req := httptest.NewRequest(method, path, rdr)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	// §2.3.1 路径 3: 允许复用既有 key → 挂在既有 logical device 上。
-	var inst models.EdgeDevice
-	db.Unscoped().First(&inst, 1)
-	if inst.LogicalDeviceID == nil || *inst.LogicalDeviceID != ld.ID {
-		t.Fatalf("expected reuse of logical device %d, got %v", ld.ID, inst.LogicalDeviceID)
-	}
-	var reloaded models.LogicalDevice
-	db.First(&reloaded, ld.ID)
-	if !reloaded.PurgeRequested {
-		t.Errorf("reused logical device must carry purge_requested")
-	}
-	var ldCount int64
-	db.Model(&models.LogicalDevice{}).Count(&ldCount)
-	if ldCount != 1 {
-		t.Errorf("expected no new logical device created, got %d rows", ldCount)
-	}
+	return w
 }
 
-func TestEdgeDevice_Delete_DeleteDataSkipsPurgeRequestedTarget(t *testing.T) {
-	r, db := setupEdgeDeviceTest(t)
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	// 既有身份已被标记 purge — 新删实例不得挂入 (v3.3-N1)。
-	ld := models.LogicalDevice{IdentityKey: "bms_jbd:0x76", Name: "old", DeviceType: "bms_jbd", RetentionDays: 100, PurgeRequested: true}
-	db.Create(&ld)
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1?delete_data=true", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var inst models.EdgeDevice
-	db.Unscoped().First(&inst, 1)
-	if inst.LogicalDeviceID == nil || *inst.LogicalDeviceID == ld.ID {
-		t.Fatalf("must not attach to purge_requested logical device, got %v", inst.LogicalDeviceID)
-	}
-	var fresh models.LogicalDevice
-	db.First(&fresh, *inst.LogicalDeviceID)
-	if fresh.IdentityKey != "bms_jbd:0x76#2" {
-		t.Errorf("expected fallback key bms_jbd:0x76#2, got %q", fresh.IdentityKey)
-	}
+// rr2SummaryItem / rr2MergeResp 是 data-summary / merge-history 的响应形状。
+type rr2SummaryItem struct {
+	SourceID   uint       `json:"source_id"`
+	Rows       *int64     `json:"rows"`
+	FirstTime  *time.Time `json:"first_time"`
+	LastTime   *time.Time `json:"last_time"`
+	State      string     `json:"state"`
+	DeviceName string     `json:"device_name"`
+	DeviceType string     `json:"device_type"`
 }
 
-func TestEdgeDevice_LogicalDeviceInfo(t *testing.T) {
+type rr2MergeResp struct {
+	RowsMigrated float64 `json:"rows_migrated"`
+	Sources      []struct {
+		ID         uint   `json:"id"`
+		State      string `json:"state"`
+		DeviceType string `json:"device_type"`
+	} `json:"sources"`
+	Warnings []string `json:"warnings"`
+}
+
+// ==================== data-summary：目标与源必须分开 ====================
+
+// TestEdgeDevice_DataSummary — /data-summary 回答「这台设备有多少行数据、覆盖
+// 什么时间范围」。2026-10-25 起响应拆成 target / sources 两组：删除确认弹窗读
+// target，合并弹窗只读 sources，两者绝不混用。
+func TestEdgeDevice_DataSummary(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12})
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "current", Value: 3})
-	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: "{}"})
+	old := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	newer := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12, Timestamp: old})
+	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "current", Value: 3, Timestamp: newer})
+	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: "{}", Timestamp: newer})
 
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Code int `json:"code"`
-		Data struct {
-			EdgeDeviceID    uint   `json:"edge_device_id"`
-			Name            string `json:"name"`
-			LogicalDeviceID *uint  `json:"logical_device_id"`
-			RetentionDays   *int   `json:"retention_days"`
-			InstanceCount   int64  `json:"instance_count"`
-			RowEstimate     *int64 `json:"row_estimate"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("bad json: %v", err)
-	}
-	if resp.Data.EdgeDeviceID != 1 {
-		t.Errorf("expected edge_device_id 1, got %d", resp.Data.EdgeDeviceID)
-	}
-	// 实例尚无逻辑身份: logical_device_id 为 null, 数据量按实例范围估算。
-	if resp.Data.LogicalDeviceID != nil {
-		t.Errorf("expected null logical_device_id before any delete, got %v", *resp.Data.LogicalDeviceID)
-	}
-	if resp.Data.InstanceCount != 1 {
-		t.Errorf("expected instance_count 1, got %d", resp.Data.InstanceCount)
-	}
-	if resp.Data.RowEstimate == nil {
-		t.Fatalf("expected row_estimate present (SQLite truncated COUNT), got null")
-	}
-	// unified_data 2 行 + device_data 1 行 = 3
-	if *resp.Data.RowEstimate != 3 {
-		t.Errorf("expected row_estimate 3, got %d", *resp.Data.RowEstimate)
-	}
-}
-
-func TestEdgeDevice_LogicalDeviceInfo_WithLogicalDevice(t *testing.T) {
-	r, db := setupEdgeDeviceTest(t)
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	ld := models.LogicalDevice{IdentityKey: "bms_jbd:0x76", Name: "Battery", DeviceType: "bms_jbd", RetentionDays: 90}
-	db.Create(&ld)
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", LogicalDeviceID: &ld.ID})
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12, LogicalDeviceID: &ld.ID})
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var resp struct {
 		Data struct {
-			Name            string `json:"name"`
-			LogicalDeviceID uint   `json:"logical_device_id"`
-			RetentionDays   int    `json:"retention_days"`
-			InstanceCount   int64  `json:"instance_count"`
-			RowEstimate     int64  `json:"row_estimate"`
+			Target     rr2SummaryItem   `json:"target"`
+			Sources    []rr2SummaryItem `json:"sources"`
+			TargetRows *int64           `json:"target_rows"`
+			SourceRows *int64           `json:"source_rows"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if resp.Data.LogicalDeviceID != ld.ID || resp.Data.Name != "Battery" || resp.Data.RetentionDays != 90 {
-		t.Errorf("unexpected logical device info: %+v", resp.Data)
+	if resp.Data.Target.SourceID != 1 {
+		t.Errorf("target.source_id = %d, want 1", resp.Data.Target.SourceID)
 	}
-	if resp.Data.InstanceCount != 1 {
-		t.Errorf("expected instance_count 1, got %d", resp.Data.InstanceCount)
+	// device_type 是合并弹窗做「同型号」校验/展示的依据（2026-10-25 产品重做）。
+	if resp.Data.Target.DeviceType != "bms_jbd" {
+		t.Errorf("target.device_type = %q, want bms_jbd", resp.Data.Target.DeviceType)
 	}
-	if resp.Data.RowEstimate != 1 {
-		t.Errorf("expected row_estimate 1, got %d", resp.Data.RowEstimate)
+	if resp.Data.TargetRows == nil || *resp.Data.TargetRows != 3 {
+		t.Errorf("target_rows = %v, want 3 (2 unified_data + 1 device_data)", resp.Data.TargetRows)
+	}
+	if len(resp.Data.Sources) != 0 {
+		t.Errorf("sources = %+v, want empty (没有传 source_ids)", resp.Data.Sources)
+	}
+	if resp.Data.SourceRows != nil {
+		t.Errorf("source_rows = %v, want omitted when no source_ids", *resp.Data.SourceRows)
+	}
+	if resp.Data.Target.FirstTime == nil || !resp.Data.Target.FirstTime.Equal(old) {
+		t.Errorf("target.first_time = %v, want %v", resp.Data.Target.FirstTime, old)
+	}
+	if resp.Data.Target.LastTime == nil || !resp.Data.Target.LastTime.Equal(newer) {
+		t.Errorf("target.last_time = %v, want %v", resp.Data.Target.LastTime, newer)
 	}
 }
 
-func TestEdgeDevice_LogicalDeviceInfo_NotFound(t *testing.T) {
+// TestEdgeDevice_DataSummary_SeparatesTargetFromSources 钉住旧缺陷：
+// total_rows 曾把目标自己也加进去，前端「预计迁移 N 行」因此系统性虚高；
+// 明细表里目标设备还被列成一行「源设备」。
+func TestEdgeDevice_DataSummary_SeparatesTargetFromSources(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	db.Create(&models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	// 目标自己有 2 行（**不应**出现在 source_rows 里），源有 1 行。
+	for i := 0; i < 2; i++ {
+		db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: float64(i)})
+	}
+	db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: 9})
+
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary?source_ids=2", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Target     rr2SummaryItem   `json:"target"`
+			Sources    []rr2SummaryItem `json:"sources"`
+			TargetRows *int64           `json:"target_rows"`
+			SourceRows *int64           `json:"source_rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(resp.Data.Sources) != 1 || resp.Data.Sources[0].SourceID != 2 {
+		t.Fatalf("sources = %+v, want exactly [source_id=2]（目标不得混进 sources）", resp.Data.Sources)
+	}
+	if resp.Data.Sources[0].State != "live" {
+		t.Errorf("source state = %q, want live", resp.Data.Sources[0].State)
+	}
+	if resp.Data.SourceRows == nil || *resp.Data.SourceRows != 1 {
+		t.Errorf("source_rows = %v, want 1（只算源；目标自己的 2 行不得加进来）", resp.Data.SourceRows)
+	}
+	if resp.Data.TargetRows == nil || *resp.Data.TargetRows != 2 {
+		t.Errorf("target_rows = %v, want 2", resp.Data.TargetRows)
+	}
+}
+
+// TestEdgeDevice_DataSummary_MarksMissingSource — 没有设备行的源（孤儿历史）
+// 用 state=missing 标出；这不是错误（合并历史的救援对象），但要可识别。
+func TestEdgeDevice_DataSummary_MarksMissingSource(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	db.Create(&models.UnifiedData{DeviceID: 999, SensorName: "voltage", Value: 1})
+
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary?source_ids=999", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Sources []rr2SummaryItem `json:"sources"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(resp.Data.Sources) != 1 {
+		t.Fatalf("sources = %+v, want 1", resp.Data.Sources)
+	}
+	if resp.Data.Sources[0].State != "missing" {
+		t.Errorf("state = %q, want missing（没有设备行，但有孤儿数据）", resp.Data.Sources[0].State)
+	}
+	if resp.Data.Sources[0].Rows == nil || *resp.Data.Sources[0].Rows != 1 {
+		t.Errorf("rows = %v, want 1", resp.Data.Sources[0].Rows)
+	}
+}
+
+func TestEdgeDevice_DataSummary_NotFound(t *testing.T) {
 	r, _ := setupEdgeDeviceTest(t)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/999/logical-device-info", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/999/data-summary", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-// TestEdgeDevice_LogicalDeviceInfo_DegradesWhenEstimateFails — T1.1:
-// 估算段失败 (此处删除数据表模拟查询失败) 时端点仍 200 且省略
-// row_estimate (降级路径, 方案 §1.3), 不得 500。
-func TestEdgeDevice_LogicalDeviceInfo_DegradesWhenEstimateFails(t *testing.T) {
+// ==================== restore：校验 / 状态复位 / 与 purge 互斥 ====================
+
+// TestEdgeDevice_Restore_RebindsNodeAndKeepsHistory — 用户真正需求的直接表达:
+// 设备从节点 A 删掉、在节点 B 恢复，历史数据（device_id 不变）必须连续可查。
+func TestEdgeDevice_Restore_RebindsNodeAndKeepsHistory(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
 
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Node{NodeID: "NODE002", Name: "B", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
+	db.Create(&models.Channel{NodeID: "NODE002", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: ""}
+	db.Create(&dev)
+	db.Create(&models.UnifiedData{DeviceID: dev.ID, SensorName: "voltage", Value: 12})
+	db.Delete(&dev) // 用户先删了设备（历史数据仍在）
 
-	// 估算失败注入: 数据表不存在 → estimateTruncatedCount 返回 ok=false。
-	if err := db.Exec("DROP TABLE unified_data").Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Exec("DROP TABLE device_data").Error; err != nil {
-		t.Fatal(err)
-	}
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/deleted", "")
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 even when estimation fails, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("deleted list expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp struct {
-		Code int `json:"code"`
+	var listResp struct {
 		Data struct {
-			EdgeDeviceID uint            `json:"edge_device_id"`
-			RowEstimate  json.RawMessage `json:"row_estimate"`
+			Items []struct {
+				ID uint `json:"id"`
+			} `json:"items"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if resp.Code != 200 || resp.Data.EdgeDeviceID != 1 {
-		t.Errorf("expected code 200 with edge_device_id 1, got %+v", resp)
+	if len(listResp.Data.Items) != 1 || listResp.Data.Items[0].ID != dev.ID {
+		t.Fatalf("deleted items = %+v, want the soft-deleted device %d", listResp.Data.Items, dev.ID)
 	}
-	if resp.Data.RowEstimate != nil {
-		t.Errorf("expected row_estimate omitted on degradation, got %s", resp.Data.RowEstimate)
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE002", "channel_id": 2})
+	w = rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var restored models.EdgeDevice
+	db.First(&restored, dev.ID) // 默认 scope 能查到 ⇒ 已恢复
+	if restored.NodeID != "NODE002" || restored.ChannelID != 2 {
+		t.Errorf("restored binding = (%s,%d), want (NODE002,2)", restored.NodeID, restored.ChannelID)
+	}
+	if restored.Status != models.EdgeDeviceStatusPending {
+		t.Errorf("restored status = %q, want pending (等待首个数据帧)", restored.Status)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", restored.ID).Count(&rows)
+	if rows != 1 {
+		t.Errorf("history rows = %d, want 1 (restore must keep history)", rows)
 	}
 }
 
-// TestEdgeDevice_LogicalDeviceInfo_DegradesOnRequestDeadline — T1.1:
-// 请求 ctx 已超时 (端点级超时兜底生效) 时估算段快速降级, 端点仍 200
-// 且省略 row_estimate, 不阻塞。
-func TestEdgeDevice_LogicalDeviceInfo_DegradesOnRequestDeadline(t *testing.T) {
+// TestEdgeDevice_Restore_RejectsLiveDevice — 「恢复」不能被当成「改绑定」的后门。
+func TestEdgeDevice_Restore_RejectsLiveDevice(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
 
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 1})
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for a live device, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEdgeDevice_Restore_RejectsPeripheralChannel — GPIO/PWM 是外设资源，不是
+// 数据传输通道；旧实现只校验「通道属于节点」，可以把设备绑到 GPIO 上并「恢复成功」，
+// 但设备永远采不到数据（静默失败）。
+func TestEdgeDevice_Restore_RejectsPeripheralChannel(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true})
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&dev)
+	db.Delete(&dev)
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 2})
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for peripheral channel, got %d: %s", w.Code, w.Body.String())
+	}
+	var still models.EdgeDevice
+	if err := db.Unscoped().First(&still, dev.ID).Error; err != nil || !still.DeletedAt.Valid {
+		t.Fatalf("被拒绝的恢复必须保持软删状态（错误=%v）", err)
+	}
+}
+
+// TestEdgeDevice_Restore_RejectsDisabledChannel — 停用通道上的设备永远不会被
+// polling，等于恢复了一台「死」设备。
+func TestEdgeDevice_Restore_RejectsDisabledChannel(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	// GORM 的 default:true 会把零值 false 覆盖成 true，必须建完再显式改停用。
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	if err := db.Model(&models.Channel{}).Where("id = ?", 2).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable channel: %v", err)
+	}
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&dev)
+	db.Delete(&dev)
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 2})
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disabled channel, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEdgeDevice_Restore_RejectsPurgeInProgress — purge 已认领设备时不能恢复：
+// 删除已不可撤销，恢复只会在删了一半的数据上制造「看起来恢复了」的假象。
+func TestEdgeDevice_Restore_RejectsPurgeInProgress(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&dev)
+	db.Delete(&dev)
+	if err := db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", dev.ID).
+		Updates(map[string]interface{}{
+			"data_purge_requested":  true,
+			"data_purge_started_at": time.Now(),
+		}).Error; err != nil {
+		t.Fatalf("seed purge claim: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 1})
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 while purge in progress, got %d: %s", w.Code, w.Body.String())
+	}
+	var still models.EdgeDevice
+	db.Unscoped().First(&still, dev.ID)
+	if !still.DeletedAt.Valid || !still.DataPurgeRequested {
+		t.Errorf("purge 认领期间的恢复被拒后，设备必须保持软删且标记不变")
+	}
+}
+
+// TestEdgeDevice_Restore_ResetsRuntimeState — 恢复复用同一个 edge_device id，必须
+// 把运行时状态复位：否则 status/last_error 仍是删除前的、init 缓存仍认为已初始化。
+func TestEdgeDevice_Restore_ResetsRuntimeState(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	stale := time.Now().Add(-72 * time.Hour)
+	dev := models.EdgeDevice{
+		Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1,
+		Status: models.EdgeDeviceStatusOffline, ErrorCode: 42, LastError: "boom",
+		InitState: "completed", InitLastStep: 3, InitTotalSteps: 3,
+		Enabled: false, LastDataAt: &stale, ConfigVersion: "v-old",
+	}
+	db.Create(&dev)
+	db.Delete(&dev)
+	if err := db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", dev.ID).
+		Update("data_purge_requested", true).Error; err != nil {
+		t.Fatalf("seed latch: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 1})
+	if w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body)); w.Code != http.StatusOK {
+		t.Fatalf("restore: %d %s", w.Code, w.Body.String())
+	}
+	var got models.EdgeDevice
+	db.Unscoped().First(&got, dev.ID)
+	if got.Status != models.EdgeDeviceStatusPending {
+		t.Errorf("status = %q, want pending", got.Status)
+	}
+	if got.ErrorCode != 0 || got.LastError != "" {
+		t.Errorf("error state = (%d,%q), want (0,\"\")", got.ErrorCode, got.LastError)
+	}
+	if got.InitState != "pending" || got.InitLastStep != 0 || got.InitTotalSteps != 0 {
+		t.Errorf("init state = (%q,%d,%d), want (pending,0,0)", got.InitState, got.InitLastStep, got.InitTotalSteps)
+	}
+	if got.DataPurgeRequested || got.DataPurgeStartedAt != nil {
+		t.Errorf("purge flags = (%v,%v), want (false,nil) —— 恢复即撤回删除意图", got.DataPurgeRequested, got.DataPurgeStartedAt)
+	}
+	// 恢复 = 回到可用状态：删除前被停用的设备必须重新启用，否则永远不会被调度。
+	if !got.Enabled {
+		t.Errorf("enabled = false, want true（恢复后应回到可用状态）")
+	}
+	// 旧的 last_data_at 属于上一个位置，不清掉 offlinedetector 会在下个 tick 判离线。
+	if got.LastDataAt != nil {
+		t.Errorf("last_data_at = %v, want nil（旧位置的事实必须清掉，否则恢复即被误判离线）", *got.LastDataAt)
+	}
+	if got.ConfigVersion != "" {
+		t.Errorf("config_version = %q, want empty", got.ConfigVersion)
+	}
+}
+
+// TestEdgeDevice_Update_MoveBindingResetsRuntimeState — 换节点（主路径）同样要
+// 复位运行时状态，否则新节点上不会重新走 init/校准。
+func TestEdgeDevice_Update_MoveBindingResetsRuntimeState(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "A", Status: "online"})
+	db.Create(&models.Node{NodeID: "NODE002", Name: "B", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE002", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{
+		Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1,
+		Status: models.EdgeDeviceStatusActive, ErrorCode: 7, LastError: "old",
+		InitState: "completed", InitLastStep: 2, InitTotalSteps: 2,
+	}
+	db.Create(&dev)
+
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE002", "channel_id": 2})
+	if w := rr2Do(t, r, "PUT", "/api/v1/edge-devices/1", string(body)); w.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", w.Code, w.Body.String())
+	}
+	var got models.EdgeDevice
+	db.First(&got, dev.ID)
+	if got.NodeID != "NODE002" || got.ChannelID != 2 {
+		t.Fatalf("binding = (%s,%d), want (NODE002,2)", got.NodeID, got.ChannelID)
+	}
+	if got.Status != models.EdgeDeviceStatusPending {
+		t.Errorf("status = %q, want pending（换节点后等待新节点首个数据帧）", got.Status)
+	}
+	if got.ErrorCode != 0 || got.LastError != "" {
+		t.Errorf("error state = (%d,%q), want (0,\"\")", got.ErrorCode, got.LastError)
+	}
+	if got.InitState != "pending" || got.InitLastStep != 0 || got.InitTotalSteps != 0 {
+		t.Errorf("init state = (%q,%d,%d), want (pending,0,0)", got.InitState, got.InitLastStep, got.InitTotalSteps)
+	}
+}
+
+// ==================== merge-history：源校验 / 退役 / 幂等 / 台账 ====================
+
+func rr2SeedMergeBase(t *testing.T, db *gorm.DB) {
+	t.Helper()
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12})
+	db.Create(&models.EdgeDevice{Name: "New", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	db.Create(&models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // 模拟请求 deadline 已耗尽
+func rr2Merge(t *testing.T, r *gin.Engine, body map[string]interface{}) (int, rr2MergeResp) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/merge-history", string(raw))
+	var resp struct {
+		Data rr2MergeResp `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v (body=%s)", err, w.Body.String())
+	}
+	return w.Code, resp.Data
+}
 
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil).WithContext(ctx)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
+// TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent — 一条 UPDATE 把旧 device_id
+// 的历史改挂到新设备，重复调用返回 0 行（幂等）。源必须已软删（主用途）。
+func TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db)
+	old := models.EdgeDevice{}
+	db.First(&old, 2)
+	db.Delete(&old) // 源已删（历史仍在）
+	for i := 0; i < 3; i++ {
+		db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: float64(i)})
+	}
+	db.Create(&models.DeviceData{DeviceID: 2, NodeID: "NODE001", DataJSON: "{}"})
 
+	code, resp := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusOK {
+		t.Fatalf("merge expected 200, got %d", code)
+	}
+	if resp.RowsMigrated != 4 {
+		t.Fatalf("rows_migrated = %v, want 4 (3 unified_data + 1 device_data)", resp.RowsMigrated)
+	}
+	if len(resp.Sources) != 1 || resp.Sources[0].ID != 2 || resp.Sources[0].State != "deleted" {
+		t.Errorf("sources = %+v, want [{id:2,state:deleted}]", resp.Sources)
+	}
+	if len(resp.Sources) == 1 && resp.Sources[0].DeviceType != "bms_jbd" {
+		t.Errorf("source device_type = %q, want bms_jbd", resp.Sources[0].DeviceType)
+	}
+	var targetRows, sourceRows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = 1").Count(&targetRows)
+	db.Model(&models.UnifiedData{}).Where("device_id = 2").Count(&sourceRows)
+	if targetRows != 3 || sourceRows != 0 {
+		t.Errorf("after merge target=%d source=%d, want 3/0", targetRows, sourceRows)
+	}
+	// 目标设备的「最后采集」必须跟着合并进来的历史前移，否则列表与历史图表自相矛盾。
+	var target models.EdgeDevice
+	db.First(&target, 1)
+	if target.LastDataAt == nil {
+		t.Errorf("target last_data_at = nil, want set after merge")
+	}
+
+	code, resp = rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusOK {
+		t.Fatalf("second merge expected 200, got %d", code)
+	}
+	if resp.RowsMigrated != 0 {
+		t.Errorf("second merge rows_migrated = %v, want 0 (idempotent)", resp.RowsMigrated)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsLiveSourceByDefault — 把在用设备的历史搬走
+// 会让它变成空壳（过去的历史归目标、之后的新数据归它自己）。默认必须拒绝。
+func TestEdgeDevice_MergeHistory_RejectsLiveSourceByDefault(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db) // 设备 2 是存活设备
+	db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: 1})
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusConflict {
+		t.Fatalf("expected 409 for live source, got %d", code)
+	}
+	var src models.EdgeDevice
+	db.First(&src, 2)
+	if src.DeletedAt.Valid || !src.Enabled {
+		t.Errorf("被拒绝的合并不应改动源设备")
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = 2").Count(&rows)
+	if rows != 1 {
+		t.Errorf("source rows after rejected merge = %d, want 1 (must not move)", rows)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsLiveSourceEvenWithLegacyFlag — 产品重做后
+// 「在役设备不能作为源」是硬约束：即使旧客户端仍传 allow_live_source=true 也一样
+// 409（该字段已被删除，Gin 会忽略未知字段 —— 不能因此放行）。
+func TestEdgeDevice_MergeHistory_RejectsLiveSourceEvenWithLegacyFlag(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db) // 设备 2 是存活设备
+	db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: 1})
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{
+		"source_ids": []uint{2}, "allow_live_source": true,
+	})
+	if code != http.StatusConflict {
+		t.Fatalf("live source must be 409 even with legacy allow_live_source, got %d", code)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = 2").Count(&rows)
+	if rows != 1 {
+		t.Errorf("source rows = %d, want 1 (must not move)", rows)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsCrossTypeSource — 产品红线（2026-10-25）：
+// 只能合并**同型号**的历史设备。跨型号合并会把 A 型号的物理量挂到 B 型号名下，
+// sensor_name/单位/图表/告警语义全被污染 —— 必须 400 且一行都不搬。
+func TestEdgeDevice_MergeHistory_RejectsCrossTypeSource(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target-BMS", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	// 源是**不同型号**（逆变器），且已删除、有数据。
+	inverter := models.EdgeDevice{Name: "Old-Inverter", Type: "techfine_inverter", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&inverter)
+	db.Delete(&inverter)
+	db.Create(&models.UnifiedData{DeviceID: inverter.ID, SensorName: "temperature", Value: 30})
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{inverter.ID}})
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-type merge must be 400, got %d", code)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", inverter.ID).Count(&rows)
+	if rows != 1 {
+		t.Errorf("source rows = %d, want 1（跨型号合并被拒后一行都不许动）", rows)
+	}
+	var targetRows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", 1).Count(&targetRows)
+	if targetRows != 0 {
+		t.Errorf("target rows = %d, want 0（跨型号合并被拒后目标不得有数据）", targetRows)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsSelf — 源=目标不能再静默成功。
+func TestEdgeDevice_MergeHistory_RejectsSelf(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db)
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{1}})
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for self merge, got %d", code)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsNonexistentSource — 源 id 不存在（没有设备
+// 记录）必须 400：既不能 200 假装成功，也不能放行（无法验证型号）。
+func TestEdgeDevice_MergeHistory_RejectsNonexistentSourceWithoutData(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db)
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{9999}})
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for nonexistent source, got %d", code)
+	}
+}
+
+// TestEdgeDevice_DeletedList_DeviceTypeFilter — 合并弹窗只列「与目标同型号」的
+// 已删除设备，服务端过滤保证其它型号不会把同型号历史挤出分页。
+func TestEdgeDevice_DeletedList_DeviceTypeFilter(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	for _, typ := range []string{"bms_jbd", "techfine_inverter", "bms_jbd"} {
+		d := models.EdgeDevice{Name: "D-" + typ, Type: typ, NodeID: "NODE001", ChannelID: 1}
+		db.Create(&d)
+		db.Delete(&d)
+	}
+
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/deleted?device_type=bms_jbd", "")
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 even on expired request ctx, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("deleted list: %d %s", w.Code, w.Body.String())
 	}
 	var resp struct {
-		Code int `json:"code"`
 		Data struct {
-			RowEstimate json.RawMessage `json:"row_estimate"`
+			Items []struct {
+				ID   uint   `json:"id"`
+				Type string `json:"type"`
+			} `json:"items"`
+			Total int64 `json:"total"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if resp.Code != 200 {
-		t.Errorf("expected code 200, got %d", resp.Code)
+	if resp.Data.Total != 2 || len(resp.Data.Items) != 2 {
+		t.Fatalf("filtered deleted list = total %d items %d, want 2/2", resp.Data.Total, len(resp.Data.Items))
 	}
-	if resp.Data.RowEstimate != nil {
-		t.Errorf("expected row_estimate omitted on deadline degradation, got %s", resp.Data.RowEstimate)
+	for _, it := range resp.Data.Items {
+		if it.Type != "bms_jbd" {
+			t.Errorf("item type = %q, want bms_jbd（服务端过滤失效）", it.Type)
+		}
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsOrphanWithoutDeviceRow — 设备行已不存在时
+// 无法验证型号，「同型号」不变量不可证 ⇒ 400（产品重做明确放弃孤儿救援路径；
+// 这类历史只受系统级保留期约束）。
+func TestEdgeDevice_MergeHistory_RejectsOrphanWithoutDeviceRow(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db)
+	db.Create(&models.UnifiedData{DeviceID: 999, SensorName: "voltage", Value: 1})
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{999}})
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for orphan source (no device row), got %d", code)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", 999).Count(&rows)
+	if rows != 1 {
+		t.Errorf("orphan rows = %d, want 1（被拒绝后不许动数据）", rows)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_MigratesLedgerTables — 只搬时序表会让同一台设备
+// 两个端点互相矛盾（/unified-data/categories 有、/sensor-fields 没有）。
+func TestEdgeDevice_MergeHistory_MigratesLedgerTables(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	rr2SeedMergeBase(t, db)
+	old := models.EdgeDevice{}
+	db.First(&old, 2)
+	db.Delete(&old)
+
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "rsoc", Unit: "%", FirstSeen: t2, LastSeen: t2, Samples: 100})
+	db.Create(&models.SensorFieldObs{DeviceID: 2, SensorName: "rsoc", Unit: "%", FirstSeen: t1, LastSeen: t1, Samples: 80})
+	db.Create(&models.SensorFieldObs{DeviceID: 2, SensorName: "voltage", Unit: "V", FirstSeen: t1, LastSeen: t1, Samples: 5})
+	db.Create(&models.DataSource{EdgeDeviceID: 1, Category: "rsoc", Name: "t-rsoc", Status: "active", ManagedBy: "auto"})
+	db.Create(&models.DataSource{EdgeDeviceID: 2, Category: "voltage", Name: "s-voltage", Status: "active", ManagedBy: "auto"})
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusOK {
+		t.Fatalf("merge expected 200, got %d", code)
+	}
+
+	var rsoc models.SensorFieldObs
+	if err := db.Where("device_id = ? AND sensor_name = ?", 1, "rsoc").First(&rsoc).Error; err != nil {
+		t.Fatalf("load merged rsoc: %v", err)
+	}
+	if rsoc.Samples != 180 {
+		t.Errorf("merged rsoc samples = %d, want 180 (100+80)", rsoc.Samples)
+	}
+	if !rsoc.FirstSeen.Equal(t1) {
+		t.Errorf("merged rsoc first_seen = %v, want earlier %v", rsoc.FirstSeen, t1)
+	}
+	var srcSFO int64
+	db.Model(&models.SensorFieldObs{}).Where("device_id = ?", 2).Count(&srcSFO)
+	if srcSFO != 0 {
+		t.Errorf("source sensor_field_obs rows = %d, want 0", srcSFO)
+	}
+	var movedDS int64
+	db.Model(&models.DataSource{}).Where("edge_device_id = ? AND category = ?", 1, "voltage").Count(&movedDS)
+	if movedDS != 1 {
+		t.Errorf("moved data_sources rows = %d, want 1", movedDS)
+	}
+	var srcDS int64
+	db.Model(&models.DataSource{}).Where("edge_device_id = ?", 2).Count(&srcDS)
+	if srcDS != 0 {
+		t.Errorf("source data_sources rows = %d, want 0", srcDS)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RequiresLiveTarget — 目标必须存活: 把历史并进
+// 一台已删设备等于把数据埋掉。
+func TestEdgeDevice_MergeHistory_RequiresLiveTarget(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Ghost", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&dev)
+	db.Delete(&dev)
+
+	body, _ := json.Marshal(map[string]interface{}{"source_ids": []uint{2}})
+	w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/merge-history", string(body))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for deleted target, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEdgeDevice_DeletedList_PaginationAndPurgeState — 已删除设备列表必须可分页，
+// 并提前暴露 purge 状态（正在清理的设备不能恢复）。
+func TestEdgeDevice_DeletedList_PaginationAndPurgeState(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	for i := 0; i < 3; i++ {
+		d := models.EdgeDevice{Name: "D", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+		db.Create(&d)
+		db.Delete(&d)
+	}
+	// 让其中一台带上 purge 认领。
+	db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", 1).
+		Updates(map[string]interface{}{"data_purge_requested": true, "data_purge_started_at": time.Now()})
+
+	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/deleted?page=1&page_size=2", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("deleted list: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Items []struct {
+				ID              uint `json:"id"`
+				PurgeRequested  bool `json:"data_purge_requested"`
+				PurgeInProgress bool `json:"purge_in_progress"`
+			} `json:"items"`
+			Total int64 `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if resp.Data.Total != 3 {
+		t.Errorf("total = %d, want 3", resp.Data.Total)
+	}
+	if len(resp.Data.Items) != 2 {
+		t.Fatalf("items = %d, want 2 (page_size=2)", len(resp.Data.Items))
+	}
+	// 同一台设备的 purge 状态可能在第二页（按 deleted_at DESC 排序，不能假设第 0 项是 id=1）。
+	var found bool
+	for page := 1; page <= 2 && !found; page++ {
+		w := rr2Do(t, r, "GET", fmt.Sprintf("/api/v1/edge-devices/deleted?page=%d&page_size=2", page), "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("deleted list page %d: %d %s", page, w.Code, w.Body.String())
+		}
+		var pageResp struct {
+			Data struct {
+				Items []struct {
+					ID              uint `json:"id"`
+					PurgeRequested  bool `json:"data_purge_requested"`
+					PurgeInProgress bool `json:"purge_in_progress"`
+				} `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &pageResp); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		for _, it := range pageResp.Data.Items {
+			if it.ID == 1 {
+				found = true
+				if !it.PurgeRequested || !it.PurgeInProgress {
+					t.Errorf("device 1 purge state = (%v,%v), want (true,true)", it.PurgeRequested, it.PurgeInProgress)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("device 1 not found in the first two pages")
+	}
+}
+
+// TestEdgeDevice_PurgeLatch_DeleteRestoreDeleteThenKeepData — 2026-10-24 审核 P0 的不变量。
+//
+// `data_purge_requested` 是**单向闩锁**（只有 purge 任务在「设备已复活」时才清回 false）。
+// 若 restore 不清它，这条用户序列会**静默硬删历史**：
+//
+//	① 删（勾选同时删数据）→ 标记 true
+//	② 恢复（用户后悔了，历史应该保住）
+//	③ 再删（这次明确不删数据）→ 旧实现因为 delete_data=false 不写该列 ⇒ 标记仍是 true
+//	④ purge 任务跑 ⇒ 硬删历史数据，而 API 应答说 data_purge_requested=false
+//
+// 本用例断言 ③ 之后标记必须是 false，且 purge.RunOnce 一行都不删。
+func TestEdgeDevice_PurgeLatch_DeleteRestoreDeleteThenKeepData(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	dev := models.EdgeDevice{Name: "Latch", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"}
+	db.Create(&dev)
+	for i := 0; i < 3; i++ {
+		db.Create(&models.UnifiedData{DeviceID: dev.ID, SensorName: "voltage", Value: float64(i)})
+	}
+
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		var rdr io.Reader
+		if body != "" {
+			rdr = bytes.NewReader([]byte(body))
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, rdr)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	// ① 删，并勾选「同时删除数据」。
+	if w := do("DELETE", "/api/v1/edge-devices/1?delete_data=true", ""); w.Code != http.StatusOK {
+		t.Fatalf("step1 delete: %d %s", w.Code, w.Body.String())
+	}
+	var inst models.EdgeDevice
+	db.Unscoped().First(&inst, dev.ID)
+	if !inst.DataPurgeRequested {
+		t.Fatalf("step1: data_purge_requested must be true")
+	}
+
+	// ② 恢复：语义 = 撤回删除意图 ⇒ 标记必须被清掉。
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE001", "channel_id": 1})
+	if w := do("POST", "/api/v1/edge-devices/1/restore", string(body)); w.Code != http.StatusOK {
+		t.Fatalf("step2 restore: %d %s", w.Code, w.Body.String())
+	}
+	db.Unscoped().First(&inst, dev.ID)
+	if inst.DataPurgeRequested {
+		t.Fatal("step2: restore 必须清掉 data_purge_requested（否则之后的「不删数据删除」仍会硬删历史）")
+	}
+
+	// ②b **独立断言 restore 本身**（不能靠第 ③ 步代替）：
+	// 第二次 DELETE 也会把闩锁写成 false，从而**掩盖**「restore 没清标记」的缺陷 ——
+	// 本用例初版就是这样假绿的（变异自证：只回滚 restore 修复时它仍 PASS）。
+	// 真实危害场景正是「删(删数据) → 恢复 → 用户不再删除」，此时 purge 任务
+	// 若看到残留 true 就会硬删刚恢复的历史。这里直接跑一次 purge 来钉住。
+	// 注意：**不能**用「跑一次 purge 看它删不删」来断言这件事 —— purge 的复活
+	// 守卫（purge_edge_device.go 的 AbandonedRevived）会自己把标记清掉并跳过删除，
+	// 于是「restore 忘了清标记」这个缺陷会被守卫掩盖（变异自证确认过：只回滚
+	// restore 修复时，purge 路径仍 PASS）。必须**直接读库**断言闩锁状态。
+	{
+		var raw struct {
+			Flag bool `gorm:"column:data_purge_requested"`
+		}
+		if err := db.Unscoped().Model(&models.EdgeDevice{}).
+			Select("data_purge_requested").Where("id = ?", dev.ID).Scan(&raw).Error; err != nil {
+			t.Fatalf("step2b read flag: %v", err)
+		}
+		if raw.Flag {
+			t.Fatalf("step2b: 恢复后闩锁仍为 true —— restore 必须直接清掉它，" +
+				"不能依赖 purge 的复活守卫兜底（守卫只在任务真的扫到该设备时才生效，" +
+				"而每日任务/重启时机不可控）")
+		}
+		var rows0 int64
+		db.Model(&models.UnifiedData{}).Where("device_id = ?", dev.ID).Count(&rows0)
+		if rows0 != 3 {
+			t.Fatalf("step2b history rows = %d, want 3", rows0)
+		}
+	}
+
+	// ③ 再删，这次明确不删数据。
+	w := do("DELETE", "/api/v1/edge-devices/1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("step3 delete: %d %s", w.Code, w.Body.String())
+	}
+	db.Unscoped().First(&inst, dev.ID)
+	if inst.DataPurgeRequested {
+		t.Fatal("step3: delete_data=false 必须显式把闩锁写成 false（不能只写 true）")
+	}
+	// 应答也必须回读库值，不能回显入参（原 P0 的另一半：应答 false / 库 true）。
+	var resp struct {
+		Data struct {
+			DataPurgeRequested bool `json:"data_purge_requested"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if resp.Data.DataPurgeRequested {
+		t.Errorf("response data_purge_requested = true, want false (must reflect DB, not request)")
+	}
+
+	// ④ 跑 purge：一行都不许删，设备行也必须还在。
+	purger := datalifecycle.NewDevicePurger(db)
+	purger.SetSchedule(0, 0, 0)
+	results, err := purger.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("purge run: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("purge picked up %d device(s), want 0: %+v", len(results), results)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", dev.ID).Count(&rows)
+	if rows != 3 {
+		t.Errorf("history rows = %d, want 3 (用户明确要求保留，必须一行不少)", rows)
+	}
+	var devRows int64
+	db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", dev.ID).Count(&devRows)
+	if devRows != 1 {
+		t.Errorf("device row count = %d, want 1", devRows)
+	}
+}
+
+// ==================== 容量门禁 / merge 台账多源 / purge 互斥 ====================
+
+// TestEdgeDevice_MoveAndRestore_RejectCommandCapacityOverflow — 2026-10-25 审核 F-03。
+//
+// 「换节点」（PUT 改 node/channel）与 restore 会把同一份 command_intervals 带到
+// 另一个节点上，而节点申报的每设备命令上限可能更小。不校验的话该节点**整份**
+// ConfigManifest 会被拒发（nodemgr/sender.go 容量校验失败即整单拒绝），所有设备
+// 静默跑旧配置。create 路径一直有这道门禁，PUT/restore 曾缺失。
+func TestEdgeDevice_MoveAndRestore_RejectCommandCapacityOverflow(t *testing.T) {
+	r, db := setupEdgeDeviceTestWithRegistry(t, func(reg *drivers.Registry) {
+		reg.Register(&fakeMultiDriver{})
+	})
+
+	db.Create(&models.Node{NodeID: "NODE-A", Name: "A", Status: "online"})
+	db.Create(&models.Node{
+		NodeID: "NODE-B", Name: "B", Status: "online",
+		HardwareInfo: `{"manifest_capacity":{"max_templates":16,"max_channels":4,"max_template_ids":16,"max_commands_per_device":1}}`,
+	})
+	db.Create(&models.Channel{NodeID: "NODE-A", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE-B", HardwareType: "UART", BusType: "UART", Enabled: true})
+	intervals, _ := json.Marshal(map[string]int{"read_a": 1000, "read_b": 1000})
+	dev := models.EdgeDevice{
+		Name: "cap", Type: "fake_multi", NodeID: "NODE-A", ChannelID: 1,
+		CommandIntervals: intervals,
+	}
+	if err := db.Create(&dev).Error; err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+
+	// PUT 换节点到低上限节点 → 400
+	body, _ := json.Marshal(map[string]interface{}{"node_id": "NODE-B", "channel_id": 2})
+	if w := rr2Do(t, r, "PUT", "/api/v1/edge-devices/1", string(body)); w.Code != http.StatusBadRequest {
+		t.Fatalf("PUT move expected 400 (capacity overflow), got %d: %s", w.Code, w.Body.String())
+	}
+	var afterMove models.EdgeDevice
+	db.First(&afterMove, dev.ID)
+	if afterMove.NodeID != "NODE-A" {
+		t.Errorf("被拒绝的换节点不应改动绑定，got node=%s", afterMove.NodeID)
+	}
+
+	// restore 到低上限节点 → 400
+	db.Delete(&dev)
+	body, _ = json.Marshal(map[string]interface{}{"node_id": "NODE-B", "channel_id": 2})
+	if w := rr2Do(t, r, "POST", "/api/v1/edge-devices/1/restore", string(body)); w.Code != http.StatusBadRequest {
+		t.Fatalf("restore expected 400 (capacity overflow), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEdgeDevice_MergeHistory_MultiSourceSameSensorNames — 2026-10-25 审核 F-04。
+// 「同型号的多台旧设备并进来」是最常见场景，两个源有同名 sensor_name 时旧实现用
+// 一条 UPDATE 搬全部源 ⇒ 撞复合主键 (device_id, sensor_name) ⇒ 台账永久不迁移。
+func TestEdgeDevice_MergeHistory_MultiSourceSameSensorNames(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	src2 := models.EdgeDevice{Name: "Old2", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	src3 := models.EdgeDevice{Name: "Old3", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&src2)
+	db.Create(&src3)
+	db.Delete(&src2)
+	db.Delete(&src3)
+
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	// 目标已有 rsoc；两个源都有 rsoc（与目标冲突）和 voltage（源之间同名、目标没有）。
+	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "rsoc", FirstSeen: t2, LastSeen: t2, Samples: 5})
+	db.Create(&models.SensorFieldObs{DeviceID: 2, SensorName: "rsoc", FirstSeen: t1, LastSeen: t1, Samples: 7})
+	db.Create(&models.SensorFieldObs{DeviceID: 2, SensorName: "voltage", FirstSeen: t1, LastSeen: t1, Samples: 10})
+	db.Create(&models.SensorFieldObs{DeviceID: 3, SensorName: "rsoc", FirstSeen: t1, LastSeen: t1, Samples: 8})
+	db.Create(&models.SensorFieldObs{DeviceID: 3, SensorName: "voltage", FirstSeen: t1, LastSeen: t2, Samples: 20})
+	// data_sources：两个源都有 voltage（源间同名），目标有 rsoc。
+	db.Create(&models.DataSource{EdgeDeviceID: 1, Category: "rsoc", Name: "t-rsoc", Status: "active", ManagedBy: "auto"})
+	db.Create(&models.DataSource{EdgeDeviceID: 2, Category: "voltage", Name: "s2-voltage", Status: "active", ManagedBy: "auto"})
+	db.Create(&models.DataSource{EdgeDeviceID: 3, Category: "voltage", Name: "s3-voltage", Status: "active", ManagedBy: "auto"})
+
+	code, resp := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2, 3}})
+	if code != http.StatusOK {
+		t.Fatalf("merge expected 200, got %d", code)
+	}
+	if len(resp.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none（台账必须真正迁移成功）", resp.Warnings)
+	}
+
+	var rsoc models.SensorFieldObs
+	if err := db.Where("device_id = ? AND sensor_name = ?", 1, "rsoc").First(&rsoc).Error; err != nil {
+		t.Fatalf("load rsoc: %v", err)
+	}
+	if rsoc.Samples != 20 {
+		t.Errorf("rsoc samples = %d, want 20 (5+7+8)", rsoc.Samples)
+	}
+	var voltage models.SensorFieldObs
+	if err := db.Where("device_id = ? AND sensor_name = ?", 1, "voltage").First(&voltage).Error; err != nil {
+		t.Fatalf("load voltage: %v", err)
+	}
+	if voltage.Samples != 30 {
+		t.Errorf("voltage samples = %d, want 30 (10+20)", voltage.Samples)
+	}
+	if !voltage.FirstSeen.Equal(t1) {
+		t.Errorf("voltage first_seen = %v, want %v", voltage.FirstSeen, t1)
+	}
+	var srcSFO, srcDS int64
+	db.Model(&models.SensorFieldObs{}).Where("device_id IN ?", []uint{2, 3}).Count(&srcSFO)
+	db.Model(&models.DataSource{}).Where("edge_device_id IN ?", []uint{2, 3}).Count(&srcDS)
+	if srcSFO != 0 || srcDS != 0 {
+		t.Errorf("source ledger rows left: sfo=%d data_sources=%d, want 0/0", srcSFO, srcDS)
+	}
+	var volDS int64
+	db.Model(&models.DataSource{}).Where("edge_device_id = ? AND category = ?", 1, "voltage").Count(&volDS)
+	if volDS != 1 {
+		t.Errorf("target voltage data_sources rows = %d, want 1", volDS)
+	}
+
+	// 重试幂等：不该再产生 warning 或行。
+	code, resp = rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2, 3}})
+	if code != http.StatusOK || resp.RowsMigrated != 0 || len(resp.Warnings) != 0 {
+		t.Errorf("retry = (%d, %+v), want (200, 0 rows, no warnings)", code, resp)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_PreservesManualDataSourceOnConflict — 审核 F-08：
+// data_sources 的 manual 行是人工配置（投影器永不覆盖），与目标同 category 冲突时
+// 必须保留并 warning，不能静默删除。
+func TestEdgeDevice_MergeHistory_PreservesManualDataSourceOnConflict(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	old := models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&old)
+	db.Delete(&old)
+	db.Create(&models.DataSource{EdgeDeviceID: 1, Category: "rsoc", Name: "t-rsoc", Status: "active", ManagedBy: "auto"})
+	db.Create(&models.DataSource{EdgeDeviceID: 2, Category: "rsoc", Name: "manual-rsoc", Status: "standby", ManagedBy: "manual"})
+
+	code, resp := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusOK {
+		t.Fatalf("merge expected 200, got %d", code)
+	}
+	if len(resp.Warnings) == 0 {
+		t.Errorf("warnings empty, want a manual-row conflict warning")
+	}
+	var manualLeft int64
+	db.Model(&models.DataSource{}).Where("edge_device_id = ? AND managed_by = ?", 2, "manual").Count(&manualLeft)
+	if manualLeft != 1 {
+		t.Errorf("manual data_sources row on source = %d, want 1（人工配置不得静默删除）", manualLeft)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RejectsPurgeClaimedSource — 审核 F-05：purge 已认领的
+// 源不能再合并（否则 purge 边删、merge 边搬，用户只救回一部分历史却拿到 200）。
+func TestEdgeDevice_MergeHistory_RejectsPurgeClaimedSource(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	old := models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&old)
+	db.Create(&models.UnifiedData{DeviceID: old.ID, SensorName: "voltage", Value: 1})
+	db.Delete(&old)
+	if err := db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", old.ID).
+		Updates(map[string]interface{}{
+			"data_purge_requested":  true,
+			"data_purge_started_at": time.Now(),
+		}).Error; err != nil {
+		t.Fatalf("seed purge claim: %v", err)
+	}
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusConflict {
+		t.Fatalf("merge with purge-claimed source expected 409, got %d", code)
+	}
+	var rows int64
+	db.Model(&models.UnifiedData{}).Where("device_id = ?", 2).Count(&rows)
+	if rows != 1 {
+		t.Errorf("source rows = %d, want 1（被拒绝的合并不许动数据）", rows)
+	}
+}
+
+// TestEdgeDevice_MergeHistory_RevokesPurgeRequestOfSource — 源只是「请求删数据」但
+// 尚未被 purge 认领时，合并要撤回删除意图（与 restore 同语义），否则救回的历史
+// 仍会被随后的 purge 任务清掉。
+func TestEdgeDevice_MergeHistory_RevokesPurgeRequestOfSource(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
+	old := models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1}
+	db.Create(&old)
+	db.Create(&models.UnifiedData{DeviceID: old.ID, SensorName: "voltage", Value: 1})
+	db.Delete(&old)
+	if err := db.Unscoped().Model(&models.EdgeDevice{}).Where("id = ?", old.ID).
+		Update("data_purge_requested", true).Error; err != nil {
+		t.Fatalf("seed latch: %v", err)
+	}
+
+	code, _ := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
+	if code != http.StatusOK {
+		t.Fatalf("merge expected 200, got %d", code)
+	}
+	var flag bool
+	db.Unscoped().Model(&models.EdgeDevice{}).Select("data_purge_requested").
+		Where("id = ?", old.ID).Scan(&flag)
+	if flag {
+		t.Errorf("data_purge_requested = true after successful merge, want false（合并即撤回删除意图）")
 	}
 }

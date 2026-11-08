@@ -29,7 +29,7 @@ func TestHandle_PrimaryBackupActiveMemberIDIsNotEdgeDeviceID(t *testing.T) {
 		},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(1, 10, true), dev(2, 10, true)},
+		Devices: []models.EdgeDevice{dev(1, true), dev(2, true)},
 		Groups:  []*sourceref.GroupSnapshot{g},
 	})
 	if len(handles) != 1 {
@@ -62,7 +62,7 @@ func TestHandle_PrimaryBackupNoActiveMember(t *testing.T) {
 		},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(5, 10, true)},
+		Devices: []models.EdgeDevice{dev(5, true)},
 		Groups:  []*sourceref.GroupSnapshot{g},
 	})
 	h := handles[0]

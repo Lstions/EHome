@@ -22,7 +22,7 @@ func rtDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.DataSource{}, &models.EdgeDevice{},
-		&models.LogicalDevice{}, &models.SourceGroup{}, &models.SensorFieldMeta{},
+		&models.SourceGroup{}, &models.SensorFieldMeta{},
 		&models.SensorFieldObs{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -39,12 +39,13 @@ func rtRouter(db *gorm.DB) *gin.Engine {
 type rtResp struct {
 	Data struct {
 		Items []struct {
-			Category    string   `json:"category"`
-			LabelZh     string   `json:"label_zh"`
-			ValueType   string   `json:"value_type"`
-			Unit        string   `json:"unit"`
-			LatestValue *float64 `json:"latest_value"`
-			AgeSec      *int     `json:"age_sec"`
+			EdgeDeviceID uint     `json:"edge_device_id"`
+			Category     string   `json:"category"`
+			LabelZh      string   `json:"label_zh"`
+			ValueType    string   `json:"value_type"`
+			Unit         string   `json:"unit"`
+			LatestValue  *float64 `json:"latest_value"`
+			AgeSec       *int     `json:"age_sec"`
 		} `json:"items"`
 	} `json:"data"`
 }
@@ -64,7 +65,7 @@ func rtFetch(t *testing.T, r *gin.Engine) rtResp {
 func TestOverview_FieldMetadata(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := rtDB(t)
-	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 14,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	db.Create(&models.SensorFieldMeta{SensorName: "rsoc", LabelZh: "电池剩余电量",
@@ -92,7 +93,7 @@ func TestOverview_FieldMetadata(t *testing.T) {
 func TestOverview_RealtimeValue(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := rtDB(t)
-	db.Create(&models.DataSource{DeviceID: 14, Category: "rsoc", EdgeDeviceID: 14,
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 14,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	SetLatestValue(models.UnifiedData{DeviceID: 14, SensorName: "rsoc", Value: 87,
@@ -118,7 +119,7 @@ func TestOverview_RealtimeValue(t *testing.T) {
 func TestOverview_ZeroValueIsNotMissing(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := rtDB(t)
-	db.Create(&models.DataSource{DeviceID: 1, Category: "alarm", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "alarm", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "alarm", Value: 0,
@@ -138,7 +139,7 @@ func TestOverview_ZeroValueIsNotMissing(t *testing.T) {
 func TestOverview_ValueTypeInferredWhenNoMeta(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := rtDB(t)
-	db.Create(&models.DataSource{DeviceID: 1, Category: "flag", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "flag", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "x", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "flag", Value: 1,
@@ -151,52 +152,53 @@ func TestOverview_ValueTypeInferredWhenNoMeta(t *testing.T) {
 	}
 }
 
-// TestOverview_RealtimeValueFromAuthoritativeMemberOnly 是**主备取值正确性**测试。
+// TestOverview_RealtimeValuesAreNotCrossedBetweenDevices 是**取值不串行**测试。
 //
 // # 它防什么
 //
-// 主备组里只有 active 成员在供数。若总览取"任意成员"的值，就会显示一个
-// 不供数的 standby 设备的读数 —— 用户会看到"这个来源的数据在变"，
-// 但变的其实是备机（它可能已经离线、数据停在几小时前）。
+// 字段目录按 (edge_device_id, category) 出**一行一个字段**。若实现把"哪个设备
+// 的读数"搞错（例如拿第一行的 edge_device_id 去取所有行的缓存），用户会在设备 A
+// 的字段行上看到设备 B 的读数 —— 数字看起来合理，但归属是错的，比空白更坏。
 //
 // # 为什么必须单独测
 //
-// 变异测试发现：只有单成员的用例无法暴露"没按 active 过滤"这个缺陷
-// （唯一成员恰好就是 active）。必须构造 1 active + 1 standby，
-// 且给 standby 一个**不同的**最新值，才能验证取的是 active 那个。
-func TestOverview_RealtimeValueFromAuthoritativeMemberOnly(t *testing.T) {
+// 单设备用例无法暴露"取错设备"：只有一个设备时取谁都对。必须让两台设备上报
+// **同一个字段名**、给**明显不同**的值, 才能验证归属。
+//
+// # 与已删用例的关系
+//
+// 2026-10-23（契约 §6）: 组键收敛为 (edge_device_id, category) 并带唯一索引,
+// 原用例「同一键两个成员, 取 active 成员的值」所依赖的**同键两行**已不可构造
+// （多设备供同一字段归来源组管）。取代它的是本用例: 两个**独立键**各自取值,
+// 谁都不得污染谁。
+func TestOverview_RealtimeValuesAreNotCrossedBetweenDevices(t *testing.T) {
 	defer resetLatestValueCacheForTest()
 	db := rtDB(t)
 
-	// 两个成员供同一来源：设备 1 = active（权威），设备 2 = standby
-	// ⚠ 刻意让 active 是**后**一个设备（ID 更大）：查询按 edge_device_id ASC 排序，
-	// 若实现取"第一个成员"而不是"active 成员"，就会拿到 standby 的值。
-	// 这个顺序安排是本测试有效性的关键 —— 反过来排会让缺陷被顺序掩盖。
-	db.Create(&models.DataSource{DeviceID: 10, Category: "rsoc", EdgeDeviceID: 1,
-		SourceType: "edge_device", Name: "a", Status: datasource.StatusStandby,
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 1,
+		SourceType: "edge_device", Name: "a", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
-	db.Create(&models.DataSource{DeviceID: 10, Category: "rsoc", EdgeDeviceID: 2,
+	db.Create(&models.DataSource{Category: "rsoc", EdgeDeviceID: 2,
 		SourceType: "edge_device", Name: "b", Status: datasource.StatusActive,
 		ManagedBy: models.DataSourceManagedAuto})
 
 	now := time.Now()
-	// active 的读数是 87，standby 的读数是 11（明显不同）
-	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "rsoc", Value: 11,
-		Timestamp: now})
-	SetLatestValue(models.UnifiedData{DeviceID: 2, SensorName: "rsoc", Value: 87,
-		Timestamp: now})
+	// 设备 1 = 11，设备 2 = 87（明显不同, 取错立刻可辨）。
+	SetLatestValue(models.UnifiedData{DeviceID: 1, SensorName: "rsoc", Value: 11, Timestamp: now})
+	SetLatestValue(models.UnifiedData{DeviceID: 2, SensorName: "rsoc", Value: 87, Timestamp: now})
 
 	body := rtFetch(t, rtRouter(db))
-	if len(body.Data.Items) != 1 {
-		t.Fatalf("items = %d, want 1（两个成员聚合为一个来源）", len(body.Data.Items))
+	if len(body.Data.Items) != 2 {
+		t.Fatalf("items = %d, want 2（两个设备各一行）", len(body.Data.Items))
 	}
-	it := body.Data.Items[0]
-	if it.LatestValue == nil {
-		t.Fatal("latest_value 为空")
-	}
-	if *it.LatestValue != 87 {
-		t.Fatalf("latest_value = %v, want 87（必须是 active 成员的值）—— "+
-			"取到 %v 说明没有按 active 过滤，会显示不供数的备机读数",
-			*it.LatestValue, *it.LatestValue)
+	want := map[uint]float64{1: 11, 2: 87}
+	for _, it := range body.Data.Items {
+		if it.LatestValue == nil {
+			t.Fatalf("设备 %d 的 latest_value 为空", it.EdgeDeviceID)
+		}
+		if exp := want[it.EdgeDeviceID]; *it.LatestValue != exp {
+			t.Fatalf("设备 %d latest_value = %v, want %v —— 取到了别的设备的读数",
+				it.EdgeDeviceID, *it.LatestValue, exp)
+		}
 	}
 }

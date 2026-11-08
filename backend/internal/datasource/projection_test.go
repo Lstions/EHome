@@ -36,8 +36,6 @@ func projSvc(db *gorm.DB) *Service {
 	return New(db, Options{Now: func() time.Time { return now }})
 }
 
-func logical(id uint) *uint { return &id }
-
 // ---------- 基本派生：空表变有数据 ----------
 
 // TestReconcile_CreatesRowsFromDevices 是本次改造的核心断言：
@@ -47,7 +45,7 @@ func TestReconcile_CreatesRowsFromDevices(t *testing.T) {
 	svc := projSvc(db)
 
 	dev := models.EdgeDevice{ID: 14, Name: "bms", Type: "jiabaida_bms",
-		NodeID: "n1", Enabled: true, LogicalDeviceID: logical(14)}
+		NodeID: "n1", Enabled: true}
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +93,7 @@ func TestReconcile_Idempotent(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(1)})
+		Enabled: true})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "a"})
 
 	in, _ := svc.DeriveInputFrom(context.Background())
@@ -125,7 +123,7 @@ func TestReconcile_DisablesStaleRowsInsteadOfDeleting(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(1)})
+		Enabled: true})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "a"})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "b"})
 
@@ -175,12 +173,12 @@ func TestReconcile_NeverOverwritesManual(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)})
+		Enabled: true})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "rsoc"})
 
 	// 用户手工建了一条，状态 standby、名字自定义
 	manual := models.DataSource{
-		DeviceID: 10, Category: "rsoc", EdgeDeviceID: 1,
+		Category: "rsoc", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "我手工起的名字",
 		Status: StatusStandby, ManagedBy: models.DataSourceManagedManual,
 	}
@@ -221,10 +219,10 @@ func TestReconcile_ManualAndAutoCoexist(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)})
+		Enabled: true})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "x"})
 
-	db.Create(&models.DataSource{DeviceID: 10, Category: "x", EdgeDeviceID: 1,
+	db.Create(&models.DataSource{Category: "x", EdgeDeviceID: 1,
 		SourceType: "edge_device", Name: "manual", Status: StatusActive,
 		ManagedBy: models.DataSourceManagedManual})
 
@@ -246,9 +244,9 @@ func TestReconcile_PrimaryBackupMarksActiveAndStandby(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d1", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)})
+		Enabled: true})
 	db.Create(&models.EdgeDevice{ID: 2, Name: "d2", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(10)})
+		Enabled: true})
 
 	g := &sourceref.GroupSnapshot{
 		ID: 7, Kind: "primary_backup", Category: "v", Enabled: true,
@@ -262,8 +260,8 @@ func TestReconcile_PrimaryBackupMarksActiveAndStandby(t *testing.T) {
 	}
 	handles := source.Derive(source.DeriveInput{
 		Devices: []models.EdgeDevice{
-			{ID: 1, Name: "d1", Enabled: true, LogicalDeviceID: logical(10)},
-			{ID: 2, Name: "d2", Enabled: true, LogicalDeviceID: logical(10)},
+			{ID: 1, Name: "d1", Enabled: true},
+			{ID: 2, Name: "d2", Enabled: true},
 		},
 		Groups: []*sourceref.GroupSnapshot{g},
 	})
@@ -290,12 +288,17 @@ func TestReconcile_PrimaryBackupMarksActiveAndStandby(t *testing.T) {
 
 // ---------- 边界 ----------
 
-// TestReconcile_UnboundDeviceProducesNoRows 验证未绑逻辑设备的设备不产生行。
-func TestReconcile_UnboundDeviceProducesNoRows(t *testing.T) {
+// TestReconcile_DeviceWithoutObservationProducesNoRows 验证「无观测 ⇒ 无来源」。
+//
+// 历史：本用例曾是 TestReconcile_UnboundDeviceProducesNoRows（未绑逻辑设备的设备
+// 不产生行）。逻辑设备概念层已移除，组键回到 (edge_device_id, category)：
+// 现在没有中间层可缺，唯一的「不产生来源」理由是**这台设备从未观测到任何字段**
+// （sensor_field_obs 里没有它的行）—— 没有类别就构不成一条数据来源。
+func TestReconcile_DeviceWithoutObservationProducesNoRows(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n", Enabled: true})
-	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "a"})
+	// 注意：不写 SensorFieldObs。
 
 	in, _ := svc.DeriveInputFrom(context.Background())
 	res, err := svc.ReconcileDerived(context.Background(), source.Derive(in))
@@ -303,7 +306,7 @@ func TestReconcile_UnboundDeviceProducesNoRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Total != 0 || res.Created != 0 {
-		t.Errorf("未绑逻辑设备的设备不应产生来源，Total=%d Created=%d", res.Total, res.Created)
+		t.Errorf("从未观测到字段的设备不应产生来源，Total=%d Created=%d", res.Total, res.Created)
 	}
 }
 
@@ -312,14 +315,15 @@ func TestReconcile_EmptyHandlesDisablesAll(t *testing.T) {
 	db := projDB(t)
 	svc := projSvc(db)
 	db.Create(&models.EdgeDevice{ID: 1, Name: "d", Type: "t", NodeID: "n",
-		Enabled: true, LogicalDeviceID: logical(1)})
+		Enabled: true})
 	db.Create(&models.SensorFieldObs{DeviceID: 1, SensorName: "a"})
 
 	in, _ := svc.DeriveInputFrom(context.Background())
 	svc.ReconcileDerived(context.Background(), source.Derive(in))
 
-	// 设备解绑逻辑身份 ⇒ 期望态空
-	db.Model(&models.EdgeDevice{}).Where("id = ?", 1).Update("logical_device_id", nil)
+	// 观测事实消失 ⇒ 期望态空（逻辑身份层已删除，现在唯一能让来源消失的
+	// 事实变化就是「这台设备不再观测到任何字段」）。
+	db.Where("device_id = ?", 1).Delete(&models.SensorFieldObs{})
 	in2, _ := svc.DeriveInputFrom(context.Background())
 	res, err := svc.ReconcileDerived(context.Background(), source.Derive(in2))
 	if err != nil {

@@ -6,8 +6,10 @@ package api
 //   - 五态绑定非法输入（models.ValidateSourceRefColumns）× API 400 + error_code；
 //   - 组不存在 / 组停用 / 空组（锚点=0）/ cooldown 低于推导下限 ⇒ 400；
 //   - 合法绑组 ⇒ 200 且锚点双写（automation trigger_edge_device_id；alert target_type/target_id）；
-//   - 边缘设备被组引用 ⇒ 单删/批量删 409，文案含组名；移除成员后可删；
-//   - 逻辑设备（经其下边缘设备）被组引用 ⇒ 合并 409。
+//   - 边缘设备被组引用 ⇒ 单删/批量删/停用 409，文案含组名；移除成员后放行。
+//
+// 2026-10-23（逻辑设备概念层移除，契约 §3）: 原「逻辑设备（经其下边缘设备）被组
+// 引用 ⇒ 合并 409」这条覆盖整组删除 —— 守卫函数与逻辑设备路由都不存在了。
 //
 // 数据库用 SQLite 内存库（setupTestDB），组表与规则表按域自补 AutoMigrate。
 
@@ -57,7 +59,6 @@ func newSourceGroupGuardAPI(t *testing.T) (*gin.Engine, *gorm.DB, *datasource.Gr
 	drivers.RegisterBuiltInDrivers(driverRegistry)
 	nodeMgr := nodemgr.NewManager(db, nil, nil, nil, nil, driverRegistry)
 	registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry)
-	registerLogicalDeviceRoutes(v1, db)
 	return r, db, gsvc
 }
 
@@ -388,39 +389,14 @@ func TestEdgeDeviceDisableReferencedByGroup(t *testing.T) {
 	}
 }
 
-// 4) 逻辑设备（经其下边缘设备间接判断）被组引用 ⇒ 合并 409。
-func TestLogicalDeviceDeleteReferencedByGroup(t *testing.T) {
-	r, db, gsvc := newSourceGroupGuardAPI(t)
-	ld := models.LogicalDevice{Name: "逻辑设备-1"}
-	if err := db.Create(&ld).Error; err != nil {
-		if err := db.Create(&models.LogicalDevice{Name: "逻辑设备-1"}).Error; err != nil {
-			t.Fatalf("create logical device: %v", err)
-		}
-	}
-	var loaded models.LogicalDevice
-	db.Last(&loaded)
-	ed := createGuardEdgeDevice(t, db, "light-ld")
-	ed.LogicalDeviceID = &loaded.ID
-	if err := db.Save(&ed).Error; err != nil {
-		t.Fatalf("set logical_device_id: %v", err)
-	}
-	group := createGuardGroup(t, gsvc, "组-逻辑引用", ed)
-
-	status, env := doGuardJSON(t, r, http.MethodPost, "/api/v1/logical-devices/merge",
-		map[string]any{"target_name": "合并目标", "source_ids": []uint{loaded.ID}})
-	if status != http.StatusConflict {
-		t.Fatalf("expected 409, got %d %v", status, env)
-	}
-	msg, _ := env["message"].(string)
-	if !strings.Contains(msg, group.Name) {
-		t.Fatalf("409 message must contain group name %q, got %q", group.Name, msg)
-	}
-
-	// 移除成员后守卫放行（直接断言 helper，不依赖 MergeDevices 的其它校验）。
-	if err := db.Where("group_id = ?", group.ID).Delete(&models.SourceGroupMember{}).Error; err != nil {
-		t.Fatalf("remove member: %v", err)
-	}
-	if info, err := findGroupReferencesByLogicalDevice(db, loaded.ID); err != nil || !info.empty() {
-		t.Fatalf("after member removal references must be empty, got %+v err=%v", info, err)
-	}
-}
+// 4) 〔已删除〕原「逻辑设备被组引用 ⇒ 合并 409」用例。
+//
+// 2026-10-23（逻辑设备概念层移除，契约 §3）: 该用例断言的是
+// `POST /api/v1/logical-devices/merge` 在逻辑设备被来源组引用时返回 409，并直接
+// 调用 `findGroupReferencesByLogicalDevice` 复检。端点、守卫函数、`logical_device_id`
+// 列三者全部随概念层删除，因此整条用例一并删除 —— 保留任何等价断言都需要
+// 「逻辑设备」这个对象，而它正是本次要消灭的东西。
+//
+// 边缘设备维度的等价保护仍在：见上面的 TestEdgeDeviceDeleteReferencedByGroup /
+// TestEdgeDeviceDisableReferencedByGroup（单删/停用 409）与批量删除守卫
+// （guardEdgeDevicesBatchDelete，由 handler_edge_device.go 的批量删除路径调用）。

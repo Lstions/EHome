@@ -82,8 +82,6 @@ type Field struct {
 type Sample struct {
 	// EdgeDeviceID 是产出该帧的边缘设备（= unified_data.device_id 口径）。
 	EdgeDeviceID uint
-	// LogicalDeviceID 是设备绑定的逻辑身份（nil = 未绑定，存量数据兼容）。
-	LogicalDeviceID *uint
 	// At 是解析时刻。
 	At time.Time
 	// Fields 解析出的字段集合（非空 —— 空结果按失败处理，见 ReasonEmptyResult）。
@@ -149,8 +147,6 @@ type DecodeContext struct {
 	EdgeDevice models.EdgeDevice
 	// Raw 是已重组的完整帧字节。
 	Raw []byte
-	// LogicalDeviceID 是设备绑定的逻辑身份（可为 nil）。
-	LogicalDeviceID *uint
 	// At 是解析时刻（由调用方给定，保证同一帧内多处使用同一时间）。
 	At time.Time
 	// ConfigParserJSON 是 DeviceConfig.parser 原始 JSON（仅 ConfigParser adapter 用）。

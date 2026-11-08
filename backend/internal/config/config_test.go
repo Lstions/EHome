@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -185,6 +186,7 @@ func TestDeviceControlV2EnabledByDefault(t *testing.T) {
 
 func TestDataRetentionDays(t *testing.T) {
 	// 默认 90
+	t.Setenv("EHOME_DATA_RETENTION_DAYS", "")
 	cfg := Load()
 	if got := cfg.DataRetentionDays(); got != DefaultDataRetentionDays {
 		t.Errorf("expected default %d, got %d", DefaultDataRetentionDays, got)
@@ -197,13 +199,35 @@ func TestDataRetentionDays(t *testing.T) {
 		t.Errorf("expected 30 from env, got %d", got)
 	}
 
-	// 非法值 (非数字 / 非正数) 被拒绝, 回落默认
-	for _, bad := range []string{"not-a-number", "0", "-5"} {
+	// 0 = 永久保留（2026-11-07 用户裁决「所有数据要长期保留」）。
+	// 改造前 0 被当成非法值回落 90，而 datalifecycle 又把它兜底成 1 天 ——
+	// 「设 0 想永久保留」反而删得更狠，是本轮修掉的反向 bug。
+	t.Setenv("EHOME_DATA_RETENTION_DAYS", "0")
+	cfg = Load()
+	if got := cfg.DataRetentionDays(); got != 0 {
+		t.Errorf("EHOME_DATA_RETENTION_DAYS=0 应为永久保留（DataRetentionDays()=0）, got %d", got)
+	}
+
+	// 非法值 (非数字 / 负数) 被拒绝, 回落默认。
+	// 负数单独留在外面: 它**不是**「比永久更永久」，而是配置写错（shell 变量没展开、
+	// 减一过头），把笔误变成「再也不清理」的静默事故比回落默认危险得多。
+	for _, bad := range []string{"not-a-number", "-5"} {
 		t.Setenv("EHOME_DATA_RETENTION_DAYS", bad)
 		cfg = Load()
 		if got := cfg.DataRetentionDays(); got != DefaultDataRetentionDays {
 			t.Errorf("invalid %q accepted as %d, want default %d", bad, got, DefaultDataRetentionDays)
 		}
+	}
+
+	// 访问器对负值也归一（对方可能绕过 env 直接构造 Config）。
+	raw := &Config{DataRetention: DataRetentionConfig{Days: -1}}
+	if got := raw.DataRetentionDays(); got != DefaultDataRetentionDays {
+		t.Errorf("负值配置 = %d, want default %d", got, DefaultDataRetentionDays)
+	}
+	// 零值配置则是合法的「永久」（不能因为「没填」就当成永久 —— 但也不能拒绝 0）。
+	zero := &Config{DataRetention: DataRetentionConfig{Days: 0}}
+	if got := zero.DataRetentionDays(); got != 0 {
+		t.Errorf("零值配置 = %d, want 0（0 = 永久保留是合法值）", got)
 	}
 }
 
@@ -305,3 +329,69 @@ func TestLoadDeviceListenerFromEnv(t *testing.T) {
 	}
 }
 
+// ==================== 遥测心跳参数配置门禁 ====================
+//
+// 出处: docs/设计/遥测存储优化方案-2026-11-06.md §3.1 / §7 阶段1；
+//       docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.1。
+//
+// 2026-11-07 起 L1 收窄**无条件生效**，write_on_change / rollup_write 两个开关
+// 已从配置层删除（连同环境变量）。因此这里只剩心跳参数的三条守则:
+//  1. 默认 60s，且 Heartbeat() 归一化后与之一致;
+//  2. env 能覆盖，解析失败时静默保持默认（与本文件既有 env 口径一致）;
+//  3. 心跳永远归一化到 (0, 24h] —— 0 / 负数 / 荒谬大值都不得让心跳静默失效。
+//
+// 「开关确实没了」这件事由 databus 包的 TestNoTelemetrySwitchesExist 做源码级
+// 门禁（扫描整个 backend/ 树），不在这里重复。
+
+func TestTelemetryDefaultsToHeartbeat60s(t *testing.T) {
+	// 刻意清空变量: 环境里残留的覆盖会让「默认 60s」的断言失去意义。
+	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "")
+	cfg := Load()
+	if got := cfg.Telemetry.HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
+		t.Errorf("默认心跳 = %d, want %d", got, DefaultTelemetryHeartbeatSeconds)
+	}
+	if got := cfg.Telemetry.Heartbeat(); got != DefaultTelemetryHeartbeatSeconds*time.Second {
+		t.Errorf("Heartbeat() = %v, want %ds", got, DefaultTelemetryHeartbeatSeconds)
+	}
+}
+
+func TestTelemetryHeartbeatEnvOverride(t *testing.T) {
+	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "120")
+	cfg := Load()
+	if got := cfg.Telemetry.HeartbeatSeconds; got != 120 {
+		t.Errorf("心跳 = %d, want 120", got)
+	}
+	if got := cfg.Telemetry.Heartbeat(); got != 120*time.Second {
+		t.Errorf("Heartbeat() = %v, want 120s", got)
+	}
+}
+
+// TestTelemetryHeartbeatEnvRejectsGarbage 守「解析失败保持默认」：一个拼写错误
+// 不能把心跳静默变成 0（= 每次必写，等于收窄功能失效）。
+func TestTelemetryHeartbeatEnvRejectsGarbage(t *testing.T) {
+	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "not-a-number")
+	if got := Load().Telemetry.HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
+		t.Errorf("非法心跳被接受为 %d, want 默认 %d", got, DefaultTelemetryHeartbeatSeconds)
+	}
+	// 非正数同样拒绝（Heartbeat() 会把 0 归一成默认，但配置层不该接受这个值）。
+	for _, bad := range []string{"0", "-5"} {
+		t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", bad)
+		if got := Load().Telemetry.HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
+			t.Errorf("非法心跳 %q 被接受为 %d, want 默认 %d", bad, got, DefaultTelemetryHeartbeatSeconds)
+		}
+	}
+}
+
+// TestTelemetryHeartbeatClamped 守上界钳制: 心跳不得大于 24h。
+func TestTelemetryHeartbeatClamped(t *testing.T) {
+	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "99999999")
+	cfg := Load()
+	if got := cfg.Telemetry.Heartbeat(); got != maxTelemetryHeartbeatSeconds*time.Second {
+		t.Errorf("心跳钳制 = %v, want %v", got, maxTelemetryHeartbeatSeconds*time.Second)
+	}
+	// YAML / 手工构造的零值同样归一（访问器兜底，不依赖 defaultConfig 是否被调用）。
+	raw := &Config{}
+	if got := raw.TelemetrySettings().HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
+		t.Errorf("零值配置心跳 = %d, want %d", got, DefaultTelemetryHeartbeatSeconds)
+	}
+}

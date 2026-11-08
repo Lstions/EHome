@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/ingest"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/pendingwrite"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -148,12 +148,54 @@ type SensorParserConsumer struct {
 	// sourceHealthSink 数据源健康 (设计/数据源主备与故障转移.md §4): 解析成功回调。
 	// 参数一: 边缘设备 ID; 参数二: 本次解析出的敏感量名; 参数三: 时间。
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
+	// telemetryRollupSink 是 L3 分钟级宽行预聚合的**旁路**采样回调
+	// (设计/遥测存储优化方案-2026-11-06.md §5.2, 接线 patch: docs/分析/遥测rollup-L3-接线patch-2026-11-06.md)。
+	//
+	// 与上面四个 sink 的差别: 它只在内存里累加, **不碰数据库** (分钟切换才落库,
+	// 由 collector 自己的 flush 驱动)。因此可以在「不写库」的分支上调用。
+	//
+	// 与 L1 收窄的关系 (接错位置会静默错数): L1 跳过 INSERT 的帧**仍然必须**调它 ——
+	// 把它理解成「喂给统计器」而不是「落库」。若接在「写库成功」分支里, 被跳过的帧
+	// 就不进分钟均值 ⇒ rollup 与原始表口径漂移, 而这个漂移没有任何告警会暴露
+	// (图表看起来正常, 只是数字偏了)。
+	telemetryRollupSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
 	// ingestResolver 是 L1 接入层的解析入口 (数据流架构 v1 §3)。
 	//
 	// 为什么是接口而不是直接 import internal/ingest 的两个 adapter：
 	// 让本文件不知道「有哪些解析后端」—— 新增后端时本文件零改动（改造目标）。
 	// nil 时退化为 fail-closed（no_adapter 审计），绝不静默丢弃。
 	ingestResolver *ingest.Resolver
+	// writeGate 是 L1「值不变不入库 + 心跳」的决策器与进程内状态表
+	// (设计/遥测存储优化方案-2026-11-06.md §3, 阶段1)。
+	//
+	// nil 安全: 未装配时 filter 退化为「全量写」，与改造前行为逐字节相同
+	// (手工构造 consumer 的测试不会被静默改变语义)。
+	writeGate *telemetryWriteGate
+	// telemetrySink 是 L2 帧级增量编码的双写旁路
+	// (设计/遥测存储-L2双写接线patch-2026-11-06.md; 方案 §7 阶段2 第2步)。
+	//
+	// nil 安全: 未接线时整条旁路不存在, 行为与改造前逐字节相同。
+	// 接线方构造方式: telemetry.SinkOrNil(dualWriter) —— 开关关闭时得到 nil。
+	//
+	// 类型用 telemetry.Sink (= func(uint, time.Time, int64, []Reading)) 而不是
+	// []parser.Field: 该包不能 import pkg/parser (依赖方向), 转换在本文件做一次。
+	telemetrySink telemetry.Sink
+	// unifiedWriteEnabled 是 **unified_data 历史写入**的停写开关（EHOME_TELEMETRY_UNIFIED_WRITE）。
+	//
+	// 停的**只**是 unified_data 的 INSERT（以及随之的 L1 commit）。L2 帧表、L3 分钟桶、
+	// 最新值缓存、告警/自动化回调**全部照常** —— 它们的调用点在门控之前。
+	//
+	// 为什么门控位置必须在 latestSink 之后、writeGate.filter 之前：
+	//
+	//	A. 只跳 db.Create => writeGate.commit 永不调用 => g.last 不推进
+	//	   => 每帧都被判 First => 指标失真（filter 的统计也失去意义）
+	//	B. 跳 writeGate.filter + db.Create => 缓存/帧表/rollup 全活 => **正确**
+	//	C. 跳过整段（含 telemetrySink/rollupSink/latestSink）=> L2/L3 一起死
+	//	   => **正是优化的意义被干掉**，而症状「图表没数据」看起来像「停写生效了」
+	//
+	// 构造时读取（不运行时可写）：避免运行时热切换引入 data race
+	// （2026-11-07 DualWriter 那个教训：字段被并发读写）。
+	unifiedWriteEnabled bool
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -182,6 +224,11 @@ func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, reas
 		// 因此默认装配内置两个 adapter，main.go 的 SetIngestResolver 只用于
 		// 定制顺序或注入额外 adapter（而非"是否启用"）。
 		ingestResolver: defaultIngestResolver(driverRegistry),
+		// L1 写入收窄 (方案 §7 阶段1): 策略从 config 解析一次 (本仓无热加载)。
+		// 默认 write_on_change=false ⇒ **影子模式**: 照常全量写, 只统计
+		// 「本可跳过多少行」, 升级镜像后写入行为与改造前完全一致。
+		writeGate:           newTelemetryWriteGate(resolveTelemetryWritePolicy()),
+		unifiedWriteEnabled: resolveUnifiedWriteEnabled(),
 	}
 	if len(deviceActivity) > 0 {
 		consumer.deviceActivity = deviceActivity[0]
@@ -222,6 +269,29 @@ func (c *SensorParserConsumer) SetSourceHealthSink(sink func(edgeDeviceID uint, 
 	c.sourceHealthSink = sink
 }
 
+// SetTelemetryRollupSink 注入 L3 分钟级预聚合采样回调
+// (方案 §5.2; 接线 patch: docs/分析/遥测rollup-L3-接线patch-2026-11-06.md)。
+//
+// 与 alertSink/automationSink 同形 (同一次解析后的字段 + 同一时刻) —— 复用既有范式,
+// 不新创机制。nil 时跳过 (未接线 ⇒ 行为与今天完全一致)。
+//
+// 命名注意: **不要**取名 SetRollupSink / rollupSink —— 那两个名字是
+// datalifecycle/rollup_retirement_gate_test.go 的 rollupGateRetiredSymbols 里的
+// 已退役符号 (旧 unified_data_rollup_1m 的写入件), 用它会把源码门禁判红。
+func (c *SensorParserConsumer) SetTelemetryRollupSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
+	c.telemetryRollupSink = sink
+}
+
+// SetTelemetrySink 注入 L2 帧级编码的双写旁路
+// (方案 §7 阶段2 第2步; 接线 patch: docs/设计/遥测存储-L2双写接线patch-2026-11-06.md)。
+//
+// 为什么是 setter 而不是构造函数参数: 与既有 4 个 Set*Sink 同一范式。
+// 为什么零成本: 这里不做任何构造/查库, 只存一个函数值 —— 接线方（main.go）
+// 无条件构造双写器并注入, 数据面不为它付任何每帧开销。
+func (c *SensorParserConsumer) SetTelemetrySink(sink telemetry.Sink) {
+	c.telemetrySink = sink
+}
+
 // SetIngestResolver 注入 L1 接入层解析器 (数据流架构 v1 §3.2, main.go 接线)。
 //
 // 为什么用 setter 而不是构造函数参数：既有 4 个 Set*Sink 都是这个模式，
@@ -229,6 +299,18 @@ func (c *SensorParserConsumer) SetSourceHealthSink(sink func(edgeDeviceID uint, 
 // nil 表示未接线：consumer 会按 no_adapter 落审计，不会 panic、不会静默丢弃。
 func (c *SensorParserConsumer) SetIngestResolver(r *ingest.Resolver) {
 	c.ingestResolver = r
+}
+
+// SetTelemetryHeartbeat 覆盖 L1 写入收窄的心跳间隔（方案 §3.1）。
+//
+// 为什么既读 config 又留 setter: 生产路径从 config.Load() 取（与
+// nodemgr.parserShardCount 同范式，本仓无热加载）；而这个 setter 让测试能固定
+// 时间语义（包级 override 会跨用例串味）。
+//
+// 没有「关闭收窄」这个入参：2026-11-07 起 L1 无条件生效（契约 §1），收窄没有关闭态。
+// heartbeat <= 0 时回落到 60s（调用方不该靠 0 表达"无心跳"，那会让跳过无上界）。
+func (c *SensorParserConsumer) SetTelemetryHeartbeat(heartbeat time.Duration) {
+	c.writeGate = newTelemetryWriteGate(telemetryWritePolicy{heartbeat: heartbeat})
 }
 
 // HasSourceHealthSink 报告解析成功健康回调是否已注入 (接线测试只读辅助;
@@ -317,7 +399,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	//   1. 标定驱动绝不被 ConfigParser 绕过（adapter 注册顺序 + Supports 保证）
 	//   2. 标定/命令上下文的查询只在对应分支发生（DecodeContext.DriverContextFn 惰性）
 	//   3. Sample.Method 字符串与原 parseMethod 完全一致（历史日志可比）
-	outcome := c.decodeFrame(device, merged, nil, time.Now(), evt.CommandTemplateID)
+	outcome := c.decodeFrame(device, merged, time.Now(), evt.CommandTemplateID)
 	if !outcome.ok() {
 		reason := outcome.FailReason
 		if ingestReasonIsConfigDefect(reason) {
@@ -340,50 +422,125 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Parse succeeded — consume reassembly buffer
 	c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 
-	// 写入双写 (§八): logical_device_id = 实例逻辑身份经 followMergeChain
-	// 解析到最终目标 (v3.2-F1: 写入与查询同链 — 合并进行中实例仍在写入时,
-	// 数据直接落目标, 不产生"目标缺新数据"窗口)。无逻辑身份的实例
-	// (backfill 前旧数据) 保持 NULL, 由 dataScopeCondition 的 OR 回退分支
-	// 按 device_id 兜住。解析失败时同样落 NULL + warn: device_id 血缘仍在,
-	// 查询/清理的 OR 分支照常覆盖, 不丢数据。
-	var logicalTarget *uint
-	if device.LogicalDeviceID != nil && *device.LogicalDeviceID > 0 {
-		target, err := datalifecycle.ResolveMergeTarget(c.db, *device.LogicalDeviceID)
-		if err != nil {
-			logger.Warn("databus: resolve merge target failed; writing logical_device_id NULL",
-				"consumer", c.Name(), "edge_device_id", device.ID,
-				"logical_device_id", *device.LogicalDeviceID, "error", err)
-		} else if target > 0 {
-			logicalTarget = &target
-		}
-	}
+	// 写入口径（2026-10-23 逻辑设备层移除后）：
+	//
+	// unified_data/device_data 只有 device_id = **边缘设备 ID** 一个归属口径。
+	// 历史上有第二个列 logical_device_id（= 经 followMergeChain 解析到的逻辑身份），
+	// 它带来两个固定成本：每帧一次 SQL 往返（ResolveMergeTarget），以及
+	// 「写入列与查询列可能不一致」的双口径风险。逻辑设备概念层删除后两列一并
+	// DROP（.contract/logical-device-removal.md §2），写入路径不再有任何身份解析。
+	//
+	// 换节点连续性由 edge_devices.id 保证：原地改 node/channel 不换 id ⇒ 历史天然连续；
+	// 换成了新设备行则由 merge-history 做数据级迁移（§4.3）。
 
 	// Store parsed data
+	//
+	// ==================== L1 写入收窄（方案 §7 阶段1）====================
+	// 规则（docs/设计/遥测存储优化方案-2026-11-06.md §3.1）: 某 (设备, 字段) 的值与
+	// 「上次**已落库**值」相同、且距上次落库不足心跳间隔 ⇒ 跳过 INSERT；
+	// 值变化 ⇒ 必写；距上次落库 ≥ 心跳 ⇒ 强制写一帧。
+	//
+	// 三处**必须**如此的原因（每一处都对应方案 §3.3 的一行副作用）:
+	//  1. latestSink 提到 INSERT **之前**且不受写库结果门控 —— 被跳过的帧同样要更新
+	//     最新值缓存/告警/自动化/WS。改造前它挂在「Create 成功的 else 分支」上，
+	//     跳过就会让缓存冻结在旧值（用户看到"数据不动了"，而 WS 还在推新值）。
+	//     这一条与写库成败无关: 缓存表达的是"设备当前状态"，不是"库里有几行"。
+	//  2. 写库**失败不推进状态** —— 否则新值被记成"已落库"，后续同值帧全被判成
+	//     "未变化"而跳过，该值永久丢失（方案 §3.3「缓存一致性」）。
+	//  3. 首帧全量写 —— 状态表是进程内的，重启后为空 ⇒ 每个字段第一次见到都必写
+	//     （方案 §3.3「进程重启」）。
+	//
+	// 默认 write_on_change=false = **影子模式**: 照常全量写，只统计「本可跳过多少行」
+	// 并打点（ehome_telemetry_write_gate_rows_total{mode="shadow",decision="skip"}），
+	// 核对命中率后再开（方案 §7 阶段1）。
+	// =================================================================
 	now := time.Now()
+
+	// ==================== 解析成功路径上的两个旁路 sink ====================
+	// 位置刻意选在「now 算好之后、写库之前」，**不能**放进下面 Create 的成功分支:
+	//
+	//   · L2 帧级编码 (§7 阶段2 第2步): L1 开启 write_on_change 后被跳过入库的帧
+	//     仍然是一次真实采样，必须进帧表 —— 否则增量链出现空洞，60s 内心跳窗口
+	//     内的变化值**永久丢失**（是数据损失，不是压缩损失）。
+	//   · L3 分钟桶聚合 (§5.2): 同理，被跳过的帧若不进分钟桶，rollup 的
+	//     avg/min/max 会漏掉真实样本，与原始表口径漂移且**没有任何告警**会暴露。
+	//
+	// 三条共同不变量: ① sink 为 nil 即完全跳过（默认关闭，零成本）；
+	// ② 两者内部都是有界队列/内存累加，绝不阻塞本函数；③ 失败只计数+日志，
+	// 不影响主写入。因此这里既不判返回值、也不需要 recover。
+	// ===================================================================
+	if c.telemetrySink != nil && len(sensorData) > 0 {
+		readings := make([]telemetry.Reading, len(sensorData))
+		for i := range sensorData {
+			readings[i] = telemetry.Reading{Name: sensorData[i].Name, Value: sensorData[i].Value}
+		}
+		// commandTemplateID 不能省: 它是 device15 那 7 种帧类型（3/14/2/5/5/9/4 字段）
+		// 的唯一可靠判据，省掉会把不同指令的值写进同一 slot（方案 §4.4 的 ⚠）。
+		c.telemetrySink(device.ID, now, int64(evt.CommandTemplateID), readings)
+	}
+	if c.telemetryRollupSink != nil && len(sensorData) > 0 {
+		c.telemetryRollupSink(device.ID, sensorData, now)
+	}
+
 	records := make([]models.UnifiedData, 0, len(sensorData))
 	for _, sd := range sensorData {
 		records = append(records, models.UnifiedData{
-			DeviceID:        device.ID,
-			LogicalDeviceID: logicalTarget,
-			SensorName:      sd.Name,
-			Value:           sd.Value,
-			Unit:            sd.Unit,
-			Timestamp:       now,
+			DeviceID:   device.ID,
+			SensorName: sd.Name,
+			Value:      sd.Value,
+			Unit:       sd.Unit,
+			Timestamp:  now,
 		})
 	}
 	if len(records) > 0 {
-		if err := c.db.Session(&gorm.Session{}).Create(&records).Error; err != nil {
-			metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
-			logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
-		} else if c.latestSink != nil {
-			// 数据层时序化 (v3.2.4): 持久化成功后更新最新值缓存
-			// (回调注入, 保持 databus 不依赖 api 包)。
-			// 注: 原 rollupSink 分支已于 2026-09-15 随 rollup 表退役删除; 注意该分支
-			// 原本还**门控**着 latestSink —— 退役时有意把 latestSink 提为独立条件,
-			// 消除"未注入 rollup ⇒ 最新值缓存永不更新"的隐藏耦合 (裁决见
-			// docs/分析/rollup-退役裁决-2026-09-15.md §5)。
+		// (1) 先更新最新值缓存（与写库结果无关；被跳过的帧也必须更新）。
+		// 注: 原 rollupSink 分支已于 2026-09-15 随 rollup 表退役删除; 注意该分支
+		// 原本还**门控**着 latestSink —— 退役时有意把 latestSink 提为独立条件,
+		// 消除"未注入 rollup ⇒ 最新值缓存永不更新"的隐藏耦合 (裁决见
+		// docs/分析/rollup-退役裁决-2026-09-15.md §5)。
+		if c.latestSink != nil {
 			for i := range records {
 				c.latestSink(records[i])
+			}
+		}
+
+		// ── 停写开关（EHOME_TELEMETRY_UNIFIED_WRITE=false，2026-11-08）──
+		//
+		// 门控位置**必须在 latestSink 之后**：最新值缓存是「运行时状态」，要继续更新，
+		// 否则停写后 /latest-data 会退化成「最后一次上报的值」，而那个值会越来越旧。
+		//
+		// 也**必须**在 telemetrySink / telemetryRollupSink 之后：那两条是 L2 帧表与 L3 分钟桶，
+		// 正是「停掉 unified_data」之后要接手的数据源。把它们一起闸掉就是
+		// 「优化的意义被干掉」，而症状「图表没数据」看起来却像「停写生效了」。
+		//
+		// 同时跳过 writeGate.filter/commit：
+		//	· filter 只产生「要写哪些行」的决策，既然不写就不必算；
+		//	· commit 的语义是「这些行已落库」。不写就不能 commit，
+		//	  否则 g.last 会记下一个从未落库的值 ⇒ 后续同值帧全被判「未变化」。
+		if !c.unifiedWriteEnabled {
+			// 计数器是必须的：否则「按预期停了」与「上游断了」在 unified_data 行数上同形。
+			metrics.UnifiedWritesSkippedTotal.Add(float64(len(records)))
+		} else {
+			// (2) 收窄决策（L1，2026-11-07 起无条件生效）: 返回的就是真正要写库的行。
+			persist, stat := c.writeGate.filter(device.ID, records, now)
+			c.writeGate.record(stat)
+
+			if len(persist) > 0 {
+				if err := c.db.Session(&gorm.Session{}).Create(&persist).Error; err != nil {
+					metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
+					logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+				} else {
+					// (3) 只有写成功才推进「最后已落库值」（方案 §3.3 缓存一致性）:
+					// 写失败不推进 —— 否则新值被记成"已落库"，后续同值帧全被判成
+					// "未变化"而跳过，该值永久丢失。
+					c.writeGate.commit(device.ID, persist, now)
+				}
+			} else {
+				// "整帧都跳过"是一条**正常**路径（值未变且未到心跳）:
+				// 不写库也不 commit —— 状态时间戳必须保持为上次落库时间，否则心跳
+				// 永远不会到点（commit 会把它推到 now）。
+				logger.Debugf("[%s] telemetry write gate skipped all %d rows (unchanged, heartbeat not due)",
+					evt.DeviceID, stat.Skipped)
 			}
 		}
 	}
@@ -461,24 +618,35 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Store raw data for this edge device.
 	//
 	// S3: 本行与 DBPersistConsumer 写的行**不是重复** —— 见该消费者类型上方的完整
-	// 对照表。要点: 本行带 "sensors" (解析后物理量), 是 latest-data 与
-	// /edge-devices/:id/data 唯一能拿到的形状; 但 ErrorCode!=0 / 空 raw / 本函数
-	// 提前 return 的三类样本**只有 DBPersistConsumer 会写**。删任何一行都会丢数据
-	// 或打断前端。
-	dataJSON, err := json.Marshal(map[string]interface{}{
-		"raw_hex":    fmt.Sprintf("%x", merged),
-		"sensors":    sensorData,
-		"channel_id": evt.ChannelID,
-		"timestamp":  now.UnixMilli(),
-	})
+	// 对照表。要点: ErrorCode!=0 / 空 raw / 本函数提前 return 的三类样本
+	// **只有 DBPersistConsumer 会写**。删任何一行都会丢数据。
+	//
+	// ==================== 停写 "sensors"（task-19，2026-11-07）====================
+	// 改前本行形状:
+	//   {"raw_hex":"...","sensors":[{Name,Value,Unit,StringValue}...],"channel_id":1,"timestamp":...}
+	// 其中 sensors 与 unified_data / telemetry_frame 存的是**同一份 (name,value,unit)**:
+	// 生产实测 device_data 单行 1,251 B 里 **83%（约 1,038 B）** 就是这个数组,
+	// 折合 147 MB/天、占全库日增（344 MB）的 43%。同一份物理量存三份
+	// （unified_data 1,294 B + 本数组 1,251 B + 帧表 129 B）是当前最大的一块冗余。
+	//
+	// 现在改为**读时合成**（internal/api/device_data_sensors.go 的
+	// deviceDataJSONWithSensors）: /latest-data 返回前按「每 sensor 各取最新」把
+	// sensors 补回，前端零改动。合成口径不能用 WHERE timestamp = X ——
+	// L1 收窄后同一时间戳只有**变化**字段会入库，等值查会缺值。
+	//
+	// ⚠ 唯一不能丢的是 StringValue: unified_data 与 telemetry_frame **都没有**这一列,
+	// 所以 device_data 是 BMS hardware_version("V19") / serial_number 的**唯一**落库位置。
+	// 故保留 "str_values" 映射，且**仅在有非空 StringValue 时出现**（绝大多数帧没有这个键,
+	// 典型的 read_basic_info 帧就是零额外字节）。
+	// ==========================================================================
+	dataJSON, err := marshalParsedDeviceData(merged, evt.ChannelID, now, sensorData)
 	if err != nil {
 		logger.Warn("databus: failed to marshal parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
 	} else if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
-		DeviceID:        device.ID,
-		LogicalDeviceID: logicalTarget,
-		NodeID:          evt.DeviceID,
-		DataJSON:        string(dataJSON),
-		Timestamp:       now,
+		DeviceID:  device.ID,
+		NodeID:    evt.DeviceID,
+		DataJSON:  string(dataJSON),
+		Timestamp: now,
 	}).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
 		logger.Warn("databus: failed to persist parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
@@ -559,4 +727,53 @@ func (c *SensorParserConsumer) nodeIngestDropReason(nodeID string) string {
 	// 节点行仍存活却走到丢弃路径: Preload 未回填 (理论上不可达)。仍然 fail-closed,
 	// 由运维按该原因继续排查。
 	return "node_unresolved"
+}
+
+// stringValuesOf 抽取 StringValue 非空的字段（BMS 的 hardware_version / serial_number）。
+//
+// 为什么单独抽这个函数：2026-11-07 起 device_data 不再写 sensors 数组（读时按
+// 「每 sensor 取最新」合成），但 StringValue **只存在于 device_data** ——
+// unified_data 与 telemetry_frame 都没有这一列。若一并丢弃，BMS 的
+// hardware_version("V19") 与 serial_number 会永久消失，且**没有任何其他副本**可恢复。
+//
+// 成本：只有 read_hardware_version(0x05) / write_sn(0xA2) 这两类帧才非空，
+// 且这两条命令默认 interval=0（不同步），所以绝大多数帧连这个 key 都不会出现。
+// 返回空 map 时调用方**不写该 key**，避免给每帧加 ~15 字节。
+func stringValuesOf(fields []parser.Field) map[string]string {
+	var out map[string]string
+	for i := range fields {
+		if fields[i].StringValue == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, 2)
+		}
+		out[fields[i].Name] = fields[i].StringValue
+	}
+	return out
+}
+
+// marshalParsedDeviceData 构造 sensor_parser 写进 device_data 的 data_json。
+//
+// 抽成独立函数是为了**能被单独测**：这段形状是前端契约的一部分（前端读
+// data_json.sensors / raw_hex），埋在 Handle 里就只能靠总线上端到端跑一遍
+// 才能验证，而端到端跑会同时依赖驱动、校准缓存、重组器三件与形状无关的东西。
+//
+// 形状（2026-11-07 task-19 起）:
+//
+//	{"raw_hex":"<hex>","channel_id":N,"timestamp":<ms>}                  绝大多数帧
+//	{...同上...,"str_values":{"hardware_version":"V19"}}                  仅字符串读数帧
+//
+// **没有 sensors 键** —— 它由读路径按「每 sensor 取最新」合成
+// （internal/api/device_data_sensors.go），这是本次改造省下 83% 行字节的来源。
+func marshalParsedDeviceData(raw []byte, channelID uint64, at time.Time, fields []parser.Field) ([]byte, error) {
+	payload := map[string]interface{}{
+		"raw_hex":    fmt.Sprintf("%x", raw),
+		"channel_id": channelID,
+		"timestamp":  at.UnixMilli(),
+	}
+	if sv := stringValuesOf(fields); len(sv) > 0 {
+		payload["str_values"] = sv
+	}
+	return json.Marshal(payload)
 }

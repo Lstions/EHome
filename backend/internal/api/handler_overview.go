@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -88,17 +89,19 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 					missed = append(missed, did)
 				}
 			}
-			if len(missed) > 0 {
-				var fallback []sensorVal
-				db.Table("unified_data").
-					Select("unified_data.device_id, unified_data.sensor_name, unified_data.value").
-					Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON unified_data.device_id = latest.device_id AND unified_data.created_at = latest.created_at", missed).
-					Where("unified_data.device_id IN ?", missed).
-					Find(&fallback)
-				for _, v := range fallback {
-					cacheByDevice[v.DeviceID] = append(cacheByDevice[v.DeviceID], v)
-				}
-			}
+			// ============ 缓存 miss 不再回落 unified_data（2026-11-08，DROP 之后）============
+			//
+			// 原实现：对 missed 设备发 DISTINCT ON 查询去 unified_data 捞该时刻全部行。
+			// DROP 后那条查询报 42P01（生产实测：启动/首次请求 1 条），且 `Find` 的错误没被检查。
+			//
+			// 与 handler_edge_device.go 的同类回落一起删。理由相同：
+			//	· 缓存由每帧 SetLatestValue 持续更新，正常运行时是热的；
+			//	· 启动预热有帧表那一趟；
+			//	· miss 只在「刚启动 + 预热未完成」或「设备确实没数据」时发生 —— 返回空是诚实的。
+			//
+			// ⚠ overview 的 latest_data 汇总在预热未完成窗口里会少几个设备，这是**既定行为**，
+			//   不是故障：它随时间自愈（缓存被后续帧填满）。
+			_ = missed
 			for _, vals := range cacheByDevice {
 				allVals = append(allVals, vals...)
 			}
@@ -130,13 +133,47 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		// F14-b: 「今日数据」统计卡读的字段。此前该字段在前后端都不存在，
 		// 前端 `|| 0` 兜底把「字段缺失」伪装成一个合法的 0，卡片永远显示 0。
-		// 口径 = unified_data 里**今天本地 00:00 起**写入的行数，与卡片文案一致。
 		// 注意不能用 time.Now().Truncate(24*time.Hour)：Truncate 按 UTC 纪元取整，
 		// 在 UTC+8 会得到本地 08:00，把当天前 8 小时的数据算到"昨天"。
+		//
+		// ==================== D2：口径从「行数」改成「采样帧数」（2026-11-07）====================
+		//
+		// L1（值不变不入库）自 2026-11-07 起**无条件生效**：同一 (设备, 字段) 的值没变
+		// 且未到心跳就不写行。于是 unified_data 的行数不再是「采了多少点」，再数行数，
+		// 这张卡会直接掉到 17.7%（真实数据回归实测），用户看到的是「数据丢了」，
+		// 而实际上一条都没丢 —— 只是不再重复记录没有变化的同一行。
+		//
+		// 新口径 = **采样帧数**：一帧 = 同一设备同一 timestamp 的一批物理量
+		// （生产端一帧内所有字段用同一个 now 写入，见 consumers_heavy.go）。
+		// 它对 L1 天然不敏感：L1 只减少「同一帧里写了几个字段」，不减少「有过几帧」。
+		//
+		// 代价（生产实测：全表 72.36M 行 / 今日 213 万行）：
+		//   count(*)                               今日窗口  235 ms
+		//   count(DISTINCT device_id,timestamp)    今日窗口  516 ms
+		// /overview 有 30 s 缓存（overviewCacheTTL），轮询不会放大这个开销。
+		// 因此这里**只对今日窗口去重**，不做全表去重（全表 20–33 s，见 handler_metrics.go 的 D3 注释）。
+		//
+		// SQL 用「子查询 + DISTINCT」而不是 PG 的 count(DISTINCT (a,b)) 行构造器：
+		// 后者是 PG 专有语法；前者 SQLite/PG 都能执行（SQLite 分支由单测覆盖）。
 		now := time.Now()
 		startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		var dataCountToday int64
-		db.Model(&models.UnifiedData{}).Where("timestamp >= ?", startOfToday).Count(&dataCountToday)
+		// ============ 数据源改为 telemetry_frame（2026-11-08，unified_data DROP）============
+		//
+		// 原来数 unified_data 的 (device_id, timestamp) 去重对。DROP 之后那张表不存在，
+		// 查询报 42P01 => todayFrames 恒 0 => 卡片显示「今日 0 条」+ 一条 WARN。
+		//
+		// 换到 telemetry_frame **口径等价**，而且是更原始的定义：
+		//	· 一帧 = 同一设备同一 timestamp 的一批物理量（与上面注释的「采样帧数」定义一致）；
+		//	· unified_data 的每一帧本来就从帧派生（consumers_heavy 的写入路径）；
+		//	· telemetry_frame 是 L2 主写入路径，**不受 L1 收窄影响**（它记录的是帧本身）。
+		//
+		// ⚠ 数的是**原始帧数**，不是分钟桶数 —— 正好对应卡片要的「采了多少点」。
+		if err := db.Model(&models.TelemetryFrame{}).
+			Where("ts >= ?", startOfToday).
+			Count(&dataCountToday).Error; err != nil {
+			logger.Warnf("[overview] count today frames: %v", err)
+		}
 
 		result := gin.H{
 			"nodes":            gin.H{"total": nodeTotal, "online": nodeOnline, "offline": nodeTotal - nodeOnline},

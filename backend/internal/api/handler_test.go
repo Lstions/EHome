@@ -57,7 +57,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.CalibrationCache{},
 		&models.PendingWriteRecord{},
 		&models.NodeLog{},
-		&models.LogicalDevice{},
 	)
 	if err != nil {
 		t.Fatalf("auto migrate: %v", err)
@@ -1175,11 +1174,13 @@ func TestDataRoutes_FailoverLogs(t *testing.T) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerDataRoutes(v1, db)
-	// failover-logs 已从数据查询域移交数据源域 (handler_data_source.go)。
-	registerFailoverLogRoutes(v1, datasource.New(db, datasource.Options{}))
+	// failover-logs 已从数据查询域移交数据源域 (handler_data_source.go)，
+	// 并挂在 /edge-devices/:id 下（2026-10-23: 逻辑设备层移除后，故障切换
+	// 日志的主语就是边缘设备本身）。
+	registerFailoverLogRoutes(v1.Group("/edge-devices"), datasource.New(db, datasource.Options{}))
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/devices/1/failover-logs?limit=10", nil)
+	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/failover-logs?limit=10", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
@@ -1304,9 +1305,12 @@ func TestEdgeDevice_LatestData(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	// §十二: 实例已删/不存在 → 404 (实例语义)。
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
+	// 契约变更 (2026-10-23): 数据端点不再对"设备不存在"报 404 —— 它按
+	// device_id 直查，没有数据就返回零值。旧 404 规则的前提（"实例语义"，
+	// 即防止把逻辑身份的数据冒充成实例数据）已随逻辑设备层移除。
+	// 404 只保留给配置类端点 (GET /edge-devices/:id)。
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (data endpoint returns zero value when device has no data), got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1323,9 +1327,10 @@ func TestEdgeDevice_Data(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	// §十二: 实例已删/不存在 → 404 (实例语义)。
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
+	// 契约变更 (2026-10-23): 同 TestEdgeDevice_LatestData —— 数据端点按
+	// device_id 直查，无数据即空页 200；配置类端点才是 404。
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (empty page when device has no data), got %d: %s", w.Code, w.Body.String())
 	}
 }
 

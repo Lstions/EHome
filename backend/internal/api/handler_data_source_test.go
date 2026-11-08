@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/models"
@@ -17,7 +18,11 @@ import (
 
 // ==================== 数据源主备 API 契约测试 (设计 §7) ====================
 
-// newDataSourceAPI 用真实 SQLite 库构造包含数据源域全部 10 条路由的引擎。
+// newDataSourceAPI 用真实 SQLite 库构造数据源域路由的引擎。
+//
+// 2026-10-24（方案 A）：4 个手工运维端点（DELETE / activate / deactivate / reset）
+// 已删除；GET 列表/详情/health、POST 创建、PUT 更新仍保留
+// （见 handler_data_source.go:registerDataSourceRoutes 的说明）。
 // setupTestDB/setupRouter/authHeader 来自 handler_test.go。
 func newDataSourceAPI(t *testing.T) (*gin.Engine, *gorm.DB, *datasource.Service) {
 	t.Helper()
@@ -27,7 +32,8 @@ func newDataSourceAPI(t *testing.T) (*gin.Engine, *gorm.DB, *datasource.Service)
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerDataSourceRoutes(v1.Group("/data-sources"), svc, db)
-	registerFailoverLogRoutes(v1, svc)
+	// failover-logs 路由 2026-10-23 迁到 /api/v1/edge-devices/:id（:id = 边缘设备 id）。
+	registerFailoverLogRoutes(v1.Group("/edge-devices"), svc)
 	return r, db, svc
 }
 
@@ -119,9 +125,10 @@ func TestDataSourceList_EmptyItemsIsArray(t *testing.T) {
 
 func TestDataSourceList_PaginationAndFilters(t *testing.T) {
 	r, db, svc := newDataSourceAPI(t)
-	seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 10})
-	seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "humidity", EdgeDeviceID: 2, Priority: 5})
-	third := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 2, Category: "temperature", EdgeDeviceID: 3, Priority: 1})
+	// 组键 = (edge_device_id, category) 且有唯一索引 ⇒ 三条来源必须两两不同键。
+	seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1, Priority: 10})
+	seedDataSource(t, svc, datasource.CreateInput{Category: "humidity", EdgeDeviceID: 2, Priority: 5})
+	third := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 3, Priority: 1})
 	if err := db.Model(&models.DataSource{}).Where("id = ?", third.ID).Update("status", datasource.StatusDisabled).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +143,8 @@ func TestDataSourceList_PaginationAndFilters(t *testing.T) {
 	if got := count("/api/v1/data-sources"); got != 3 {
 		t.Fatalf("all items = %d want 3", got)
 	}
-	if got := count("/api/v1/data-sources?device_id=1"); got != 2 {
-		t.Fatalf("device_id=1 items = %d want 2", got)
+	if got := count("/api/v1/data-sources?edge_device_id=1"); got != 1 {
+		t.Fatalf("edge_device_id=1 items = %d want 1（组键含设备, 每设备每类别至多一行）", got)
 	}
 	if got := count("/api/v1/data-sources?category=humidity"); got != 1 {
 		t.Fatalf("category=humidity items = %d want 1", got)
@@ -162,9 +169,9 @@ func TestDataSourceList_PaginationAndFilters(t *testing.T) {
 	dsAssertCode(t, w, http.StatusOK)
 }
 
-func TestDataSourceList_InvalidDeviceID(t *testing.T) {
+func TestDataSourceList_InvalidEdgeDeviceID(t *testing.T) {
 	r, _, _ := newDataSourceAPI(t)
-	w := doDSRequest(t, r, http.MethodGet, "/api/v1/data-sources?device_id=abc", nil)
+	w := doDSRequest(t, r, http.MethodGet, "/api/v1/data-sources?edge_device_id=abc", nil)
 	dsAssertCode(t, w, http.StatusBadRequest)
 }
 
@@ -172,7 +179,7 @@ func TestDataSourceList_InvalidDeviceID(t *testing.T) {
 
 func TestDataSourceGet(t *testing.T) {
 	r, _, svc := newDataSourceAPI(t)
-	item := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
+	item := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1})
 
 	w := doDSRequest(t, r, http.MethodGet, fmt.Sprintf("/api/v1/data-sources/%d", item.ID), nil)
 	resp := dsAssertCode(t, w, http.StatusOK)
@@ -210,8 +217,10 @@ func TestDataSourceCreate_FirstIsActiveAndDuplicateConflict(t *testing.T) {
 		"device_id": 1, "category": "temperature", "edge_device_id": 8,
 	})
 	resp = dsAssertCode(t, w, http.StatusCreated)
-	if dsDataMap(t, resp)["status"] != datasource.StatusStandby {
-		t.Fatalf("second source status = %v want standby", dsDataMap(t, resp)["status"])
+	// 组键含设备 ⇒ 不同 edge_device 是**各自组的首行**，因此也是 active。
+	// 「第二行是 standby」的前提（同组多成员）在唯一索引下已不可构造。
+	if dsDataMap(t, resp)["status"] != datasource.StatusActive {
+		t.Fatalf("second source status = %v want active（不同 edge_device 是独立组键的首行）", dsDataMap(t, resp)["status"])
 	}
 
 	// 同组同 edge_device 重复 → 409
@@ -227,7 +236,6 @@ func TestDataSourceCreate_RequiredAndEnumValidation(t *testing.T) {
 		name string
 		body map[string]interface{}
 	}{
-		{"missing device_id", map[string]interface{}{"category": "t", "edge_device_id": 1}},
 		{"missing category", map[string]interface{}{"device_id": 1, "edge_device_id": 1}},
 		{"missing edge_device_id", map[string]interface{}{"device_id": 1, "category": "t"}},
 		{"invalid source_type", map[string]interface{}{"device_id": 1, "category": "t", "edge_device_id": 1, "source_type": "mqtt"}},
@@ -266,7 +274,7 @@ func TestDataSourceCreate_IgnoresInjectedRuntimeFields(t *testing.T) {
 func TestDataSourceUpdate_WhitelistAndGroupPreserved(t *testing.T) {
 	r, db, svc := newDataSourceAPI(t)
 	item := seedDataSource(t, svc, datasource.CreateInput{
-		DeviceID: 1, Category: "temperature", EdgeDeviceID: 1,
+		Category: "temperature", EdgeDeviceID: 1,
 		Name: "old", Description: "old", Priority: 1, MaxFailCount: 3, Config: "{}",
 	})
 
@@ -296,7 +304,7 @@ func TestDataSourceUpdate_WhitelistAndGroupPreserved(t *testing.T) {
 	if err := db.First(&got, item.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if got.DeviceID != 1 || got.Category != "temperature" || got.EdgeDeviceID != 1 {
+	if got.Category != "temperature" || got.EdgeDeviceID != 1 {
 		t.Fatalf("group key was injected: %+v", got)
 	}
 	if got.SourceType != datasource.SourceTypeEdgeDevice || got.Status != datasource.StatusActive || got.FailCount != 0 {
@@ -308,19 +316,31 @@ func TestDataSourceUpdate_WhitelistAndGroupPreserved(t *testing.T) {
 	}
 }
 
+// TestDataSourceUpdate_PointerZeroValuesApplied 锁「指针字段显式传 0 必须生效」。
+//
+// 2026-10-24 起 **is_primary 不再属于可写字段**：它是 status 的派生量
+// （恒等于 status==active），本用例因此改为断言「传 false 被忽略」。
+// 保留在自己的用例里而不是删掉，因为「is_primary 传 false 不生效」这件事
+// 本身就是不变量的一部分，需要有门禁。
 func TestDataSourceUpdate_PointerZeroValuesApplied(t *testing.T) {
 	r, db, svc := newDataSourceAPI(t)
 	item := seedDataSource(t, svc, datasource.CreateInput{
-		DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5, IsPrimary: true, MaxFailCount: 7,
+		Category: "temperature", EdgeDeviceID: 1, Priority: 5, IsPrimary: true, MaxFailCount: 7,
 	})
 	w := doDSRequest(t, r, http.MethodPut, fmt.Sprintf("/api/v1/data-sources/%d", item.ID), map[string]interface{}{
-		"priority": 0, "is_primary": false, "max_fail_count": 1,
+		"priority": 0, "max_fail_count": 1,
+		// 显式传 false：必须被忽略（status 仍是 active ⇒ is_primary 恒 true）。
+		"is_primary": false,
 	})
 	dsAssertCode(t, w, http.StatusOK)
 	var got models.DataSource
 	db.First(&got, item.ID)
-	if got.Priority != 0 || got.IsPrimary || got.MaxFailCount != 1 {
+	if got.Priority != 0 || got.MaxFailCount != 1 {
 		t.Fatalf("pointer zero values not applied: %+v", got)
+	}
+	if got.Status != datasource.StatusActive || !got.IsPrimary {
+		t.Fatalf("is_primary 必须派生自 status：status=%s is_primary=%v（期望 active/true）",
+			got.Status, got.IsPrimary)
 	}
 }
 
@@ -329,7 +349,7 @@ func TestDataSourceUpdate_NotFoundAndValidation(t *testing.T) {
 	w := doDSRequest(t, r, http.MethodPut, "/api/v1/data-sources/9999", map[string]interface{}{"name": "x"})
 	dsAssertCode(t, w, http.StatusNotFound)
 
-	item := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
+	item := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1})
 	w = doDSRequest(t, r, http.MethodPut, fmt.Sprintf("/api/v1/data-sources/%d", item.ID), map[string]interface{}{"max_fail_count": 21})
 	dsAssertCode(t, w, http.StatusBadRequest)
 
@@ -337,178 +357,50 @@ func TestDataSourceUpdate_NotFoundAndValidation(t *testing.T) {
 	dsAssertCode(t, w, http.StatusBadRequest)
 }
 
-// ---------- DELETE /data-sources/:id ----------
+// ---------- 已删除的写端点（2026-10-24 方案 A 的回归门禁） ----------
 
-func TestDataSourceDelete_NotFoundAndSuccess(t *testing.T) {
-	r, db, svc := newDataSourceAPI(t)
-	w := doDSRequest(t, r, http.MethodDelete, "/api/v1/data-sources/9999", nil)
-	dsAssertCode(t, w, http.StatusNotFound)
+// TestDataSourceWriteEndpointsRemoved 钉住：四个手工运维端点确实**不再存在**。
+//
+// 为什么需要这条门禁（而不是只删测试）：删掉 handler 后，如果哪天有人「顺手」
+// 把路由加回来，不会有人注意到 —— 因为这些端点在生产上是恒失败或恒被投影器覆盖的，
+// 加回来也不会立刻报错，只会重新变成「看起来能用、永远失败」的陷阱。
+//
+// 期望 404（不是 405）：路由整条不存在，gin 直接走 NoRoute。
+func TestDataSourceWriteEndpointsRemoved(t *testing.T) {
+	r, _, svc := newDataSourceAPI(t)
+	item := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1})
 
-	item := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	w = doDSRequest(t, r, http.MethodDelete, fmt.Sprintf("/api/v1/data-sources/%d", item.ID), nil)
-	dsAssertCode(t, w, http.StatusOK)
-	var n int64
-	db.Model(&models.DataSource{}).Where("id = ?", item.ID).Count(&n)
-	if n != 0 {
-		t.Fatalf("source still present after delete")
+	cases := []struct{ method, path string }{
+		{http.MethodDelete, fmt.Sprintf("/api/v1/data-sources/%d", item.ID)},
+		{http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/activate", item.ID)},
+		{http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/deactivate", item.ID)},
+		{http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/reset", item.ID)},
 	}
-}
-
-func TestDataSourceDelete_ActivePromotesCandidate(t *testing.T) {
-	r, db, svc := newDataSourceAPI(t)
-	active := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5})
-	standby := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 1})
-
-	w := doDSRequest(t, r, http.MethodDelete, fmt.Sprintf("/api/v1/data-sources/%d", active.ID), nil)
-	dsAssertCode(t, w, http.StatusOK)
-
-	var got models.DataSource
-	if err := db.First(&got, standby.ID).Error; err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != datasource.StatusActive {
-		t.Fatalf("candidate status = %s want active", got.Status)
-	}
-	var activeCount int64
-	db.Model(&models.DataSource{}).
-		Where("device_id = ? AND category = ? AND status = ?", 1, "temperature", datasource.StatusActive).
-		Count(&activeCount)
-	if activeCount != 1 {
-		t.Fatalf("active count = %d want 1", activeCount)
-	}
-}
-
-// ---------- POST /data-sources/:id/activate ----------
-
-func TestDataSourceActivate(t *testing.T) {
-	r, db, svc := newDataSourceAPI(t)
-	a := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5})
-	b := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 1})
-
-	w := doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/activate", b.ID), nil)
-	resp := dsAssertCode(t, w, http.StatusOK)
-	data := dsDataMap(t, resp)
-	if data["status"] != datasource.StatusActive {
-		t.Fatalf("activate response status = %v want active", data["status"])
-	}
-	if int(data["id"].(float64)) != int(b.ID) {
-		t.Fatalf("activate returned source %v want %d", data["id"], b.ID)
-	}
-	var old, nw models.DataSource
-	db.First(&old, a.ID)
-	db.First(&nw, b.ID)
-	if old.Status != datasource.StatusStandby || nw.Status != datasource.StatusActive {
-		t.Fatalf("after activate old=%s new=%s", old.Status, nw.Status)
+	for _, c := range cases {
+		w := doDSRequest(t, r, c.method, c.path, nil)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s %s = %d, want 404（该端点已按方案 A 删除；恢复它须先解决「组键二元化后无 standby 候选」的语义问题）",
+				c.method, c.path, w.Code)
+		}
 	}
 
-	w = doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources/9999/activate", nil)
-	dsAssertCode(t, w, http.StatusNotFound)
-
-	// disabled → 允许 activate（= 重新启用，R7 v1.1 修订）
-	if err := db.Model(&models.DataSource{}).Where("id = ?", a.ID).Update("status", datasource.StatusDisabled).Error; err != nil {
-		t.Fatal(err)
+	// 保留的端点必须仍然可用（别把有效的也一起删了）。
+	// POST/PUT 的完整行为由上面的 Create/Update 用例覆盖，这里只确认路由在位。
+	if w := doDSRequest(t, r, http.MethodGet, "/api/v1/data-sources", nil); w.Code != http.StatusOK {
+		t.Fatalf("GET /data-sources = %d, want 200（只读端点必须保留）", w.Code)
 	}
-	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/activate", a.ID), nil)
-	resp = dsAssertCode(t, w, http.StatusOK)
-	if dsDataMap(t, resp)["status"] != datasource.StatusActive {
-		t.Fatalf("activate disabled status = %v want active", dsDataMap(t, resp)["status"])
+	if w := doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources", map[string]interface{}{
+		"edge_device_id": 7, "category": "voltage",
+	}); w.Code != http.StatusCreated {
+		t.Fatalf("POST /data-sources = %d, want 201（创建端点保留：供数据修正）", w.Code)
 	}
-	var reA, reB models.DataSource
-	db.First(&reA, a.ID)
-	db.First(&reB, b.ID)
-	if reA.Status != datasource.StatusActive || reB.Status != datasource.StatusStandby {
-		t.Fatalf("after re-enable a=%s b=%s want active/standby", reA.Status, reB.Status)
-	}
-}
-
-// ---------- POST /data-sources/:id/deactivate ----------
-
-func TestDataSourceDeactivate(t *testing.T) {
-	r, db, svc := newDataSourceAPI(t)
-	// active 且无候选 → 409 (R6)
-	only := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	w := doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/deactivate", only.ID), nil)
-	dsAssertCode(t, w, http.StatusConflict)
-	var still models.DataSource
-	db.First(&still, only.ID)
-	if still.Status != datasource.StatusActive {
-		t.Fatalf("409 must not mutate status, got %s", still.Status)
-	}
-
-	// active 且有候选 → 候选接替 (R5)
-	a := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 2, Category: "temperature", EdgeDeviceID: 1})
-	b := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 2, Category: "temperature", EdgeDeviceID: 2})
-	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/deactivate", a.ID), nil)
-	resp := dsAssertCode(t, w, http.StatusOK)
-	if dsDataMap(t, resp)["status"] != datasource.StatusDisabled {
-		t.Fatalf("deactivate response status = %v want disabled", dsDataMap(t, resp)["status"])
-	}
-	var rb models.DataSource
-	db.First(&rb, b.ID)
-	if rb.Status != datasource.StatusActive {
-		t.Fatalf("candidate status = %s want active", rb.Status)
-	}
-
-	// standby → disabled (R8)
-	_ = seedDataSource(t, svc, datasource.CreateInput{DeviceID: 3, Category: "temperature", EdgeDeviceID: 1})
-	d := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 3, Category: "temperature", EdgeDeviceID: 2})
-	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/deactivate", d.ID), nil)
-	resp = dsAssertCode(t, w, http.StatusOK)
-	if dsDataMap(t, resp)["status"] != datasource.StatusDisabled {
-		t.Fatalf("standby deactivate status = %v want disabled", dsDataMap(t, resp)["status"])
-	}
-
-	w = doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources/9999/deactivate", nil)
-	dsAssertCode(t, w, http.StatusNotFound)
-}
-
-// ---------- POST /data-sources/:id/reset ----------
-
-func TestDataSourceReset(t *testing.T) {
-	r, db, svc := newDataSourceAPI(t)
-	// 组 1：存在 active 时 error → standby
-	a := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
-	if err := db.Model(&models.DataSource{}).Where("id = ?", b.ID).
-		Updates(map[string]interface{}{"status": datasource.StatusError, "fail_count": 2}).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	// 非 error → 400
-	w := doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/reset", a.ID), nil)
-	dsAssertCode(t, w, http.StatusBadRequest)
-
-	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/reset", b.ID), nil)
-	resp := dsAssertCode(t, w, http.StatusOK)
-	data := dsDataMap(t, resp)
-	if data["status"] != datasource.StatusStandby {
-		t.Fatalf("reset with active present status = %v want standby", data["status"])
-	}
-	if int(data["fail_count"].(float64)) != 0 {
-		t.Fatalf("reset fail_count = %v want 0", data["fail_count"])
-	}
-
-	// 组 2：无 active 时 error → active
-	only := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 2, Category: "temperature", EdgeDeviceID: 1})
-	if err := db.Model(&models.DataSource{}).Where("id = ?", only.ID).
-		Updates(map[string]interface{}{"status": datasource.StatusError, "fail_count": 1}).Error; err != nil {
-		t.Fatal(err)
-	}
-	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/reset", only.ID), nil)
-	resp = dsAssertCode(t, w, http.StatusOK)
-	if dsDataMap(t, resp)["status"] != datasource.StatusActive {
-		t.Fatalf("reset without active status = %v want active", dsDataMap(t, resp)["status"])
-	}
-
-	w = doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources/9999/reset", nil)
-	dsAssertCode(t, w, http.StatusNotFound)
 }
 
 // ---------- GET /data-sources/:id/health ----------
 
 func TestDataSourceHealth_EmptyArrayLimitClamp(t *testing.T) {
 	r, db, svc := newDataSourceAPI(t)
-	item := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
+	item := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1})
 
 	// 空集 → []
 	w := doDSRequest(t, r, http.MethodGet, fmt.Sprintf("/api/v1/data-sources/%d/health", item.ID), nil)
@@ -561,51 +453,69 @@ func TestDataSourceHealth_EmptyArrayLimitClamp(t *testing.T) {
 	}
 }
 
-// ---------- GET /devices/:id/failover-logs ----------
+// ---------- GET /edge-devices/:id/failover-logs ----------
 
 func TestFailoverLogs_ArrayEmptyAndCategoryFilter(t *testing.T) {
-	r, _, svc := newDataSourceAPI(t)
+	r, db, svc := newDataSourceAPI(t)
 
 	// 空集 → []
-	w := doDSRequest(t, r, http.MethodGet, "/api/v1/devices/1/failover-logs", nil)
+	w := doDSRequest(t, r, http.MethodGet, "/api/v1/edge-devices/1/failover-logs", nil)
 	resp := dsAssertCode(t, w, http.StatusOK)
 	if arr := dsDataArray(t, resp); len(arr) != 0 {
 		t.Fatalf("empty failover logs len = %d want 0", len(arr))
 	}
 
-	// 用 svc 制造一次手动切换 (activate 第二条)。
-	seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5})
-	b := seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 1})
-	seedDataSource(t, svc, datasource.CreateInput{DeviceID: 1, Category: "humidity", EdgeDeviceID: 3})
-	if _, err := svc.Activate(b.ID); err != nil {
-		t.Fatalf("activate to produce failover log: %v", err)
+	// 造一条切换日志。
+	//
+	// 2026-10-24（方案 A）：原先这里调 svc.Activate 让它顺手写日志，但 Activate 已删
+	// （组域通知/日志现在由 GroupService 产生）。本用例的对象是 **GET 只读端点**，
+	// 因此直接插入日志行即可 —— 反而更无依赖、更能独立验证 DTO 映射。
+	// 日志里的 device_id 列值 = 该行的 edge_device_id。
+	ds := seedDataSource(t, svc, datasource.CreateInput{Category: "temperature", EdgeDeviceID: 1, Priority: 5})
+	if err := db.Create(&models.FailoverLog{
+		DeviceID:     ds.EdgeDeviceID,
+		Category:     ds.Category,
+		FromSourceID: 0, // 0 = 无前任（组内首条）
+		ToSourceID:   ds.ID,
+		Reason:       datasource.ReasonManual,
+		CreatedAt:    time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed failover log: %v", err)
 	}
 
-	w = doDSRequest(t, r, http.MethodGet, "/api/v1/devices/1/failover-logs", nil)
+	w = doDSRequest(t, r, http.MethodGet, "/api/v1/edge-devices/1/failover-logs", nil)
 	resp = dsAssertCode(t, w, http.StatusOK)
 	arr := dsDataArray(t, resp)
 	if len(arr) != 1 {
 		t.Fatalf("failover logs len = %d want 1", len(arr))
 	}
 	entry := arr[0].(map[string]interface{})
-	if entry["category"] != "temperature" || int(entry["to_source_id"].(float64)) != int(b.ID) {
+	if entry["category"] != "temperature" || int(entry["to_source_id"].(float64)) != int(ds.ID) {
 		t.Fatalf("unexpected failover entry: %v", entry)
+	}
+	// API 层 DTO 映射: 模型的 device_id 列对外暴露为 edge_device_id (契约 §6)。
+	if got, ok := entry["edge_device_id"].(float64); !ok || uint(got) != ds.EdgeDeviceID {
+		t.Fatalf("edge_device_id = %v want %d (device_id 列名是历史命名, 取值是边缘设备 id)",
+			entry["edge_device_id"], ds.EdgeDeviceID)
+	}
+	if _, legacy := entry["device_id"]; legacy {
+		t.Fatalf("响应不得再出现 device_id 字段（逻辑设备 id 时代的命名）: %v", entry)
 	}
 
 	// category 过滤生效
-	w = doDSRequest(t, r, http.MethodGet, "/api/v1/devices/1/failover-logs?category=humidity", nil)
+	w = doDSRequest(t, r, http.MethodGet, "/api/v1/edge-devices/1/failover-logs?category=humidity", nil)
 	resp = dsAssertCode(t, w, http.StatusOK)
 	if arr := dsDataArray(t, resp); len(arr) != 0 {
 		t.Fatalf("category=humidity logs len = %d want 0", len(arr))
 	}
 
-	w = doDSRequest(t, r, http.MethodGet, "/api/v1/devices/1/failover-logs?category=temperature", nil)
+	w = doDSRequest(t, r, http.MethodGet, "/api/v1/edge-devices/1/failover-logs?category=temperature", nil)
 	resp = dsAssertCode(t, w, http.StatusOK)
 	if arr := dsDataArray(t, resp); len(arr) != 1 {
 		t.Fatalf("category=temperature logs len = %d want 1", len(arr))
 	}
 
 	// 非法设备 id → 400
-	w = doDSRequest(t, r, http.MethodGet, "/api/v1/devices/abc/failover-logs", nil)
+	w = doDSRequest(t, r, http.MethodGet, "/api/v1/edge-devices/abc/failover-logs", nil)
 	dsAssertCode(t, w, http.StatusBadRequest)
 }

@@ -86,7 +86,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			q = q.Where("model = ?", model)
 		}
 		// search 是**服务端**全库检索 (§3.3.5): 与前端本地过滤同口径 (name 或 model)。
-		// LOWER+LIKE 在 PostgreSQL 与 SQLite 测试库都可用 (与 handler_logical_device.go:60
+		// LOWER+LIKE 在 PostgreSQL 与 SQLite 测试库都可用 (与 handler_edge_device.go
 		// 同一写法)。
 		if search := strings.TrimSpace(c.Query("search")); search != "" {
 			like := "%" + strings.ToLower(search) + "%"

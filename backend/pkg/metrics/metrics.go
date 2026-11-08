@@ -200,6 +200,16 @@ var (
 	})
 
 	// DataConsumerDBWriteFailures counts persistence failures by consumer and table.
+	// UnifiedWritesSkippedTotal 统计**因停写开关而跳过**的 unified_data 行数。
+	//
+	// 为什么必须有这个计数器：开关关掉后，「停写生效」与「根本没有数据进来」
+	// 在 unified_data 行数上**同形**（都不增长）。没有这个计数器，就无法区分
+	// 「按预期停了」和「上游断了」—— 而这个区分在停写上线后的头几天就是要害。
+	UnifiedWritesSkippedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_unified_writes_skipped_total",
+		Help: "unified_data rows NOT written because EHOME_TELEMETRY_UNIFIED_WRITE=false",
+	})
+
 	DataConsumerDBWriteFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_data_consumer_db_write_failures_total",
 		Help: "DataEventBus consumer database write failures",

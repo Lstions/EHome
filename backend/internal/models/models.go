@@ -133,19 +133,43 @@ type EdgeDevice struct {
 	// 执行 `WHERE status <> 'offline'` 来同步设备集合（见 loadActiveDevices 的说明）。
 	// 该列原本无索引，每秒一次全表扫 + 全字段物化，设备量大时是不可接受的开销。
 	// 加索引后这条查询走 index scan，与「每秒一次」的调用频率相称。
-	Status           string          `gorm:"size:20;default:pending;index" json:"status"`
-	ErrorCode        int             `gorm:"default:0" json:"error_code"` // v2.2 新增
-	LastDataAt       *time.Time      `json:"last_data_at"`                // v2.2 新增
-	LastError        string          `gorm:"size:256" json:"last_error"`  // v2.2 新增
-	ConfigVersion    string          `gorm:"size:64" json:"config_version"`
-	LogicalDeviceID  *uint           `gorm:"index" json:"logical_device_id,omitempty"`                         // 数据生命周期 P0: 逻辑身份锚点 (FK logical_devices, 不带级联)
-	InitState        string          `gorm:"size:20;default:pending" json:"init_state"`                        // v2.2 新增 (G6 准备)
-	InitLastStep     int             `gorm:"default:0" json:"init_last_step"`                                  // v2.2 新增
-	InitTotalSteps   int             `gorm:"default:0" json:"init_total_steps"`                                // v2.2 新增
-	CommandIntervals json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"command_intervals"` // per-command polling intervals
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt  `gorm:"index" json:"-"`
+	Status        string     `gorm:"size:20;default:pending;index" json:"status"`
+	ErrorCode     int        `gorm:"default:0" json:"error_code"` // v2.2 新增
+	LastDataAt    *time.Time `json:"last_data_at"`                // v2.2 新增
+	LastError     string     `gorm:"size:256" json:"last_error"`  // v2.2 新增
+	ConfigVersion string     `gorm:"size:64" json:"config_version"`
+	// DataPurgeRequested 标记「删除该设备时勾选了同时删除数据」。
+	//
+	// 历史: 该语义原先挂在已删除的 logical_devices.purge_requested 上 (逻辑身份层)。
+	// 逻辑设备概念层已整体移除 (2026-10-23, .contract/logical-device-removal.md),
+	// 删除语义回到设备自身 —— 它本来就是「某台设备的数据要不要清」的问题。
+	// 由 purge 后台任务分批硬删该设备数据后清回 false 并硬删设备行。
+	DataPurgeRequested bool `gorm:"column:data_purge_requested;default:false" json:"data_purge_requested"`
+	// DataPurgeStartedAt 是 DevicePurger **认领**该设备硬删任务的时间（2026-10-25）。
+	//
+	// 为什么需要一个「认领」时间而不是只靠 data_purge_requested：
+	// purge 是异步分批的（一台设备可能上千万行，删除要跑几分钟），而 restore
+	// 可能在这段时间内发生。原实现只在扫描时判一次 deleted_at，之后一直按快照
+	// 继续删 —— restore 提交后 purge 仍会删掉它刚选择保留的历史，并把已复活的
+	// 设备行物理删掉（不可恢复的数据丢失 + 幽灵删除）。
+	//
+	// 现在的互斥协议：
+	//   · purger 认领：UPDATE ... SET data_purge_started_at=now()
+	//     WHERE id=? AND deleted_at IS NOT NULL AND data_purge_requested AND
+	//           data_purge_started_at IS NULL  （RowsAffected=0 则不处理）
+	//   · restore 在事务里对同一行加行锁，看到非 nil 就 409（清理进行中，不可恢复）
+	//   · 认领与 restore 的「清 deleted_at + 清标记」由行锁串行化，二者只有一个生效
+	//   · 服务启动/每轮开始时把残留认领清零（进程崩溃后的恢复）
+	//
+	// nil = 没有进行中的清理。这一列只表达「正在删」，不参与任何业务查询。
+	DataPurgeStartedAt *time.Time      `gorm:"column:data_purge_started_at" json:"data_purge_started_at"`
+	InitState          string          `gorm:"size:20;default:pending" json:"init_state"`
+	InitLastStep       int             `gorm:"default:0" json:"init_last_step"`                                  // v2.2 新增
+	InitTotalSteps     int             `gorm:"default:0" json:"init_total_steps"`                                // v2.2 新增
+	CommandIntervals   json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"command_intervals"` // per-command polling intervals
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt  `gorm:"index" json:"-"`
 	// 非数据库字段 — 仅用于 API 响应中携带最新传感器数据
 	LastData map[string]float64 `gorm:"-" json:"last_data,omitempty"`
 	// 关联
@@ -176,38 +200,6 @@ const (
 	EdgeDeviceStatusPending = "pending"
 	EdgeDeviceStatusActive  = "active"
 	EdgeDeviceStatusOffline = "offline"
-)
-
-// =====================================================================
-
-// LogicalDevice 逻辑设备身份 (数据生命周期 P0, 方案 v3.3 §1.1)
-//
-// 一个 LogicalDevice = 跨实例/跨时间的设备身份锚点。edge_devices 行
-// (含软删) 通过 logical_device_id 挂载到身份上; unified_data/device_data
-// 的 logical_device_id 是普通列 (无 FK), 由写入路径回填。
-//
-// 不变量 (§3.3-3): 同一 logical_device 最多一个存活 edge_device 实例。
-// 删除 logical_device 行只允许在 purge 任务确认数据清理完成后执行。
-type LogicalDevice struct {
-	ID             uint      `gorm:"primaryKey" json:"id"`
-	IdentityKey    string    `gorm:"column:identity_key;size:64;uniqueIndex;not null" json:"identity_key"` // type:hardware_id, 创建后只读
-	Name           string    `gorm:"size:128;not null" json:"name"`                                        // 用户可编辑
-	DeviceType     string    `gorm:"size:32;not null;index" json:"device_type"`
-	RetentionDays  int       `gorm:"default:90" json:"retention_days"`     // 创建时快照系统级配置 (§4.1)
-	MergedInto     *uint     `gorm:"index" json:"merged_into"`             // 自引用 logical_devices(id), 无级联; 仅 purge 前显式解除
-	MergeStatus    *string   `gorm:"size:16" json:"merge_status"`          // NULL / pending / done
-	PurgeRequested bool      `gorm:"default:false" json:"purge_requested"` // 删除设备勾选"同时删除数据"时置位
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-// TableName GORM 表名
-func (LogicalDevice) TableName() string { return "logical_devices" }
-
-// 合并状态取值 (MergeStatus)
-const (
-	MergeStatusPending = "pending"
-	MergeStatusDone    = "done"
 )
 
 // =====================================================================
@@ -304,9 +296,6 @@ type DeviceData struct {
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt    time.Time `json:"created_at"`
 	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增 (与 DeviceID 二选一)
-	// 数据生命周期 P0: 逻辑身份列 (普通列, 无 FK; §1.2 大表不引入软删除)。
-	// 本卡不建 (logical_device_id, timestamp) 复合索引——M 迁移步骤负责。
-	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
 // =====================================================================
@@ -324,8 +313,6 @@ type UnifiedData struct {
 	Timestamp    time.Time `gorm:"primaryKey;index" json:"timestamp"` // 复合主键第二列 + 分区键
 	CreatedAt    time.Time `json:"created_at"`
 	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增
-	// 数据生命周期 P0: 逻辑身份列 (普通列, 无 FK; §1.2 大表不引入软删除)。
-	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
 // 注: UnifiedDataRollup1m (分钟级 rollup 聚合表) 已于 2026-09-15 **退役** ——
@@ -338,17 +325,20 @@ type UnifiedData struct {
 // =====================================================================
 
 // DataSource 数据源主备 (设计/数据源主备与故障转移.md v1.0)
+//
+// 2026-10-23: 逻辑设备概念层已移除，组键回到 (edge_device_id, category)。
+// 原 DeviceID 列（= 逻辑设备 id）已删除：它是逻辑身份层的产物，
+// 让同一物理来源在两套 id 空间之间来回映射。数据源就是「某台边缘设备的某个类别」。
 type DataSource struct {
-	ID       uint `gorm:"primaryKey" json:"id"`
-	DeviceID uint `gorm:"not null;index:idx_ds_device_status,priority:1;uniqueIndex:uniq_ds_source,priority:1" json:"device_id"` // LogicalDevice.ID
+	ID uint `gorm:"primaryKey" json:"id"`
 	// Category 数据类别（= unified_data.sensor_name 物理名；一期只支持字面量）。
 	//
 	// 列宽 32→64（2026-10-21 DG-05 / 方案 §14.1 M1）：字段解析层 selector 上限 64 字符，
 	// 而本列原先 varchar(32) 会在 33–64 字符值上 **PG 硬报错**（value too long），
 	// 与 alert_rules.sensor_name(64)/automation_rules.trigger_sensor_name(64) 不一致。
 	// 扩宽不可逆但对存量数据零风险（旧值全部 ≤32）。
-	Category     string     `gorm:"size:64;not null;index:idx_ds_device_status,priority:2;uniqueIndex:uniq_ds_source,priority:2" json:"category"`
-	EdgeDeviceID uint       `gorm:"not null;index;uniqueIndex:uniq_ds_source,priority:3" json:"edge_device_id"`
+	Category     string     `gorm:"size:64;not null;index:idx_ds_device_status,priority:1;uniqueIndex:uniq_ds_source,priority:2" json:"category"`
+	EdgeDeviceID uint       `gorm:"not null;index;uniqueIndex:uniq_ds_source,priority:1;index:idx_ds_device_status,priority:2" json:"edge_device_id"`
 	SourceType   string     `gorm:"size:20;not null;default:edge_device" json:"source_type"`
 	Name         string     `gorm:"size:64;not null" json:"name"`
 	Description  string     `gorm:"size:255" json:"description"`

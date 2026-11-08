@@ -3,9 +3,9 @@
 package api
 
 // PG 集成测试 (契约 §1.5): 在真实 PostgreSQL 上执行 history_points.go 的
-// 聚合 SQL —— 这是唯一能证明 to_timestamp/floor/lag/IS DISTINCT FROM 与
-// 保形去重子查询在 PG 上真的可执行、且语义正确的证据 (SQLite 单测只能覆盖
-// 纯函数与方言分支, 不能执行 PG 方言 SQL)。
+// 聚合 SQL —— 这是唯一能证明 to_timestamp/floor/lag/IS DISTINCT FROM 在 PG 上
+// 真的可执行、且语义正确的证据 (SQLite 单测只能覆盖纯函数与方言分支, 不能执行
+// PG 方言 SQL)。
 //
 // 运行:
 //
@@ -16,6 +16,20 @@ package api
 // 未设 EHOME_TEST_DB=postgres 时 requirePostgresAPI(t) 显式 skip (不伪装成
 // "跑过了")。库隔离: testutil.OpenTestDB 在目标库内建随机 schema
 // test_<pid>_<nano>, 结束时 DROP SCHEMA CASCADE —— 对落脚库零残留写入。
+//
+// 2026-10-23 (逻辑设备概念层移除, .contract/logical-device-removal.md §5):
+// 本文件原有一组「scope 双分支 UNION ALL / 保形去重 / latest-data 取较新」用例,
+// 它们全部以 `datalifecycle.ResolveDataQueryScope` 与 `logical_device_id` 为
+// 前提。这两个东西随概念层删除后, 那组用例没有对象 —— 已按「设备维度直查」这个
+// 新形态重写:
+//
+//   - 聚合 SQL 的语义正确性 (avg 分桶 / change 变更点) 保持原样, 只把数据来源
+//     从 scope 换成 EdgeDeviceID;
+//   - 原「保形去重先于聚合」→ 改为 **设备隔离**: 一次查询只能看到目标设备自己的
+//     行, 别的设备同 timestamp 的行一律不得混入 (这正是去重当初想掩盖的问题);
+//   - 原「UNION 分支让复合索引生效」→ 改为 **设备列索引存在且被选中**;
+//   - 原「latest-data A/B 分支取较新」→ 随 latestDeviceDataSQL 一起删除
+//     (latest-data 端点改由 handler_edge_device.go 直查 device_id)。
 
 import (
 	"context"
@@ -28,7 +42,6 @@ import (
 	"testing"
 	"time"
 
-	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
 	"ehome/backend/testutil"
 
@@ -44,29 +57,24 @@ func requirePostgresAPI(t *testing.T) {
 	}
 }
 
-// seedPostgresHistoryDevice creates one logical device plus its single
-// instance and returns (instanceID, logicalID, startTime). Query semantics:
-// instance → logical scope (§六), exactly like the endpoint does.
-func seedPostgresHistoryDevice(t *testing.T, db *gorm.DB) (uint, uint, time.Time) {
+// seedPostgresHistoryDevice creates one edge device and returns
+// (deviceID, startTime). 查询维度就是这台设备本身 —— 逻辑设备层移除后,
+// "设备的历史"不再需要任何解析步骤。
+func seedPostgresHistoryDevice(t *testing.T, db *gorm.DB) (uint, time.Time) {
 	t.Helper()
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 
-	ld := models.LogicalDevice{IdentityKey: "bms-pg-hist:0x76", Name: "pg-hist", DeviceType: "bms"}
-	if err := db.Create(&ld).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
 	if err := db.Create(&models.Node{NodeID: "N-PGH", Name: "pgh", Status: "online"}).Error; err != nil {
 		t.Fatalf("create node: %v", err)
 	}
 	if err := db.Create(&models.Channel{NodeID: "N-PGH", HardwareType: "I2C", BusType: "I2C", Enabled: true}).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	dev := models.EdgeDevice{Name: "pg-hist", Type: "bms", NodeID: "N-PGH", ChannelID: 1,
-		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
+	dev := models.EdgeDevice{Name: "pg-hist", Type: "bms", NodeID: "N-PGH", ChannelID: 1, HardwareID: "0x76"}
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatalf("create edge device: %v", err)
 	}
-	return dev.ID, ld.ID, start
+	return dev.ID, start
 }
 
 // historyPointRouter wires exactly the production data routes onto a PG test DB.
@@ -78,17 +86,6 @@ func historyPointRouter(t *testing.T, db *gorm.DB) *gin.Engine {
 	return r
 }
 
-// historyQueryFor resolves the §六 data scope of devID, mirroring what the
-// endpoint passes into queryHistoryPoints (rendered as UNION ALL branches).
-func historyQueryFor(t *testing.T, db *gorm.DB, devID uint) *datalifecycle.DataQueryScope {
-	t.Helper()
-	qs, err := datalifecycle.ResolveDataQueryScope(db, devID)
-	if err != nil {
-		t.Fatalf("resolve query scope: %v", err)
-	}
-	return qs
-}
-
 // ==================== avg 模式: 点数上限 + 桶均值 ====================
 
 func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
@@ -97,7 +94,7 @@ func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
 	if db.Dialector.Name() != "postgres" {
 		t.Fatalf("dialector = %q, want postgres", db.Dialector.Name())
 	}
-	devID, ldID, start := seedPostgresHistoryDevice(t, db)
+	devID, start := seedPostgresHistoryDevice(t, db)
 
 	// 契约 §1.5: 1Hz × 16 类 × 2h。
 	const categories = 16
@@ -107,11 +104,10 @@ func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
 		name := fmt.Sprintf("metric_%02d", c)
 		for i := 0; i < pointsPerCategory; i++ {
 			rows = append(rows, models.UnifiedData{
-				DeviceID:        devID,
-				LogicalDeviceID: &ldID,
-				SensorName:      name,
-				Value:           float64(c)*1e6 + float64(i),
-				Timestamp:       start.Add(time.Duration(i) * time.Second),
+				DeviceID:   devID,
+				SensorName: name,
+				Value:      float64(c)*1e6 + float64(i),
+				Timestamp:  start.Add(time.Duration(i) * time.Second),
 			})
 		}
 	}
@@ -126,11 +122,10 @@ func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
 		t.Fatalf("seeded rows = %d, want %d", seeded, want)
 	}
 
-	qs := historyQueryFor(t, db, devID)
 	end := start.Add(2 * time.Hour)
 	points, err := queryHistoryPoints(context.Background(), db, historyPointQuery{
-		Scope: qs, DedupNeeded: qs.DedupNeeded,
-		Category: "metric_00", Start: start, End: end,
+		EdgeDeviceID: devID,
+		Category:     "metric_00", Start: start, End: end,
 		MaxPoints: 500, Mode: AggModeAvg,
 	})
 	if err != nil {
@@ -141,37 +136,37 @@ func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
 	if len(points) > 501 {
 		t.Fatalf("avg returned %d points, want <= maxPoints+1 (501)", len(points))
 	}
-	// (2) 桶宽 = ceil(7200/500) = 15s; 桶均值 = 桶内 i 的平均值 (值即 i)。
+	// (2) 桶宽 = ceil(7200/500) = 15s; 桶内【最后值】= 该桶内 i 的最大值。
+	// D1 (2026-11-07): 旧断言是桶均值 sums/counts；L1 启用后行数不再代表时间密度，
+	// 必须改成「桶内最后一行」。这里播种是 1 Hz 连续序列，所以桶内最后值 = 桶内最大 i。
 	width := bucketWidthSeconds(pointsPerCategory, 500)
 	if width != 15 {
 		t.Fatalf("bucketWidthSeconds(7200, 500) = %d, want 15", width)
 	}
-	sums := make(map[int64]float64)
-	counts := make(map[int64]int)
+	lastByBucket := make(map[int64]float64)
 	for i := 0; i < pointsPerCategory; i++ {
 		ts := start.Add(time.Duration(i) * time.Second).Unix()
 		bucket := ts / width * width
-		sums[bucket] += float64(i)
-		counts[bucket]++
+		lastByBucket[bucket] = float64(i) // 按 i 递增插入 ⇒ 后写覆盖先写 = 桶内最后
 	}
-	if len(points) != len(sums) {
-		t.Fatalf("avg points = %d, want one per non-empty bucket (%d)", len(points), len(sums))
+	if len(points) != len(lastByBucket) {
+		t.Fatalf("avg points = %d, want one per non-empty bucket (%d)", len(points), len(lastByBucket))
 	}
 	for _, p := range points {
 		bucket := p.Timestamp.Unix()
-		wantMean, ok := sums[bucket]
+		wantLast, ok := lastByBucket[bucket]
 		if !ok {
 			t.Fatalf("point timestamp %s is not an expected bucket start", p.Timestamp)
 		}
 		if p.Timestamp.Unix()%width != 0 {
 			t.Errorf("bucket timestamp %s is not aligned to width %ds", p.Timestamp, width)
 		}
-		want := wantMean / float64(counts[bucket])
-		if p.Value != want {
-			t.Errorf("bucket %d avg = %v, want %v", bucket, p.Value, want)
+		if p.Value != wantLast {
+			t.Errorf("bucket %d last-value = %v, want %v (D1: bucket-last-value, not bucket mean)",
+				bucket, p.Value, wantLast)
 		}
 	}
-	t.Logf("avg: seeded=%d categories=%d points=%d width=%ds", seeded, categories, len(points), width)
+	t.Logf("avg(bucket-last-value): seeded=%d categories=%d points=%d width=%ds", seeded, categories, len(points), width)
 }
 
 // ==================== change 模式: 变更点序列 (首点 + 双向跳变) ====================
@@ -179,13 +174,13 @@ func TestHistoryPointsPostgres_AvgBuckets(t *testing.T) {
 func TestHistoryPointsPostgres_ChangeSequence(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)
-	devID, ldID, start := seedPostgresHistoryDevice(t, db)
+	devID, start := seedPostgresHistoryDevice(t, db)
 
 	// 0 0 1 1 0 0 0 1 -> 变更点: t0(首点), t2(0->1), t4(1->0), t7(0->1)。
 	seq := []float64{0, 0, 1, 1, 0, 0, 0, 1}
 	for i, v := range seq {
 		row := models.UnifiedData{
-			DeviceID: devID, LogicalDeviceID: &ldID, SensorName: "protection_status",
+			DeviceID: devID, SensorName: "protection_status",
 			Value: v, Timestamp: start.Add(time.Duration(i) * time.Second),
 		}
 		if err := db.Create(&row).Error; err != nil {
@@ -193,10 +188,9 @@ func TestHistoryPointsPostgres_ChangeSequence(t *testing.T) {
 		}
 	}
 
-	qs := historyQueryFor(t, db, devID)
 	points, err := queryHistoryPoints(context.Background(), db, historyPointQuery{
-		Scope: qs, DedupNeeded: qs.DedupNeeded,
-		Category: "protection_status", Start: start, End: start.Add(time.Duration(len(seq)) * time.Second),
+		EdgeDeviceID: devID,
+		Category:     "protection_status", Start: start, End: start.Add(time.Duration(len(seq)) * time.Second),
 		MaxPoints: 500, Mode: AggModeChange,
 	})
 	if err != nil {
@@ -226,7 +220,7 @@ func TestHistoryPointsPostgres_ChangeSequence(t *testing.T) {
 func TestHistoricalEndpointsPostgres_Aggregation(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)
-	devID, ldID, start := seedPostgresHistoryDevice(t, db)
+	devID, start := seedPostgresHistoryDevice(t, db)
 
 	// 30min @ 1Hz 两个连续量 + 每 10s 一个 protection_status。
 	const n = 1800
@@ -234,7 +228,7 @@ func TestHistoricalEndpointsPostgres_Aggregation(t *testing.T) {
 		rows := make([]models.UnifiedData, 0, n)
 		for i := 0; i < n; i++ {
 			rows = append(rows, models.UnifiedData{
-				DeviceID: devID, LogicalDeviceID: &ldID, SensorName: cat,
+				DeviceID: devID, SensorName: cat,
 				Value: 3.0 + float64(i)*0.001, Timestamp: start.Add(time.Duration(i) * time.Second),
 			})
 		}
@@ -254,7 +248,7 @@ func TestHistoricalEndpointsPostgres_Aggregation(t *testing.T) {
 		ts := start.Add(time.Duration(i*10) * time.Second)
 		protectionValues = append(protectionValues, v)
 		protectionRows = append(protectionRows, models.UnifiedData{
-			DeviceID: devID, LogicalDeviceID: &ldID, SensorName: "protection_status",
+			DeviceID: devID, SensorName: "protection_status",
 			Value: v, Timestamp: ts,
 		})
 		if len(protectionValues) == 1 || v != protectionValues[len(protectionValues)-2] {
@@ -390,51 +384,46 @@ func TestHistoricalEndpointsPostgres_Aggregation(t *testing.T) {
 	}
 }
 
-// ==================== 保形去重必须先于聚合 ====================
+// ==================== 设备隔离 (原「保形去重先于聚合」的替代) ====================
 
-// TestHistoryPointsPostgres_DedupBeforeAggregation pins 契约 §1.3: 两台物理
-// 设备同一 (sensor_name, timestamp) 的两行必须先按 MAX(id) 去重再 avg ——
-// 直接聚合会把两台设备的读数平均掉 (无物理意义) 且值可被观察到不同。
-func TestHistoryPointsPostgres_DedupBeforeAggregation(t *testing.T) {
+// TestHistoryPointsPostgres_DeviceIsolation 取代原
+// TestHistoryPointsPostgres_DedupBeforeAggregation。
+//
+// 原用例的前提是「两台物理设备在同一 (sensor_name, timestamp) 各写一行, 必须先按
+// MAX(id) 去重再聚合」—— 那是逻辑身份把多台设备的行**合并进同一查询**的产物。
+// 逻辑层移除后, 一次查询只落在一台设备 (device_id = ? 等值) 上, 因此需要钉住的
+// 性质从"去重"变成 **隔离**: 别的设备的行绝不能混进来。
+//
+// 造两台设备, 在**完全相同的 timestamp** 上写同一个 sensor 的不同值:
+//   - 若查询条件写错 (漏了 device_id / 用 IN 兜底 / 又回到 UNION), 桶均值会被
+//     另一台设备的值污染, 值可直接观察到不同 (10/20 vs 110/120);
+//   - 隔离正确时每桶只有目标设备那一个值。
+func TestHistoryPointsPostgres_DeviceIsolation(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)
 
-	done := models.MergeStatusDone
-	target := models.LogicalDevice{IdentityKey: "bms-pg-dedup:0x76", Name: "dedup-target", DeviceType: "bms"}
-	if err := db.Create(&target).Error; err != nil {
-		t.Fatalf("create target logical device: %v", err)
-	}
-	source := models.LogicalDevice{IdentityKey: "bms-pg-dedup:0x77", Name: "dedup-source", DeviceType: "bms",
-		MergedInto: &target.ID, MergeStatus: &done}
-	if err := db.Create(&source).Error; err != nil {
-		t.Fatalf("create source logical device: %v", err)
-	}
-	if err := db.Create(&models.Node{NodeID: "N-PGD", Name: "pgd", Status: "online"}).Error; err != nil {
+	if err := db.Create(&models.Node{NodeID: "N-PGI", Name: "pgi", Status: "online"}).Error; err != nil {
 		t.Fatalf("create node: %v", err)
 	}
-	if err := db.Create(&models.Channel{NodeID: "N-PGD", HardwareType: "I2C", BusType: "I2C", Enabled: true}).Error; err != nil {
+	if err := db.Create(&models.Channel{NodeID: "N-PGI", HardwareType: "I2C", BusType: "I2C", Enabled: true}).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	dev1 := models.EdgeDevice{Name: "dedup-living", Type: "bms", NodeID: "N-PGD", ChannelID: 1, LogicalDeviceID: &target.ID}
-	dev2 := models.EdgeDevice{Name: "dedup-replaced", Type: "bms", NodeID: "N-PGD", ChannelID: 1, LogicalDeviceID: &source.ID}
+	dev1 := models.EdgeDevice{Name: "iso-target", Type: "bms", NodeID: "N-PGI", ChannelID: 1}
+	dev2 := models.EdgeDevice{Name: "iso-noise", Type: "bms", NodeID: "N-PGI", ChannelID: 1}
 	if err := db.Create(&dev1).Error; err != nil {
 		t.Fatalf("create dev1: %v", err)
 	}
 	if err := db.Create(&dev2).Error; err != nil {
 		t.Fatalf("create dev2: %v", err)
 	}
-	if err := db.Delete(&dev2).Error; err != nil { // 实例已删, 数据保留 (merge done 场景)
-		t.Fatalf("soft delete dev2: %v", err)
-	}
 
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	// 每个 timestamp 两行: 迁移来的旧源行 (id 较小, 值 10/20) + 新写入行
-	// (id 较大, 值 30/40)。保形去重保留 MAX(id) => 30/40。
+	// 同一 (sensor, timestamp) 上两台设备各有读数: 目标 10/20, 噪声 110/120。
 	rows := []models.UnifiedData{
-		{DeviceID: dev2.ID, LogicalDeviceID: &target.ID, SensorName: "soc", Value: 10, Timestamp: start},
-		{DeviceID: dev1.ID, LogicalDeviceID: &target.ID, SensorName: "soc", Value: 30, Timestamp: start},
-		{DeviceID: dev2.ID, LogicalDeviceID: &target.ID, SensorName: "soc", Value: 20, Timestamp: start.Add(time.Second)},
-		{DeviceID: dev1.ID, LogicalDeviceID: &target.ID, SensorName: "soc", Value: 40, Timestamp: start.Add(time.Second)},
+		{DeviceID: dev1.ID, SensorName: "soc", Value: 10, Timestamp: start},
+		{DeviceID: dev2.ID, SensorName: "soc", Value: 110, Timestamp: start},
+		{DeviceID: dev1.ID, SensorName: "soc", Value: 20, Timestamp: start.Add(time.Second)},
+		{DeviceID: dev2.ID, SensorName: "soc", Value: 120, Timestamp: start.Add(time.Second)},
 	}
 	for i := range rows {
 		if err := db.Create(&rows[i]).Error; err != nil {
@@ -442,33 +431,26 @@ func TestHistoryPointsPostgres_DedupBeforeAggregation(t *testing.T) {
 		}
 	}
 
-	qs, err := datalifecycle.ResolveDataQueryScope(db, dev1.ID)
-	if err != nil {
-		t.Fatalf("resolve query scope: %v", err)
-	}
-	if !qs.DedupNeeded {
-		t.Fatal("precondition: qs.DedupNeeded must be true (target has a done incoming merge)")
-	}
 	// 窗口 2s / maxPoints=500 -> 桶宽 1s => t0、t0+1s 两个桶。
 	points, err := queryHistoryPoints(context.Background(), db, historyPointQuery{
-		Scope: qs, DedupNeeded: qs.DedupNeeded,
-		Category: "soc", Start: start, End: start.Add(2 * time.Second),
+		EdgeDeviceID: dev1.ID,
+		Category:     "soc", Start: start, End: start.Add(2 * time.Second),
 		MaxPoints: 500, Mode: AggModeAvg,
 	})
 	if err != nil {
-		t.Fatalf("queryHistoryPoints(avg, dedup): %v", err)
+		t.Fatalf("queryHistoryPoints(avg, isolated): %v", err)
 	}
-	wantValues := []float64{30, 40} // 去重保留 MAX(id); 未去重会是 20 / 30
+	wantValues := []float64{10, 20}
 	if len(points) != len(wantValues) {
-		t.Fatalf("deduped avg points = %d, want %d: %+v", len(points), len(wantValues), points)
+		t.Fatalf("avg points = %d, want %d: %+v", len(points), len(wantValues), points)
 	}
 	for i, p := range points {
 		if p.Value != wantValues[i] {
-			t.Errorf("deduped bucket %d value = %v, want %v (de-dup must precede avg)", i, p.Value, wantValues[i])
+			t.Errorf("bucket %d value = %v, want %v (another device leaked into the query)", i, p.Value, wantValues[i])
 		}
 	}
 
-	// 端点同样走 dedup 感知的 scope (证明 handler 把 qs.DedupNeeded 传下去了)。
+	// 端点同样必须隔离 (证明 handler 把 device_pk 传成了 device_id 等值条件)。
 	r := historyPointRouter(t, db)
 	path := fmt.Sprintf("/api/v1/unified-data/historical-batch?device_pk=%d&categories=soc&start_time=%s&end_time=%s&max_points=500&agg=avg",
 		dev1.ID, url.QueryEscape(start.Format(time.RFC3339)), url.QueryEscape(start.Add(2*time.Second).Format(time.RFC3339)))
@@ -483,18 +465,18 @@ func TestHistoryPointsPostgres_DedupBeforeAggregation(t *testing.T) {
 	}
 	batch := envelopeData[[]batchEntry](t, w.Body.Bytes())
 	if len(batch) != 1 || len(batch[0].Data) != len(wantValues) {
-		t.Fatalf("endpoint deduped points = %+v, want %d points", batch, len(wantValues))
+		t.Fatalf("endpoint points = %+v, want %d points", batch, len(wantValues))
 	}
 	for i, p := range batch[0].Data {
 		if p.Value != wantValues[i] {
-			t.Errorf("endpoint deduped bucket %d value = %v, want %v", i, p.Value, wantValues[i])
+			t.Errorf("endpoint bucket %d value = %v, want %v", i, p.Value, wantValues[i])
 		}
 	}
 }
 
-// ==================== §1.6 回归门禁: UNION ALL 让索引真正被使用 ====================
+// ==================== 设备维度查询确实走设备列索引 ====================
 
-// explainPlan runs EXPLAIN (COSTS OFF) on sql and returns the plan text lines.
+// explainPlan runs EXPLAIN on sql and returns the plan text lines.
 func explainPlan(t *testing.T, db *gorm.DB, sqlText string, args ...interface{}) []string {
 	t.Helper()
 	var lines []string
@@ -507,287 +489,241 @@ func explainPlan(t *testing.T, db *gorm.DB, sqlText string, args ...interface{})
 	return lines
 }
 
-// requirePlanMentions fails unless the plan text mentions want.
-func requirePlanMentions(t *testing.T, plan []string, want string) {
+// requirePlanOmits fails if the plan text contains any of the banned substrings.
+func requirePlanOmits(t *testing.T, plan []string, banned ...string) {
 	t.Helper()
-	for _, line := range plan {
-		if strings.Contains(line, want) {
+	joined := strings.Join(plan, "\n")
+	for _, b := range banned {
+		if strings.Contains(joined, b) {
+			t.Fatalf("query plan must not mention %q:\n  %s", b, joined)
+		}
+	}
+}
+
+// alignUnifiedDataSchemaToProduction 把测试 schema 的 unified_data 索引形状
+// **对齐到生产 DDL**（datalifecycle/partition_mgr.go 的 partitionParentIndexes）。
+//
+// ============ 为什么必须显式对齐（2026-11-07 实测，非推测）============
+//
+// 测试库走 testutil.OpenTestDB → AutoMigrate(allModels)，而 models.UnifiedData 的
+// SensorName 字段带 `gorm:"index"` ⇒ AutoMigrate 会建出单列索引
+// idx_unified_data_sensor_name。
+//
+// 生产走 partition_mgr.go 的裸 DDL，**刻意不建**这个索引 —— 第 911 行注释：
+//
+//	//   · sensor_name_idx —— 全仓没有以 sensor_name 为**前导**列的查询。
+//
+// 于是同一条 `device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?` 查询，
+// 在两个形状上 planner 给出**不同答案**（同数据、同统计信息、同 PG18.6 实测）：
+//
+//	有 sensor_name 索引（AutoMigrate 形状）→ Index Scan using idx_unified_data_sensor_name (cost=0.29..84.54)
+//	删掉后（= 生产形状）              → Index Scan using idx_unified_data_device_id  (cost=0.29..1215.29)
+//
+// 本包断言的是「查询在生产上走 device_id 前导索引」，那就必须先让 schema 是生产形状，
+// 否则断言的是一条生产上根本不存在的计划 —— 用例会一直红，而红的原因与产品代码无关。
+//
+// ⚠ 刻意**只**改测试 schema，两条更省事的路都是错的：
+//
+//	· 改 production DDL 加 sensor_name 索引 —— 生产会多一个没人用的索引（写放大 + 空间）；
+//	· 改 model 的 gorm tag 去掉 index  —— 所有 AutoMigrate 出来的库（含测试库以外）
+//	  都会失去它，是**另一个方向**的漂移，且掩盖真实差异而不消除它。
+func alignUnifiedDataSchemaToProduction(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	// (1) 去掉 AutoMigrate 多出来的单列 sensor_name 索引（生产刻意不建，见上）。
+	if err := db.Exec("DROP INDEX IF EXISTS idx_unified_data_sensor_name").Error; err != nil {
+		t.Fatalf("drop idx_unified_data_sensor_name: %v", err)
+	}
+
+	// (2) 补上 AutoMigrate 不会建、但生产 DDL 一定建的两条**设备前导复合索引**
+	//     （partition_mgr.go 的 unified_data 清单）。
+	//
+	// 为什么这一步不能省（我第一版只做了 (1)：avg 模式绿了，change 模式仍红）：
+	//
+	//	change 模式带窗口函数 `ORDER BY timestamp`，在「只有单列 device_id /
+	//	timestamp 索引」的形状下 planner 会选 timestamp 索引来省一次 Sort，把
+	//	device_id 降级成 Filter —— 那是**合理的**代价选择，不是缺陷。生产同时有
+	//	(device_id, timestamp)，它既提供设备过滤又提供时间序，planner 必然选它。
+	//	缺了这条，用例就在一个生产不存在的形状上做断言。
+	//
+	// 只有「多出来的删掉 + 缺的补上」两半都做到，测试 schema 才真是生产形状。
+	for _, ddl := range []string{
+		"CREATE INDEX IF NOT EXISTS unified_data_device_sensor_ts_idx ON unified_data (device_id, sensor_name, timestamp)",
+		"CREATE INDEX IF NOT EXISTS unified_data_device_ts_idx ON unified_data (device_id, timestamp)",
+	} {
+		if err := db.Exec(ddl).Error; err != nil {
+			t.Fatalf("align index DDL failed: %v\nDDL: %s", err, ddl)
+		}
+	}
+
+	// (3) 自检：对齐后的形状必须「没有 sensor_name 前导索引」且「有 3 条 device_id
+	//     前导索引」。把将来的漂移变成一条可读的失败，而不是留给读者一条莫名其妙
+	//     的「计划里没有 device_id 索引」。
+	indexes, err := db.Migrator().GetIndexes(&models.UnifiedData{})
+	if err != nil {
+		t.Fatalf("list indexes on unified_data: %v", err)
+	}
+	deviceLeading := 0
+	for _, idx := range indexes {
+		cols := idx.Columns()
+		if len(cols) == 0 {
+			continue
+		}
+		if cols[0] == "sensor_name" {
+			t.Fatalf("对齐后仍有以 sensor_name 为前导列的索引 %q，生产 DDL 没有它"+
+				"（partition_mgr.go:911）；请更新 alignUnifiedDataSchemaToProduction", idx.Name())
+		}
+		if cols[0] == "device_id" {
+			deviceLeading++
+		}
+	}
+	if deviceLeading < 3 {
+		t.Fatalf("对齐后 device_id 前导索引只有 %d 条，生产 DDL 有 3 条"+
+			"（device_id / device_sensor_ts / device_ts）；对齐 DDL 可能未生效", deviceLeading)
+	}
+}
+
+// deviceLeadingIndexNames 返回某表上**所有**以 device_id 为首列的索引名。
+//
+// 为什么返回列表而不是一个名字（原 deviceIndexName 的修订）：生产在同一张表上有
+// 三条 device_id 前导索引（单列 / +sensor_name+timestamp / +timestamp），planner
+// 按查询形态各选其一。断言「必须选中某一条具体索引」会把用例绑死在 planner 的
+// 代价模型上 —— 正确的断言是「选中了**任意一条** device_id 前导索引」，
+// 即：设备维度过滤走索引，而不是退化成全表扫 + Filter。
+func deviceLeadingIndexNames(t *testing.T, db *gorm.DB, model interface{}, table string) []string {
+	t.Helper()
+	indexes, err := db.Migrator().GetIndexes(model)
+	if err != nil {
+		t.Fatalf("list indexes on %s: %v", table, err)
+	}
+	var names []string
+	for _, idx := range indexes {
+		cols := idx.Columns()
+		if len(cols) > 0 && cols[0] == "device_id" {
+			names = append(names, idx.Name())
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("%s has no index whose leading column is device_id (逻辑层移除后 device_id 是唯一查询维度, 没有它只能全表扫)", table)
+	}
+	return names
+}
+
+// requirePlanMentionsAny 断言计划里出现 want 中**任意一个**子串。
+func requirePlanMentionsAny(t *testing.T, plan []string, want []string) {
+	t.Helper()
+	joined := strings.Join(plan, "\n")
+	for _, w := range want {
+		if strings.Contains(joined, w) {
 			return
 		}
 	}
-	t.Fatalf("query plan does not use %q:\n  %s", want, strings.Join(plan, "\n  "))
+	t.Fatalf("query plan mentions none of the device_id-leading indexes %v:\n  %s",
+		want, strings.Join(plan, "\n  "))
 }
 
-// TestPostgresUnionPlanUsesCompositeIndexes 是本修复的关键回归门禁
-// (契约 §1.6, Lead 2026-10-20 23:09 补充第 3 点):
+// TestPostgresDeviceScopedPlan 取代原 TestPostgresUnionPlanUsesCompositeIndexes。
 //
-//   - A 分支 (logical_device_id IN (...) + sensor_name + timestamp) 必须走
-//     idx_unified_logical_sensor_ts (avg 与 change 两种模式);
-//   - B 分支 (logical_device_id IS NULL AND device_id IN (...), 造了 NULL 行)
-//     必须走部分索引 idx_unified_legacy_null_ts;
-//   - latest-data A 分支走 idx_devdata_logical_created, B 分支走
-//     idx_devdata_legacy_null_created。
+// 原用例锁的是「UNION ALL 两个分支各自带干净前导列, 避免 OR 条件把
+// logical_device_id 降级成 Filter」。列没了, 分支也没了 —— 现在要锁的是**更简单
+// 也更强的一条**: 单表单条件查询必须能走 device_id 前导索引。
 //
-// 回退成旧 OR scope 条件时本条必红 (verifier 在 22.4M 行 bench 上实测:
-// 24h 单测点仍 Index Scan timestamp_idx 扫 2.5M 行, latest-data 仍 Seq Scan)。
-func TestPostgresUnionPlanUsesCompositeIndexes(t *testing.T) {
+// 做法: 关掉 enable_seqscan 后 EXPLAIN, 断言计划里出现那个以 device_id 为首列的
+// 索引, 且计划里**不出现** logical_device_id。关 seqscan 是为了消除"数据量小所以
+// planner 选顺序扫"的噪声 —— 这里断言的是"索引可用且被选中", 不是"planner 在
+// 任意代价下都选它" (后者在小表上不稳定, 原用例注释里也承认过)。
+//
+// ⚠ 前置动作 alignUnifiedDataSchemaToProduction 不可删：AutoMigrate 建出的 schema
+// 比生产多一个 sensor_name 前导索引，会让 planner 走错索引 ⇒ 本用例稳定红
+// （2026-11-07 实测 3/3）。详见该函数的注释。
+func TestPostgresDeviceScopedPlan(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)
-	ctx := context.Background()
-	if err := datalifecycle.EnsureLogicalDataIndexes(ctx, db); err != nil {
-		t.Fatalf("ensure indexes: %v", err)
-	}
+	alignUnifiedDataSchemaToProduction(t, db)
+	devID, start := seedPostgresHistoryDevice(t, db)
 
-	// 1 逻辑设备 + 1 实例 (scope 因此有 A/B 两个分支)。
-	ld := models.LogicalDevice{IdentityKey: "bms-union-plan:0x76", Name: "union-plan", DeviceType: "bms"}
-	if err := db.Create(&ld).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
-	if err := db.Create(&models.Node{NodeID: "N-UP", Name: "up", Status: "online"}).Error; err != nil {
-		t.Fatalf("create node: %v", err)
-	}
-	if err := db.Create(&models.Channel{NodeID: "N-UP", HardwareType: "I2C", BusType: "I2C", Enabled: true}).Error; err != nil {
-		t.Fatalf("create channel: %v", err)
-	}
-	dev := models.EdgeDevice{Name: "union-plan", Type: "bms", NodeID: "N-UP", ChannelID: 1,
-		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
-	if err := db.Create(&dev).Error; err != nil {
-		t.Fatalf("create edge device: %v", err)
-	}
-
-	// 帧序插入 16 类 × 2000s = 32000 行 (与生产 1Hz 采集同构: 同测点在堆内分散),
-	// 另造 400 行 backfill 前 NULL-logical 旧行, 让 B 分支部分索引可被选中。
-	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	// 造足够的行, 让索引选择有意义。
+	start = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	const sensors = 16
 	const points = 2000
-	rows := make([]models.UnifiedData, 0, sensors*points+400)
+	rows := make([]models.UnifiedData, 0, sensors*points)
 	for i := 0; i < points; i++ {
 		ts := start.Add(time.Duration(i) * time.Second)
 		for s := 0; s < sensors; s++ {
 			rows = append(rows, models.UnifiedData{
-				DeviceID: dev.ID, LogicalDeviceID: &ld.ID,
-				SensorName: fmt.Sprintf("metric_%02d", s), Value: float64(i), Timestamp: ts,
-			})
-		}
-		if i%5 == 0 { // 每 5s 一条 NULL-logical 旧行 (同 sensor/时间轴)
-			rows = append(rows, models.UnifiedData{
-				DeviceID: dev.ID, SensorName: "metric_00", Value: float64(i), Timestamp: ts,
+				DeviceID: devID, SensorName: fmt.Sprintf("metric_%02d", s),
+				Value: float64(i), Timestamp: ts,
 			})
 		}
 	}
 	if err := db.CreateInBatches(rows, 1000).Error; err != nil {
 		t.Fatalf("seed unified_data: %v", err)
 	}
-	devRows := make([]models.DeviceData, 0, 2000)
-	for i := 0; i < 2000; i++ {
-		ts := start.Add(time.Duration(i) * time.Second)
-		devRows = append(devRows, models.DeviceData{
-			DeviceID: dev.ID, NodeID: "N-UP", DataJSON: `{"v":1}`,
-			Timestamp: ts, CreatedAt: ts, LogicalDeviceID: &ld.ID,
-		})
+	if err := db.Exec("ANALYZE unified_data").Error; err != nil {
+		t.Fatalf("analyze unified_data: %v", err)
 	}
-	for i := 0; i < 200; i++ { // NULL-logical 旧行, 供 latest-data B 分支部分索引
-		ts := start.Add(time.Duration(i*10) * time.Second)
-		devRows = append(devRows, models.DeviceData{
-			DeviceID: dev.ID, NodeID: "N-UP", DataJSON: `{"v":0}`,
-			Timestamp: ts, CreatedAt: ts,
-		})
-	}
-	if err := db.CreateInBatches(devRows, 500).Error; err != nil {
-		t.Fatalf("seed device_data: %v", err)
-	}
-	for _, table := range []string{"unified_data", "device_data"} {
-		if err := db.Exec("ANALYZE " + table).Error; err != nil {
-			t.Fatalf("analyze %s: %v", table, err)
+
+	// 断言口径：两条模式各自选中**任意一条** device_id 前导索引即可。
+	//
+	// 为什么不钉死某一条（原实现用 deviceIndexName 取"第一条"）：生产同时有
+	// (device_id) / (device_id, sensor_name, timestamp) / (device_id, timestamp)
+	// 三条，planner 按查询形态各选其一。钉死单条会把用例绑死在 PG 的代价模型
+	// 细节上 —— 实测 avg 选 device_sensor_ts、change 选 device_ts，两者都是正确
+	// 答案。这里要锁的性质只有一条：**设备维度过滤走索引，不退化成全表扫 + Filter**。
+	deviceIdxs := deviceLeadingIndexNames(t, db, &models.UnifiedData{}, "unified_data")
+
+	// 在一个事务里关掉 seqscan, 让 planner 只能走索引 (设置不跨连接泄漏)。
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET LOCAL enable_seqscan = off").Error; err != nil {
+			return err
 		}
-	}
-
-	qs, err := datalifecycle.ResolveDataQueryScope(db, dev.ID)
+		end := start.Add(2 * time.Hour)
+		for _, mode := range []AggMode{AggModeAvg, AggModeChange} {
+			sqlText, args := historyAggregateSQL(db, historyPointQuery{
+				EdgeDeviceID: devID, Category: "metric_00",
+				Start: start, End: end, MaxPoints: 500, Mode: mode,
+			}, bucketWidthSeconds(historyWindowSeconds(start, end), 500))
+			if sqlText == "" {
+				t.Fatalf("%s: SQL is empty", mode)
+			}
+			plan := explainPlan(t, tx, sqlText, args...)
+			requirePlanMentionsAny(t, plan, deviceIdxs)
+			requirePlanOmits(t, plan, "logical_device_id", "UNION")
+			t.Logf("%s plan on unified_data:\n  %s", mode, strings.Join(plan, "\n  "))
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("resolve query scope: %v", err)
-	}
-	if len(qs.Scope.LogicalIDs) == 0 || len(qs.Scope.InstanceIDs) == 0 {
-		t.Fatalf("precondition: scope must have both branches (logical=%v instance=%v)",
-			qs.Scope.LogicalIDs, qs.Scope.InstanceIDs)
-	}
-	// 注: 本测试 schema 只有 ~3 万行且单一逻辑设备, PG 代价模型对 A 分支
-	// (logical_device_id, sensor_name, timestamp) 与单列索引的取舍不稳定;
-	// A 分支"走复合索引"的真实验收证据在 22.4M 行 ehome_bench 的 EXPLAIN
-	// (.bench/after-v2.md, 单测点 24h 扫描 ≈86,400 行)。本测试锁定的是
-	// 结构上可复现的两点: union 分支顺序/形态, 以及 B 分支必须走 legacy
-	// 部分索引 (没有它 B 分支会退化为全窗口扫描)。
-	end := start.Add(2 * time.Hour)
-
-	// (1) avg 历史查询: B 分支 (NULL-logical) 必须走部分索引。
-	avgSQL, avgArgs := historyAggregateSQL(historyPointQuery{
-		Scope: qs, Category: "metric_00", Start: start, End: end,
-		MaxPoints: 500, Mode: AggModeAvg,
-	}, bucketWidthSeconds(historyWindowSeconds(start, end), 500))
-	t.Logf("avg SQL:\n%s", avgSQL)
-	avgPlan := explainPlan(t, db, avgSQL, avgArgs...)
-	requirePlanMentions(t, avgPlan, datalifecycle.IndexUnifiedLegacyNullTS)
-	// covering 索引 (INCLUDE value): avg 必须是 Index Only Scan (无 heap fetch),
-	// 否则 planner 在 86,400 行量级仍会退回去扫 timestamp 索引 (Lead bench 实测)。
-	requirePlanMentions(t, avgPlan, "Index Only Scan")
-
-	// (2) change 历史查询: B 分支同样必须走部分索引 (不许全窗口扫描)。
-	changeSQL, changeArgs := historyAggregateSQL(historyPointQuery{
-		Scope: qs, Category: "metric_00", Start: start, End: end,
-		MaxPoints: 500, Mode: AggModeChange,
-	}, bucketWidthSeconds(historyWindowSeconds(start, end), 500))
-	changePlan := explainPlan(t, db, changeSQL, changeArgs...)
-	requirePlanMentions(t, changePlan, datalifecycle.IndexUnifiedLegacyNullTS)
-	// change: 分支 ORDER BY -> Merge Append + Index Only Scan (无 external sort)。
-	requirePlanMentions(t, changePlan, "Index Only Scan")
-
-	// (3) latest-data: 每个 scope 分支各自 (… ORDER BY created_at DESC LIMIT 1)
-	//     再取较新, 因此 A 分支走 (logical_device_id, created_at DESC)、B 分支走
-	//     legacy 部分索引。按分支分别 EXPLAIN（合并后单条 SQL 的节点顺序不稳定）。
-	branches := dataScopeBranches(qs)
-	if len(branches) != 2 {
-		t.Fatalf("latest-data branches = %d, want 2 (logical + NULL-logical fallback)", len(branches))
-	}
-	for i, wantIndex := range []string{
-		datalifecycle.IndexDevDataLogicalCreated,
-		datalifecycle.IndexDevDataLegacyNullCreat,
-	} {
-		branchSQL := fmt.Sprintf(
-			"SELECT * FROM device_data WHERE %s ORDER BY created_at DESC LIMIT 1",
-			branches[i].cond)
-		branchPlan := explainPlan(t, db, branchSQL, branches[i].args...)
-		requirePlanMentions(t, branchPlan, wantIndex)
-	}
-	// 合并语句本身也必须可执行（语义由 TestLatestDeviceDataPostgres_NewestAcrossBranches 锁）。
-	latestSQL, latestArgs := latestDeviceDataSQL(qs)
-	if latestSQL == "" {
-		t.Fatal("latest-data SQL is empty")
-	}
-	var latestRow models.DeviceData
-	if err := db.Raw(latestSQL, latestArgs...).Scan(&latestRow).Error; err != nil {
-		t.Fatalf("latest-data union query failed: %v", err)
+		t.Fatalf("plan check: %v", err)
 	}
 }
 
-// ==================== latest-data: A/B 两分支取较新（语义回归门禁） ====================
+// ==================== change 模式: 跨传感器乱序写入下的全局有序 ====================
 
-// TestLatestDeviceDataPostgres_NewestAcrossBranches 锁住评审 2026-10-21 指出的
-// 语义回归：旧 OR scope 查询返回 max(created_at) over (A ∪ B)；实现若改成
-// 「A 命中即止」，当 B 行比 A 最新行更新时（backfill 未完成 / 写路径回退写
-// NULL-logical）会返回 stale 行。这里构造两种顺序，断言必须取较新。
-func TestLatestDeviceDataPostgres_NewestAcrossBranches(t *testing.T) {
+// TestHistoryPointsPostgres_ChangeOrderedAcrossSensors 取代原
+// TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered。
+//
+// 原用例验证「A/B 两分支的行交错时, change 序列仍按 timestamp 全局有序」——
+// 分支没了, 但**乱序写入**这个真实条件还在: 不同命令/不同传感器的心跳会让行在
+// 堆里不按时间先后落盘。change 模式依赖 lag() 的 ORDER BY, 必须自己保证全局有序,
+// 不能指望物理行序。
+func TestHistoryPointsPostgres_ChangeOrderedAcrossSensors(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)
-	ctx := context.Background()
-	if err := datalifecycle.EnsureLogicalDataIndexes(ctx, db); err != nil {
-		t.Fatalf("ensure indexes: %v", err)
-	}
+	devID, start := seedPostgresHistoryDevice(t, db)
 
-	ld := models.LogicalDevice{IdentityKey: "bms-latest-branches:0x76", Name: "latest-branches", DeviceType: "bms"}
-	if err := db.Create(&ld).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
-	dev := models.EdgeDevice{Name: "latest-branches", Type: "bms", NodeID: "N-LB", ChannelID: 1,
-		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
-	if err := db.Create(&dev).Error; err != nil {
-		t.Fatalf("create edge device: %v", err)
-	}
-	qs, err := datalifecycle.ResolveDataQueryScope(db, dev.ID)
-	if err != nil {
-		t.Fatalf("resolve query scope: %v", err)
-	}
-	sqlText, args := latestDeviceDataSQL(qs)
-	if sqlText == "" {
-		t.Fatal("latest-data SQL is empty")
-	}
-	readLatest := func() models.DeviceData {
-		t.Helper()
-		var row models.DeviceData
-		if err := db.Raw(sqlText, args...).Scan(&row).Error; err != nil {
-			t.Fatalf("latest-data query failed: %v", err)
-		}
-		return row
-	}
-
-	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	mkRow := func(ts time.Time, logical bool, payload string) models.DeviceData {
-		row := models.DeviceData{
-			DeviceID: dev.ID, NodeID: "N-LB", DataJSON: payload,
-			Timestamp: ts, CreatedAt: ts,
-		}
-		if logical {
-			row.LogicalDeviceID = &ld.ID
-		}
-		return row
-	}
-
-	// 场景 1: A 有旧行 (T+0), B 有更新的 NULL-logical 行 (T+10) => 必须返回 B。
-	if err := db.Create(&[]models.DeviceData{
-		mkRow(base, true, `{"branch":"A","n":1}`),
-		mkRow(base.Add(10*time.Second), false, `{"branch":"B","n":2}`),
-	}).Error; err != nil {
-		t.Fatalf("seed scenario 1: %v", err)
-	}
-	if got := readLatest(); got.DataJSON != `{"branch":"B","n":2}` {
-		t.Fatalf("scenario 1: latest-data = %q (created_at=%s), want the newer NULL-logical row",
-			got.DataJSON, got.CreatedAt.Format(time.RFC3339))
-	}
-
-	// 场景 2: 再写一条更新的 A 行 (T+20) => 必须返回 A（两个方向都取较新）。
-	newerA := mkRow(base.Add(20*time.Second), true, `{"branch":"A","n":3}`)
-	if err := db.Create(&newerA).Error; err != nil {
-		t.Fatalf("seed scenario 2: %v", err)
-	}
-	if got := readLatest(); got.DataJSON != `{"branch":"A","n":3}` {
-		t.Fatalf("scenario 2: latest-data = %q (created_at=%s), want the newer logical row",
-			got.DataJSON, got.CreatedAt.Format(time.RFC3339))
-	}
-}
-
-// ==================== change 模式: 跨 A/B 分支的全局有序与并集语义 ====================
-
-// TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered 锁住评审指出的测试缺口：
-// 既有 change 测试的 B 分支为空，从未验证「A/B 行交错时按 timestamp 全局有序、
-// 变更点等于全量并集的 lag」。这里两分支交错插入，断言时间升序且序列与
-// 手工计算的并集 lag 完全一致。
-func TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered(t *testing.T) {
-	requirePostgresAPI(t)
-	db := testutil.OpenTestDB(t)
-
-	ld := models.LogicalDevice{IdentityKey: "bms-change-branches:0x76", Name: "change-branches", DeviceType: "bms"}
-	if err := db.Create(&ld).Error; err != nil {
-		t.Fatalf("create logical device: %v", err)
-	}
-	dev := models.EdgeDevice{Name: "change-branches", Type: "bms", NodeID: "N-CB", ChannelID: 1,
-		HardwareID: "0x76", LogicalDeviceID: &ld.ID}
-	if err := db.Create(&dev).Error; err != nil {
-		t.Fatalf("create edge device: %v", err)
-	}
-	qs, err := datalifecycle.ResolveDataQueryScope(db, dev.ID)
-	if err != nil {
-		t.Fatalf("resolve query scope: %v", err)
-	}
-	if len(qs.Scope.LogicalIDs) == 0 || len(qs.Scope.InstanceIDs) == 0 {
-		t.Fatalf("precondition: scope must have both branches")
-	}
-
-	// 交错时间轴: t=0,2,4 走 A 分支; t=1,3 走 B 分支 (NULL-logical)。
-	// 并集值序列 0,1,0,0,1 => 变更点: t0=0(首点), t1=1(0->1), t2=0(1->0), t4=1(0->1)。
-	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	start = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	// 值序列按时间应为 0,1,0,0,1 => 变更点: t0=0(首点), t1=1(0->1), t2=0(1->0), t4=1(0->1)。
+	// 写入顺序刻意打乱 (4,1,3,0,2), 模拟多命令交错的落盘顺序。
 	type point struct {
-		offset  int
-		value   float64
-		logical bool
+		offset int
+		value  float64
 	}
-	points := []point{
-		{0, 0, true}, {1, 1, false}, {2, 0, true}, {3, 0, false}, {4, 1, true},
-	}
+	points := []point{{4, 1}, {1, 1}, {3, 0}, {0, 0}, {2, 0}}
 	for _, pt := range points {
 		row := models.UnifiedData{
-			DeviceID: dev.ID, SensorName: "protection_status",
+			DeviceID: devID, SensorName: "protection_status",
 			Value: pt.value, Timestamp: start.Add(time.Duration(pt.offset) * time.Second),
-		}
-		if pt.logical {
-			row.LogicalDeviceID = &ld.ID
 		}
 		if err := db.Create(&row).Error; err != nil {
 			t.Fatalf("seed unified row t=%d: %v", pt.offset, err)
@@ -795,7 +731,7 @@ func TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered(t *testing.T) {
 	}
 
 	got, err := queryHistoryPoints(context.Background(), db, historyPointQuery{
-		Scope: qs, Category: "protection_status",
+		EdgeDeviceID: devID, Category: "protection_status",
 		Start: start, End: start.Add(time.Hour), MaxPoints: 500, Mode: AggModeChange,
 	})
 	if err != nil {
@@ -809,7 +745,7 @@ func TestHistoryPointsPostgres_ChangeAcrossBranchesOrdered(t *testing.T) {
 	for i := range wantOffsets {
 		wantTs := start.Add(time.Duration(wantOffsets[i]) * time.Second)
 		if !got[i].Timestamp.Equal(wantTs) {
-			t.Errorf("point[%d].timestamp = %s, want %s (global order across branches)",
+			t.Errorf("point[%d].timestamp = %s, want %s (global order regardless of insert order)",
 				i, got[i].Timestamp.Format(time.RFC3339), wantTs.Format(time.RFC3339))
 		}
 		if got[i].Value != wantValues[i] {

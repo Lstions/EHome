@@ -46,12 +46,15 @@ func (k Kind) String() string { return string(k) }
 
 // SourceKey 唯一标识一个「数据来源」。
 //
-// 与既有 data_sources 表的分组键一致：(逻辑设备, 类别)。这个口径不是新发明的 ——
-// data_sources 的 uniqueIndex uniq_ds_source(device_id, category, edge_device_id)
-// 里前两列就是它。
+// 与 data_sources 表的组键一致：(edge_device_id, 类别)。
+//
+// 历史：逻辑设备概念层已整体移除（2026-10-23, .contract/logical-device-removal.md），
+// 组键原为 (逻辑设备, 类别)，那条口径让「同一物理来源」在两套 id 空间里来回映射。
+// 现在「一个来源」就是「某台边缘设备上报的某个类别」—— 同一台设备换节点后
+// edge_device_id 不变（原地换节点）或经 merge-history 迁移，历史天然连续。
 type SourceKey struct {
-	// LogicalDeviceID 是逻辑设备 ID（= data_sources.device_id 的口径）。
-	LogicalDeviceID uint
+	// EdgeDeviceID 是边缘设备 ID（= unified_data.device_id 的口径）。
+	EdgeDeviceID uint
 	// Category 是物理名（= unified_data.sensor_name，不归一）。
 	Category string
 }

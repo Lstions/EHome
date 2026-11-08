@@ -4,30 +4,31 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 
-	"ehome/backend/internal/models"
-	"ehome/backend/internal/notify"
 	"ehome/backend/pkg/metrics"
 )
 
-// retention 通知文案 (§4.2): 到期前 30/7 天各一条, 文案含延长保留期入口。
-// 标题固定用于每日任务的去重查询 (同设备同层级窗口期内不重复发)。
-const (
-	retentionNoticeTitle30 = "数据保留期即将到期（剩余 30 天）"
-	retentionNoticeTitle7  = "数据保留期即将到期（剩余 7 天）"
-)
-
-// RetentionResult reports one logical device's retention outcome.
+// RetentionResult reports one retention run's outcome.
+//
+// 2026-10-23: 逻辑设备层移除后，保留期回到**系统级单一窗口**
+// (EHOME_DATA_RETENTION_DAYS，默认 90)，不再有「按身份配置」与 30/7 天两档通知
+// —— 那两档的前提是「每个身份有自己的到期日」，系统级窗口下到期日对全库一致。
 type RetentionResult struct {
-	LogicalID    uint   `json:"logical_id"`
-	NotifiedTier int    `json:"notified_tier,omitempty"` // 30 / 7 / 0
-	RowsDeleted  int64  `json:"rows_deleted"`
-	Err          string `json:"error,omitempty"`
+	// Days 是本轮采用的系统级保留天数。0 表示永久保留。
+	Days int `json:"days"`
+	// Permanent 表示本轮**跳过了数据删除**（保留期为 0 = 永久）。
+	//
+	// 单独给一个布尔而不是让调用方去判 Days==0：日志/接口消费方不该知道
+	// 「0 是永久还是未配置」这个内部约定，否则迟早有人把 0 当默认值渲染成
+	// 「保留 0 天 = 删除所有数据」。
+	Permanent bool `json:"permanent,omitempty"`
+	// RowsDeleted 是本轮按窗口精确删除的行数（分区 DROP 另计）。
+	RowsDeleted int64  `json:"rows_deleted"`
+	Err         string `json:"error,omitempty"`
 }
 
 // RetentionTask is the §4.3 任务 1 daily worker: 保留期临期通知
@@ -43,14 +44,17 @@ type RetentionTask struct {
 	// notifier 清理 notifications 表 (D-2): 与本任务同频每日执行, 无独立
 	// goroutine —— 调度编排不变, 失败只 slog.Warn, 不影响 retention 主流程。
 	notifier *NotificationCleaner
-	// notifySink 是**通知写入 + 投递**入口 (D-1 步骤 3): main.go 经 SetNotifier
-	// 注入 notify.Dispatcher, 由它写 notifications 行并顺带外发投递。
+	// 注 (2026-10-23): 本任务**不再是通知生产者**。
 	//
-	// 字段名不叫 notifier 是因为它与上面的 D-2 清理器 *NotificationCleaner* 撞名
-	// (两者语义相反: 一个写通知, 一个删通知), 保留不同名字避免误读。
-	// **nil 是显式支持的合法状态**: 既有测试直接 NewRetentionTask(db) 不注入时
-	// 回落为直接写 notifications 表, 行为与改造前逐字节一致。
-	notifySink notify.Notifier
+	// 历史上它是「保留期临期通知（30/7 天两档）」的写入点，因此需要 main.go 注入
+	// notify.Dispatcher。逻辑设备层移除后保留期变成系统级单一窗口，到期日对全库
+	// 一致，不再有「这个身份快到期了」的个体语义 ⇒ 临期通知整体消失，本任务只
+	// 删除过期数据。
+	//
+	// 因此注入字段与 setter 方法**一并删除**，而不是留一个空壳 setter ——
+	// 空壳 setter 正是 notify_wiring_gate 要防的「引擎孤儿」形状（调用点在、
+	// 实际无投递，静默失效）。该性质由 notify_wiring_test.go 的源码扫描用例
+	// 钉住（本包内不得再出现通知注入点的标识符）。
 	// deliveries 清理 notification_deliveries 投递审计表 (D-1 裁决 3 的欠账):
 	// 同样挂在本任务上, 与 notifications 清理**同批处理** (裁决原文要求),
 	// 不新增 goroutine、不改 main.go。
@@ -188,47 +192,69 @@ func (r *RetentionTask) runOnceLogged() {
 	for _, res := range results {
 		if res.Err != "" {
 			slog.Warn("datalifecycle: retention processing failed",
-				"logical_id", res.LogicalID, "error", res.Err)
+				"days", res.Days, "error", res.Err)
 			continue
 		}
 		if res.RowsDeleted > 0 {
 			slog.Info("datalifecycle: retention expired rows deleted",
-				"logical_id", res.LogicalID, "rows_deleted", res.RowsDeleted)
-		}
-		if res.NotifiedTier > 0 {
-			slog.Info("datalifecycle: retention expiry notice sent",
-				"logical_id", res.LogicalID, "tier_days", res.NotifiedTier)
+				"days", res.Days, "rows_deleted", res.RowsDeleted)
 		}
 	}
 }
 
-// RunOnce applies retention policy to every eligible logical device.
-// Eligibility guards (与 purge 任务对齐):
-//   - purge_requested=TRUE → purge 任务负责 (其数据将被整体删除)
-//   - pending 合并参与者 (目标或源) → 顺延至合并终态 (搬迁窗口内数据
-//     归属在移动, 保留期删除会误伤未搬迁分片或应用错误的 retention)
+// RunOnce applies the system-level retention window to the whole database.
+//
+// 语义（2026-10-23 逻辑设备层移除后的最终形态；2026-11-07 增加「永久保留」）：
+//   - 保留期只有一个系统级窗口 EHOME_DATA_RETENTION_DAYS（默认 90 天）；
+//   - 先按月 DROP 分区（整月分区的每一天都已过期才删，见 dropExpiredPartitionsOnce），
+//     再对剩余边界分区按 timestamp 做精确分批 DELETE；
+//   - **保留期为 0 表示永久保留**：上面两步整段跳过，但下面 8 个旁路清理器照跑
+//     （它们的窗口来自各自的常量，与数据保留期无关）；
+//   - 不再有「按身份跳过」「pending 合并顺延」这类守卫 —— 它们存在的唯一理由是
+//     「不同身份有不同的到期日」，而系统级窗口下这个前提不存在。
+//
+// 旁路清理器（notifications / deliveries / automation_events / 命令域三表 /
+// 审计 / node_events）与本任务同频、同一调用点，顺序与理由见下方逐条注释；
+// 任何一项失败都只告警，绝不影响数据保留期主流程。
+//
+// 为什么「永久保留」不跳过旁路清理器（这是本轮最容易做错的一处）：
+// 用户说的「所有数据要长期保留」指的是**遥测数据**（unified_data / device_data /
+// telemetry_frame）。旁路清理器删的是通知、投递审计、自动化事件、命令记录、安全审计、
+// 节点事件 —— 这些是**元数据**，且它们**没有独立 goroutine**，唯一调用点就是本函数。
+// 整体 return 会让这 8 张表无限增长，把「保留数据」变成「全库膨胀」的事故。
 func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) {
-	var devices []models.LogicalDevice
-	if err := r.db.WithContext(ctx).
-		Where("purge_requested = ?", false).
-		Order("id").
-		Find(&devices).Error; err != nil {
-		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
-		return nil, fmt.Errorf("datalifecycle: scan logical devices: %w", err)
-	}
-	// 全局分区清扫 (v3.4 §3.2.1): 每轮仅一次, 不再按设备各做一次。
+	days := SystemRetentionDays()
+	// ==================== 0 = 永久保留（2026-11-07）====================
 	//
-	// 为什么必须上移且不能按单设备 retention: DropPartitionsBeforeFor 扫描
-	// unified_data_% 并整表 DROP, 是**不区分数据所有者**的全局操作; 若按某个设备
-	// 的 retention 计算 cutoff, 短保留期设备会连带删除长保留期设备仍应保留的历史
-	// 整月分区 (P0 静默不可恢复数据丢失)。cutoff 取所有逻辑设备中最长 retention,
-	// 保证一个分区只有在它对每一个数据所有者都已到期时才被删除。
+	// 用户裁决「所有数据要长期保留」，因此这里**不再**把 0 兜底成 1 天
+	// （那是个反向 bug：设 0 想永久保留，反而删得更狠）。改成:
 	//
-	// 清扫失败不得中断逐设备的 scope 精确 DELETE: 只记指标 + 日志, 继续。
-	if err := r.dropExpiredPartitionsOnce(ctx, r.now()); err != nil {
-		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
-		slog.Error("datalifecycle: retention global partition sweep failed; continuing per-device deletes",
-			"error", err)
+	//	days <= 0 ⇒ 跳过【数据】删除（分区 DROP + 行级 DELETE），
+	//	           但**旁路清理器全部照跑** —— 通知/投递/自动化事件/命令域三表/
+	//	           审计/node_events 各有自己的保留期常量，与数据保留期无关。
+	//
+	// 为什么不能「整体 return」：那会让这 8 张表**无限增长**（它们的清理器没有
+	// 独立 goroutine，唯一调用点就是本函数），把一个「保留数据」的需求变成
+	// 「所有表都永久膨胀」的事故。而它们清理的是**运维/审计元数据**，不是用户
+	// 的遥测数据 —— 用户说的「所有数据」不包含这些。
+	//
+	// 负值同样走这条路（SetSystemRetentionDays 会忽略负值，所以实际到不了这里的
+	// 只有真正的 0；保留 <= 0 判断是为了防「有人绕过 setter 直接改 atomic」）。
+	permanent := days <= 0
+	if permanent {
+		slog.Info("datalifecycle: data retention is PERMANENT (retention_days<=0): " +
+			"skipping partition DROP and row DELETE; bypass cleaners still run")
+	} else {
+		// 全局分区清扫 (v3.4 §3.2.1): 每轮一次。系统级窗口下 cutoff 唯一，不存在
+		// 「短保留期设备连带删掉长保留期设备数据」的问题（那是 per-identity retention
+		// 才有的问题）。
+		//
+		// 清扫失败不得中断下面的精确 DELETE: 只记指标 + 日志, 继续。
+		if err := r.dropExpiredPartitionsOnce(ctx, r.now(), days); err != nil {
+			metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
+			slog.Error("datalifecycle: retention global partition sweep failed; continuing exact deletes",
+				"days", days, "error", err)
+		}
 	}
 
 	// D-2: notifications 清理 (与 retention 同频每日一次)。旁路操作:
@@ -289,54 +315,58 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 		r.nodeEvents.runOnceLogged(ctx)
 	}
 
-	results := make([]RetentionResult, 0, len(devices))
-	for i := range devices {
-		select {
-		case <-ctx.Done():
-			return results, ctx.Err()
-		default:
-		}
-		res := r.processOne(ctx, &devices[i])
-		if res.Err != "" {
+	// 分区 DROP 之后，边界分区里仍可能有「整月未到期但单行已过期」的数据:
+	// 用系统级 cutoff 做一次精确分批 DELETE（全表，不再按设备 scope）。
+	//
+	// 永久保留（days<=0）时**整段跳过**：既没有 cutoff 可算，也不该删任何行。
+	// 注意 RowsDeleted 保持 0 而不是省略 —— 结果形状是 # 个元素、每个 Days 字段
+	// 都照常填（Days=0 就是「永久」这个事实本身），让调用方/日志能看出本轮为什么没删。
+	res := RetentionResult{Days: days, Permanent: permanent}
+	if !permanent && ctx.Err() == nil {
+		deleted, derr := r.deleteExpiredRows(ctx, days, r.now())
+		res.RowsDeleted = deleted
+		if derr != nil {
+			res.Err = derr.Error()
 			metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
 		}
-		if res.RowsDeleted > 0 {
-			metrics.LifecyclePurgedRows.WithLabelValues("retention").Add(float64(res.RowsDeleted))
+		if deleted > 0 {
+			metrics.LifecyclePurgedRows.WithLabelValues("retention").Add(float64(deleted))
 		}
-		results = append(results, res)
 	}
-	return results, nil
+	return []RetentionResult{res}, nil
 }
 
 // dropExpiredPartitionsOnce performs the per-run GLOBAL monthly partition reap
-// for every partitioned time-series table (unified_data, device_data)
-// (v3.4 §3.2.1). It is intentionally the ONLY place retention drops partitions.
+// for every partitioned time-series table (unified_data, device_data,
+// telemetry_frame) (v3.4 §3.2.1). It is intentionally the ONLY place retention
+// drops partitions.
 // No-op unless at least one of those tables is a partitioned PostgreSQL table.
 //
-// cutoff 语义 (防回归, 见 deleteExpired 注记): 分区 DROP 是不可分割的全局整月
-// 操作, 一个分区只有对**每一个**数据所有者都已到期时才可删除, 因此 cutoff 取
-// now - max(retention_days) (所有逻辑设备中**最长**的保留期)。若取较短保留期
-// (或按单设备取), 会在处理该设备时连带 DROP 掉长保留期设备仍需要的历史整月
-// 分区, 造成跨设备、静默、不可恢复的数据丢失。两张表共用同一 cutoff, 语义不变。
-func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.Time) error {
+// cutoff 语义: 分区 DROP 是不可分割的全局整月操作 —— 只有当一个分区的最后一天
+// 都已早于 cutoff 时才可删除（DropPartitionsBeforeFor 内部按分区上界判断）。
+// 系统级单一窗口下 cutoff 对全库唯一，因此不再需要「取所有所有者中最长保留期」
+// 那层推导（那是 per-identity retention 的产物）。
+func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.Time, days int) error {
+	// 永久保留（days<=0）不得 DROP 任何分区：调用方已经跳过，这里再挡一次，
+	// 因为「0 天窗口」会算出 cutoff = now，把当下所有分区全判成过期 ——
+	// 这是本函数最危险的参数错误，必须在函数自己身上也 fail-closed。
+	if days <= 0 {
+		return nil
+	}
 	// 各表先判断是否已分区: 未分区 (非 PG / 迁移未完成) 的表跳过, 一张表未分区
 	// 不影响另一张。SQLite 下 IsTablePartitioned 恒 false → 整体 no-op。
+	//
+	// 表清单来自 partitionLifecycleTables()（telemetry_frame_lifecycle.go）——
+	// L2 帧表成为主路径后必须与 unified_data/device_data 同列，否则"帧数据永不
+	// 清理"（评审 B-3）。清单只给表名：分区 DROP 与列名无关（按分区名 YYYYMM 判定）。
 	var partitioned []string
-	for _, table := range []string{"unified_data", "device_data"} {
+	for _, table := range partitionLifecycleTables() {
 		if IsTablePartitioned(r.db, table) {
 			partitioned = append(partitioned, table)
 		}
 	}
 	if len(partitioned) == 0 {
 		return nil // 非 PG / 均未分区: 分区机制 no-op (SQLite 主路径不受影响)
-	}
-	days, ok, err := r.globalPartitionRetentionDays(ctx)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		// 无逻辑设备 = 无数据所有者: 保守起见不动任何分区 (宁可多留, 不可误删)。
-		return nil
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
 	pm := NewPartitionManager(r.db)
@@ -348,159 +378,23 @@ func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.
 	return nil
 }
 
-// globalPartitionRetentionDays returns the retention window (days) governing the
-// global partition sweep: the LONGEST retention_days across ALL logical_devices
-// (including purge_requested ones — 保守)。
+// deleteExpiredRows batch-deletes rows older than the system-level retention
+// cutoff across **all** time-series tables (unified_data / device_data /
+// telemetry_frame).
 //
-// retention_days <= 0 的脏数据按 1 天处理, 避免负值算出未来 cutoff 而删除本不该
-// 删的分区。无设备行 (MAX 为 NULL) 时 ok=false, 调用方跳过清扫。
-func (r *RetentionTask) globalPartitionRetentionDays(ctx context.Context) (days int, ok bool, err error) {
-	var longest *int
-	if scanErr := r.db.WithContext(ctx).
-		Raw("SELECT MAX(retention_days) FROM logical_devices").
-		Scan(&longest).Error; scanErr != nil {
-		return 0, false, fmt.Errorf("scan logical devices max retention_days: %w", scanErr)
-	}
-	if longest == nil {
-		return 0, false, nil
-	}
-	days = *longest
+// 与分区 DROP 的区别: 分区是整月粒度，边界分区里可能有「整月未到期但单行已过期」
+// 的数据；本函数用「时间列 < cutoff」精确删除它们（帧表的时间列是 ts）。
+// 每批独立事务 + 批间 sleep，避免长事务持锁与 WAL 膨胀。
+//
+// 注意本函数不再带任何 scope 条件 —— 逻辑设备层移除后不存在「按身份取子集」的
+// 需求；全库同一窗口。
+func (r *RetentionTask) deleteExpiredRows(ctx context.Context, days int, now time.Time) (int64, error) {
+	// 永久保留（days<=0）不得删任何行：同 dropExpiredPartitionsOnce 的二次防御，
+	// days=0 算出的 cutoff 就是 now，会把整表删空。
 	if days <= 0 {
-		days = 1
+		return 0, nil
 	}
-	return days, true, nil
-}
-
-func (r *RetentionTask) processOne(ctx context.Context, ld *models.LogicalDevice) RetentionResult {
-	result := RetentionResult{LogicalID: ld.ID}
-
-	pending, err := isPendingMergeParticipant(ctx, r.db, ld.ID)
-	if err != nil {
-		result.Err = err.Error()
-		return result
-	}
-	if pending {
-		return result // 顺延 (无错误): 合并终态后下轮处理
-	}
-
-	scope, err := ResolveScope(r.db, ld.ID)
-	if err != nil {
-		result.Err = err.Error()
-		return result
-	}
-
-	oldest, err := scopeOldestTimestamp(ctx, r.db, scope)
-	if err != nil {
-		result.Err = err.Error()
-		return result
-	}
-	if oldest == nil {
-		return result // 无数据, 保留期不适用
-	}
-
-	now := r.now()
-	expiry := oldest.Add(time.Duration(ld.RetentionDays) * 24 * time.Hour)
-	remaining := expiry.Sub(now)
-
-	switch {
-	case remaining > 30*24*time.Hour:
-		// 未临期: 无需通知或清理。
-	case remaining > 7*24*time.Hour:
-		if sent := r.notifyExpiry(ctx, ld, retentionNoticeTitle30, 30, remaining); sent {
-			result.NotifiedTier = 30
-		}
-	case remaining > 0:
-		if sent := r.notifyExpiry(ctx, ld, retentionNoticeTitle7, 7, remaining); sent {
-			result.NotifiedTier = 7
-		}
-	default:
-		// 到期: 分批硬删 (§4.3 任务 1)。通知窗口已过, 文案已明确告知
-		// 不可恢复; 此处只执行删除。
-		deleted, derr := r.deleteExpired(ctx, scope, ld.RetentionDays, now)
-		if derr != nil {
-			result.Err = derr.Error()
-			return result
-		}
-		result.RowsDeleted = deleted
-	}
-	return result
-}
-
-// notifyExpiry sends the tier notification unless the same (device, tier)
-// notification was already sent within the tier window (每日任务去重)。
-// Returns true when a notification was created.
-func (r *RetentionTask) notifyExpiry(ctx context.Context, ld *models.LogicalDevice, title string, tierDays int, remaining time.Duration) bool {
-	sourceID := strconv.FormatUint(uint64(ld.ID), 10)
-	windowStart := r.now().Add(-time.Duration(tierDays) * 24 * time.Hour)
-	var existing int64
-	if err := r.db.WithContext(ctx).Model(&models.Notification{}).
-		Where("source = ? AND source_id = ? AND title = ? AND created_at > ?",
-			NotificationSourceRetentionExpiring, sourceID, title, windowStart).
-		Count(&existing).Error; err != nil {
-		slog.Warn("datalifecycle: retention notice dedup query failed",
-			"logical_id", ld.ID, "error", err)
-		return false
-	}
-	if existing > 0 {
-		return false
-	}
-	daysLeft := int(remaining.Hours()/24) + 1
-	n := models.Notification{
-		Type:        "warning",
-		Title:       title,
-		Message:     fmt.Sprintf("逻辑设备「%s」（%s）最早的数据将在约 %d 天后到期硬删除，删除后不可恢复。", ld.Name, ld.DeviceType, daysLeft),
-		Description: fmt.Sprintf("如需保留更久，请到「逻辑设备」管理页调大该设备的保留天数（当前 %d 天）。", ld.RetentionDays),
-		Source:      NotificationSourceRetentionExpiring,
-		SourceID:    sourceID,
-	}
-	if !r.createNotification(ctx, &n, ld.ID) {
-		return false
-	}
-	return true
-}
-
-// SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
-// 传 nil 显式回落为直接写 notifications 表 (见 notifySink 字段注释)。
-func (r *RetentionTask) SetNotifier(n notify.Notifier) {
-	r.notifySink = n
-}
-
-// createNotification 落库一条通知 (D-1 步骤 3: 经注入的 Notifier 或直接落库)。
-//
-// nil 回落是**显式设计**, 既有测试直接 NewRetentionTask(db) 不注入时行为不变。
-// 调用点 (notifyExpiry) 不在事务内, 且在业务写完成之后, 因此同步投递安全
-// (详见 notify/dispatcher.go 的 Create 投递时机裁决)。
-func (r *RetentionTask) createNotification(ctx context.Context, n *models.Notification, logicalID uint) bool {
-	if r.notifySink != nil {
-		r.notifySink.Create(ctx, n)
-		return n.ID != 0
-	}
-	if err := r.db.WithContext(ctx).Create(n).Error; err != nil {
-		slog.Error("datalifecycle: create retention notification failed",
-			"logical_id", logicalID, "error", err)
-		return false
-	}
-	return true
-}
-
-// deleteExpired batch-deletes rows older than the retention cutoff.
-// Same batching strategy as purge (§4.3 锁交互说明).
-func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retentionDays int, now time.Time) (int64, error) {
-	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
-
-	// 防回归 (P0 数据丢失, 2026-09): 本函数**严禁**再调用
-	// DropPartitionsBefore / DropPartitionsBeforeFor。
-	//
-	// 为什么: 分区 DROP 是全局整月粒度操作 (DropPartitionsBeforeFor 扫描
-	// unified_data_%, 不区分该分区里的数据属于哪个逻辑设备), 而本函数的 cutoff
-	// 由**单一 scope 的 retentionDays** 算出。若在此做全局 DROP, 处理短保留期
-	// 设备 A(retention_days=30) 时, 会把长保留期设备 B(365) 仍应保留的历史整月
-	// 分区**整表 DROP**, 连带删除 B 的数据 —— 静默、不可恢复, 且任何一方都不会
-	// 收到错误提示。
-	//
-	// 全局分区清扫已上移到 RunOnce (每轮一次), 并以**所有**逻辑设备中**最长**的
-	// retention_days 计算 cutoff, 保证一个分区只有对每一个数据所有者都已到期时
-	// 才被删除。本函数只保留按 scope 限定的精确 DELETE 批次 (安全, 不变)。
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
 	batchSize := r.batchSize
 	if batchSize <= 0 {
 		batchSize = purgeBatchSizePostgres
@@ -508,22 +402,20 @@ func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retenti
 			batchSize = purgeBatchSizeSQLite
 		}
 	}
-	cond, args := scope.Cond()
-
 	var total int64
-	for _, table := range []string{"unified_data", "device_data"} {
+	// 按表分支而不是把表名塞进同一条 SQL：帧表没有 id 列、时间列叫 ts、
+	// 主键是 (device_id, ts, seq) —— 用 unified_data 的 "WHERE id IN (...) AND
+	// timestamp < ?" 会直接报列不存在（评审 B-3 / 契约 §4 的 ⚠）。
+	for _, table := range existingTimeseriesTables(r.db) {
 		for batch := 0; batch < maxPurgeBatches; batch++ {
 			var affected int64
 			err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-				res := tx.Exec(
-					fmt.Sprintf("DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE %s AND timestamp < ? LIMIT ?)", table, table, cond),
-					append(append([]interface{}{}, args...), cutoff, batchSize)...,
-				)
-				affected = res.RowsAffected
-				return res.Error
+				n, derr := deleteExpiredRowsFromTable(tx, table, cutoff, batchSize)
+				affected = n
+				return derr
 			})
 			if err != nil {
-				return total, fmt.Errorf("retention delete %s: %w", table, err)
+				return total, fmt.Errorf("retention delete %s: %w", table.Name, err)
 			}
 			total += affected
 			if affected < int64(batchSize) {

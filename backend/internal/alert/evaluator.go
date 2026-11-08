@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/notify"
@@ -102,10 +101,10 @@ type Evaluator struct {
 // NewEvaluator 构造求值器并全量加载 enabled 规则缓存。
 func NewEvaluator(db *gorm.DB, broadcast func(eventType string, payload any)) *Evaluator {
 	e := &Evaluator{
-		db:           db,
-		broadcast:    broadcast,
-		rules:        make(map[uint]models.AlertRule),
-		windows:      make(map[uint][]sample),
+		db:            db,
+		broadcast:     broadcast,
+		rules:         make(map[uint]models.AlertRule),
+		windows:       make(map[uint][]sample),
 		firing:        make(map[uint]bool),
 		lastNotifyAt:  make(map[uint]time.Time),
 		plans:         newPlanCache(),
@@ -323,7 +322,8 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	}
 	// 热路径零拷贝：规则快照由 LoadRules/Invalidate 一次性构建并以 atomic.Pointer
 	// 发布；快照不可变 ⇒ 无需 RLock、无需每帧重建（硬性能门禁 #10a-2）。
-	// resolveLogicalID 的 SQL 往返仍在锁外（原 H2 修复语义不变）。
+	// 全路径**零 DB 查询**（2026-10-23 逻辑设备层移除后，连 target_type=logical_device
+	// 的落地列解析也不存在了 —— 那条 SQL 往返曾是唯一的热路径查库点）。
 	snapPtr := e.rulesSnap.Load()
 	if snapPtr == nil {
 		return
@@ -331,8 +331,6 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	snapshot := *snapPtr
 
 	target := edgeDeviceID
-	var logicalID uint
-	logicalResolved := false
 	for i := range snapshot {
 		r := snapshot[i]
 		// 来源组规则：匹配/过滤由 sourceref 快照决定（按 kind 分流，裁决 1）。
@@ -354,48 +352,27 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 					edgeDeviceID: target})
 			continue
 		}
-		// 存量单设备/逻辑设备匹配（逐字节保持原逻辑；logical 解析移到锁外且惰性）。
-		switch r.TargetType {
-		case models.AlertTargetEdgeDevice:
-			if r.TargetID != target {
-				continue
-			}
-		case models.AlertTargetLogicalDevice:
-			if !logicalResolved {
-				logicalID = e.resolveLogicalID(target)
-				logicalResolved = true
-			}
-			if logicalID == 0 || r.TargetID != logicalID {
-				continue
-			}
-		default:
+		// 存量单设备匹配：target_type 只剩 edge_device（逻辑设备层已移除）。
+		//
+		// 历史：曾有一条 logical_device 分支，需要把帧来源的 edge_device_id 经
+		// 「合并链」解析成逻辑身份再比较（每帧一次 SQL 往返）。逻辑设备概念层
+		// 整体移除后（2026-10-23, .contract/logical-device-removal.md §7），
+		// edge_device_id 就是唯一目标口径 —— 换节点不换 id，帧匹配天然稳定。
+		if r.TargetType != models.AlertTargetEdgeDevice {
+			continue // 未知/废弃的 target_type：不猜，跳过（fail-closed）
+		}
+		if r.TargetID != target {
 			continue
 		}
 		e.evalRule(r, target, fields, at)
 	}
 }
 
-// resolveLogicalID 解析边缘设备的最终逻辑身份 (合并链跟随, 与写入侧同链)。
-func (e *Evaluator) resolveLogicalID(edgeDeviceID uint) uint {
-	var dev models.EdgeDevice
-	if err := e.db.Select("id", "logical_device_id").First(&dev, edgeDeviceID).Error; err != nil {
-		return 0
-	}
-	if dev.LogicalDeviceID == nil || *dev.LogicalDeviceID == 0 {
-		return 0
-	}
-	target, err := datalifecycle.ResolveMergeTarget(e.db, *dev.LogicalDeviceID)
-	if err != nil {
-		logger.Warn("alert: resolve merge target failed", "edge_device_id", edgeDeviceID, "error", err)
-		return 0
-	}
-	return target
-}
-
 // evalRule 单规则状态机: normal → firing (连续满足 DurationSec) → resolved (任一不满足)。
 //
 // deviceID 是本次上报的**边缘设备 ID**（Evaluate 入参）：解析层 plan 按
-// (device, selector) 编译，不能用 rule.TargetID（可能是逻辑设备 ID，会恒 unbound）。
+// (device, selector) 编译。逻辑设备 ID 已不存在，rule.TargetID 现在恒为
+// edge_device_id（2026-10-23）。
 func (e *Evaluator) evalRule(rule models.AlertRule, deviceID uint, fields []parser.Field, at time.Time) {
 	// literal 路径内部与历史 matchField 逐字节等价；特殊 selector 走 EvalPredicate。
 	ok, satisfied, value := e.evalSelector(rule, deviceID, fields, at)

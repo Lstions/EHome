@@ -7,9 +7,12 @@ import "time"
 // =====================================================================
 
 // 告警规则目标类型 (TargetType 取值)
+//
+// 2026-10-23: 逻辑设备概念层已移除（.contract/logical-device-removal.md），
+// 目标只按边缘设备界定。target_type 列保留（存量契约 / 未来的其它目标类型），
+// 但取值域只有 edge_device —— 校验在白名单 validTargetTypes 里，不在 DB CHECK。
 const (
-	AlertTargetEdgeDevice    = "edge_device"
-	AlertTargetLogicalDevice = "logical_device"
+	AlertTargetEdgeDevice = "edge_device"
 )
 
 // 告警比较符 (Comparator 取值)
@@ -33,7 +36,7 @@ const (
 // 挂接点: SensorParserConsumer 解析后回调 (alertSink), 非独立 DataConsumer。
 type AlertRule struct {
 	ID          uint    `gorm:"primaryKey" json:"id"`
-	TargetType  string  `gorm:"size:20;not null;index;default:'edge_device'" json:"target_type"` // edge_device | logical_device
+	TargetType  string  `gorm:"size:20;not null;index;default:'edge_device'" json:"target_type"` // 仅 edge_device
 	TargetID    uint    `gorm:"not null;index" json:"target_id"`
 	SensorName  string  `gorm:"size:64;not null;index" json:"sensor_name"`      // 与 UnifiedData.SensorName 同域
 	Comparator  string  `gorm:"size:8;not null;default:'gt'" json:"comparator"` // gt|gte|lt|lte|eq|neq
@@ -97,8 +100,8 @@ type AlertEvent struct {
 	SourceEdgeDeviceID *uint   `json:"source_edge_device_id,omitempty"`
 	MembersJSON        string  `gorm:"type:text" json:"members_json,omitempty"`
 
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (AlertEvent) TableName() string { return "alert_events" }

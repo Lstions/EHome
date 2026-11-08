@@ -18,7 +18,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.AlertRule{}, &models.AlertEvent{}, &models.Notification{}, &models.EdgeDevice{}, &models.LogicalDevice{}); err != nil {
+	if err := db.AutoMigrate(&models.AlertRule{}, &models.AlertEvent{}, &models.Notification{}, &models.EdgeDevice{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	gin.SetMode(gin.TestMode)
@@ -242,18 +242,20 @@ func TestInvalidateReloadsRules(t *testing.T) {
 	}
 }
 
-// 目标匹配: 仅命中目标设备的字段求值; logical_device 规则经合并链解析。
+// 目标匹配: 仅命中目标设备的字段求值。
+//
+// 历史: 本用例曾是「logical_device 规则经合并链解析后触发」。逻辑设备概念层
+// 已整体移除（2026-10-23），target_type 只剩 edge_device，target_id 直接就是
+// edge_device_id —— 因此这里断言的就是那个唯一口径。
 func TestEvaluateTargetMatching(t *testing.T) {
 	db := newTestDB(t)
-	logical := models.LogicalDevice{Name: "逻辑设备"}
-	db.Create(&logical)
-	dev := models.EdgeDevice{Name: "边缘设备", NodeID: "N1", ChannelID: 1, LogicalDeviceID: &logical.ID}
+	dev := models.EdgeDevice{Name: "边缘设备", NodeID: "N1", ChannelID: 1}
 	db.Create(&dev)
 
 	ev := newTestEvaluator(t, db, nil)
 	re := rule(7, "voltage", "lt", 10, 0)
-	re.TargetType = models.AlertTargetLogicalDevice
-	re.TargetID = logical.ID
+	re.TargetType = models.AlertTargetEdgeDevice
+	re.TargetID = dev.ID
 	db.Create(&re)
 	ev.LoadRules()
 
@@ -265,11 +267,34 @@ func TestEvaluateTargetMatching(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("other device must not trigger, got %d", count)
 	}
-	// 本设备 (经逻辑身份链) 触发。
+	// 本设备触发。
 	ev.Evaluate(dev.ID, []parser.Field{{Name: "voltage", Value: 5}}, now)
 	db.Model(&models.AlertEvent{}).Count(&count)
 	if count != 1 {
-		t.Fatalf("expected logical-device rule to fire, got %d", count)
+		t.Fatalf("expected edge-device rule to fire, got %d", count)
+	}
+}
+
+// TestEvaluateIgnoresUnknownTargetType 验证未知/废弃的 target_type 被跳过（fail-closed）。
+//
+// 逻辑设备层删除后，DB 里若仍有 target_type='logical_device' 的历史行（本机与
+// 生产均为 0 行，但迁移不保证第三方库），求值器不得猜测语义、也不得 panic ——
+// 直接跳过。这条断言的是「不猜」而不是「恰好在某处 return」。
+func TestEvaluateIgnoresUnknownTargetType(t *testing.T) {
+	db := newTestDB(t)
+	ev := newTestEvaluator(t, db, nil)
+	re := rule(8, "voltage", "lt", 10, 0)
+	re.TargetType = "logical_device" // 已废弃取值
+	re.TargetID = 1
+	db.Create(&re)
+	ev.LoadRules()
+
+	now := time.Now()
+	ev.Evaluate(1, []parser.Field{{Name: "voltage", Value: 5}}, now)
+	var count int64
+	db.Model(&models.AlertEvent{}).Count(&count)
+	if count != 0 {
+		t.Fatalf("废弃 target_type 不应命中任何帧，got %d 条事件", count)
 	}
 }
 

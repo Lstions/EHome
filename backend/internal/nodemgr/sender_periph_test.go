@@ -689,6 +689,11 @@ func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "collector limit") {
 		t.Fatalf("expected template capacity failure, got %v", err)
 	}
+	// 2026-10-25：容量类错误必须是 ManifestValidationError，API 层才会映射 400
+	// （用户可行动的配置错误），而不是 500「服务器故障」。
+	if !IsManifestValidationError(err) {
+		t.Fatalf("capacity error must be ManifestValidationError (API maps to 400), got %T: %v", err, err)
+	}
 	if len(mock.publishedPayload) != 0 {
 		t.Fatal("overflow manifest was published")
 	}
@@ -712,6 +717,9 @@ func TestConfigManifestHonorsReportedTemplateCapacity(t *testing.T) {
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "reported-capacity", ManifestID: "reported-capacity"})
 	if err == nil || !strings.Contains(err.Error(), "collector limit is 1") {
 		t.Fatalf("expected reported-capacity failure, got %v", err)
+	}
+	if !IsManifestValidationError(err) {
+		t.Fatalf("reported-capacity error must be ManifestValidationError, got %T: %v", err, err)
 	}
 	if len(mock.publishedPayload) != 0 {
 		t.Fatal("manifest above reported capacity was published")
@@ -768,6 +776,9 @@ func TestConfigManifestRejectsTooManyV2EdgeDevicesBeforePublish(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "edge devices") {
 		t.Fatalf("expected V2 edge-device capacity failure, got %v", err)
 	}
+	if !IsManifestValidationError(err) {
+		t.Fatalf("edge-device capacity error must be ManifestValidationError, got %T: %v", err, err)
+	}
 	if len(mock.publishedPayload) != 0 {
 		t.Fatal("edge-device overflow manifest was published")
 	}
@@ -795,6 +806,10 @@ func TestConfigManifestRejectsTooManyV2CommandsBeforePublish(t *testing.T) {
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "command-overflow", ManifestID: "command-overflow"})
 	if err == nil || !strings.Contains(err.Error(), "commands") {
 		t.Fatalf("expected V2 command capacity failure, got %v", err)
+	}
+	// 2026-10-25 runtime 复验发现的同类残留：命令条数超限曾是普通 error ⇒ config sync 500。
+	if !IsManifestValidationError(err) {
+		t.Fatalf("command capacity error must be ManifestValidationError (API maps to 400), got %T: %v", err, err)
 	}
 	if len(mock.publishedPayload) != 0 {
 		t.Fatal("command overflow manifest was published")

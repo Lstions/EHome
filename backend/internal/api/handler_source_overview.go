@@ -28,11 +28,11 @@ import (
 //
 //   - 「来源类型：直连」「来源组：单设备直连」是在描述**配置状态**，
 //     而本页是只读事实目录，用户在这里根本无法配置它；
-//   - 「当前来源：bms 权威」与第一列「逻辑设备 bms #14」重复；
+//   - 「当前来源：bms 权威」与第一列「设备 bms #14」重复；
 //   - 「成员」在只有一台设备时恒为 1，没有任何信息量。
 //
 // 来源组的配置与成员关系在「来源组」Tab 里维护，两页职责不重叠。
-// 现在本页只输出**字段事实**：逻辑设备、类别、描述、类型、单位、实时值、
+// 现在本页只输出**字段事实**：边缘设备、类别、描述、类型、单位、实时值、
 // 更新时间、状态。
 //
 // # 只读如何保证
@@ -40,10 +40,14 @@ import (
 // 本组只注册 GET（写方法显式 405，见 registerSourceOverviewRoute）。
 // 前端组件契约里也没有任何写操作。
 
-// sourceOverviewItem 是字段目录的一行（= 一个逻辑设备的一个数据类别）。
+// sourceOverviewItem 是字段目录的一行（= 一台边缘设备的一个数据类别）。
+//
+// 2026-10-23（逻辑设备概念层移除，契约 §6）: 顶层身份从「逻辑设备」回到
+// **边缘设备**。原来这里是 logical_device_id/logical_device_name —— 那是
+// 逻辑身份层的投影，而本页要回答的「有哪些字段」从来就是某台边缘设备上报的。
 type sourceOverviewItem struct {
-	LogicalDeviceID   uint   `json:"logical_device_id"`
-	LogicalDeviceName string `json:"logical_device_name"`
+	EdgeDeviceID   uint   `json:"edge_device_id"`
+	EdgeDeviceName string `json:"edge_device_name"`
 
 	// Category 是物理名（= unified_data.sensor_name，不归一）。
 	Category string `json:"category"`
@@ -134,7 +138,7 @@ func inferValueType(v float64) string {
 
 // listSourceOverview 返回只读字段目录。
 //
-// 数据来源：data_sources（已由投影器自动填充的"字段 → 逻辑设备"关系）+
+// 数据来源：data_sources（已由投影器自动填充的"字段 → 边缘设备"关系）+
 // sensor_field_meta（声明层元数据）+ sensor_field_obs（事实层单位）+
 // 进程内最新值缓存（实时值）。全部批量查询，无 N+1。
 func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
@@ -151,41 +155,47 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 		if cat := c.Query("category"); cat != "" {
 			q = q.Where("category = ?", cat)
 		}
-		if ld := c.Query("logical_device_id"); ld != "" {
-			q = q.Where("device_id = ?", ld)
+		// 过滤参数名同步改 edge_device_id（旧的 logical_device_id 随逻辑层删除）。
+		// 传错名字不会静默忽略成"全量"：仍走全量是旧行为，前端已同步改。
+		if ed := c.Query("edge_device_id"); ed != "" {
+			q = q.Where("edge_device_id = ?", ed)
 		}
 
 		var rows []models.DataSource
-		if err := q.Order("device_id ASC, category ASC, edge_device_id ASC").Find(&rows).Error; err != nil {
+		if err := q.Order("edge_device_id ASC, category ASC").Find(&rows).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"code": "source_overview_failed", "message": "读取字段目录失败",
 			})
 			return
 		}
 
-		// 按 (逻辑设备, 类别) 聚合 —— 一个字段一行。
+		// 按 (边缘设备, 类别) 归并 —— 一个字段一行。
 		//
-		// 为什么还要聚合：同一字段可能由多台设备供数（主备组）。
-		// 目录层面它是**一个**字段，实时值取权威成员的那份。
+		// 2026-10-23（契约 §6）: 组键收敛为 (edge_device_id, category) 且带唯一索引
+		// uniq_ds_source，**同一键只能有一行**。所以这里的循环不再是"多成员聚合成
+		// 一行"（那个场景在 data_sources 里已不可表达 —— 多设备供同一字段是
+		// 来源组的职责），而是"同一键的行天然只有一条"的显式表达。
+		// 保留归并结构而不是直接 1:1 映射，是因为筛选/排序仍可能给出同键多行
+		// （例如未来放开唯一索引），归并逻辑让它不产生重复的字段行。
 		type fieldKey struct {
-			deviceID uint
-			category string
+			edgeDeviceID uint
+			category     string
 		}
 		order := make([]fieldKey, 0, len(rows))
 		byKey := make(map[fieldKey]*sourceOverviewItem, len(rows))
 		membersOfKey := make(map[fieldKey][]models.DataSource, len(rows))
-		logicalIDs := make(map[uint]struct{}, len(rows))
+		edgeDeviceIDs := make(map[uint]struct{}, len(rows))
 		for i := range rows {
-			k := fieldKey{rows[i].DeviceID, rows[i].Category}
+			k := fieldKey{rows[i].EdgeDeviceID, rows[i].Category}
 			if _, ok := byKey[k]; !ok {
 				byKey[k] = &sourceOverviewItem{
-					LogicalDeviceID: rows[i].DeviceID,
-					Category:        rows[i].Category,
+					EdgeDeviceID: rows[i].EdgeDeviceID,
+					Category:     rows[i].Category,
 				}
 				order = append(order, k)
 			}
 			membersOfKey[k] = append(membersOfKey[k], rows[i])
-			logicalIDs[rows[i].DeviceID] = struct{}{}
+			edgeDeviceIDs[rows[i].EdgeDeviceID] = struct{}{}
 		}
 		if len(order) == 0 {
 			c.JSON(http.StatusOK, gin.H{"code": 0, "data": sourceOverviewResponse{
@@ -194,17 +204,21 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// 逻辑设备名（一次查询）。
-		logicalNames := make(map[uint]string, len(logicalIDs))
+		// 边缘设备名（一次查询）。
+		//
+		// Unscoped: data_sources 台账里可能还留着**已软删设备**的映射行（删设备
+		// 不清台账，数据仍可查）。若按默认作用域查，那些行会得到空名字，页面上
+		// 变成"某个没有名字的设备" —— 比显示旧名字更糟（用户会以为数据串了）。
+		edgeDeviceNames := make(map[uint]string, len(edgeDeviceIDs))
 		{
-			ids := make([]uint, 0, len(logicalIDs))
-			for id := range logicalIDs {
+			ids := make([]uint, 0, len(edgeDeviceIDs))
+			for id := range edgeDeviceIDs {
 				ids = append(ids, id)
 			}
-			var lds []models.LogicalDevice
-			db.Select("id, name").Where("id IN ?", ids).Find(&lds)
-			for _, l := range lds {
-				logicalNames[l.ID] = l.Name
+			var devs []models.EdgeDevice
+			db.Unscoped().Select("id", "name").Where("id IN ?", ids).Find(&devs)
+			for _, d := range devs {
+				edgeDeviceNames[d.ID] = d.Name
 			}
 		}
 
@@ -251,7 +265,7 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 		now := time.Now()
 		for _, k := range order {
 			it := byKey[k]
-			it.LogicalDeviceName = logicalNames[k.deviceID]
+			it.EdgeDeviceName = edgeDeviceNames[k.edgeDeviceID]
 
 			if m, ok := metaByCat[k.category]; ok {
 				it.LabelZh = m.LabelZh
@@ -259,11 +273,12 @@ func listSourceOverview(db *gorm.DB) gin.HandlerFunc {
 			}
 			it.Unit = unitByCat[k.category]
 
-			// 实时值：优先取台账里 active 的那个成员（主备组只有它在供数）；
-			// 单设备时它就是唯一成员。
+			// 实时值：取台账里 active 的那一行。
 			//
-			// 为什么要挑 active 而不是"第一个"：主备组的备机可能早已离线，
-			// 取它的值会显示一个停在几小时前的读数，看起来像"这个字段在变"。
+			// 为什么仍然优先 active 而不是"第一个"：这条规则的价值不随组键变化
+			// 而消失 —— 若同键存在多行（唯一索引被放开 / 历史脏数据），把 standby
+			// 的读数当成字段实时值会显示一个停在几小时前的数，看起来像"字段在变"。
+			// 单行是常态时，下面的循环直接命中唯一那条。
 			members := membersOfKey[k]
 			pick := members[0]
 			for _, m := range members {

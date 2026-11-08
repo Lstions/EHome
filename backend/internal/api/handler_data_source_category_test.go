@@ -50,12 +50,12 @@ func TestDataSourceCategory_RejectsSpecialSelector(t *testing.T) {
 	withDataSourceCategoryResolver(t, true)
 	r, db := newDataSourceCategoryAPI(t)
 	seed := seedDataSource(t, datasource.New(db, datasource.Options{}), datasource.CreateInput{
-		DeviceID: 1, Category: "rsoc", EdgeDeviceID: 1,
+		Category: "rsoc", EdgeDeviceID: 1,
 	})
 	_ = seed
 	for _, category := range []string{"@soc", "temperature_*", "virtual:dc_power"} {
 		w := doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources", map[string]interface{}{
-			"device_id": 2, "category": category, "edge_device_id": 2,
+			"category": category, "edge_device_id": 2,
 		})
 		var resp map[string]interface{}
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -75,7 +75,7 @@ func TestDataSourceCategory_RejectsUnknownField(t *testing.T) {
 	withDataSourceCategoryResolver(t, true)
 	r, _ := newDataSourceCategoryAPI(t)
 	w := doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources", map[string]interface{}{
-		"device_id": 2, "category": "rsoc", "edge_device_id": 2,
+		"category": "rsoc", "edge_device_id": 2,
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d want 400 (body=%s)", w.Code, w.Body.String())
@@ -100,7 +100,7 @@ func TestDataSourceCategory_AcceptsObservedLiteral(t *testing.T) {
 		t.Fatalf("seed obs: %v", err)
 	}
 	w := doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources", map[string]interface{}{
-		"device_id": 2, "category": "rsoc", "edge_device_id": 2,
+		"category": "rsoc", "edge_device_id": 2,
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d want 201 (body=%s)", w.Code, w.Body.String())
@@ -112,7 +112,7 @@ func TestDataSourceCategory_SkippedWhenUnwired(t *testing.T) {
 	SetFieldSelectorResolver(nil)
 	r, _ := newDataSourceCategoryAPI(t)
 	w := doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources", map[string]interface{}{
-		"device_id": 3, "category": "@soc", "edge_device_id": 3,
+		"category": "@soc", "edge_device_id": 3,
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("unwired resolver must keep legacy behavior: status = %d want 201 (body=%s)", w.Code, w.Body.String())

@@ -19,31 +19,35 @@ package api
 //   - raw 模式 / SQLite / maxPoints<=0 / 非法时间窗: 调用方完全不进入本文件,
 //     继续走旧路径 (SQLite 行为一分不改, 既有单测是契约)。
 //
-// §1.6 (2026-10-20 22:57 verifier 实测): 聚合的 scope 来源必须是 UNION ALL
-// 两分支 (logical 分支 + NULL-logical 的 device 分支), 否则 dataScopeCond 的
-// OR 条件会把 logical_device_id 降级为 Filter, 复合索引完全用不上。SQL 组装在
-// scope_union.go (historyAggregateSQL), 本文件只负责模式解析、桶宽、执行与
-// 响应点形状; 参数顺序见 historyAggregateSQL 的注释。
+// 2026-10-23 (逻辑设备概念层移除, .contract/logical-device-removal.md §5):
+// 曾经为「逻辑身份」服务过的三件东西在这里一并消失 ——
+//
+//   1. UNION ALL 双分支 scope 源 (logical 分支 + NULL-logical 回退分支,
+//      原 scope_union.go 的 historyUnionSQL): 唯一目的是让
+//      `logical_device_id` 保持索引前导列。列已 DROP, 分支没有对象;
+//   2. 保形去重 (ROW_NUMBER() ... MAX(id), 原 qs.DedupNeeded): 它的前提是
+//      「两台物理设备在同一 (sensor_name, timestamp) 各写一行」。逻辑层移除后
+//      每个查询只落在一台边缘设备 (device_id 等值条件) 上, 同一设备同一时刻
+//      不会出现两行, 去重既无对象也会白付一次全窗口排序;
+//   3. 因此聚合 SQL 回归**单表单条件**:
+//        FROM unified_data WHERE device_id = ? AND sensor_name = ?
+//                           AND "timestamp" BETWEEN ? AND ?
+//      设备维度 (device_id) 就是索引前导列, 直接可用 (见
+//      datalifecycle/partition_mgr.go 的 unified_data_device_id_idx /
+//      device_data_device_id_idx), 不再需要 OR 兜底或 UNION 拼装。
+//
+// avg/change 模式的 SQL 结构、桶宽、change 点上限、窗口裁剪全部保持不变 ——
+// 本次只换数据来源, 不改聚合语义。
 //
 // 响应 item 的形状: {"timestamp":..., "value":...} (HistoryPoint) —— 不再带
 // id/device_id/sensor_name/unit/created_at 等冗余字段 (每点 198 B -> 约 40 B)。
-//
-// 保形去重 (qs.DedupNeeded) 仍必须先于聚合: 在 union 源外层按
-// (sensor_name, timestamp) 用 ROW_NUMBER() ... ORDER BY id DESC 去重 (与
-// datalifecycle.ApplyShapeDedup 同语义, MAX(id) 胜出), 再在其上 avg/lag ——
-// 两台物理设备同一时刻的两行不得被平均 (无物理意义)。
 //
 // 本文件不依赖 gin, 纯函数与 SQL 执行辅助可独立单测 (history_points_test.go /
 // history_points_pg_test.go)。
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"time"
-
-	"ehome/backend/internal/datalifecycle"
-	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
 )
@@ -177,71 +181,38 @@ func exceedsChangePointCap(mode AggMode, n int) bool {
 	return mode == AggModeChange && n > maxChangePoints
 }
 
-// trimAvgPointsBeforeStart drops leading avg-bucket points whose bucket start
-// is earlier than the requested window start (floor(epoch/W)*W can push the
-// first bucket up to W-1 seconds before start). Pure function; change mode
-// points are real row timestamps and are never trimmed.
-func trimAvgPointsBeforeStart(points []HistoryPoint, start time.Time) []HistoryPoint {
-	cut := 0
-	for cut < len(points) && points[cut].Timestamp.Before(start) {
-		cut++
-	}
-	if cut == 0 {
-		return points
-	}
-	return points[cut:]
-}
-
 // historyPointQuery describes one aggregated history read.
+//
+// 2026-10-23: 原 `Scope *datalifecycle.DataQueryScope` + `DedupNeeded bool`
+// 两个字段随逻辑设备概念层一起删除。查询维度回到**边缘设备**:
+// EdgeDeviceID 就是 unified_data.device_id (= EdgeDevice.ID)。
 type historyPointQuery struct {
-	// Scope is the resolved §六 data query scope. Its branches are rendered as
-	// an index-friendly UNION ALL source (契约 §1.6, see scope_union.go).
-	Scope *datalifecycle.DataQueryScope
-	// DedupNeeded enables 保形去重 (qs.DedupNeeded) before aggregation.
-	DedupNeeded bool
-	Category    string
-	Start       time.Time
-	End         time.Time
-	MaxPoints   int
+	// EdgeDeviceID 是 unified_data.device_id 的等值条件 (= EdgeDevice.ID)。
+	// 0 表示"不查"(调用方直接返回空结果, 不打扰数据库)。
+	EdgeDeviceID uint
+	Category     string
+	Start        time.Time
+	End          time.Time
+	MaxPoints    int
 	// Mode is the resolved mode: AggModeAvg or AggModeChange.
 	Mode AggMode
+	// BatchHint 表示"同一窗口还会有很多 category 来问"（批端点）。
+	//
+	// 为什么要有它：帧表解码一次能服务全部字段，但只服务一个字段时全解是
+	// 29 倍浪费（实测全解 28 ms vs 单解 5 ms）。批端点知道"后面还有 28 个",
+	// 单查端点不知道 —— 所以由**调用方**给出这个信息，而不是让数据层猜。
+	BatchHint bool
 }
 
-// queryHistoryPoints runs one aggregated PostgreSQL history query and returns
-// at most maxPoints+1 lean points.
-func queryHistoryPoints(ctx context.Context, db *gorm.DB, q historyPointQuery) ([]HistoryPoint, error) {
-	widthSeconds := bucketWidthSeconds(historyWindowSeconds(q.Start, q.End), q.MaxPoints)
-	if widthSeconds <= 0 {
-		return nil, fmt.Errorf(
-			"history points: invalid aggregation window (start=%s end=%s max_points=%d)",
-			q.Start.Format(time.RFC3339), q.End.Format(time.RFC3339), q.MaxPoints)
-	}
+// historyDeviceCond 是全部数据读取的唯一条件形状: 边缘设备维度等值。
+//
+// 为什么不再有 OR / IN / 分支: 逻辑层移除后「一台设备的历史」= 它自己的
+// device_id 的行; 软删设备的数据同样可读 (Unscoped 语义, 契约 §5), 所以这里
+// 也**不**做 edge_devices 存在性校验 —— 数据读取与配置读取的可见性分离。
+const historyDeviceCond = `device_id = ? AND sensor_name = ? AND "timestamp" BETWEEN ? AND ?`
 
-	sqlText, args := historyAggregateSQL(q, widthSeconds)
-	points := make([]HistoryPoint, 0, q.MaxPoints+1)
-	if sqlText == "" {
-		// scope 匹配不到任何行 (空 logical/instance 集合): 不必打扰数据库。
-		return points, nil
-	}
-	// 一条 raw SQL 自带两个互斥分支; 绑定请求上下文 (客户端超时/断开即取消)。
-	if err := db.WithContext(ctx).Raw(sqlText, args...).Scan(&points).Error; err != nil {
-		return nil, fmt.Errorf("history points: query category %q: %w", q.Category, err)
-	}
-	// avg 的首桶起点可能早于窗口起点 (floor 对齐, 最多 W-1 秒): 裁掉, 保持
-	// 「返回点都在 [start, end] 内」的旧语义 (评审 2026-10-21 可忽略项, 顺手修)。
-	if q.Mode != AggModeChange {
-		points = trimAvgPointsBeforeStart(points, q.Start)
-	}
-	// change 点数由翻转次数决定, 不受 max_points 约束; 超过硬上限时如实报错
-	// 而不是静默截断 (截断会让 0→1 跃变计数变小 = 错数据)。详见 maxChangePoints。
-	if exceedsChangePointCap(q.Mode, len(points)) {
-		return nil, fmt.Errorf(
-			"history points: change mode returned %d points for category %q, exceeds cap %d (narrow the time range or use agg=raw)",
-			len(points), q.Category, maxChangePoints)
-	}
-	if q.Mode == AggModeChange && len(points) > q.MaxPoints*100 && len(points) > 1000 {
-		logger.Warnf("[unified-data] change-mode history returned %d points (max_points=%d, window=%s..%s) — response is transition-bound, not capped at max_points",
-			len(points), q.MaxPoints, q.Start.Format(time.RFC3339), q.End.Format(time.RFC3339))
-	}
-	return points, nil
-}
+// D1 需要区分的两种方言。
+const (
+	sqlDialectPostgres = "postgres"
+	sqlDialectSQLite   = "sqlite"
+)

@@ -61,8 +61,23 @@ func TestOpenTestDB_DispatchContract(t *testing.T) {
 		t.Errorf("openPostgres 必须建隔离 schema（CREATE SCHEMA）—— " +
 			"残留检查查的是 pg_namespace，若隔离单元改成 database，那条检查会失效")
 	}
-	if !strings.Contains(body, `schemaName := fmt.Sprintf("test_%s"`) {
-		t.Errorf("隔离 schema 命名必须是 test_<suffix> —— 残留检查按 'test_%%' 前缀匹配")
+	// 隔离 schema 名必须**以 test_ 开头** —— 残留检查按 'test\_%' 前缀匹配，
+	// 不以 test_ 开头 ⇒ 回收器永远看不到它 ⇒ 泄漏无人清。
+	//
+	// 2026-11-08：命名从 `fmt.Sprintf("test_%s", randomSuffix())` 改为
+	// `buildSchemaName(currentNamespace(), pid, now)`（让 schema 名带命名空间标识，
+	// 修「跨容器互相 DROP」的事故）。所以这里改为断言**生成器本身**的那条不变量，
+	// 而不再锚定某个赋值语句的字面量 —— 后者会把「换了实现但语义正确」判成违规。
+	//
+	// 名字的**行为**正确性（可解析回 namespace/pid/nano、只含安全字符、长度 <=63）
+	// 由 reap_test.go 的 TestBuildSchemaNameRoundTrip / TestBuildSchemaNameIsSafeIdentifier 钉住；
+	// 这里只守住「前缀」这条与**回收器可达性**直接相关的约束。
+	if !strings.Contains(body, `fmt.Sprintf("test_%s_%d_%d"`) {
+		t.Errorf("buildSchemaName 的格式串必须以 test_ 开头 —— 残留检查按 'test_%%' 前缀匹配")
+	}
+	if !strings.Contains(body, "buildSchemaName(currentNamespace()") {
+		t.Errorf("openPostgres 必须用 buildSchemaName(currentNamespace(), ...) 生成 schema 名 —— " +
+			"不带命名空间标识会让跨容器的回收器误删对方正在用的 schema（2026-11-08 事故）")
 	}
 }
 

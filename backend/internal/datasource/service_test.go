@@ -1,7 +1,11 @@
 package datasource
 
-// 本文件测试 datasource.Service 的**台账能力**：CRUD、手动运维（Activate/
-// Deactivate/Reset/Delete）、查询（List/Health/FailoverLogs）、校验错误。
+// 本文件测试 datasource.Service 的**台账能力**：Create/Update/Get 的校验与默认值、
+// 组键口径、以及只读查询（List/Health/FailoverLogs）。
+//
+// 2026-10-24（遗留处置方案 A）：手动运维四个方法（Activate/Deactivate/Reset/Delete）
+// 及其测试**已删除** —— 组键二元化后它们的「候选接替」分支物理不可达，在生产上
+// 表现为恒 409 / 恒 400 / 删了被投影器重建，测试 PASS 只会伪装功能正常。
 //
 // # 已下线的 legacy 主备状态机（M3，2026-10-23）
 //
@@ -42,7 +46,6 @@ package datasource
 import (
 	"errors"
 	"math/rand"
-	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +59,11 @@ func testBase() time.Time {
 	return time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 }
 
-// newTestService 用 SQLite 内存库构造 Service，并注入收集通知的闭包。
+// newTestService 用 SQLite 内存库构造 Service。
+//
+// 返回值里的 notes 仅为**兼容既有调用点的签名**而保留：Service 自 2026-10-24 起
+// 不再是通知生产者（SetNotifier / 四个手工运维方法已删，通知链迁到 GroupService），
+// 因此它恒为空切片。保留而不是改签名，是为了让未被本次处置触及的用例零改动。
 func newTestService(t *testing.T, now *time.Time) (*Service, *gorm.DB, *[]models.Notification) {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
@@ -68,7 +75,6 @@ func newTestService(t *testing.T, now *time.Time) (*Service, *gorm.DB, *[]models
 		Now:          func() time.Time { return *now },
 	})
 	notes := make([]models.Notification, 0)
-	svc.SetNotifier(func(n models.Notification) { notes = append(notes, n) })
 	return svc, db, &notes
 }
 
@@ -90,9 +96,12 @@ func reloadDS(t *testing.T, db *gorm.DB, id uint) models.DataSource {
 	return ds
 }
 
-func activeCount(t *testing.T, db *gorm.DB, deviceID uint, category string) int64 {
+// activeCount 按**组键** (edge_device_id, category) 统计 active 行。
+//
+// 2026-10-23: 逻辑设备层移除后组键不再含逻辑 id（.contract/logical-device-removal.md §6）。
+func activeCount(t *testing.T, db *gorm.DB, edgeDeviceID uint, category string) int64 {
 	t.Helper()
-	return countRows(t, db, &models.DataSource{}, "device_id = ? AND category = ? AND status = ?", deviceID, category, StatusActive)
+	return countRows(t, db, &models.DataSource{}, "edge_device_id = ? AND category = ? AND status = ?", edgeDeviceID, category, StatusActive)
 }
 
 func countRows(t *testing.T, db *gorm.DB, model interface{}, query string, args ...interface{}) int64 {
@@ -117,283 +126,81 @@ func failoverLogs(t *testing.T, db *gorm.DB, deviceID uint, category string) []m
 	return logs
 }
 
-// R5: 停用 active 且有候选 → 候选接替，原来源 disabled，reason=manual_deactivate。
-func TestR5_DeactivateActivePromotesCandidate(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, notes := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 7})
+// ── 组键口径与只读查询 ──
+//
+// # 已执行的处置（2026-10-24，方案 A）
+//
+// 组键从 (逻辑设备, 类别) 变成 **(edge_device_id, 类别)**，唯一索引 uniq_ds_source
+// 正好建在这两列上 ⇒ **一个组恒有且只有一行**。由此产生两个后果，均已落地处理：
+//
+//  1. 【删除】Service 的 Delete / Activate / Deactivate / Reset 四个手工运维方法
+//     及其通知链（recordHealth / writeFailoverLog / newNotification / emitAll /
+//     emit / SetNotifier / SetDispatchNotifier）**已全部删除**。
+//     理由：这些方法的所有「候选接替」分支在本组键下物理不可达（同组第二行插不进去），
+//     在生产上表现为「恒 409 / 恒 400 / 删了被投影器以新 id 重建」，是死代码 + 陷阱。
+//     相关测试（旧 TestR6/R7/R8/R9/TestDelete_ActiveWithoutCandidate*）随之删除 ——
+//     **它们断言的是生产不可达的分支，PASS 只会伪装功能正常**。
+//  2. 【保留】真正可用的手工干预能力全在 **GroupService**（source_groups）：
+//     ActivateGroupMember / DeactivateGroupMember / 组 CRUD / 健康与切换日志，
+//     且已真接入 UI（SourceGroupList.vue 调 activateGroup）。
+//
+// 本文件现在只测**仍然存在**的能力：组键口径（同键第二行必被拒绝，这是唯一索引
+// 不被悄悄放宽的守卫）、Create/Update/Get 的校验与默认值、以及只读查询。
 
-	if _, err := svc.Deactivate(a.ID); err != nil {
-		t.Fatalf("R5 deactivate: %v", err)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusDisabled {
-		t.Fatalf("R5 original=%s want disabled", ra.Status)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
-		t.Fatalf("R5 candidate=%s want active", rb.Status)
-	}
-	if got := activeCount(t, db, 1, "temperature"); got != 1 {
-		t.Fatalf("R5 active count=%d want 1", got)
-	}
-	logs := failoverLogs(t, db, 1, "temperature")
-	if len(logs) != 1 || logs[0].Reason != ReasonManualDeactivate || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
-		t.Fatalf("R5 log mismatch: %+v", logs)
-	}
-	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got != 1 {
-		t.Fatalf("R5 transition health=%d want 1", got)
-	}
-	if len(*notes) != 1 || (*notes)[0].Type != notifyTypeInfo || !strings.Contains((*notes)[0].Message, ReasonManualDeactivate) {
-		t.Fatalf("R5 notification wrong: %+v", *notes)
-	}
-}
-
-// R6: 停用 active 且无候选 → ErrConflict，状态不变。
-func TestR6_DeactivateActiveWithoutCandidateConflicts(t *testing.T) {
+// TestCreate_GroupKeyIsEdgeDeviceAndCategory 钉住组键口径本身。
+//
+// 三件事：
+//  1. 同 (edge_device, category) 第二次创建 ⇒ ErrConflict（组恒一行，前提成立）；
+//  2. 不同 edge_device + 同 category ⇒ **两条独立来源**，各自 active
+//     （它们不是同一个组，因此不适用「每组至多一条 active」）；
+//  3. 同 edge_device + 不同 category ⇒ 两条独立来源。
+func TestCreate_GroupKeyIsEdgeDeviceAndCategory(t *testing.T) {
 	base := testBase()
 	now := base
 	svc, db, _ := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
 
-	if _, err := svc.Deactivate(a.ID); !errors.Is(err, ErrConflict) {
-		t.Fatalf("R6 err=%v want ErrConflict", err)
+	first := mustCreate(t, svc, CreateInput{Category: "temperature", EdgeDeviceID: 1})
+	if first.Status != StatusActive {
+		t.Fatalf("新键首行 status=%s want active", first.Status)
 	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusActive {
-		t.Fatalf("R6 status=%s want active", ra.Status)
-	}
-	if got := activeCount(t, db, 1, "temperature"); got != 1 {
-		t.Fatalf("R6 active count=%d want 1", got)
-	}
-}
-
-// R7: activate 手动切换，原 active→standby，写 reason=manual，幂等。
-func TestR7_ActivateManualSwitch(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, notes := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 5})
-
-	got, err := svc.Activate(b.ID)
-	if err != nil {
-		t.Fatalf("R7 activate: %v", err)
-	}
-	if got.ID != b.ID || got.Status != StatusActive {
-		t.Fatalf("R7 returned %+v", got)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusStandby {
-		t.Fatalf("R7 previous active=%s want standby", ra.Status)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
-		t.Fatalf("R7 target=%s want active", rb.Status)
-	}
-	logs := failoverLogs(t, db, 1, "temperature")
-	if len(logs) != 1 || logs[0].Reason != ReasonManual || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
-		t.Fatalf("R7 log mismatch: %+v", logs)
-	}
-	if len(*notes) != 1 || (*notes)[0].Type != notifyTypeInfo || !strings.Contains((*notes)[0].Message, ReasonManual) {
-		t.Fatalf("R7 notification wrong: %+v", *notes)
+	if _, err := svc.Create(CreateInput{Category: "temperature", EdgeDeviceID: 1}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("同 (edge_device_id, category) 第二次创建 err=%v want ErrConflict", err)
 	}
 
-	// 幂等：已 active 再 activate 不产生新日志。
-	if _, err := svc.Activate(b.ID); err != nil {
-		t.Fatalf("R7 idempotent activate: %v", err)
+	otherDevice := mustCreate(t, svc, CreateInput{Category: "temperature", EdgeDeviceID: 2})
+	otherCategory := mustCreate(t, svc, CreateInput{Category: "humidity", EdgeDeviceID: 1})
+	if otherDevice.ID == first.ID || otherCategory.ID == first.ID {
+		t.Fatal("不同 edge_device 或不同 category 必须产生独立来源")
 	}
-	if logs2 := failoverLogs(t, db, 1, "temperature"); len(logs2) != 1 {
-		t.Fatalf("R7 idempotent produced extra logs: %d", len(logs2))
-	}
-}
-
-// R7 (v1.1): disabled 是人工可逆状态，activate 即重新启用；写 failover_logs(reason=manual)
-// 与 health(transition)。
-func TestR7_ActivateDisabledReenablesSource(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, _ := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
-
-	// B 为 standby，停用走 R8 → disabled，不写切换日志/健康事件。
-	if _, err := svc.Deactivate(b.ID); err != nil {
-		t.Fatalf("deactivate standby: %v", err)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusDisabled {
-		t.Fatalf("b=%s want disabled", rb.Status)
-	}
-	if got := countRows(t, db, &models.FailoverLog{}, ""); got != 0 {
-		t.Fatalf("deactivate standby wrote %d logs want 0", got)
-	}
-
-	now = base.Add(time.Minute)
-	got, err := svc.Activate(b.ID)
-	if err != nil {
-		t.Fatalf("activate disabled: %v want nil", err)
-	}
-	if got.ID != b.ID || got.Status != StatusActive {
-		t.Fatalf("activate disabled returned %+v", got)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
-		t.Fatalf("b=%s want active", rb.Status)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusStandby {
-		t.Fatalf("a=%s want standby", ra.Status)
-	}
-	if got := activeCount(t, db, 1, "temperature"); got != 1 {
-		t.Fatalf("active count=%d want 1", got)
-	}
-	logs := failoverLogs(t, db, 1, "temperature")
-	if len(logs) != 1 || logs[0].Reason != ReasonManual || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
-		t.Fatalf("log mismatch: %+v", logs)
-	}
-	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got < 1 {
-		t.Fatalf("activate transition health rows for b=%d want >=1", got)
-	}
-}
-
-// R7 (v1.1): 组内无 active 时，disabled 来源可被 activate 提升为权威；
-// 覆盖 Deactivate(R5) 与 Activate 两条切换路径的 health(transition) 留痕。
-func TestR7_ActivateDisabledWhenNoActive(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, _ := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
-
-	// Deactivate A（active 且有候选 B）→ B 接替、A disabled。
-	if _, err := svc.Deactivate(a.ID); err != nil {
-		t.Fatalf("deactivate a: %v", err)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusDisabled {
-		t.Fatalf("a=%s want disabled", ra.Status)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
-		t.Fatalf("b=%s want active", rb.Status)
-	}
-
-	// Deactivate B（active 且无候选）→ R6 409，状态不变。
-	if _, err := svc.Deactivate(b.ID); !errors.Is(err, ErrConflict) {
-		t.Fatalf("deactivate b err=%v want ErrConflict", err)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
-		t.Fatalf("409 must not mutate b, got %s", rb.Status)
-	}
-
-	// Activate A（disabled → active），B → standby。
-	now = base.Add(time.Minute)
-	got, err := svc.Activate(a.ID)
-	if err != nil {
-		t.Fatalf("activate disabled when no active: %v want nil", err)
-	}
-	if got.ID != a.ID || got.Status != StatusActive {
-		t.Fatalf("activate returned %+v", got)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusActive {
-		t.Fatalf("a=%s want active", ra.Status)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusStandby {
-		t.Fatalf("b=%s want standby", rb.Status)
-	}
-	if got := activeCount(t, db, 1, "temperature"); got != 1 {
-		t.Fatalf("active count=%d want 1", got)
-	}
-	logs := failoverLogs(t, db, 1, "temperature")
-	if len(logs) != 2 {
-		t.Fatalf("failover logs=%d want 2", len(logs))
-	}
-	if logs[0].Reason != ReasonManualDeactivate || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
-		t.Fatalf("first log mismatch: %+v", logs[0])
-	}
-	if logs[1].Reason != ReasonManual || logs[1].FromSourceID != b.ID || logs[1].ToSourceID != a.ID {
-		t.Fatalf("second log mismatch: %+v", logs[1])
-	}
-	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got < 1 {
-		t.Fatalf("R5 deactivate transition health rows for b=%d want >=1", got)
-	}
-	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", a.ID, healthStatusTransition); got < 1 {
-		t.Fatalf("activate transition health rows for a=%d want >=1", got)
-	}
-}
-
-// R8: 停用非 active 直接 disabled，不影响 active。
-func TestR8_DeactivateNonActiveSetsDisabled(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, _ := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
-
-	if _, err := svc.Deactivate(b.ID); err != nil {
-		t.Fatalf("R8 deactivate: %v", err)
-	}
-	if rb := reloadDS(t, db, b.ID); rb.Status != StatusDisabled {
-		t.Fatalf("R8 status=%s want disabled", rb.Status)
-	}
-	if ra := reloadDS(t, db, a.ID); ra.Status != StatusActive {
-		t.Fatalf("R8 active changed to %s", ra.Status)
-	}
-	if got := activeCount(t, db, 1, "temperature"); got != 1 {
-		t.Fatalf("R8 active count=%d want 1", got)
-	}
-}
-
-// R9: reset 仅对 error；恢复 standby/fail_count=0，保留 last_failure；组内无 active 则提升。
-func TestR9_ResetError(t *testing.T) {
-	base := testBase()
-	now := base
-	svc, db, _ := newTestService(t, &now)
-	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
-	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
-	lastFail := base.Add(-time.Hour)
-	if err := db.Model(&models.DataSource{}).Where("id = ?", b.ID).
-		Updates(map[string]interface{}{"status": StatusError, "fail_count": 5, "last_failure": lastFail}).Error; err != nil {
+	var total int64
+	if err := db.Model(&models.DataSource{}).Count(&total).Error; err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := svc.Reset(b.ID)
-	if err != nil {
-		t.Fatalf("R9 reset: %v", err)
+	if total != 3 {
+		t.Fatalf("行数 = %d, want 3", total)
 	}
-	if got.Status != StatusStandby || got.FailCount != 0 {
-		t.Fatalf("R9 status=%s fail=%d want standby/0", got.Status, got.FailCount)
+	// 三条都是各自组的首行 ⇒ 全部 active；每键至多一条 active 的不变量依然成立。
+	if got := countRows(t, db, &models.DataSource{}, "status = ?", StatusActive); got != 3 {
+		t.Fatalf("active 行 = %d, want 3", got)
 	}
-	if got.LastFailure == nil || !got.LastFailure.Equal(lastFail) {
-		t.Fatalf("R9 last_failure not preserved: %v", got.LastFailure)
-	}
-	if activeCount(t, db, 1, "temperature") != 1 {
-		t.Fatalf("R9 should not change active while one exists")
-	}
-
-	// 组内无 active → 提升为 active。
-	c := mustCreate(t, svc, CreateInput{DeviceID: 2, Category: "humidity", EdgeDeviceID: 1})
-	if err := db.Model(&models.DataSource{}).Where("id = ?", c.ID).Update("status", StatusError).Error; err != nil {
-		t.Fatal(err)
-	}
-	got2, err := svc.Reset(c.ID)
-	if err != nil {
-		t.Fatalf("R9 reset promote: %v", err)
-	}
-	if got2.Status != StatusActive {
-		t.Fatalf("R9 promote got %s want active", got2.Status)
-	}
-
-	// 非 error → ErrInvalidRequest。
-	if _, err := svc.Reset(a.ID); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("R9 non-error reset err=%v want ErrInvalidRequest", err)
-	}
+	assertGroupInvariant(t, db)
 }
 
 // 校验错误与哨兵错误。
 func TestValidationErrors(t *testing.T) {
 	base := testBase()
 	now := base
-	svc, db, _ := newTestService(t, &now)
+	svc, _, _ := newTestService(t, &now)
 
 	t.Run("required_fields", func(t *testing.T) {
+		// 组键 = (edge_device_id, category)：两列都必填。
+		// 历史：这里曾有第三个用例 {DeviceID: 1, Category: ...}（缺 edge_device_id）。
+		// 逻辑设备层移除后 device_id 列已不存在，必填项只剩这两列；
+		// 留一个"两列都缺"的用例补上前 DeviceID 用例的覆盖位。
 		for _, in := range []CreateInput{
-			{Category: "temperature", EdgeDeviceID: 1},
-			{DeviceID: 1, EdgeDeviceID: 1},
-			{DeviceID: 1, Category: "temperature"},
+			{EdgeDeviceID: 1},         // 缺 category
+			{Category: "temperature"}, // 缺 edge_device_id
+			{},                        // 两者都缺
 		} {
 			if _, err := svc.Create(in); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("Create(%+v) err=%v want ErrInvalidRequest", in, err)
@@ -401,17 +208,17 @@ func TestValidationErrors(t *testing.T) {
 		}
 	})
 	t.Run("source_type", func(t *testing.T) {
-		if _, err := svc.Create(CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, SourceType: "mqtt"}); !errors.Is(err, ErrInvalidRequest) {
+		if _, err := svc.Create(CreateInput{Category: "temperature", EdgeDeviceID: 1, SourceType: "mqtt"}); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("err=%v want ErrInvalidRequest", err)
 		}
 	})
 	t.Run("max_fail_count", func(t *testing.T) {
-		if _, err := svc.Create(CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, MaxFailCount: 99}); !errors.Is(err, ErrInvalidRequest) {
+		if _, err := svc.Create(CreateInput{Category: "temperature", EdgeDeviceID: 1, MaxFailCount: 99}); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("err=%v want ErrInvalidRequest", err)
 		}
 	})
 	t.Run("defaults", func(t *testing.T) {
-		ds, err := svc.Create(CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 4})
+		ds, err := svc.Create(CreateInput{Category: "temperature", EdgeDeviceID: 4})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -426,43 +233,18 @@ func TestValidationErrors(t *testing.T) {
 		}
 	})
 	t.Run("duplicate", func(t *testing.T) {
-		_, _ = svc.Create(CreateInput{DeviceID: 2, Category: "humidity", EdgeDeviceID: 9})
-		if _, err := svc.Create(CreateInput{DeviceID: 2, Category: "humidity", EdgeDeviceID: 9}); !errors.Is(err, ErrConflict) {
+		_, _ = svc.Create(CreateInput{Category: "humidity", EdgeDeviceID: 9})
+		if _, err := svc.Create(CreateInput{Category: "humidity", EdgeDeviceID: 9}); !errors.Is(err, ErrConflict) {
 			t.Fatalf("err=%v want ErrConflict", err)
 		}
 	})
 	t.Run("not_found", func(t *testing.T) {
+		// Activate/Deactivate/Reset 已于 2026-10-24 删除（方案 A），只剩 Get。
 		if _, err := svc.Get(9999); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("Get err=%v", err)
 		}
-		if _, err := svc.Activate(9999); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("Activate err=%v", err)
-		}
-		if _, err := svc.Deactivate(9999); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("Deactivate err=%v", err)
-		}
-		if _, err := svc.Reset(9999); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("Reset err=%v", err)
-		}
-	})
-	t.Run("activate_disabled_reenables", func(t *testing.T) {
-		a := mustCreate(t, svc, CreateInput{DeviceID: 3, Category: "voltage", EdgeDeviceID: 1})
-		b := mustCreate(t, svc, CreateInput{DeviceID: 3, Category: "voltage", EdgeDeviceID: 2})
-		if _, err := svc.Deactivate(b.ID); err != nil {
-			t.Fatal(err)
-		}
-		if rb := reloadDS(t, db, b.ID); rb.Status != StatusDisabled {
-			t.Fatalf("setup b=%s want disabled", rb.Status)
-		}
-		got, err := svc.Activate(b.ID)
-		if err != nil {
-			t.Fatalf("activate disabled err=%v want nil", err)
-		}
-		if got.ID != b.ID || got.Status != StatusActive {
-			t.Fatalf("activate disabled returned %+v", got)
-		}
-		if ra := reloadDS(t, db, a.ID); ra.Status != StatusStandby {
-			t.Fatalf("previous active=%s want standby", ra.Status)
+		if _, err := svc.Update(9999, UpdateInput{}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Update err=%v", err)
 		}
 	})
 }
@@ -474,9 +256,9 @@ func TestListHealthAndFailoverLogs(t *testing.T) {
 	svc, db, _ := newTestService(t, &now)
 
 	for i, prio := range []int{1, 5, 3} {
-		mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: uint(i + 1), Priority: prio})
+		mustCreate(t, svc, CreateInput{Category: "temperature", EdgeDeviceID: uint(i + 1), Priority: prio})
 	}
-	mustCreate(t, svc, CreateInput{DeviceID: 2, Category: "humidity", EdgeDeviceID: 1})
+	mustCreate(t, svc, CreateInput{Category: "humidity", EdgeDeviceID: 1})
 
 	items, total, err := svc.List(ListFilter{Page: 0, PageSize: 0})
 	if err != nil {
@@ -488,7 +270,7 @@ func TestListHealthAndFailoverLogs(t *testing.T) {
 	if items[0].Priority != 5 || items[1].Priority != 3 || items[2].Priority != 1 {
 		t.Fatalf("List ordering wrong: %+v", items)
 	}
-	items, total, err = svc.List(ListFilter{DeviceID: 2, Page: 1, PageSize: 100})
+	items, total, err = svc.List(ListFilter{EdgeDeviceID: 2, Page: 1, PageSize: 100})
 	if err != nil || total != 1 || len(items) != 1 {
 		t.Fatalf("List filter total=%d len=%d err=%v", total, len(items), err)
 	}
@@ -555,15 +337,15 @@ func randomEdgeDeviceID(t *testing.T, db *gorm.DB, rng *rand.Rand) uint {
 func assertGroupInvariant(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	type groupRow struct {
-		DeviceID uint
-		Category string
-		C        int64
+		EdgeDeviceID uint
+		Category     string
+		C            int64
 	}
 	var rows []groupRow
 	if err := db.Model(&models.DataSource{}).
-		Select("device_id, category, COUNT(*) AS c").
+		Select("edge_device_id, category, COUNT(*) AS c").
 		Where("status = ?", StatusActive).
-		Group("device_id, category").
+		Group("edge_device_id, category").
 		Having("COUNT(*) > 1").
 		Find(&rows).Error; err != nil {
 		t.Fatalf("invariant query: %v", err)
@@ -573,47 +355,52 @@ func assertGroupInvariant(t *testing.T, db *gorm.DB) {
 	}
 }
 
-// TestDelete_ActiveWithStandbyCandidate_PromotesWithoutDoubleActive 是 CI run 39871785449
-// (Backend simulation gates) 暴露缺陷的回归钉。
+// TestIsPrimaryIsDerivedFromStatus 钉住 is_primary 不变量：**恒等于 (status == active)**。
 //
-// 缺陷形态：Delete() 处理「删除 active、组内还有 standby 候选」时，
-// 改前是**先 Save(candidate) 升 active、再在函数末尾 Delete(ds)** ——
-// 同一事务内出现两条 active，撞上 data_sources 的部分唯一索引
-// ux_ds_one_active (device_id,category) WHERE status='active'
-// ⇒ PG/SQLite 语句级检查直接报 duplicate key，整个删除事务回滚。
+// 为什么需要这条门禁：is_primary 曾是「人工声明的主来源」标记，但主备状态机 M3 下线后
+// 零个读者（所有「谁在供数」判定看 status），而状态迁移只 Update("status") 不同步它
+// ⇒ 2026-10-24 审核实测可以出现 active + is_primary=false 的漂移（POST 创建的来源
+// 缺省 is_primary=false 但 status=active）。
 //
-// 为什么原有 TestDataSourceDelete_ActivePromotesCandidate 没抓到：
-// 它走 API + seedDataSource，删的 active 是**组内第一条**，
-// 而本用例直接打 Service 层，覆盖「active + standby 候选共存」这条真实路径。
-// （真实触发场景：仿真 SIM-DS-002/005/006 的 t.Cleanup 删主来源时组内仍有备来源。）
-func TestDelete_ActiveWithStandbyCandidate_PromotesWithoutDoubleActive(t *testing.T) {
-	now := time.Now().UTC()
-	svc, db, notes := newTestService(t, &now)
+// 现在它由 status 派生，不接收入参。本用例锁两件事：
+//  1. Create 时忽略入参 IsPrimary，按 status 派生；
+//  2. Update 也不能把 active 行改成 is_primary=false（否则漂移会从 API 面重新进来）。
+func TestIsPrimaryIsDerivedFromStatus(t *testing.T) {
+	base := testBase()
+	now := base
+	svc, db, _ := newTestService(t, &now)
 
-	active := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, Priority: 5})
-	standby := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2, Priority: 1})
-	if active.Status != StatusActive || standby.Status != StatusStandby {
-		t.Fatalf("前置状态不符：active=%q standby=%q", active.Status, standby.Status)
+	// 1) Create 忽略入参。
+	//
+	// 组键 = (edge_device_id, category) + 唯一索引 ⇒ 同组只能有一行，
+	// 「组内第二条是 standby」这个形态**构造不出来**。能反证派生的只有：
+	// 首条必为 active，而传 IsPrimary=false —— 若实现照抄入参就会得到 false。
+	first := mustCreate(t, svc, CreateInput{
+		Category: "humidity", EdgeDeviceID: 1,
+		IsPrimary: false,
+	})
+	if first.Status != StatusActive {
+		t.Fatalf("前置：首条应为 active，实际 %s", first.Status)
+	}
+	if !first.IsPrimary {
+		t.Fatalf("Create: active 行 is_primary 必须为 true（入参 false 应被忽略），实际 false")
 	}
 
-	if err := svc.Delete(active.ID); err != nil {
-		t.Fatalf("删除 active（组内还有 standby 候选）失败：%v", err)
+	// 2) Update 不能破坏派生。
+	if _, err := svc.Update(first.ID, UpdateInput{IsPrimary: boolPtr(false)}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var got models.DataSource
+	if err := db.First(&got, first.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusActive || !got.IsPrimary {
+		t.Fatalf("Update 后 status=%s is_primary=%v，不变量要求 active ⇒ is_primary=true",
+			got.Status, got.IsPrimary)
 	}
 
-	var rows []models.DataSource
-	db.Where("device_id = ? AND category = ?", 1, "temperature").Find(&rows)
-	if len(rows) != 1 {
-		t.Fatalf("期望只剩备来源 1 条，实际 %d 条：%+v", len(rows), rows)
-	}
-	if rows[0].ID != standby.ID {
-		t.Fatalf("剩余的应是备来源 %d，实际 %d", standby.ID, rows[0].ID)
-	}
-	// 候选必须被接替成 active（删除权威来源不能导致该组失去权威）
-	if rows[0].Status != StatusActive {
-		t.Fatalf("备来源接替后状态 = %q，期望 active", rows[0].Status)
-	}
-	// 且必须留下切换审计（谁接替谁、原因）
-	if len(*notes) == 0 {
-		t.Fatal("删除权威来源后未产生「数据源切换」通知")
-	}
+	// 组内唯一一行不变式顺带校验（唯一索引没被放宽）。
+	assertGroupInvariant(t, db)
 }
+
+func boolPtr(b bool) *bool { return &b }

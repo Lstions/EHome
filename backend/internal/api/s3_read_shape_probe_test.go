@@ -6,11 +6,21 @@ package api
 // 一个可解析 DataEvent 会写 device_data **两行**, 由两个消费者各写一行,
 // 形状不同:
 //   db_persist    : device_id=0, data_json={"raw":<hex>,...}              (原始字节, 审计/取证)
-//   sensor_parser : device_id=N, data_json={"raw_hex":...,"sensors":[...]} (解析后物理量)
+//   sensor_parser : device_id=N, data_json=见下                          (解析后物理量)
 //
 // 两者**覆盖面不同, 都不是冗余** (error_code!=0 / 空 raw / 解析被拒 三类只有 db_persist 会写),
 // 所以本轮**两个写入者都保留**。但"保留两行"必须配一条锁:
 // 前端依赖的**读形状**不能被日后任何"去重"悄悄改掉。
+//
+// ⚠ 2026-11-07 (task-19) sensor_parser 的**落库**形状变了, 但**读形状没变**:
+//   · 停写前 (历史行): {"raw_hex":..,"sensors":[{Name,Value,Unit,StringValue}..],..}
+//   · 停写后 (新行)  : {"raw_hex":..,"channel_id":..,"timestamp":..[, "str_values":{..}]}
+//     —— sensors 与 unified_data 是完全重复的第二份副本 (占该列 83%), 已停写;
+//     改由读路径按「每 sensor 各取最新」合成 (internal/api/device_data_sensors.go)。
+//
+// 所以本文件的两条正向断言 (latest-data / edge-devices/:id/data 必须返回 parsed 形状)
+// **继续有效且更有价值**: 它们现在锁的是"合成这条路真的在跑" —— 若合成被删,
+// 新行会变成 no-sensors 形状, 这两条立刻变红。历史行 (本来就带 sensors) 也照常通过。
 //
 // 前端依赖点: frontend-shared/src/composables/useDeviceData.ts:114 读
 // `data_json.sensors` 逐项取名 (DataPanel 面板)。若 latest-data 改返回 raw 形状,
@@ -42,6 +52,11 @@ const (
 	s3ShapeRaw    s3Shape = "raw(db_persist)"       // 有 raw, 无 sensors
 	s3ShapeBoth   s3Shape = "both"
 	s3ShapeNone   s3Shape = "neither"
+	// s3ShapeStoredNoSensors 是 2026-11-07 起 sensor_parser 的**落库**形状:
+	// 有 raw_hex 但没有 sensors (合成只发生在读路径, 不该出现在库里)。
+	// 单独一态是为了让"库里漏进合成结果"或"合成没生效"都能被区分出来 ——
+	// 归到 s3ShapeNone 会把两者混为一谈。
+	s3ShapeStoredNoSensors s3Shape = "stored(raw_hex,no sensors)"
 )
 
 func s3Classify(t *testing.T, dataJSON string) s3Shape {
@@ -52,6 +67,7 @@ func s3Classify(t *testing.T, dataJSON string) s3Shape {
 	}
 	_, hasRaw := m["raw"]
 	_, hasSensors := m["sensors"]
+	_, hasRawHex := m["raw_hex"]
 	switch {
 	case hasRaw && hasSensors:
 		return s3ShapeBoth
@@ -59,6 +75,8 @@ func s3Classify(t *testing.T, dataJSON string) s3Shape {
 		return s3ShapeParsed
 	case hasRaw:
 		return s3ShapeRaw
+	case hasRawHex:
+		return s3ShapeStoredNoSensors
 	default:
 		return s3ShapeNone
 	}
@@ -202,6 +220,19 @@ func TestS3_ReadContract_ReverseControlRawShapeIsDistinguishable(t *testing.T) {
 // Lead task-16 裁决: /nodes/:id/data 本轮**故意不改** —— 它按 node_id 过滤, 两种形状
 // 都会命中, 但它**没有任何生产调用者** (全仓 grep + docs/分析/功能模块与业务功能实测盘点-2026-09-23.md:163
 // 「无包装、无调用者」), 为一个无人调用的端点改接口只承担风险而无收益。
+//
+// ⚠ 2026-11-07 (task-19) **追加**: 这个端点现在返回的行里**不含 sensors** ——
+//
+//	· sensor_parser 写的新行: data_json = {"raw_hex":..,"channel_id":..,"timestamp":..}
+//	  (sensors 由读路径合成, 见 internal/api/device_data_sensors.go)
+//	· 本端点**没有接合成** —— 因为全仓仍然零调用者, 接合成就等于给一段死代码
+//	  增加两条 DB 查询和一层 L1 语义依赖。
+//
+// 这是**有意的**不是漏的。若日后真的有人接入这个端点, 必须**同时**做两件事:
+//  1. 在 handler_node.go 的 /nodes/:id/data 里调用 deviceDataJSONListWithSensors
+//     (注意该端点跨设备, 需要按 device_id 分组后再合成 —— 不能整页一次 IN 查询);
+//  2. 更新本用例: 届时"混两种形状"不再是缺陷而是待修项, 断言应当改成
+//     "所有 parsed 行都必须带 sensors"。
 //
 // 本用例把"歧义仍然存在"钉成**可执行的记录**, 而不是口头结论:
 //

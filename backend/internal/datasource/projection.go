@@ -29,6 +29,12 @@ import (
 //  2. **不删除，只 disable**：设备下线/字段消失时置 disabled 保留血缘
 //  3. **幂等**：可重复调用任意次，结果一致
 //
+// # 组键（2026-10-23 逻辑设备层移除后）
+//
+//	data_sources 的唯一键是 (edge_device_id, category) —— 「某台边缘设备的某个类别
+//	就是一条来源」。逻辑身份层消失后没有第二套 id 空间，投影的两元组也少一维：
+//	不再出现「同一物理来源同时挂在逻辑 id 与边缘 id 上」的双写。
+//
 // # 性能
 //
 // 收敛在**冷路径**（启动后一次 + 周期性 ticker），不在采集热路径。
@@ -62,56 +68,58 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 	//    只载 auto 与 manual 两类，不需要全部字段。
 	type existingRow struct {
 		ID           uint
-		DeviceID     uint
-		Category     string
 		EdgeDeviceID uint
+		Category     string
 		Status       string
 		ManagedBy    string
 	}
 	var rows []existingRow
 	if err := s.db.WithContext(ctx).Model(&models.DataSource{}).
-		Select("id, device_id, category, edge_device_id, status, managed_by").
+		Select("id, edge_device_id, category, status, managed_by").
 		Find(&rows).Error; err != nil {
 		return res, fmt.Errorf("datasource: load existing sources: %w", err)
 	}
 
-	type triple struct {
-		deviceID     uint
-		category     string
+	// 组键 = (edge_device_id, category)。
+	type key struct {
 		edgeDeviceID uint
+		category     string
 	}
-	autoByTriple := make(map[triple]*existingRow, len(rows))
-	manualTriples := make(map[triple]struct{}, len(rows))
+	autoByKey := make(map[key]*existingRow, len(rows))
+	manualKeys := make(map[key]struct{}, len(rows))
 	for i := range rows {
-		t := triple{rows[i].DeviceID, rows[i].Category, rows[i].EdgeDeviceID}
+		k := key{rows[i].EdgeDeviceID, rows[i].Category}
 		if rows[i].ManagedBy == models.DataSourceManagedManual {
-			manualTriples[t] = struct{}{}
+			manualKeys[k] = struct{}{}
 			continue
 		}
-		autoByTriple[t] = &rows[i]
+		autoByKey[k] = &rows[i]
 	}
 
-	// 2) 展开期望态为三元组（每台成员设备一行）。
-	desired := make(map[triple]struct{}, 0)
-	desiredStatus := make(map[triple]string, 0)
+	// 2) 展开期望态为二元组（每个成员设备一行）。
+	desired := make(map[key]struct{}, 0)
+	desiredStatus := make(map[key]string, 0)
 	for _, h := range handles {
 		if h == nil {
 			continue
 		}
-		key := h.Key()
-		if key.LogicalDeviceID == 0 || key.Category == "" {
+		cat := h.Key().Category
+		if cat == "" {
 			continue
 		}
 		for _, m := range h.Members() {
-			t := triple{key.LogicalDeviceID, key.Category, m.EdgeDeviceID}
-			desired[t] = struct{}{}
+			if m.EdgeDeviceID == 0 {
+				continue
+			}
+			k := key{m.EdgeDeviceID, cat}
+			desired[k] = struct{}{}
 			// 主备：active 成员 active，其余 standby；直连/复合：active
 			// （复合组没有单一权威，但每个成员都在供数，标 active 更符合事实）。
 			status := StatusActive
 			if h.Kind() == source.KindPrimaryBackup && !m.Active {
 				status = StatusStandby
 			}
-			desiredStatus[t] = status
+			desiredStatus[k] = status
 		}
 	}
 	res.Total = len(desired)
@@ -127,7 +135,7 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 	// 事实来源：source_group_members.last_success（由 GroupService.MarkSuccess 维护）。
 	// 直连来源（无组）没有成员行，此时留空 —— 这是诚实的：没有组就没有"成员健康"概念，
 	// 而设备本身的在线状态在 edge_devices.status 里。
-	lastSuccessByTriple := make(map[triple]*time.Time, len(desired))
+	lastSuccessByKey := make(map[key]*time.Time, len(desired))
 	if len(desired) > 0 {
 		type memRow struct {
 			EdgeDeviceID uint
@@ -148,54 +156,42 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 					"error", err)
 			}
 		}
-		// 逻辑设备映射：从**已派生的期望态**反推（deviceID -> 逻辑设备）。
-		//
-		// 为什么不从设备行查：ReconcileDerived 只接收 handles（不查设备表），
-		// 而 handles 的 key 已含 LogicalDeviceID + 每个成员的 EdgeDeviceID，
-		// 正好给出同一映射。这样投影器保持"输入只有 handles"的纯收敛语义。
-		logicalOf := make(map[uint]uint, len(desired))
-		for t := range desired {
-			logicalOf[t.edgeDeviceID] = t.deviceID
-		}
+		// 组件的 (edge_device_id, category) 直接就是组键 —— 不再需要「逻辑设备映射」
+		// 那一层反推（它是逻辑身份层的副产物：组键曾含逻辑 id，而成员表只有边缘 id）。
 		for _, m := range mems {
 			if m.LastSuccess == nil {
 				continue
 			}
-			ld, ok := logicalOf[m.EdgeDeviceID]
-			if !ok {
-				continue
-			}
-			t := triple{ld, m.Category, m.EdgeDeviceID}
-			if _, want := desired[t]; !want {
+			k := key{m.EdgeDeviceID, m.Category}
+			if _, want := desired[k]; !want {
 				continue
 			}
 			ts := *m.LastSuccess
-			if cur, ok := lastSuccessByTriple[t]; !ok || ts.After(*cur) {
-				lastSuccessByTriple[t] = &ts
+			if cur, ok := lastSuccessByKey[k]; !ok || ts.After(*cur) {
+				lastSuccessByKey[k] = &ts
 			}
 		}
 	}
 
 	// 3) 收敛（单事务：部分成功会让台账处于自相矛盾状态）。
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for t := range desired {
-			status := desiredStatus[t]
-			existing, hasAuto := autoByTriple[t]
-			if _, isManual := manualTriples[t]; isManual {
+		for k := range desired {
+			status := desiredStatus[k]
+			existing, hasAuto := autoByKey[k]
+			if _, isManual := manualKeys[k]; isManual {
 				// 人工配置优先：跳过，不覆盖。
 				res.SkippedManual++
 				continue
 			}
 			if !hasAuto {
 				row := models.DataSource{
-					DeviceID:     t.deviceID,
-					Category:     t.category,
-					EdgeDeviceID: t.edgeDeviceID,
-					SourceType:   "edge_device",
-					Name:         derivedName(t.deviceID, t.category, t.edgeDeviceID),
+					EdgeDeviceID: k.edgeDeviceID,
+					Category:     k.category,
+					SourceType:   SourceTypeEdgeDevice,
+					Name:         derivedName(k.edgeDeviceID, k.category),
 					Priority:     0,
 					IsPrimary:    status == StatusActive,
-					MaxFailCount: 3,
+					MaxFailCount: defaultMaxFailCount,
 					Status:       status,
 					ManagedBy:    models.DataSourceManagedAuto,
 					DerivedAt:    &now,
@@ -203,12 +199,12 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 				// 新建行也要带 last_success —— 否则首次派生出来的行永远显示"从未成功"，
 				// 直到状态发生变化才补上（而这可能永远不发生）。三个写入路径
 				// （新建 / 状态变化 / 状态未变）必须一致。
-				if ts := lastSuccessByTriple[t]; ts != nil {
+				if ts := lastSuccessByKey[k]; ts != nil {
 					row.LastSuccess = ts
 				}
 				if err := tx.Create(&row).Error; err != nil {
-					return fmt.Errorf("datasource: create derived source (%d,%s,%d): %w",
-						t.deviceID, t.category, t.edgeDeviceID, err)
+					return fmt.Errorf("datasource: create derived source (%d,%s): %w",
+						k.edgeDeviceID, k.category, err)
 				}
 				res.Created++
 				continue
@@ -221,7 +217,7 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 				// "设备一直正常"的来源永远不更新最后成功时间 —— 页面上会显示
 				// 一个越来越旧的时间，看起来像设备掉线了。
 				touch := map[string]interface{}{"derived_at": now}
-				if ts := lastSuccessByTriple[t]; ts != nil {
+				if ts := lastSuccessByKey[k]; ts != nil {
 					touch["last_success"] = *ts
 				}
 				if err := tx.Model(&models.DataSource{}).Where("id = ?", existing.ID).
@@ -236,7 +232,7 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 				"derived_at": now,
 			}
 			// last_success 只在有新值时写（不清空既有事实）。
-			if ts := lastSuccessByTriple[t]; ts != nil {
+			if ts := lastSuccessByKey[k]; ts != nil {
 				updates["last_success"] = *ts
 			}
 			if err := tx.Model(&models.DataSource{}).Where("id = ?", existing.ID).
@@ -247,8 +243,8 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 		}
 
 		// 4) 期望态里没有的 auto 行 ⇒ disable（**不删除**，保留血缘）。
-		for t, row := range autoByTriple {
-			if _, want := desired[t]; want {
+		for k, row := range autoByKey {
+			if _, want := desired[k]; want {
 				continue
 			}
 			if row.Status == StatusDisabled {
@@ -268,12 +264,12 @@ func (s *Service) ReconcileDerived(ctx context.Context, handles []*source.Handle
 	return res, nil
 }
 
-// derivedName 生成可读的派生名（如 "dev14·rsoc"）。
+// derivedName 生成可读的派生名（如 "e14·rsoc"）。
 //
-// 为什么不用纯 ID：纯 ID 在页面上无法阅读；带逻辑设备与类别的组合
-// 既能读又能唯一标识（唯一性由 DB 的 uniq_ds_source 索引保证）。
-func derivedName(deviceID uint, category string, edgeDeviceID uint) string {
-	return fmt.Sprintf("dev%d·%s@e%d", deviceID, category, edgeDeviceID)
+// 为什么不用纯 ID：纯 ID 在页面上无法阅读；「设备 + 类别」的组合既能读
+// 又能唯一标识（唯一性由 DB 的 uniq_ds_source 索引保证）。
+func derivedName(edgeDeviceID uint, category string) string {
+	return fmt.Sprintf("e%d·%s", edgeDeviceID, category)
 }
 
 // DeriveInputFrom 从 DB 读取派生所需的输入（收敛器用，**唯一**查库点）。
@@ -284,17 +280,16 @@ func derivedName(deviceID uint, category string, edgeDeviceID uint) string {
 // 数据源选择（性能关键）：
 //   - 设备与观测字段来自 sensor_field_obs（轻量投影表），**不是** unified_data
 //     （生产 3000 万行，扫它会把一次派生变成分钟级操作）。
-//   - 只取已绑定逻辑设备的设备：未绑定设备无法定来源键。
+//   - 不再按逻辑身份过滤：组键是 (edge_device_id, category)，每台有观测的设备
+//     都该进台账。旧版只取已绑逻辑设备的行，逻辑层删除后这个过滤条件无对应列。
 func (s *Service) DeriveInputFrom(ctx context.Context) (source.DeriveInput, error) {
 	var in source.DeriveInput
 	if s == nil || s.db == nil {
 		return in, fmt.Errorf("datasource: nil service or db")
 	}
 
-	// 设备：只取已绑定逻辑设备的。
-	if err := s.db.WithContext(ctx).
-		Where("logical_device_id IS NOT NULL AND logical_device_id > 0").
-		Find(&in.Devices).Error; err != nil {
+	// 设备：全部存活的边缘设备（软删的由 GORM 默认范围排除）。
+	if err := s.db.WithContext(ctx).Find(&in.Devices).Error; err != nil {
 		return in, fmt.Errorf("datasource: load devices for derive: %w", err)
 	}
 

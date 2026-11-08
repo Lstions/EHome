@@ -25,6 +25,64 @@ type Config struct {
 	// 所有 field_resolver 配置（含 enabled）变更需**重启进程**生效；灰度用
 	// EHOME_FIELD_RESOLVER_ENABLED 环境变量 + 重启（方案 §11 明示，不新增 watcher）。
 	FieldResolver FieldResolverConfig `yaml:"field_resolver"`
+	// Telemetry 是遥测写入策略（设计/遥测存储优化方案-2026-11-06.md §3 L1）。
+	// ⚠ 与 field_resolver 同理：本仓**没有配置热加载**，改配置必须重启。
+	Telemetry TelemetryConfig `yaml:"telemetry"`
+}
+
+// TelemetryConfig 是 L1「值不变不入库」写入收窄策略（方案 §3.1；2026-11-07 起无条件生效）。
+//
+// 【没有开关】2026-11-07 用户裁决「完成并打开 L1、L2，同时删除开关」：
+// write_on_change 与 rollup_write 两个布尔字段连同它们的环境变量一起**删除**，
+// 不是「默认改成 true」。本结构体剩下的都是**参数**，不是开关：
+//
+//   - 某 (设备, 字段) 的值与「上次成功落库的值」相同、且距上次成功落库
+//     不足 HeartbeatSeconds ⇒ 跳过 INSERT（内存缓存/告警/自动化/WS 照常更新）；
+//   - 值变化 ⇒ 必写；距上次落库 ≥ HeartbeatSeconds ⇒ 强制写一帧（心跳，
+//     保证时间轴连续、图表不空档）。
+//
+// 唯一可调的是心跳粒度。要临时停用收窄，只能回滚镜像 —— 这是有意的：
+// 留一个 kill-switch 就等于留一条「线上行为随环境变量漂移」的路，
+// 而读侧口径（avg 聚合 / 行计数）已经按 L1 生效改过（见 internal/api/history_points.go
+// 的 D1、handler_overview.go 的 D2、handler_metrics.go 的 D3），开关一关读侧就先错了。
+type TelemetryConfig struct {
+	// HeartbeatSeconds 心跳间隔（秒）；<=0 回落默认 60，超过 24h 被钳制。
+	// 它同时被 L2 复用为「关键帧间隔」（见 internal/telemetry 的 EnvKeyFrameSeconds）。
+	HeartbeatSeconds int `yaml:"heartbeat_seconds"`
+}
+
+// DefaultTelemetryHeartbeatSeconds 是心跳默认值（方案 §3.2 实测口径：60s）。
+const DefaultTelemetryHeartbeatSeconds = 60
+
+// maxTelemetryHeartbeatSeconds 钳制心跳上界（24h）：心跳语义是「保证时间轴
+// 不空档」，写死一个比保留期还大的值等价于关掉心跳，宁可钳制也不静默失效。
+const maxTelemetryHeartbeatSeconds = 24 * 60 * 60
+
+// Heartbeat 返回归一化后的心跳间隔：<=0 → 默认 60s；> 24h → 钳制到 24h。
+func (t TelemetryConfig) Heartbeat() time.Duration {
+	sec := t.HeartbeatSeconds
+	if sec <= 0 {
+		sec = DefaultTelemetryHeartbeatSeconds
+	}
+	if sec > maxTelemetryHeartbeatSeconds {
+		sec = maxTelemetryHeartbeatSeconds
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// TelemetrySettings 返回补齐默认值后的遥测写入策略。
+//
+// 与 FieldResolverSettings 同一范式：归一化放在访问器里，保证任何来源
+// （YAML / env / 测试手工构造）都不会得到 0 值心跳。
+func (c *Config) TelemetrySettings() TelemetryConfig {
+	t := c.Telemetry
+	if t.HeartbeatSeconds <= 0 {
+		t.HeartbeatSeconds = DefaultTelemetryHeartbeatSeconds
+	}
+	if t.HeartbeatSeconds > maxTelemetryHeartbeatSeconds {
+		t.HeartbeatSeconds = maxTelemetryHeartbeatSeconds
+	}
+	return t
 }
 
 // DeviceConfig configures the 3.0 device-facing TCP+TLS listener.
@@ -254,7 +312,9 @@ const DefaultDataRetentionDays = 90
 
 // DataRetentionConfig holds the system-level data retention policy.
 type DataRetentionConfig struct {
-	Days int `yaml:"days"` // EHOME_DATA_RETENTION_DAYS; 新建 logical_device 的保留天数快照
+	// Days 是系统级保留期（全库统一窗口）。**0 = 永久保留**（2026-11-07），
+	// 负值在访问器里归一成默认 90（见 DataRetentionDays）。
+	Days int `yaml:"days"` // EHOME_DATA_RETENTION_DAYS; 0 = 永久保留
 }
 
 // AdminBootstrapConfig is an explicit, first-run-only administrator
@@ -300,6 +360,11 @@ func defaultConfig() *Config {
 			MaxVirtualDepth:    DefaultFieldResolverMaxVirtualDepth,
 			PreviewMaxSamples:  DefaultFieldResolverPreviewMaxSamples,
 			NeverResolvedHours: DefaultFieldResolverNeverResolvedHours,
+		},
+		// 遥测写入收窄（L1）2026-11-07 起**无条件生效**，没有开关；
+		// 这里只剩心跳参数（默认 60s，方案 §3.2 实测口径）。
+		Telemetry: TelemetryConfig{
+			HeartbeatSeconds: DefaultTelemetryHeartbeatSeconds,
 		},
 	}
 }
@@ -390,8 +455,10 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("EHOME_ADMIN_EMAIL", ""); v != "" {
 		cfg.AdminBootstrap.Email = v
 	}
+	// EHOME_DATA_RETENTION_DAYS: 0 = **永久保留**（不自动删除数据），2026-11-07 用户裁决。
+	// 负值仍然拒绝（更可能是写错，而不是「比永久更永久」）。
 	if v := getEnv("EHOME_DATA_RETENTION_DAYS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.DataRetention.Days = n
 		}
 	}
@@ -452,6 +519,14 @@ func overrideWithEnv(cfg *Config) {
 			cfg.FieldResolver.NeverResolvedHours = n
 		}
 	}
+	// 遥测心跳参数（方案 §3.2）：这是**参数**不是开关 —— L1 收窄已无条件生效，
+	// 心跳只决定「恒定值多久补写一行」。解析失败时保持默认，与本文件既有 env
+	// 覆盖的静默容错口径一致。
+	if v := getEnv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Telemetry.HeartbeatSeconds = n
+		}
+	}
 }
 
 func getEnv(key, defaultValue string) string {
@@ -472,10 +547,21 @@ func (c *Config) LogLevel() string             { return c.Log.Level }
 func (c *Config) DBConfig() DatabaseConfig     { return c.Database }
 func (c *Config) ControlConfig() ControlConfig { return c.Control }
 
-// DataRetentionDays returns the system-level retention (days) snapshotted
-// into newly created logical devices. Never returns <= 0.
+// DataRetentionDays returns the system-level retention window in days.
+//
+// **0 = 永久保留**（不自动删除数据），是合法配置值，不是「未配置」。
+// 2026-11-07 用户裁决「所有数据要长期保留」（见
+// docs/设计/老数据迁移到帧表-分析与契约-2026-11-07.md §5）。
+//
+// 负值仍然归一成默认 90：零值有明确语义（永久），负值没有 —— 它只可能来自
+// 配置写错（shell 变量没展开、减一过头），把它当「永久」会让一个笔误变成
+// 「再也不清理」的静默事故，因此 fail-safe 到默认窗口。
+//
+// ⚠ 调用方必须区分 0 与「小窗口」：0 不能拿去算 cutoff（cutoff 会等于 now，
+// 把所有数据判成过期）。用 datalifecycle.IsRetentionPermanent() 判断，
+// 或直接依赖 datalifecycle.RunOnce 内部的永久判断。
 func (c *Config) DataRetentionDays() int {
-	if c.DataRetention.Days > 0 {
+	if c.DataRetention.Days >= 0 {
 		return c.DataRetention.Days
 	}
 	return DefaultDataRetentionDays

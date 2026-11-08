@@ -245,6 +245,7 @@ func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemp
 //	设备侧报错只体现在 ConfigResult.success=false，而 §211 表明那条路径
 //	**在 UI 上几乎不可见**（用户只看到"配置失败"，不知道是 DMA）。
 //	在编码前拒绝能把原因直接放进 API 响应，前端可原样显示。
+//
 // ValidateUARTDMASlots 是 validateUARTDMASlots 的导出别名，供 API 层在
 // **通道写入时**复用同一判据（见 api/handler_device.go validateNodeUARTDMASlots）。
 // 导出而不是让 API 层重写一套：口径只能有一份。
@@ -395,7 +396,7 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		}
 	}
 	if len(existingTemplates)+missing > maxTemplates {
-		return false, fmt.Errorf("template reconciliation would create %d templates; collector limit is %d", len(existingTemplates)+missing, maxTemplates)
+		return false, newManifestValidationError(fmt.Sprintf("template reconciliation would create %d templates; collector limit is %d", len(existingTemplates)+missing, maxTemplates))
 	}
 
 	// 已有模板的 id（按 write_data 归一化键索引）。

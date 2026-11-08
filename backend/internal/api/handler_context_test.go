@@ -42,10 +42,39 @@ type queryContextRecorder struct {
 	ctxs []context.Context
 }
 
+// register 在 GORM 的**三条执行链**上都挂同一个采集器。
+//
+// ============ 为什么必须是三条，而不是只有 Query()（2026-11-08 踩到）============
+//
+// 原实现只注册 Query() 链。当时够用，因为 4 个重查询里至少有一个走
+// `db.Where(...).Find()` —— 那条走 Query() 链，采集器能拿到它的 Statement.Context。
+//
+// 2026-11-08 硬切换删掉了 /devices/:id/history 的 unified_data 回落裸 SQL 之后，
+// 这条路径上**只剩** `checkHistoryFrameBudget` 的预算探测：
+//
+//	historySensorCount      → db.WithContext(ctx).Raw(...).Scan(&n)     走 Row() 链
+//	historyFrameCountUpTo   → db.WithContext(ctx).Raw(...).Scan(&n)     走 Row() 链
+//
+// Query() 链上一条查询都没有了 ⇒ 采集器看不到任何东西 ⇒
+// 「取消传播到 DB」这条断言变成**永远为假**，用例红。
+//
+// 但它并不是「取消没有传播」—— handler 确实传了 ctx（`db.WithContext(ctx).Raw(...)`），
+// 只是**没有一条 Query()-chain 查询可供观察**。
+//
+// 这正是「判据与被测对象脱节」：判据还在，被测的实现方式变了。
+//
+// 所以三条链都要注册。注释里写清是**因为生产上三条都在用**：
+//
+//	Query() 链：Find / First / Take / Scan(v)（GORM 的 model 查询）
+//	Row()   链：Raw(...).Row() / Row()（本次预算探测就是这条）
+//	Raw()   链：Exec / 某些 Scan 形态的底层执行
+//
+// 只注册其中一条 = 判据只覆盖该链上的查询，而「生产在用哪些链」会随实现漂移 ——
+// 那正是本次失效的成因。
 func (r *queryContextRecorder) register(db *gorm.DB) {
-	db.Callback().Query().Before("gorm:query").Register("ehome:p22_capture_ctx", func(tx *gorm.DB) {
+	capture := func(tx *gorm.DB) {
 		// GORM 在渲染子查询 (如 ApplyShapeDedup 的 Table("(?)")) 时会以
-		// DryRun 方式复用 query 回调构建 SQL; 那不是真正打到 DB 的执行。
+		// DryRun 方式复用回调构建 SQL; 那不是真正打到 DB 的执行。
 		// 只记录真正执行的查询, 才能证明"最终执行链"拿到了取消信号。
 		if tx.DryRun {
 			return
@@ -53,7 +82,10 @@ func (r *queryContextRecorder) register(db *gorm.DB) {
 		r.mu.Lock()
 		r.ctxs = append(r.ctxs, tx.Statement.Context)
 		r.mu.Unlock()
-	})
+	}
+	db.Callback().Query().Before("gorm:query").Register("ehome:p22_capture_ctx", capture)
+	db.Callback().Row().Before("gorm:row").Register("ehome:p22_capture_ctx", capture)
+	db.Callback().Raw().Before("gorm:raw").Register("ehome:p22_capture_ctx", capture)
 }
 
 func (r *queryContextRecorder) reset() {
@@ -113,21 +145,6 @@ func TestHeavyQueries_CanceledRequest_Returns500AndReachesDB(t *testing.T) {
 		{
 			name:   "unified-data-historical",
 			target: "/api/v1/unified-data/historical?device_pk=1&category=voltage&start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
-		},
-		{
-			// 保形去重 (ApplyShapeDedup / db.Session) 分支: 目标逻辑设备有一个
-			// 已完成的入边合并 → qs.DedupNeeded=true, 外层去重查询的执行链也
-			// 必须携带请求上下文。
-			name:   "unified-data-historical-dedup-session",
-			target: "/api/v1/unified-data/historical?device_pk=1&category=voltage&start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
-			seed: func(db *gorm.DB) {
-				done := models.MergeStatusDone
-				target := models.LogicalDevice{IdentityKey: "type:dedup-target", Name: "target", DeviceType: "sensor"}
-				db.Create(&target)
-				src := models.LogicalDevice{IdentityKey: "type:dedup-src", Name: "src", DeviceType: "sensor", MergedInto: &target.ID, MergeStatus: &done}
-				db.Create(&src)
-				db.Create(&models.EdgeDevice{Name: "probe-dedup", Type: "sensor", NodeID: "n1", ChannelID: 1, LogicalDeviceID: &target.ID})
-			},
 		},
 		{
 			name:   "devices-history",

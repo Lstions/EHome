@@ -281,7 +281,8 @@ func sceneProvision(e *harness.Env, spec sceneSpec) *sceneDevice {
 		"enabled":          true,
 	}).Expect(http.StatusCreated)
 	edgeID := edge.DataInt("id")
-	logicalID := edge.DataInt("logical_device_id")
+	// 2026-10-23：logical_device_id 已随逻辑设备概念层删除（契约 §2），
+	// 这里只校验创建响应里仍然必有的三个 id。
 	if edgeID == 0 || channelID == 0 || cfgID == 0 {
 		e.Fatalf("边缘设备创建返回不完整: %s", edge.BodyString())
 	}
@@ -309,15 +310,14 @@ func sceneProvision(e *harness.Env, spec sceneSpec) *sceneDevice {
 	dev.ChannelID = uint32(channelID)
 
 	fixture := &edgeDevice{
-		NodeID:          dev.NodeID,
-		NodeDBID:        nodeDBID,
-		ChannelID:       channelID,
-		DeviceConfigID:  cfgID,
-		EdgeDeviceID:    edgeID,
-		LogicalDeviceID: logicalID,
-		Type:            spec.Type,
-		HardwareID:      spec.HardwareID,
-		Device:          dev,
+		NodeID:         dev.NodeID,
+		NodeDBID:       nodeDBID,
+		ChannelID:      channelID,
+		DeviceConfigID: cfgID,
+		EdgeDeviceID:   edgeID,
+		Type:           spec.Type,
+		HardwareID:     spec.HardwareID,
+		Device:         dev,
 	}
 	if spec.Handshake {
 		// Hello 必须在 ResourceReport 之前（handler_hello.go 每次 Hello 会清空

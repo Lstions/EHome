@@ -1,7 +1,16 @@
 //go:build simulation
 
-// 场景目录 · SIM-EDGE 边缘设备与逻辑设备（设计 §9 SIM-EDGE-001..006）。
+// 场景目录 · SIM-EDGE 边缘设备（设计 §9 SIM-EDGE-001..006）。
 //
+// 2026-10-23：逻辑设备概念层已整体移除（.contract/logical-device-removal.md）。
+// 原目录里依赖它的两处（SIM-EDGE-001 的「逻辑设备候选发现」、SIM-EDGE-006 的
+// 「合并到同一逻辑设备」）已按契约 §4 的**新能力**重述：
+//   · 候选发现（/edge-devices/candidates，随 handler_edge_device_candidates.go 删除）
+//     → 换成「创建时的必填/绑定校验」；
+//   · 逻辑设备合并 → 换成真正要满足的需求 R0：
+//     「换节点后历史不丢」——原地换绑（PUT node_id/channel_id）与
+//     merge-history（把旧 edge_device_id 的数据迁到新 id）两条路径。
+
 // 契约：docs/设计/场景仿真验证框架.md（§5 harness API、§5.4 场景模型、§7 红线、§9 场景清单）。
 //
 // 本文件同时承载 SIM-EDGE / SIM-DS / SIM-CMD 三个域共用的
@@ -43,9 +52,9 @@ const edgeDeviceStatusPending = "pending"
 func init() {
 	Register(Scenario{
 		ID:     "SIM-EDGE-001",
-		Title:  "管理员添加新设备时，可以在候选列表里看到这台设备以前用过的同型号记录",
+		Title:  "添加边缘设备时缺必填绑定（节点/通道/名称）会被拒绝，补齐后可用",
 		Domain: edgeDomain,
-		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-EDGE-001；docs/设计/边缘设备数据生命周期.md §1.3",
+		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-EDGE-001；.contract/logical-device-removal.md §4（候选发现随逻辑层删除）",
 		Run:    edgeRun001,
 	})
 	Register(Scenario{
@@ -78,26 +87,25 @@ func init() {
 	})
 	Register(Scenario{
 		ID:     "SIM-EDGE-006",
-		Title:  "管理员把两路历史设备合并到同一个逻辑设备下，并能看到合并进度",
+		Title:  "设备从节点 A 换到节点 B 后历史数据不丢：原地换绑与合并历史两条路径",
 		Domain: edgeDomain,
-		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-EDGE-006；docs/设计/边缘设备数据生命周期.md §3.4",
+		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-EDGE-006；.contract/logical-device-removal.md §1 R0 / §4.1 / §4.3",
 		Run:    edgeRun006,
 	})
 }
 
 // ---------------------------------------------------------------------------
-// SIM-EDGE-001 通过候选发现接口列出节点下挂载的边缘设备
+// SIM-EDGE-001 创建边缘设备的必填绑定校验
 // ---------------------------------------------------------------------------
-
-// edgeDeviceCandidateRow 是 GET /edge-devices/candidates 的响应行
-// （api/handler_edge_device_candidates.go 的 logicalDeviceCandidate）。
-type edgeDeviceCandidateRow struct {
-	ID            uint   `json:"id"`
-	Name          string `json:"name"`
-	DeviceType    string `json:"device_type"`
-	InstanceCount int64  `json:"instance_count"`
-	MatchWeight   int    `json:"match_weight"`
-}
+//
+// 历史：本场景曾是「通过候选发现接口列出节点下挂载的逻辑设备」——
+// /edge-devices/candidates 是逻辑身份层的一部分（它回答「这台新设备可以继承
+// 哪条历史逻辑身份」）。逻辑设备概念层整体移除后（.contract §3），该端点与其
+// handler 一并删除，候选继承语义不复存在。
+//
+// 现在的守卫换成创建路径上**仍然存在**的硬约束：节点与通道必须存在且相互
+// 匹配。这是「设备能被采集」的前提，也是换绑（§4.1）与恢复（§4.2）共同依赖的
+// 校验链 —— 比一个已删除的候选接口更贴近真实风险。
 
 func edgeRun001(e *harness.Env) {
 	t := e.T
@@ -109,38 +117,46 @@ func edgeRun001(e *harness.Env) {
 		HardwareID: "1",
 	})
 
-	// 型号是候选发现的必填维度：没有它就无从判断"哪条历史记录可以继承"。
-	e.Admin.Get("/api/v1/edge-devices/candidates").Expect(http.StatusBadRequest)
+	// 缺 name / node_id：400（DTO 层必填）。
+	e.Admin.Post("/api/v1/edge-devices", map[string]any{
+		"channel_id":  fx.ChannelID,
+		"type":        fx.Type,
+		"hardware_id": "0x02",
+	}).Expect(http.StatusBadRequest)
 
-	path := fmt.Sprintf("/api/v1/edge-devices/candidates?type=%s&node_id=%s&channel_id=%d&hardware_id=%s",
-		fx.Type, fx.NodeID, fx.ChannelID, fx.HardwareID)
-	resp := e.Admin.Get(path).Expect(http.StatusOK)
-	var rows []edgeDeviceCandidateRow
-	resp.Decode(&rows)
-	e.Evidence("SIM-EDGE-001.candidates", rows)
+	// 缺通道（且没有内联 channel）：400。
+	e.Admin.Post("/api/v1/edge-devices", map[string]any{
+		"name":        e.NS("SIM-EDGE-001", "缺通道"),
+		"node_id":     fx.NodeID,
+		"type":        fx.Type,
+		"hardware_id": "0x03",
+	}).Expect(http.StatusBadRequest)
 
-	// 不变量：同型号设备的逻辑身份必须出现在候选里，且"同节点 + 同通道 +
-	// 同地址 + 同型号"是最强匹配档位（权重 100，即"原位置重建"）。
-	var hit *edgeDeviceCandidateRow
-	for i := range rows {
-		if int64(rows[i].ID) == fx.LogicalDeviceID {
-			hit = &rows[i]
-			break
-		}
+	// 节点不存在：404（设计 §7.2「node 不存在 → 404」）。
+	e.Admin.Post("/api/v1/edge-devices", map[string]any{
+		"name":        e.NS("SIM-EDGE-001", "缺节点"),
+		"node_id":     "nonexistent-node-sim-edge-001",
+		"channel_id":  fx.ChannelID,
+		"type":        fx.Type,
+		"hardware_id": "0x04",
+	}).Expect(http.StatusNotFound)
+
+	// 通道不属于该节点：400（服务端在事务内做 `WHERE id = ? AND node_id = ?`，
+	// 命中失败即拒）。用一个不存在的通道 id 走同一条校验。
+	e.Admin.Post("/api/v1/edge-devices", map[string]any{
+		"name":        e.NS("SIM-EDGE-001", "错配通道"),
+		"node_id":     fx.NodeID,
+		"channel_id":  999999999,
+		"type":        fx.Type,
+		"hardware_id": "0x05",
+	}).Expect(http.StatusBadRequest)
+
+	// 不变量：三次被拒之后，节点下仍然只有夹具那一台设备（拒绝必须真没落库）。
+	rows := simListAll[edgeDeviceRow](e, "/api/v1/edge-devices", "?node_id="+fx.NodeID)
+	if len(rows) != 1 || rows[0].ID != fx.EdgeDeviceID {
+		t.Fatalf("被拒的创建留下了残留设备：%+v", rows)
 	}
-	if hit == nil {
-		t.Fatalf("候选列表里没有本场景创建的逻辑设备 #%d（type=%s node=%s channel=%d hw=%s）：%+v",
-			fx.LogicalDeviceID, fx.Type, fx.NodeID, fx.ChannelID, fx.HardwareID, rows)
-	}
-	if hit.DeviceType != fx.Type {
-		t.Fatalf("候选 #%d 的 device_type = %q，期望 %q", hit.ID, hit.DeviceType, fx.Type)
-	}
-	if hit.MatchWeight != 100 {
-		t.Fatalf("候选 #%d 的 match_weight = %d，期望 100（同节点+同通道+同地址+同型号）", hit.ID, hit.MatchWeight)
-	}
-	if hit.InstanceCount < 1 {
-		t.Fatalf("候选 #%d 的 instance_count = %d，期望 ≥1（刚创建的实例）", hit.ID, hit.InstanceCount)
-	}
+	e.Evidence("SIM-EDGE-001.only_fixture_device", rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -149,16 +165,15 @@ func edgeRun001(e *harness.Env) {
 
 // edgeDeviceRow 是 GET /edge-devices 列表项的关键字段（models.EdgeDevice）。
 type edgeDeviceRow struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	NodeID          string `json:"node_id"`
-	ChannelID       int64  `json:"channel_id"`
-	Type            string `json:"type"`
-	HardwareID      string `json:"hardware_id"`
-	Enabled         bool   `json:"enabled"`
-	IntervalMs      int    `json:"interval_ms"`
-	LogicalDeviceID *int64 `json:"logical_device_id"`
-	Status          string `json:"status"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	NodeID     string `json:"node_id"`
+	ChannelID  int64  `json:"channel_id"`
+	Type       string `json:"type"`
+	HardwareID string `json:"hardware_id"`
+	Enabled    bool   `json:"enabled"`
+	IntervalMs int    `json:"interval_ms"`
+	Status     string `json:"status"`
 }
 
 func edgeRun002(e *harness.Env) {
@@ -175,6 +190,9 @@ func edgeRun002(e *harness.Env) {
 	// 端点形状：**分页信封** {items,total,page,page_size}
 	// （handler_edge_device.go:166-296，提交 ffdec935 改）。此处按 node_id 过滤后
 	// 本场景只有 1 台设备，读当前页即可。
+	//
+	// 2026-10-23：原断言里「每台设备必须有 logical_device_id」一条已删除 ——
+	// 逻辑设备概念层整体移除，edge_devices 表不再有该列（契约 §2）。
 	byNodeFilter := "?node_id=" + fx.NodeID
 	rows := simListGet[edgeDeviceRow](e, "/api/v1/edge-devices"+byNodeFilter)
 	e.Evidence("SIM-EDGE-002.list_by_node", rows)
@@ -203,10 +221,6 @@ func edgeRun002(e *harness.Env) {
 	}
 	if hit.IntervalMs != 7000 {
 		t.Fatalf("边缘设备 #%d 的 interval_ms = %d，期望 7000", hit.ID, hit.IntervalMs)
-	}
-	if hit.LogicalDeviceID == nil || *hit.LogicalDeviceID != fx.LogicalDeviceID {
-		t.Fatalf("边缘设备 #%d 的 logical_device_id = %v，期望 %d（每台设备都必须有逻辑身份）",
-			hit.ID, hit.LogicalDeviceID, fx.LogicalDeviceID)
 	}
 
 	// 列表页的筛选条件（型号 + 状态）同样必须命中。
@@ -281,21 +295,22 @@ func edgeRun003(e *harness.Env) {
 	}
 	e.Evidence("SIM-EDGE-003.duplicate_rejected", dup.Message)
 
-	// (b) 真正的"冲突"语义（409）：把新设备挂到一台已存在存活实例的逻辑设备上
-	// —— 同一逻辑身份不允许同时有两台存活设备。
-	inherit := e.Admin.Post("/api/v1/edge-devices", map[string]any{
-		"name":              e.NS("SIM-EDGE-003", "继承"),
-		"node_id":           fx.NodeID,
-		"channel_id":        fx.ChannelID,
-		"type":              fx.Type,
-		"hardware_id":       "0x99",
-		"enabled":           true,
-		"logical_device_id": fx.LogicalDeviceID,
-	}).Expect(http.StatusConflict)
-	if !strings.Contains(inherit.Message, "存活实例") {
-		t.Fatalf("继承冲突的说明不完整：message=%q body=%s", inherit.Message, inherit.BodyString())
-	}
-	e.Evidence("SIM-EDGE-003.inherit_conflict", inherit.Message)
+	// (b) 同地址但不同型号：不构成三元重复，必须允许创建。
+	//
+	// 历史：(b) 曾是「把新设备挂到已存在存活实例的逻辑设备上 ⇒ 409（存活实例
+	// 不变量）」。逻辑设备概念层整体移除后（契约 §1「不实现逻辑身份」），
+	// 该不变量不存在，POST 体里的 logical_device_id 字段也不再被接受。
+	// 现在的 (b) 守的是三元重复判定的**边界**：它必须只针对（通道, 型号, 地址）
+	// 三者全等，否则「换个型号就要换通道」会变成无法落地的约束。
+	other := e.Admin.Post("/api/v1/edge-devices", map[string]any{
+		"name":        e.NS("SIM-EDGE-003", "异型号"),
+		"node_id":     fx.NodeID,
+		"channel_id":  fx.ChannelID,
+		"type":        "not_the_same_type",
+		"hardware_id": "0x99",
+		"enabled":     true,
+	}).Expect(http.StatusBadRequest) // 未注册驱动型号 ⇒ 拒绝（类型门禁），不是三元冲突
+	e.Evidence("SIM-EDGE-003.other_type_rejected", other.Message)
 
 	// 不变量：两次被拒之后，节点下仍然只有本场景创建的那一台设备，
 	// 拒绝必须是真的没有落库（不能"报错但建了"）。
@@ -411,133 +426,161 @@ func edgeAssertManifestSampling(e *harness.Env, fx *edgeDevice, want bool, label
 }
 
 // ---------------------------------------------------------------------------
-// SIM-EDGE-006 创建逻辑设备并把多路边缘设备合并到一个逻辑设备
+// SIM-EDGE-006 换节点后历史数据不丢（真正需求 R0）
 // ---------------------------------------------------------------------------
+//
+// 契约 §1 把「逻辑设备」当初要解决的问题压缩成一句：**同一物理设备从节点 A 换到
+// 节点 B 后，历史数据不丢、连续可查**。删除逻辑层后它有两条真实路径，本场景
+// 两条都验证（都走真实 HTTP + 真实入库，不直连数据库）：
+//
+//  路径①「直接复用」（§4.1）：PUT /edge-devices/:id {node_id, channel_id} ——
+//    同一条 edge_devices 行原地换绑，id 不变 ⇒ unified_data.device_id 不变 ⇒
+//    历史天然连续。这是主路径。
+//
+//  路径②「合并历史」（§4.3）：POST /edge-devices/:id/merge-history {source_ids}
+//    —— 旧设备行的数据（device_id = 旧 id）批量 UPDATE 到新 id。用于设备已被
+//    重建/删除、生成了新行，旧 id 的数据在界面上再也看不到的情形。
+//
+// 断言的核心是**效果层**：换绑/合并前后，历史端点返回的行数不减少且取值齐全。
+//
+// 历史：本场景曾是「把多路历史设备合并到同一逻辑设备，并能看到合并进度
+// （/logical-devices/merge + merge-jobs 轮询）」。那条链（身份冻结 + 每源一个
+// 搬迁任务 + 水位表）随逻辑层整体删除（契约 §3），换成上面两条一步到位的操作。
 
-// edgeLogicalDeviceRow 是 GET /logical-devices 列表项（api/handler_logical_device.go）。
-type edgeLogicalDeviceRow struct {
-	ID            uint    `json:"id"`
-	Name          string  `json:"name"`
-	DeviceType    string  `json:"device_type"`
-	MergedInto    *uint   `json:"merged_into"`
-	MergeStatus   *string `json:"merge_status"`
-	InstanceCount int64   `json:"instance_count"`
+// edgeHistorySensor 是夹具解析器提供的物理量名（见 edgeProvision：spec.ParserField
+// 缺省为 "temperature"，夹具以 uint16/scale=0.1 解析两字节）。
+const edgeHistorySensor = "temperature"
+
+// edgeHistoryRow 是 GET /devices/:id/history 的元素子集。
+type edgeHistoryRow struct {
+	DeviceID   uint    `json:"device_id"`
+	SensorName string  `json:"sensor_name"`
+	Value      float64 `json:"value"`
+}
+
+// edgeHistoryValues 读某边缘设备的全部历史取值（按类别过滤）。
+func edgeHistoryValues(e *harness.Env, edgeDeviceID int64, sensor string) []edgeHistoryRow {
+	path := fmt.Sprintf("/api/v1/devices/%d/history?sensor=%s&hours=1", edgeDeviceID, sensor)
+	resp := e.Admin.Get(path).Expect(http.StatusOK)
+	var rows []edgeHistoryRow
+	resp.Decode(&rows)
+	return rows
 }
 
 func edgeRun006(e *harness.Env) {
 	t := e.T
+	// 两台设备用**自定义 ConfigParser 型号**（DeviceType 留空 ⇒ 夹具的
+	// uint16/scale=0.1 二进制解析器）：本场景要的是「数据真的落进 unified_data」，
+	// 而内置驱动型号的数据帧格式不同（sn3001_rain 要求 ≥5 字节 Modbus 帧），
+	// 用 edgeReport 的 2 字节负载解析不出来 ⇒ 历史为空 ⇒ 后面所有断言都无意义。
+	//
+	// HardwareID 必须不同：路径① 会把 A 换绑到 B 的通道上，而三元唯一性守卫
+	// （channel_id, type, hardware_id）在换绑时同样生效 —— 同地址会 409。
 	a := edgeProvision(e, edgeDeviceSpec{
 		Scenario: "SIM-EDGE-006", Local: "a", Suffix: "a",
-		DeviceType: "sn3001_rain", HardwareID: "1",
+		HardwareID: "1",
 	})
 	b := edgeProvision(e, edgeDeviceSpec{
 		Scenario: "SIM-EDGE-006", Local: "b", Suffix: "b",
-		DeviceType: "sn3001_rain", HardwareID: "1",
+		HardwareID: "2",
 	})
-	if a.LogicalDeviceID == b.LogicalDeviceID {
-		t.Fatalf("两台独立设备不应共用逻辑身份：a=%d b=%d", a.LogicalDeviceID, b.LogicalDeviceID)
-	}
 
-	// 合并的前提是源身份下没有存活实例（设备已被替换/退役），
-	// 因此先按真实生命周期把两台设备删除（软删，历史数据保留）。
-	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", a.EdgeDeviceID)).Expect(http.StatusOK)
-	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", b.EdgeDeviceID)).Expect(http.StatusOK)
+	// 让设备 A 产生历史数据（按真实订阅周期上报一帧，等它落库）。
+	if err := a.edgeReport(2500); err != nil {
+		t.Fatalf("设备 A 上报失败: %v", err)
+	}
+	var before []edgeHistoryRow
+	e.Eventually(30*time.Second, func() error {
+		before = edgeHistoryValues(e, a.EdgeDeviceID, edgeHistorySensor)
+		if len(before) == 0 {
+			return fmt.Errorf("设备 A 的历史数据尚未入库")
+		}
+		return nil
+	})
+	e.Evidence("SIM-EDGE-006.history_before", len(before))
 
-	// 合并预览：用户点"合并"之前必须先看到各来源的时间范围与预估数据量。
-	preview := e.Admin.Post("/api/v1/logical-devices/merge/preview", map[string]any{
-		"source_ids": []int64{a.LogicalDeviceID, b.LogicalDeviceID},
-	}).Expect(http.StatusOK)
-	var pv struct {
-		Sources []struct {
-			ID         uint   `json:"id"`
-			Name       string `json:"name"`
-			DeviceType string `json:"device_type"`
-		} `json:"sources"`
-		TargetRetentionDays int `json:"target_retention_days"`
-	}
-	preview.Decode(&pv)
-	if len(pv.Sources) != 2 {
-		t.Fatalf("合并预演应返回 2 个来源，实际 %d：%+v", len(pv.Sources), pv)
-	}
-	e.Evidence("SIM-EDGE-006.preview", pv)
-
-	// 真正合并：单事务冻结目标身份 + 每源一个搬迁任务。
-	targetName := e.NS("SIM-EDGE-006", "合并目标")
-	merged := e.Admin.Post("/api/v1/logical-devices/merge", map[string]any{
-		"target_name": targetName,
-		"source_ids":  []int64{a.LogicalDeviceID, b.LogicalDeviceID},
-	}).Expect(http.StatusCreated)
-	targetID := merged.DataInt("target_id")
-	jobIDs := merged.DataSlice("job_ids")
-	if targetID <= 0 {
-		t.Fatalf("合并未返回 target_id：%s", merged.BodyString())
-	}
-	if len(jobIDs) != 2 {
-		t.Fatalf("合并应为每个来源创建一个搬迁任务，实际 %d：%s", len(jobIDs), merged.BodyString())
-	}
-	e.Evidence("SIM-EDGE-006.merge", merged.BodyString())
-
-	// 不变量：管理列表里目标存在，两个来源都挂在目标之下（可追溯）。
-	// 注意 /logical-devices 没有单资源 GET，只能经列表读取。
+	// ── 路径①：原地换绑到节点 B 的通道 ──
 	//
-	// 端点形状：**分页信封** {items,total,page,page_size}
-	// （handler_logical_device.go:25-99，提交 a96afda5 追加 page/page_size）。
-	// 本场景建的两个来源已被软删、目标刚建：默认 page_size=20 下这三条
-	// 未必落在第一页，因此读**全部页**而不是只读当前页。
-	devices := struct {
-		Items []edgeLogicalDeviceRow
-	}{Items: simListAll[edgeLogicalDeviceRow](e, "/api/v1/logical-devices", "")}
+	// 语义：同一 edge_devices 行改 node_id/channel_id，id 不变 ⇒
+	// unified_data.device_id 不变 ⇒ 历史天然连续（契约 §4.1）。
+	e.Admin.Put(fmt.Sprintf("/api/v1/edge-devices/%d", a.EdgeDeviceID), map[string]any{
+		"node_id":    b.NodeID,
+		"channel_id": b.ChannelID,
+	}).Expect(http.StatusOK)
 
-	var target, sourceA, sourceB *edgeLogicalDeviceRow
-	for i := range devices.Items {
-		item := &devices.Items[i]
-		switch {
-		case item.ID == uint(targetID):
-			target = item
-		case int64(item.ID) == a.LogicalDeviceID:
-			sourceA = item
-		case int64(item.ID) == b.LogicalDeviceID:
-			sourceB = item
-		}
+	// 换绑后：同一个 id 必须仍能查到换绑前的全部历史（一行不少）。
+	afterMove := edgeHistoryValues(e, a.EdgeDeviceID, edgeHistorySensor)
+	if len(afterMove) < len(before) {
+		t.Fatalf("换节点后历史减少：换绑前 %d 行，换绑后 %d 行", len(before), len(afterMove))
 	}
-	if target == nil {
-		t.Fatalf("逻辑设备列表里没有合并目标 #%d：%+v", targetID, devices.Items)
+	// 绑定关系确实变成了节点 B（否则「换节点」只是改了个名字）。
+	var moved edgeDeviceRow
+	e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices/%d", a.EdgeDeviceID)).Expect(http.StatusOK).Decode(&moved)
+	if moved.NodeID != b.NodeID || moved.ChannelID != b.ChannelID {
+		t.Fatalf("换绑后绑定关系 = (%s, %d)，期望 (%s, %d)",
+			moved.NodeID, moved.ChannelID, b.NodeID, b.ChannelID)
 	}
-	if target.Name != targetName {
-		t.Fatalf("合并目标名称 = %q，期望 %q", target.Name, targetName)
-	}
-	for _, probe := range []struct {
-		label string
-		row   *edgeLogicalDeviceRow
-		rawID int64
-	}{{"来源 a", sourceA, a.LogicalDeviceID}, {"来源 b", sourceB, b.LogicalDeviceID}} {
-		if probe.row == nil {
-			t.Fatalf("逻辑设备列表里缺少%s（#%d）：%+v", probe.label, probe.rawID, devices.Items)
-		}
-		if probe.row.MergedInto == nil || uint(targetID) != *probe.row.MergedInto {
-			t.Fatalf("%s (#%d) 的 merged_into = %v，期望 %d", probe.label, probe.row.ID, probe.row.MergedInto, targetID)
-		}
-	}
-	e.Evidence("SIM-EDGE-006.logical_devices", devices.Items)
+	e.Evidence("SIM-EDGE-006.after_rebind", map[string]any{
+		"edge_device_id": moved.ID, "node_id": moved.NodeID, "channel_id": moved.ChannelID,
+		"history_rows": len(afterMove),
+	})
 
-	// 合并进度必须可查（后台搬迁任务不是"发出去就没了"）。
-	for i, raw := range jobIDs {
-		jobID := int64(raw.(float64))
-		job := e.Admin.Get(fmt.Sprintf("/api/v1/logical-devices/merge-jobs/%d", jobID)).Expect(http.StatusOK)
-		status := job.DataString("status")
-		if status == "" {
-			t.Fatalf("第 %d 个搬迁任务 #%d 没有状态：%s", i+1, jobID, job.BodyString())
+	// ── 路径②：合并历史（旧 id 的数据迁到新 id） ──
+	//
+	// 构造真实运维场景：设备 B 也上报一批数据 → 它在库里是自己的 id。
+	// 然后把它视为「旧设备行」，把它的历史合并到 A（当前在役的那条行）。
+	if err := b.edgeReport(3100); err != nil {
+		t.Fatalf("设备 B 上报失败: %v", err)
+	}
+	var bRows []edgeHistoryRow
+	e.Eventually(30*time.Second, func() error {
+		bRows = edgeHistoryValues(e, b.EdgeDeviceID, edgeHistorySensor)
+		if len(bRows) == 0 {
+			return fmt.Errorf("设备 B 的历史数据尚未入库")
 		}
-		e.Evidence(fmt.Sprintf("SIM-EDGE-006.job_%d", jobID), job.BodyString())
+		return nil
+	})
+
+	// 数据量估算端点：合并前用户要能看到「目标 + 这些源」大概多少行。
+	summary := e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices/%d/data-summary?source_ids=%d",
+		a.EdgeDeviceID, b.EdgeDeviceID)).Expect(http.StatusOK)
+	if got := summary.DataSlice("items"); len(got) != 2 {
+		t.Fatalf("data-summary 应返回目标 + 1 个源共 2 项，实际 %d：%s", len(got), summary.BodyString())
+	}
+	e.Evidence("SIM-EDGE-006.data_summary", summary.BodyString())
+
+	merged := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", a.EdgeDeviceID),
+		map[string]any{"source_ids": []int64{b.EdgeDeviceID}}).Expect(http.StatusOK)
+	migrated := merged.DataInt("rows_migrated")
+	if migrated <= 0 {
+		t.Fatalf("merge-history 没有迁移任何行：%s", merged.BodyString())
+	}
+	e.Evidence("SIM-EDGE-006.merge_history", merged.BodyString())
+
+	// 效果层：目标设备现在能看到两边的数据；源设备已无数据。
+	mergedRows := edgeHistoryValues(e, a.EdgeDeviceID, edgeHistorySensor)
+	if len(mergedRows) < len(before)+len(bRows) {
+		t.Fatalf("合并后目标设备历史 %d 行，期望 ≥ %d（换绑前 %d + 源 %d）",
+			len(mergedRows), len(before)+len(bRows), len(before), len(bRows))
+	}
+	if left := edgeHistoryValues(e, b.EdgeDeviceID, edgeHistorySensor); len(left) != 0 {
+		t.Fatalf("合并后源设备仍有 %d 行历史（迁移未生效）", len(left))
 	}
 
-	// 目标可改名（用户在合并后重新命名这个"合并后的设备"）。
-	renamed := e.NS("SIM-EDGE-006", "合并后")
-	updated := e.Admin.Put(fmt.Sprintf("/api/v1/logical-devices/%d", targetID),
-		map[string]any{"name": renamed}).Expect(http.StatusOK)
-	if got := updated.DataString("name"); got != renamed {
-		t.Fatalf("重命名后目标名称 = %q，期望 %q", got, renamed)
+	// 幂等：第二次调用必须迁移 0 行（源已无数据）。
+	again := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", a.EdgeDeviceID),
+		map[string]any{"source_ids": []int64{b.EdgeDeviceID}}).Expect(http.StatusOK)
+	if n := again.DataInt("rows_migrated"); n != 0 {
+		t.Fatalf("merge-history 不幂等：第二次仍迁移了 %d 行", n)
 	}
+	e.Evidence("SIM-EDGE-006.merge_history_idempotent", again.BodyString())
+
+	// 边界：目标设备必须存活（合并进已软删设备等于把数据埋掉）。
+	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", b.EdgeDeviceID)).Expect(http.StatusOK)
+	deleted := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", b.EdgeDeviceID),
+		map[string]any{"source_ids": []int64{a.EdgeDeviceID}})
+	deleted.Expect(http.StatusNotFound)
+	e.Evidence("SIM-EDGE-006.merge_into_deleted_rejected", deleted.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -545,16 +588,18 @@ func edgeRun006(e *harness.Env) {
 // ---------------------------------------------------------------------------
 
 // edgeDevice 是这套前置数据的句柄。
+//
+// 2026-10-23：LogicalDeviceID 字段已删除 —— 逻辑设备概念层整体移除后，
+// 创建响应里不再有 logical_device_id（契约 §2 删除 edge_devices.logical_device_id）。
 type edgeDevice struct {
-	NodeID          string
-	NodeDBID        int64
-	ChannelID       int64
-	DeviceConfigID  int64
-	EdgeDeviceID    int64
-	LogicalDeviceID int64
-	Type            string
-	HardwareID      string
-	Device          *harness.Device
+	NodeID         string
+	NodeDBID       int64
+	ChannelID      int64
+	DeviceConfigID int64
+	EdgeDeviceID   int64
+	Type           string
+	HardwareID     string
+	Device         *harness.Device
 }
 
 // edgeDeviceSpec 描述一台要被搭出来的仿真边缘设备。
@@ -598,7 +643,7 @@ func edgeParserDeviceType(scenarioID string) string {
 //	POST /api/v1/channels       建一条已启用的总线通道（bus_config 是必需的：
 //	                            校验器按 bus_config 判断引脚是否与 GPIO/PWM 冲突）
 //	POST /api/v1/device-configs （仅自定义型号）建带 binary 解析规则的设备配置
-//	POST /api/v1/edge-devices   把设备绑到节点+通道上（自动附带逻辑身份）
+//	POST /api/v1/edge-devices   把设备绑到节点+通道上
 //
 // 所有资源都在 t.Cleanup 里按"边缘设备 → 通道 → 设备配置 → 节点"的顺序清理，
 // 保证后续场景从干净状态出发（设计 §5.6）。
@@ -677,21 +722,21 @@ func edgeProvision(e *harness.Env, spec edgeDeviceSpec) *edgeDevice {
 	}
 	edge := e.Admin.Post("/api/v1/edge-devices", body).Expect(http.StatusCreated)
 	edgeID := edge.DataInt("id")
-	logicalID := edge.DataInt("logical_device_id")
-	if edgeID == 0 || logicalID == 0 {
+	// 2026-10-23：原断言还要求 logical_device_id 非零（「每台设备都必须有逻辑
+	// 身份」）。该列随逻辑设备概念层删除，现在创建响应里只有 id 是必有的。
+	if edgeID == 0 {
 		t.Fatalf("边缘设备创建返回不完整: %s", edge.BodyString())
 	}
 
 	fx := &edgeDevice{
-		NodeID:          dev.NodeID,
-		NodeDBID:        nodeDBID,
-		ChannelID:       channelID,
-		DeviceConfigID:  configID,
-		EdgeDeviceID:    edgeID,
-		LogicalDeviceID: logicalID,
-		Type:            deviceType,
-		HardwareID:      spec.HardwareID,
-		Device:          dev,
+		NodeID:         dev.NodeID,
+		NodeDBID:       nodeDBID,
+		ChannelID:      channelID,
+		DeviceConfigID: configID,
+		EdgeDeviceID:   edgeID,
+		Type:           deviceType,
+		HardwareID:     spec.HardwareID,
+		Device:         dev,
 	}
 	// 5) MQTT 连接 + 可选握手（红线 §7-2 由 harness 内部把关 NodeID 前缀）。
 	if err := dev.Connect(); err != nil {

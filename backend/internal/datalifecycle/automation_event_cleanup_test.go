@@ -525,11 +525,20 @@ func TestRetentionTask_RunsAutomationEventCleanup(t *testing.T) {
 	seedAutomationEvent(t, db, 9, models.AutomationResultExecuted, ago(100))          // 执行档窗内 → 留
 	seedAutomationEvent(t, db, 9, models.AutomationResultPendingConfirm, ago(800))    // 待办 → 留
 	seedNotification(t, db, "ancient-unread", false, ago(1000))                       // 同批的 notifications 清理
-	// key 会拼成 edge_devices 的 device_id/name (varchar(16)) —— PG 下超长直接
+	// 一台设备 + 一行到期数据, 只为证明清理器不会打断 retention 主流程。
+	// (原 seedRetentionDevice 随逻辑设备层删除; 语义变化: 保留期过去是
+	//  per-identity 的 retention_days, 现在是系统级单一窗口。)
+	// key 会拼成 edge_devices 的 name (varchar(16)) —— PG 下超长直接
 	// SQLSTATE 22001 (SQLite 不校验长度, 第一次只跑 SQLite 时此处静默通过)。
-	// "d1-autoev" + "-inst" = 14 字符。
-	ld := seedRetentionDevice(t, db, "d1-autoev", 365, ago(400))
-	_ = ld
+	retDev := seedDevice(t, db, "d1-autoev", "bms_jbd", "d1-autoev-hw", false)
+	if err := db.Create(&models.UnifiedData{
+		DeviceID:   retDev.ID,
+		SensorName: "voltage",
+		Value:      1,
+		Timestamp:  ago(400),
+	}).Error; err != nil {
+		t.Fatalf("seed retention row: %v", err)
+	}
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }

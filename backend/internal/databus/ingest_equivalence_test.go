@@ -216,7 +216,7 @@ func TestIngestEquivalence_Differential(t *testing.T) {
 
 			// 新逻辑（走 consumer 的 decodeFrame）
 			c := NewSensorParserConsumerWithRegistry(db, nil, nil, reg)
-			outcome := c.decodeFrame(tc.device, tc.raw, nil, nowFixed(), tc.commandTemplateID)
+			outcome := c.decodeFrame(tc.device, tc.raw, nowFixed(), tc.commandTemplateID)
 
 			if legacy.OK != outcome.ok() {
 				t.Fatalf("成功判定不一致: legacy.OK=%v new.ok()=%v (reason=%s err=%v)",
@@ -274,7 +274,7 @@ func TestIngestEquivalence_CalibrationNotBypassedByConfigParser(t *testing.T) {
 	}
 
 	c := NewSensorParserConsumerWithRegistry(db, nil, nil, reg)
-	outcome := c.decodeFrame(dev, []byte{0x00, 0x2A}, nil, nowFixed(), 0)
+	outcome := c.decodeFrame(dev, []byte{0x00, 0x2A}, nowFixed(), 0)
 	if !outcome.ok() {
 		t.Fatalf("标定设备解析失败: reason=%s err=%v", outcome.FailReason, outcome.Err)
 	}

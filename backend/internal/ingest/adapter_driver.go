@@ -93,12 +93,11 @@ func (a *AdapterDriver) Decode(ctx DecodeContext) (Sample, error) {
 
 	// Method 字符串保持改造前格式：fmt.Sprintf("Driver(%s)", device.Type)
 	return Sample{
-		EdgeDeviceID:    ctx.EdgeDevice.ID,
-		LogicalDeviceID: ctx.LogicalDeviceID,
-		At:              ctx.At,
-		Fields:          fromDriverData(raw),
-		Method:          "Driver(" + ctx.EdgeDevice.Type + ")",
-		Quality:         QualityOk,
+		EdgeDeviceID: ctx.EdgeDevice.ID,
+		At:           ctx.At,
+		Fields:       fromDriverData(raw),
+		Method:       "Driver(" + ctx.EdgeDevice.Type + ")",
+		Quality:      QualityOk,
 	}, nil
 }
 

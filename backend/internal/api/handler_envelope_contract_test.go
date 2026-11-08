@@ -99,7 +99,6 @@ func newEnvelopeContractDB(t *testing.T) *gorm.DB {
 		&models.Notification{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{}, &models.PendingWriteRecord{},
 		&models.NodeLog{}, &models.GPIOConfig{}, &models.PWMConfig{},
-		&models.LogicalDevice{}, &models.MergeJob{},
 	); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
@@ -410,6 +409,21 @@ func TestEnvelopeContract_NodeLatestNestsDialectInData(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// ⚠ 2026-11-08：该端点已**不再回落 unified_data**（停写后它会返回冻结的过期值）。
+	//
+	// 这里必须显式 SetLatestValue：**这是契约，不是测试辅助**。
+	// 生产运行时缓存由 SensorParserConsumer 每帧更新，语义等价；
+	// 但「缓存 miss 时返回空」本身是对外行为，已记录在
+	// docs/规范/unified_data硬切换-读路径契约变更-2026-11-08.md。
+	// 详见 handler_data.go 的「契约变更」块。
+	// 所以「有数据时返回最新值」这条契约现在由**缓存**承载 —— 正常运行时缓存由
+	// SensorParserConsumer 每帧更新，用例里必须显式模拟这一步。
+	//
+	// 这条改动本身就是那个行为变更的证明：不灌缓存，接口返回空。
+	SetLatestValue(models.UnifiedData{
+		DeviceID: dev.ID, SensorName: "temperature", Value: 21.5, Unit: "C", Timestamp: time.Now().UTC(),
+	})
+	t.Cleanup(resetLatestValueCacheForTest)
 
 	w = authenticated(t, r, http.MethodGet, "/api/v1/nodes/contract-latest/latest", nil, "")
 	data = requireEnvelopeOK(t, w, http.StatusOK)
@@ -425,5 +439,94 @@ func TestEnvelopeContract_NodeLatestNestsDialectInData(t *testing.T) {
 	}
 	if len(populated.Values) != 1 || populated.Values[0]["sensor_name"] != "temperature" {
 		t.Fatalf("unexpected latest values: %s", data)
+	}
+}
+
+// TestEnvelopeContract_NodeLatestEmptyDataSerializesAsArray 补的是 Lead 指出的
+// **覆盖范围缺口**（2026-11-08，演练后确认）。
+//
+// ==================== 这个缺口是什么形态 ====================
+//
+// 上面 TestEnvelopeContract_NodeLatestNestsDialectInData 的 C12 断言了
+// 「empty values must serialize as [] (not null)」，但**它造的是无通道的节点** ——
+// 走的是 `if len(channelIDs) == 0` 那条分支，那条分支显式写死了
+// `"values": []map[string]interface{}{}`。
+//
+// 于是「有通道、但没有任何数据」这条**真正会返回 nil 的分支从未被测过**：
+//
+//	var results []LatestValue      // nil
+//	db.Raw(...).Scan(&results)     // 0 行 ⇒ 仍是 nil
+//	Success(..., "values": results) // encoding/json: nil slice → null
+//
+// 实测（演练现场 + 本地复现）：
+//
+//	无通道        → {"values": []}
+//	有通道无数据  → {"values": null}     ← 不一致
+//
+// 这是「判据覆盖了，但覆盖范围不等于声称范围」—— 断言的名字说的是
+// 「empty values」，实际只验证了**两种 empty 中的一种**。
+//
+// 影响：任何按 `data.values.length` 消费的前端，在第二种空值上会抛
+// TypeError（Cannot read properties of null）。当前前端无消费方，
+// 但这是接口契约，不该依赖「暂时没人用」。
+func TestEnvelopeContract_NodeLatestEmptyDataSerializesAsArray(t *testing.T) {
+	r, db := setupEnvelopeContractRouter(t)
+
+	if err := db.Create(&models.Node{NodeID: "contract-empty", Name: "empty", Status: "online"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 有**启用**通道 ⇒ 跳过 `len(channelIDs) == 0` 那条分支，进入回落 SQL。
+	ch := models.Channel{NodeID: "contract-empty", HardwareType: "UART", BusType: "UART", Enabled: true}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 用子测试而不是两段顺序断言：两条都是**独立的空值形态**，
+	// 顺序写法下第一条 t.Fatalf 会遮住第二条 —— 那正是本轮要补的那种缺口
+	// （「跑过了，但没跑到出问题那条」）。
+	t.Run("无设备", func(t *testing.T) {
+		w := authenticated(t, r, http.MethodGet, "/api/v1/nodes/contract-empty/latest", nil, "")
+		assertValuesIsArray(t, requireEnvelopeOK(t, w, http.StatusOK), "无设备")
+	})
+
+	t.Run("有设备无数据", func(t *testing.T) {
+		dev := models.EdgeDevice{Name: "empty-dev", Type: "sensor", NodeID: "contract-empty", ChannelID: ch.ID, HardwareID: "0x02"}
+		if err := db.Create(&dev).Error; err != nil {
+			t.Fatal(err)
+		}
+		w := authenticated(t, r, http.MethodGet, "/api/v1/nodes/contract-empty/latest", nil, "")
+		assertValuesIsArray(t, requireEnvelopeOK(t, w, http.StatusOK), "有设备无数据")
+	})
+}
+
+// assertValuesIsArray 断言 data.values 序列化成 `[]` 而不是 `null`。
+//
+// 为什么用 json.RawMessage 而不是 []T：后者无法区分 `null` 与 `[]`
+// —— Unmarshal 到 nil slice 时两者都得到 len==0，断言会假绿。
+// 必须先拿到**原始字节**再判前几个字符。
+func assertValuesIsArray(t *testing.T, data []byte, scenario string) {
+	t.Helper()
+	var raw struct {
+		Values json.RawMessage `json:"values"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("%s: data must be an object with values: %v (%s)", scenario, err, data)
+	}
+	if len(raw.Values) == 0 {
+		t.Fatalf("%s: values missing entirely: %s", scenario, data)
+	}
+	if string(raw.Values) == "null" {
+		t.Fatalf("%s: values serialized as null, want [] —— "+
+			"前端按 data.values.length 消费会在 null 上抛 TypeError: %s", scenario, data)
+	}
+	if raw.Values[0] != '[' {
+		t.Fatalf("%s: values must be an array, got %s: %s", scenario, string(raw.Values), data)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw.Values, &items); err != nil {
+		t.Fatalf("%s: values is not a valid array: %v", scenario, err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("%s: expected empty array, got %s", scenario, data)
 	}
 }

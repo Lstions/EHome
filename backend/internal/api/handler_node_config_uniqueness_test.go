@@ -250,7 +250,7 @@ func twoDoorTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.UnifiedData{}, &models.User{}, &models.OTATask{},
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.DeviceModel{}, &models.NodeEvent{}, &models.CalibrationCache{},
-		&models.PendingWriteRecord{}, &models.LogicalDevice{},
+		&models.PendingWriteRecord{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")

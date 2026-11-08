@@ -33,6 +33,27 @@ import (
 // 绝不参与建表/SELECT/INSERT。
 const rollupTable = "unified_data_rollup_1m"
 
+// ============ 2026-11-06：L3 新表 telemetry_rollup_1m **不归本文件管** ============
+//
+// 设计/遥测存储优化方案-2026-11-06.md §5.4 要求「只退役旧表，不要误伤新表」。
+// 新表 telemetry_rollup_1m 与旧表的关系、以及为什么它不是"死表复活"，
+// 见 internal/models/telemetry_rollup.go 的文件头（三条硬差异：宽行 / 有消费者 /
+// 有保留期）。
+//
+// 落到代码上的硬约束（由 datalifecycle/rollup_retirement_gate_test.go 守住）：
+//   1. 本文件**只允许**出现一个以 `_rollup_1m` 结尾的表名字面量，即 rollupTable；
+//      任何人把新表名加进本文件（哪怕只是加一行 DROP）门禁立刻变红 —— 那正是
+//      "退役步骤误伤新表"的唯一实现路径；
+//   2. DROP 语句必须由常量拼接，**不得**使用 LIKE / 动态表名 / 通配 —— 通配会
+//      把 telemetry_rollup_1m 与其月分区一并带走（它同样以 _rollup_1m 结尾，
+//      且分区名形如 telemetry_rollup_1m_YYYYMM）；
+//   3. 行为证据（不是源码证据）在 database/retire_rollup_test.go：
+//      TestRetireLegacyRollup1mDoesNotTouchTelemetryRollup —— 两表同时存在时，
+//      退役只删旧表、新表与其数据原样保留。
+//
+// 为什么把约束写在**代码旁**而不是只写在文档里: 退役 DROP 是不可逆操作，
+// 文档不会被读第二次，而门禁会。
+
 // RetireLegacyRollup1m 幂等退役 unified_data_rollup_1m 表 (DDL: DROP TABLE IF EXISTS)。
 //
 // 范式对齐 (本仓既有做法, 未新创):

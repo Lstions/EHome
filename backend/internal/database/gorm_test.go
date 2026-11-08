@@ -181,7 +181,8 @@ func TestAutoMigrate(t *testing.T) {
 	})
 
 	t.Run("DataSource", func(t *testing.T) {
-		ds := models.DataSource{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, SourceType: "edge_device", Name: "test-source", Config: "{}"}
+		// 组键 = (edge_device_id, category)：DeviceID(逻辑设备) 列已删除。
+		ds := models.DataSource{EdgeDeviceID: 1, Category: "temperature", SourceType: "edge_device", Name: "test-source", Config: "{}"}
 		if err := db.Create(&ds).Error; err != nil {
 			t.Fatalf("create data source: %v", err)
 		}

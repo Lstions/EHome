@@ -333,7 +333,15 @@ func (d *Detector) checkEdgeDevicesOffline(db *gorm.DB) {
 	// 已上报过的设备缓存里的时间戳就是判据，直接用。
 	if len(neverReportedIDs) > 0 {
 		var neverReported []models.EdgeDevice
-		if err := db.Where("id IN ? AND (last_data_at IS NULL OR last_data_at = ?) AND created_at < ?",
+		// 「从未上报」的计时起点 = max(created_at, updated_at)（2026-10-25）。
+		//
+		// 恢复已删除设备 / 换节点复用旧 edge_devices 行：created_at 可能是几个月前，
+		// 若只看它，这类设备**恢复后的下一个 tick 就被判 offline**（并把刚从
+		// 「删除→恢复」救回来的设备显示成离线、触发 source-offline hook）。restore/PUT
+		// 换绑会刷新 updated_at，「最近一次状态写入」才是 pending 设备的合理起点。
+		// CASE WHEN 两种方言都支持（不用 GREATEST/max() 以免方言分叉）。
+		baseExpr := "CASE WHEN updated_at > created_at THEN updated_at ELSE created_at END"
+		if err := db.Where("id IN ? AND (last_data_at IS NULL OR last_data_at = ?) AND ("+baseExpr+") < ?",
 			neverReportedIDs, time.Time{}, threshold).Find(&neverReported).Error; err != nil {
 			logger.Warnf("[OfflineDetector] query never-reported edge devices: %v", err)
 		} else {

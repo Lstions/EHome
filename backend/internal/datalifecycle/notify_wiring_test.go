@@ -1,73 +1,61 @@
 package datalifecycle
 
+// notify_wiring_test.go — 「保留期任务不再产生任何通知」的可红断言。
+//
+// 2026-10-23 语义变更（逻辑设备概念层移除，见 .contract/logical-device-removal.md）：
+// 本文件原有 4 个接线用例，对象全部消失：
+//   - TestRetentionNotifyGoesThroughNotifier / TestRetentionNotifyNilNotifierFallsBackToDB
+//     被删：30/7 天两档「临期通知」随 per-identity retention 一起移除。系统级窗口
+//     下到期日对全库一致，没有「这个身份快到期了」的个体语义。
+//   - TestMigratorNotifyGoesThroughNotifier / TestMigratorNotifyNilNotifierFallsBackToDB
+//     被删：它们依赖 NewMigrator / seedMergeSource / startMerge /
+//     NotificationSourceMergeFailed，全部随合并搬迁 worker 删除。
+//
+// 替换它们的是**两条互补的断言**：
+//   1. 运行期：RetentionTask.RunOnce 不写任何通知（本文件 TestRetention...）；
+//   2. 源码级：RetentionTask 上不存在 SetNotifier 这类空壳接入口
+//      （TestRetentionTask_HasNoNotifierInjectionPoint）。
+//
+// 第 2 条为什么必要（而不是把 SetNotifier 留成空壳）：
+// cmd/server 的 notify_wiring_gate 会扫描 main.go 里「每个通知生产者都调了
+// SetNotifier」。留一个不再投递的空壳 setter，会让门禁继续"绿"，而真实的
+// 投递能力已经消失 —— 那正是该门禁存在的理由（防"引擎孤儿"）。因此这里把
+// 「本任务不再是通知生产者」这件事钉在**接口层**：没有注入点 ⇒ 门禁不会误绿。
+
 import (
 	"context"
-	"errors"
-	"sync"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/testutil"
-
-	"gorm.io/gorm"
 )
 
-// ============================================================================
-// D-1 步骤 3: datalifecycle 两个通知写入点经 Notifier 落库的接线测试
-// ============================================================================
+// TestRetentionTask_ProducesNoExpiringNotice 钉住「保留期不再发临期通知」。
 //
-// 本包有两个独立的通知写入点, 分属两个 worker:
-//   - Migrator.notify      (merge 失败/受阻, migrate.go)
-//   - RetentionTask.createNotification (保留期临期, retention_task.go)
-// 两者各有一个 SetNotifier, 必须分别接线 —— 只接一个会有半个包仍然"永不外发"。
-
-// dlFakeNotifier 记录经它写入的通知并真落库 (保持自增 ID 语义)。
-type dlFakeNotifier struct {
-	mu  sync.Mutex
-	got []models.Notification
-	db  *gorm.DB
-}
-
-func (f *dlFakeNotifier) Create(ctx context.Context, n *models.Notification) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if n == nil {
-		return
-	}
-	if err := f.db.WithContext(ctx).Create(n).Error; err != nil {
-		return
-	}
-	f.got = append(f.got, *n)
-}
-
-func (f *dlFakeNotifier) count() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.got)
-}
-
-func (f *dlFakeNotifier) first() models.Notification {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.got) == 0 {
-		return models.Notification{}
-	}
-	return f.got[0]
-}
-
-// TestRetentionNotifyGoesThroughNotifier 断言保留期临期通知**经注入的 Notifier 落库**。
-//
-// 走真实任务路径: RetentionTask.RunOnce (每日任务), 不是直接调内部函数 ——
-// 否则"SetNotifier 接线"本身不在被测范围内。
-func TestRetentionNotifyGoesThroughNotifier(t *testing.T) {
+// 走真实任务路径 (RetentionTask.RunOnce)，不是直接调内部函数。夹具刻意做成
+// 「旧实现一定会发通知」的形状: 数据 age = 80 天、系统窗口 90 天，旧的两档
+// 通知正是在「剩 30 天内」触发。
+func TestRetentionTask_ProducesNoExpiringNotice(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	seedRetentionDevice(t, db, "wired", 365, now.AddDate(0, 0, -340))
+	SetSystemRetentionDays(90)
+	defer SetSystemRetentionDays(90)
 
-	fake := &dlFakeNotifier{db: db}
+	dev := seedDevice(t, db, "no-notice", "bms_jbd", "no-notice-hw", false)
+	if err := db.Create(&models.UnifiedData{
+		DeviceID:   dev.ID,
+		SensorName: "voltage",
+		Value:      1,
+		Timestamp:  now.AddDate(0, 0, -80), // 窗口内, 且旧实现在此必发 30 天档
+	}).Error; err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
 	r := NewRetentionTask(db)
-	r.SetNotifier(fake)
 	r.now = func() time.Time { return now }
 	r.SetBatchSleep(0)
 
@@ -75,118 +63,55 @@ func TestRetentionNotifyGoesThroughNotifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if len(results) != 1 || results[0].NotifiedTier != 30 {
-		t.Fatalf("results = %+v, want NotifiedTier=30", results)
+	if len(results) != 1 || results[0].Days != 90 {
+		t.Fatalf("results = %+v, want one result with Days=90", results)
 	}
-	if fake.count() != 1 {
-		t.Fatalf("Notifier 落库 %d 条, 期望 1 条 (临期通知必须经它落库)", fake.count())
+	if results[0].RowsDeleted != 0 {
+		t.Errorf("RowsDeleted = %d, want 0 (row is inside the 90-day window)", results[0].RowsDeleted)
 	}
-	if got := fake.first(); got.Source != NotificationSourceRetentionExpiring {
-		t.Fatalf("Source = %q, 期望 %q", got.Source, NotificationSourceRetentionExpiring)
+	// notifications 表里没有任何行 —— 这同时覆盖了「绕过注入点直接写库」的情形。
+	var n int64
+	if err := db.Model(&models.Notification{}).Count(&n).Error; err != nil {
+		t.Fatalf("count notifications: %v", err)
 	}
-	// 通知在 notifications 表里真实可见。
-	var n models.Notification
-	if err := db.Where("source = ?", NotificationSourceRetentionExpiring).First(&n).Error; err != nil {
-		t.Fatalf("notification not created: %v", err)
+	if n != 0 {
+		t.Fatalf("notifications 行数 = %d, want 0 (系统级窗口下没有临期通知)", n)
 	}
-	if n.Title != retentionNoticeTitle30 {
-		t.Fatalf("Title = %q, 期望 %q", n.Title, retentionNoticeTitle30)
+	// 窗口内的数据没被删（不是用「多删」换来的安静）。
+	var kept int64
+	if err := db.Model(&models.UnifiedData{}).Count(&kept).Error; err != nil {
+		t.Fatalf("count unified_data: %v", err)
 	}
-}
-
-// TestRetentionNotifyNilNotifierFallsBackToDB 断言 nil 回落是显式设计:
-// 既有测试 NewRetentionTask(db) 不注入时, 通知仍落库且去重逻辑不变。
-func TestRetentionNotifyNilNotifierFallsBackToDB(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	seedRetentionDevice(t, db, "fallback", 365, now.AddDate(0, 0, -340))
-
-	r := NewRetentionTask(db) // 不注入 Notifier
-	r.now = func() time.Time { return now }
-	r.SetBatchSleep(0)
-
-	results, err := r.RunOnce(context.Background())
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if len(results) != 1 || results[0].NotifiedTier != 30 {
-		t.Fatalf("results = %+v, want NotifiedTier=30 (nil 回落行为必须不变)", results)
-	}
-	var n models.Notification
-	if err := db.Where("source = ?", NotificationSourceRetentionExpiring).First(&n).Error; err != nil {
-		t.Fatalf("nil Notifier 回落未落库: %v", err)
+	if kept != 1 {
+		t.Errorf("unified_data rows = %d, want 1 (in-window row must be kept)", kept)
 	}
 }
 
-// TestMigratorNotifyGoesThroughNotifier 断言 merge 受阻通知经注入的 Notifier 落库。
+// TestRetentionTask_HasNoNotifierInjectionPoint 是源码级断言:
+// RetentionTask 上不得再有 SetNotifier / notifySink 这类「通知注入点」。
 //
-// 场景: 合并搬迁失败但未超重试上限 → 首次失败发一条 warning (migrate.go 受阻分支)。
-// 该分支在独立的 Update 之后调用 notify, **不在事务内** —— 这是"同步投递安全"
-// 这一裁决的实测依据之一。
-func TestMigratorNotifyGoesThroughNotifier(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	src := seedMergeSource(t, db, "notify-src", 2, base)
-	target := seedMergeSource(t, db, "notify-dst", 0, base)
-	startMerge(t, db, src, target)
-
-	fake := &dlFakeNotifier{db: db}
-	m := NewMigrator(db)
-	m.SetNotifier(fake)
-	m.SetBatchSleep(0)
-	// 注入批次失败: 使搬迁失败但未超重试上限 → retries=1 走"首次受阻"分支
-	// (未超限: 保留水位, 下次续跑; 首次失败发一条 warning)。
-	m.SetBatchHook(func(string, int64, int64) error {
-		return errors.New("injected batch failure")
-	})
-
-	if _, err := m.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
+// 为什么不只是「不调用」: cmd/server 的 notify_wiring_gate 检查 main.go 里每个
+// 生产者的 SetNotifier 调用。空壳 setter 会让门禁误以为「投递仍接线」，而实际
+// 一条都不会发。删除注入点 ⇒ 门禁少一条 needle 是**有意的**，且有本用例背书。
+func TestRetentionTask_HasNoNotifierInjectionPoint(t *testing.T) {
+	forbidden := []string{"func (r *RetentionTask) SetNotifier", "notifySink", "retentionTask.SetNotifier"}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
 	}
-	// 夹具是 2 个源 → 2 个 merge job, 每个 job 首次受阻各发一条 warning
-	// (与 migrate_test.go 的 "warning notifications = 2 (one per source job)" 同口径)。
-	// 断言"每条都经 Notifier"而不是"总共 1 条"。
-	if fake.count() != 2 {
-		t.Fatalf("Notifier 落库 %d 条, 期望 2 条 (每源 job 一条受阻通知, 全部必须经它落库)", fake.count())
-	}
-	for _, got := range fake.got {
-		if got.Source != NotificationSourceMergeFailed {
-			t.Fatalf("Source = %q, 期望 %q", got.Source, NotificationSourceMergeFailed)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
 		}
-		if got.Type != "warning" {
-			t.Fatalf("Type = %q, 期望 warning (首次受阻分支)", got.Type)
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
 		}
-	}
-	// 通知在 notifications 表里真实可见。
-	var rows []models.Notification
-	db.Where("source = ?", NotificationSourceMergeFailed).Find(&rows)
-	if len(rows) != 2 {
-		t.Fatalf("notifications 行数 = %d, 期望 2", len(rows))
-	}
-}
-
-// TestMigratorNotifyNilNotifierFallsBackToDB 断言 nil 回落: 不注入时仍落库。
-func TestMigratorNotifyNilNotifierFallsBackToDB(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	src := seedMergeSource(t, db, "fb-src", 2, base)
-	target := seedMergeSource(t, db, "fb-dst", 0, base)
-	startMerge(t, db, src, target)
-
-	m := NewMigrator(db) // 不注入 Notifier
-	m.SetBatchSleep(0)
-	m.SetBatchHook(func(string, int64, int64) error {
-		return errors.New("injected batch failure")
-	})
-
-	if _, err := m.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	var got []models.Notification
-	if err := db.Where("source = ?", NotificationSourceMergeFailed).Find(&got).Error; err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("nil Notifier 回落落库 %d 行, 期望 2 行 (每源 job 一条, 行为必须与改造前一致)", len(got))
+		for _, needle := range forbidden {
+			if strings.Contains(string(data), needle) {
+				t.Errorf("%s 仍含 %q —— RetentionTask 不再是通知生产者，"+
+					"空壳注入点会让 notify_wiring_gate 误以为投递仍接线", f, needle)
+			}
+		}
 	}
 }

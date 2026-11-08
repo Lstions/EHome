@@ -21,7 +21,7 @@ func newWSPayloadTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{},
-		&models.CalibrationCache{}, &models.LogicalDevice{}); err != nil {
+		&models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db

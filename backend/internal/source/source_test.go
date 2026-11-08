@@ -12,14 +12,8 @@ import (
 //
 // 纪律：**零 DB**（source 包不 import gorm）。派生是纯函数，没有理由为它起库。
 
-func ld(id uint) *uint { return &id }
-
-func dev(id uint, logical uint, enabled bool) models.EdgeDevice {
-	d := models.EdgeDevice{ID: id, Name: "d", Enabled: enabled}
-	if logical != 0 {
-		d.LogicalDeviceID = ld(logical)
-	}
-	return d
+func dev(id uint, enabled bool) models.EdgeDevice {
+	return models.EdgeDevice{ID: id, Name: "d", Enabled: enabled}
 }
 
 // ---------- 反向索引（本层存在的核心理由）----------
@@ -30,7 +24,7 @@ func dev(id uint, logical uint, enabled bool) models.EdgeDevice {
 func TestRegistry_ResolveByDevice(t *testing.T) {
 	r := source.NewRegistry()
 	handles := source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true)},
+		Devices:  []models.EdgeDevice{dev(1, true)},
 		Observed: map[uint][]string{1: {"rsoc", "voltage"}},
 	})
 	r.Publish(handles)
@@ -62,7 +56,7 @@ func TestRegistry_ResolveByDevice(t *testing.T) {
 func TestRegistry_DeviceSourceCount(t *testing.T) {
 	r := source.NewRegistry()
 	r.Publish(source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true)},
+		Devices:  []models.EdgeDevice{dev(1, true)},
 		Observed: map[uint][]string{1: {"a", "b", "c"}},
 	}))
 	if got := r.DeviceSourceCount(1); got != 3 {
@@ -79,7 +73,7 @@ func TestRegistry_DeviceSourceCount(t *testing.T) {
 func TestRegistry_PublishReplaces(t *testing.T) {
 	r := source.NewRegistry()
 	r.Publish(source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true), dev(2, 20, true)},
+		Devices:  []models.EdgeDevice{dev(1, true), dev(2, true)},
 		Observed: map[uint][]string{1: {"a"}, 2: {"b"}},
 	}))
 	if r.Len() != 2 {
@@ -87,7 +81,7 @@ func TestRegistry_PublishReplaces(t *testing.T) {
 	}
 	// 只发布设备 1 ⇒ 设备 2 的来源应消失
 	r.Publish(source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true)},
+		Devices:  []models.EdgeDevice{dev(1, true)},
 		Observed: map[uint][]string{1: {"a"}},
 	}))
 	if r.Len() != 1 {
@@ -103,7 +97,7 @@ func TestRegistry_PublishReplaces(t *testing.T) {
 // TestHandle_DirectAccepts 验证直连来源的判定。
 func TestHandle_DirectAccepts(t *testing.T) {
 	handles := source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true)},
+		Devices:  []models.EdgeDevice{dev(1, true)},
 		Observed: map[uint][]string{1: {"a"}},
 	})
 	h := handles[0]
@@ -118,16 +112,23 @@ func TestHandle_DirectAccepts(t *testing.T) {
 	}
 }
 
-// TestDerive_UnboundDeviceProducesNoSource 验证未绑逻辑设备的设备不产生来源。
+// TestDerive_EveryObservedDeviceProducesSource 验证「有观测即有来源」。
 //
-// 语义：它能正常采集入库，但没有 (logicalDevice, category) 键，无法定来源。
-func TestDerive_UnboundDeviceProducesNoSource(t *testing.T) {
+// 历史：本用例曾是 TestDerive_UnboundDeviceProducesNoSource —— 未绑逻辑设备的
+// 设备不产生来源（来源键需要 (逻辑设备, 类别)）。逻辑设备概念层已移除
+// （2026-10-23），组键回到 (edge_device_id, 类别)，中间层不存在就不会缺：
+// 任何观测过字段的边缘设备都必须进来源台账，否则页面上会出现
+// 「设备在传数据、来源页却是空的」这种必然困惑。
+func TestDerive_EveryObservedDeviceProducesSource(t *testing.T) {
 	handles := source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 0, true)}, // logical = 0
+		Devices:  []models.EdgeDevice{dev(1, true)},
 		Observed: map[uint][]string{1: {"a"}},
 	})
-	if len(handles) != 0 {
-		t.Errorf("未绑逻辑设备的设备不应产生来源，实际 %d 条", len(handles))
+	if len(handles) != 1 {
+		t.Fatalf("每台有观测的设备都应产生来源，实际 %d 条", len(handles))
+	}
+	if got := handles[0].Key(); got.EdgeDeviceID != 1 || got.Category != "a" {
+		t.Errorf("来源键 = %+v, want {1 a}", got)
 	}
 }
 
@@ -149,12 +150,12 @@ func TestDerive_GroupTakesPrecedence(t *testing.T) {
 		},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices:  []models.EdgeDevice{dev(1, 10, true), dev(2, 10, true)},
+		Devices:  []models.EdgeDevice{dev(1, true), dev(2, true)},
 		Observed: map[uint][]string{1: {"rsoc"}, 2: {"rsoc"}},
 		Groups:   []*sourceref.GroupSnapshot{g},
 	})
 
-	// 两台设备同属逻辑设备 10、同类别 rsoc ⇒ 若组不优先会产生 2 条直连 + 1 条组
+	// 两台设备同类别 rsoc 且都被组覆盖 ⇒ 若组不优先会产生 2 条直连 + 1 条组
 	if len(handles) != 1 {
 		t.Fatalf("产生 %d 条来源，want 1（组应覆盖直连，不并存）", len(handles))
 	}
@@ -179,7 +180,7 @@ func TestHandle_PrimaryBackupOnlyActiveAccepts(t *testing.T) {
 		},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(1, 10, true), dev(2, 10, true)},
+		Devices: []models.EdgeDevice{dev(1, true), dev(2, true)},
 		Groups:  []*sourceref.GroupSnapshot{g},
 	})
 	h := handles[0]
@@ -212,7 +213,7 @@ func TestHandle_CompositeAnyMemberAccepts(t *testing.T) {
 		},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(1, 10, true), dev(2, 10, true)},
+		Devices: []models.EdgeDevice{dev(1, true), dev(2, true)},
 		Groups:  []*sourceref.GroupSnapshot{g},
 	})
 	h := handles[0]
@@ -232,7 +233,7 @@ func TestDerive_DisabledGroupProducesNothing(t *testing.T) {
 		Members: []sourceref.MemberSnapshot{{EdgeDeviceID: 1}},
 	}
 	handles := source.Derive(source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(1, 10, true)},
+		Devices: []models.EdgeDevice{dev(1, true)},
 		Groups:  []*sourceref.GroupSnapshot{g},
 	})
 	for _, h := range handles {
@@ -249,7 +250,7 @@ func TestDerive_DisabledGroupProducesNothing(t *testing.T) {
 // 不稳定的后果：投影每次刷新行序变化，用户会以为数据在跳。
 func TestDerive_Deterministic(t *testing.T) {
 	in := source.DeriveInput{
-		Devices: []models.EdgeDevice{dev(3, 10, true), dev(1, 10, true), dev(2, 20, true)},
+		Devices: []models.EdgeDevice{dev(3, true), dev(1, true), dev(2, true)},
 		Observed: map[uint][]string{
 			1: {"b", "a"}, 2: {"c"}, 3: {"a"},
 		},
@@ -268,25 +269,39 @@ func TestDerive_Deterministic(t *testing.T) {
 	}
 }
 
-// TestDerive_MultiDeviceSameCategoryPicksEnabledFirst 验证同类别多设备时
-// enabled 设备排在前面（active 判定优先可用设备）。
-func TestDerive_MultiDeviceSameCategoryPicksEnabledFirst(t *testing.T) {
+// TestDerive_SameCategoryDifferentDevicesAreSeparateSources 验证组键口径：
+// 同类别但不同边缘设备 = **两条独立来源**（组键含 edge_device_id）。
+//
+// 历史：本用例曾是 TestDerive_MultiDeviceSameCategoryPicksEnabledFirst ——
+// 两台设备共用同一逻辑设备时，同类别会被聚合成一条「多成员直连」来源。
+// 逻辑设备层移除后组键是 (edge_device_id, 类别)，多设备共类别只有两种形态：
+//  1. 用户显式建来源组（主备/复合）—— 由组的 Handle 表达；
+//  2. 各自独立 —— 各一条直连来源。
+//
+// 「隐式多成员直连」这个形态消失了（它只是逻辑身份层的副产物）。
+func TestDerive_SameCategoryDifferentDevicesAreSeparateSources(t *testing.T) {
 	handles := source.Derive(source.DeriveInput{
 		Devices: []models.EdgeDevice{
-			dev(5, 10, false), // disabled，ID 更大
-			dev(2, 10, true),  // enabled
+			dev(5, false), // disabled，ID 更大
+			dev(2, true),  // enabled
 		},
 		Observed: map[uint][]string{5: {"x"}, 2: {"x"}},
 	})
-	if len(handles) != 1 {
-		t.Fatalf("handles = %d", len(handles))
+	if len(handles) != 2 {
+		t.Fatalf("handles = %d, want 2（不同设备同类别 = 两条独立来源）", len(handles))
 	}
-	members := handles[0].Members()
-	if len(members) != 2 {
-		t.Fatalf("members = %d, want 2", len(members))
+	// 排序后设备 2 在前。
+	if handles[0].Key().EdgeDeviceID != 2 || handles[1].Key().EdgeDeviceID != 5 {
+		t.Fatalf("排序 = %d,%d want 2,5", handles[0].Key().EdgeDeviceID, handles[1].Key().EdgeDeviceID)
 	}
-	if members[0].EdgeDeviceID != 2 {
-		t.Errorf("首个成员 = %d, want 2（enabled 应优先）", members[0].EdgeDeviceID)
+	for _, h := range handles {
+		members := h.Members()
+		if len(members) != 1 {
+			t.Fatalf("直连来源成员数 = %d, want 1", len(members))
+		}
+		if members[0].EdgeDeviceID != h.Key().EdgeDeviceID {
+			t.Errorf("直连来源的成员必须是自己：key=%+v member=%d", h.Key(), members[0].EdgeDeviceID)
+		}
 	}
 }
 

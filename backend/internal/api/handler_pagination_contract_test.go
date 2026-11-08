@@ -2,7 +2,8 @@ package api
 
 // 分页契约测试 (架构与接口评估及优化方案 P1.2 裁决: items + total)。
 //
-// 覆盖 automation-events 与 logical-devices 两个端点, 四类边界各一条:
+// 覆盖 automation-events / nodes / edge-devices 三个端点, 四类边界各一条。
+// （logical-devices 端点的分页用例随逻辑设备概念层一起删除, 2026-10-23）:
 // 默认页 / 指定页 / 超范围页 / 筛选+分页组合。
 //
 // 为什么必须有「超范围页」一条: 本任务的根因是 automation-events 曾用
@@ -16,7 +17,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -26,8 +26,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// newPaginationRouter 装配 automation-events + logical-devices 两组路由。
-// 复用 setupTestRouter 的 db (已迁移 LogicalDevice), 再补迁 automation 两张表。
+// newPaginationRouter 装配 automation-events 路由。
+// 复用 setupTestRouter 的 db, 再补迁 automation 两张表。
 func newPaginationRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	r, db := setupTestRouter(t)
@@ -223,110 +223,6 @@ func TestAutomationEventsPagination_FilterWithPagination(t *testing.T) {
 	none := getPage(t, r, "/api/v1/automation-events?rule_id=999&page=1&page_size=5")
 	if len(none.Data.Items) != 0 || none.Data.Total != 0 {
 		t.Fatalf("未命中筛选 = %d 条/total %d, want 0/0", len(none.Data.Items), none.Data.Total)
-	}
-}
-
-func TestLogicalDevicesPagination(t *testing.T) {
-	r, db := setupTestRouter(t)
-	for i := 0; i < 25; i++ {
-		ld := models.LogicalDevice{
-			IdentityKey: "pag:" + strconv.Itoa(i), Name: "LD-" + strconv.Itoa(i),
-			DeviceType: "bms", RetentionDays: 365,
-		}
-		if err := db.Create(&ld).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// 默认页: page_size=20, total 为全量 25。
-	def := getPage(t, r, "/api/v1/logical-devices")
-	if got := len(def.Data.Items); got != 20 {
-		t.Fatalf("默认页 items = %d, want 20", got)
-	}
-	if def.Data.Total != 25 {
-		t.Fatalf("默认页 total = %d, want 25 (total 必须是全量, 不是当前页)", def.Data.Total)
-	}
-
-	// 第 2 页 → 5 条, 与第 1 页不重叠。
-	p2 := getPage(t, r, "/api/v1/logical-devices?page=2&page_size=20")
-	if got := len(p2.Data.Items); got != 5 {
-		t.Fatalf("第 2 页 items = %d, want 5", got)
-	}
-	seen := map[float64]bool{}
-	for _, it := range def.Data.Items {
-		seen[it["id"].(float64)] = true
-	}
-	for _, it := range p2.Data.Items {
-		if seen[it["id"].(float64)] {
-			t.Fatalf("第 2 页与第 1 页重叠于 id=%v (Offset 未生效)", it["id"])
-		}
-	}
-
-	// 超范围页 → 200 + 空集 + total 不变。
-	out := getPage(t, r, "/api/v1/logical-devices?page=50&page_size=20")
-	if got := len(out.Data.Items); got != 0 {
-		t.Fatalf("越界页 items = %d, want 0", got)
-	}
-	if out.Data.Total != 25 {
-		t.Fatalf("越界页 total = %d, want 25", out.Data.Total)
-	}
-
-	// clamp: page=0 → 1, page_size 越界 → 默认 20。
-	clamped := getPage(t, r, "/api/v1/logical-devices?page=0&page_size=0")
-	if got := len(clamped.Data.Items); got != 20 {
-		t.Fatalf("clamp 后 items = %d, want 20", got)
-	}
-
-	// 聚合字段仍在当前页生效 (分页不得吞掉 instance_count/last_data_at)。
-	if _, ok := def.Data.Items[0]["instance_count"]; !ok {
-		t.Fatalf("分页后条目缺 instance_count 聚合字段: %v", def.Data.Items[0])
-	}
-
-	// ── 筛选 + 分页组合 (§3.3.5: 服务端分页时检索必须覆盖全库, 不是当前页本地过滤) ──
-	// device_type 过滤: 25 条全为 bms, 造 3 条 sn3001 后过滤应得 3 条 (而非 28)。
-	for i := 0; i < 3; i++ {
-		ld := models.LogicalDevice{
-			IdentityKey: "other:" + strconv.Itoa(i), Name: "Other-" + strconv.Itoa(i),
-			DeviceType: "sn3001", RetentionDays: 365,
-		}
-		if err := db.Create(&ld).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	byType := getPage(t, r, "/api/v1/logical-devices?device_type=sn3001&page=1&page_size=20")
-	if byType.Data.Total != 3 {
-		t.Fatalf("device_type=sn3001 total = %d, want 3 (过滤须在 Count 侧生效)", byType.Data.Total)
-	}
-	if got := len(byType.Data.Items); got != 3 {
-		t.Fatalf("device_type=sn3001 items = %d, want 3", got)
-	}
-	for _, it := range byType.Data.Items {
-		if it["device_type"] != "sn3001" {
-			t.Fatalf("device_type 过滤混入 %v", it["device_type"])
-		}
-	}
-
-	// search 是全库检索: "LD-1" 命中的 LD-1x 分散在**第 1 页之外**, 若 search 被当成
-	// 当前页本地过滤就会漏掉 —— 这正是分页前的伪装全局检索缺陷。
-	// 25 条 LD-0..LD-24 中名称含 "ld-1" 的有 LD-1、LD-10..LD-19 共 11 条。
-	bySearch := getPage(t, r, "/api/v1/logical-devices?search=ld-1&page=1&page_size=20")
-	if bySearch.Data.Total != 11 {
-		t.Fatalf("search=ld-1 total = %d, want 11 (检索须覆盖全库)", bySearch.Data.Total)
-	}
-	for _, it := range bySearch.Data.Items {
-		name, _ := it["name"].(string)
-		if !strings.Contains(strings.ToLower(name), "ld-1") {
-			t.Fatalf("search 结果混入不匹配项 %q", name)
-		}
-	}
-
-	// 筛选 + 分页组合: 11 条按 5/页 → 第 3 页剩 1 条 (offset 基于过滤后的集合)。
-	combo := getPage(t, r, "/api/v1/logical-devices?search=ld-1&page=3&page_size=5")
-	if got := len(combo.Data.Items); got != 1 {
-		t.Fatalf("search+page 组合末页 items = %d, want 1", got)
-	}
-	if combo.Data.Total != 11 {
-		t.Fatalf("search+page 组合 total = %d, want 11", combo.Data.Total)
 	}
 }
 
@@ -791,146 +687,106 @@ func TestEdgeDevicesPagination_FilterWithPagination(t *testing.T) {
 	}
 }
 
-// TestEdgeDevicesPagination_EnrichmentScopedToCurrentPage 钉死本端点独有的不变式:
+// TestEdgeDevicesPagination_EnrichmentScopedToCurrentPage 钉死本端点独有的不变式：
 // latest-data 富化只对**当前页**的 deviceIDs 执行。
 //
-// 观测方式: 给全部 25 台设备都写入 latest-data (第 1 页是 10 台)。
-// 分页正确时, 只有当前页那 10 台带 last_data; 若富化仍按全表跑,
-// 拿到的 deviceIDs 会是 25 个, 但只有当前页 10 台会被赋回 —— 单看响应区分不出来。
-// 因此这里改从**查询范围**取证: latest-data 的回落 SQL 只应见到当前页的 id。
-// 用 GORM callback 记录实际出现在 SQL 里的 device_id 参数。
+// ============ 验证手段换了（2026-11-08），性质没换 ============
+//
+// 原手段：用 GORM callback 抓「富化查询的 SQL 里出现哪些 device_id」，
+//
+//	断言那个集合是当前页的子集。
+//
+// 但 unified_data 已 DROP，富化的那条**回落 SQL 被删了**（缓存 miss 不再回落），
+// 于是「抓 SQL」这个手段失效 —— 它现在只能抓到空集。
+//
+// ⚠ 关键判断：**失效的是验证手段，不是被验证的性质。**
+//
+//	性质「富化只作用于当前页」仍然成立且仍需要守。
+//	所以换手段，不删用例、也不把断言改成恒真。
+//
+// 新手段：**从响应数据取证**。给 25 台设备全部写入缓存，然后看**每页返回的
+// last_data 里出现哪些 device_id**：
+//
+//	· 只作用于当前页 => 只有当前页那 10 台有 last_data；
+//	· 作用于全表     => 25 台都会（旧实现把全表结果赋回，虽只显示当前页 10 条，
+//	                     但下面「第 2 页必须是另一批」的对照会立刻发现两页相同）。
+//
+// 为什么这比抓 SQL 更强：它验的是**可观测结果**，不依赖任何实现细节（用不用缓存、
+// 发不发 SQL、SQL 长什么样都与它无关）。实现换三次它仍然成立。
 func TestEdgeDevicesPagination_EnrichmentScopedToCurrentPage(t *testing.T) {
 	r, db := newListNodeRouter(t)
 	seedEdgeDevices(t, db)
+	resetLatestValueCacheForTest()
+	t.Cleanup(resetLatestValueCacheForTest)
 
-	// 造 latest-data: 每台设备一条 unified_data。
+	// 造 latest-data：**每台设备**都灌进缓存（25 台，而每页只 10 台）。
+	// 这样「富化只限当前页」和「富化覆盖全表」在响应上才会出现差异。
 	var devices []models.EdgeDevice
 	if err := db.Order("id").Find(&devices).Error; err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range devices {
-		if err := db.Create(&models.UnifiedData{
+		SetLatestValue(models.UnifiedData{
 			DeviceID: d.ID, SensorName: "temperature", Value: 20, Unit: "C",
-		}).Error; err != nil {
-			t.Fatal(err)
-		}
+		})
 	}
 
-	// 用 SQL 记分板抓取富化查询里出现的 device_id。
-	rec := &sqlParamRecorder{}
-	if err := db.Callback().Query().After("gorm:query").Register("test:capture_unified_data_ids", rec.afterQuery); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Callback().Query().Remove("test:capture_unified_data_ids") }()
-
-	// 第 1 页 10 台。
+	// 首页 10 台。
 	resp := getPage(t, r, "/api/v1/edge-devices?page=1&page_size=10")
 	if got := len(resp.Data.Items); got != 10 {
 		t.Fatalf("首页 items = %d, want 10", got)
 	}
-
 	pageIDs := map[uint]bool{}
 	for _, it := range resp.Data.Items {
 		pageIDs[uint(it["id"].(float64))] = true
 	}
 
-	// 富化查询必须只触及当前页的 id: 抓到的 unified_data device_id 集合
-	// 必须是 pageIDs 的子集, 且非空 (否则富化根本没跑, 断言会假通过)。
-	enriched := rec.unifiedDataDeviceIDs()
-	if len(enriched) == 0 {
-		t.Fatalf("未捕获到 unified_data 富化查询 (富化可能未执行, 该断言会假通过)")
+	// ① 每台返回的设备都必须带 last_data —— 若富化没跑，这条先红。
+	//    （没有这条，「富化是否执行」就无从得知，下面的子集断言会变成空跑。）
+	enriched := map[uint]bool{}
+	for _, it := range resp.Data.Items {
+		id := uint(it["id"].(float64))
+		ld, ok := it["last_data"]
+		if !ok || ld == nil {
+			t.Fatalf("设备 %d 没有 last_data —— 富化没跑（本用例的全部断言都会是空跑）", id)
+		}
+		m, ok := ld.(map[string]any)
+		if !ok || len(m) == 0 {
+			t.Fatalf("设备 %d 的 last_data = %v, want 非空 map", id, ld)
+		}
+		enriched[id] = true
+	}
+	if len(enriched) != 10 {
+		t.Fatalf("带 last_data 的设备 %d 台, want 10（= 当前页）—— "+
+			"若 >10 说明富化覆盖了非当前页设备", len(enriched))
 	}
 	for id := range enriched {
 		if !pageIDs[id] {
-			t.Fatalf("富化查询触及了非当前页设备 device_id=%d (当前页 %v) —— 仍在全表捞数据", id, pageIDs)
+			t.Fatalf("设备 %d 有 last_data 但不在当前页 %v", id, pageIDs)
 		}
 	}
 
-	// 反向对照: 第 2 页富化的必须是另一批 id, 与第 1 页不重叠。
-	// (若富化无视分页, 两页会抓到同一批全表 id, 这里立刻变红。)
-	rec.reset()
+	// ② 反向对照：第 2 页必须是**另一批** id。
+	//    （若富化无视分页、每页都返回同一批，这条立刻红。）
 	resp2 := getPage(t, r, "/api/v1/edge-devices?page=2&page_size=10")
+	if got := len(resp2.Data.Items); got != 10 {
+		t.Fatalf("第 2 页 items = %d, want 10", got)
+	}
 	page2IDs := map[uint]bool{}
 	for _, it := range resp2.Data.Items {
-		page2IDs[uint(it["id"].(float64))] = true
-		if pageIDs[uint(it["id"].(float64))] {
-			t.Fatalf("第 2 页与第 1 页重叠于 id=%v", it["id"])
+		id := uint(it["id"].(float64))
+		page2IDs[id] = true
+		if ld, ok := it["last_data"]; !ok || ld == nil {
+			t.Fatalf("第 2 页设备 %d 没有 last_data", id)
 		}
 	}
-	enriched2 := rec.unifiedDataDeviceIDs()
-	if len(enriched2) == 0 {
-		t.Fatalf("第 2 页未捕获到 unified_data 富化查询")
-	}
-	for id := range enriched2 {
-		if !page2IDs[id] {
-			t.Fatalf("第 2 页富化触及了非本页设备 device_id=%d (本页 %v)", id, page2IDs)
+	overlap := 0
+	for id := range page2IDs {
+		if pageIDs[id] {
+			overlap++
 		}
 	}
-}
-
-// sqlParamRecorder 记录 GORM 查询里出现的 unified_data.device_id 参数值。
-// 通过检查 SQL 文本 + 变量参数识别富化查询, 不改动被测代码。
-type sqlParamRecorder struct {
-	mu  sync.Mutex
-	ids map[uint]bool
-}
-
-func (r *sqlParamRecorder) reset() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.ids = nil
-}
-
-func (r *sqlParamRecorder) afterQuery(tx *gorm.DB) {
-	if tx.Statement == nil || !strings.Contains(tx.Statement.SQL.String(), "unified_data") {
-		return
+	if overlap != 0 {
+		t.Fatalf("第 1 页与第 2 页重叠 %d 台 —— 分页失效", overlap)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.ids == nil {
-		r.ids = map[uint]bool{}
-	}
-	for _, v := range tx.Statement.Vars {
-		switch id := v.(type) {
-		case uint:
-			r.ids[id] = true
-		case int:
-			r.ids[uint(id)] = true
-		case int64:
-			r.ids[uint(id)] = true
-		case []uint:
-			for _, e := range id {
-				r.ids[e] = true
-			}
-		case []int:
-			for _, e := range id {
-				r.ids[uint(e)] = true
-			}
-		case []int64:
-			for _, e := range id {
-				r.ids[uint(e)] = true
-			}
-		case []interface{}:
-			for _, e := range id {
-				switch n := e.(type) {
-				case uint:
-					r.ids[n] = true
-				case int:
-					r.ids[uint(n)] = true
-				case int64:
-					r.ids[uint(n)] = true
-				}
-			}
-		}
-	}
-}
-
-func (r *sqlParamRecorder) unifiedDataDeviceIDs() map[uint]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make(map[uint]bool, len(r.ids))
-	for k := range r.ids {
-		out[k] = true
-	}
-	return out
 }

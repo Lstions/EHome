@@ -63,6 +63,22 @@ func AutoMigrate() error {
 	if legacyPWM.MigrationRequired {
 		return fmt.Errorf("pwm_configs migration_required: %d legacy row(s) lack hardware_id/channel; reconcile rows against a fresh ResourceReport: %+v", len(legacyPWM.Rows), legacyPWM.Rows)
 	}
+	// 逻辑设备概念层退役 (2026-10-23): logical_devices / merge_jobs / backfill_jobs
+	// 三张表，以及 edge_devices / unified_data / device_data 上的 logical_device_id、
+	// data_sources 上的 device_id（= 逻辑设备 id）列，全部移除。
+	// 裁决: .contract/logical-device-removal.md。
+	//
+	// **必须排在 AutoMigrate 之前**，原因（2026-10-23 实测踩到）:
+	//   data_sources 上的旧索引 uniq_ds_source / idx_ds_device_status 都以
+	//   device_id 为前导列。若先 AutoMigrate 再退役，GORM 会因为「同名索引已存在」
+	//   而跳过创建新定义的索引，接着退役把旧索引连同 device_id 一起删掉 ⇒
+	//   最终库上**一个唯一索引都没有**（同 (edge_device_id, category) 可以插入
+	//   两行，唯一性约束静默消失）。先退役、再 AutoMigrate，则 GORM 在干净的
+	//   表面上按新 tag 重建索引，约束回到位。
+	// 幂等：重跑时 HasColumn=false / HasTable=false ⇒ 零动作。
+	if _, err := RetireLogicalDeviceLayer(DB); err != nil {
+		return err
+	}
 	if err := DB.AutoMigrate(
 		// v2.1 表 (保留, GORM 会自动加新字段)
 		&models.Node{},
@@ -118,13 +134,6 @@ func AutoMigrate() error {
 		// v3.0: GPIO/PWM peripheral control models
 		&models.GPIOConfig{},
 		&models.PWMConfig{},
-
-		// 数据生命周期 P0: 逻辑设备身份 (方案 v3.3 §1.1)
-		&models.LogicalDevice{},
-		// 数据生命周期 M 迁移: 大表回填进度水位 (§4.3 断点续跑)
-		&models.BackfillJob{},
-		// 数据生命周期 P3: 合并搬迁任务进度 (§4.3 任务 3)
-		&models.MergeJob{},
 
 		// 阈值告警引擎 (方案 v0.4 §5.1.1 任务C)
 		&models.AlertRule{},

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
@@ -142,7 +143,16 @@ func (g *GroupService) validateMemberConfig(db *gorm.DB, kind, combine string, c
 	return nil
 }
 
-// categoryObserved 与 api 层 category_not_observed 同口径：投影表优先、unified_data 兜底。
+// categoryObserved 与 api 层 category_not_observed **同口径**：
+// 投影表优先、帧表存在性兜底（2026-11-08 硬切换后重排）。
+//
+// 原实现是「投影表 + unified_data」。停写后 unified_data 恒空，于是
+// 「60s 内刚上报的新字段」会被判未上报 => V-5 校验拒绝创建来源组 =>
+// 用户以为自己填错了字段名。
+//
+// 两条路径**必须逐字同口径**：api 层的 dataSourceCategoryObserved 与本函数
+// 都印着「同口径」三个字，改一处不改另一处会让「建设备时能过、建组时不能过」
+// 这类只在特定入口出现的差异重现 —— 那正是本仓反复修的「同一语义两处实现」。
 func (g *GroupService) categoryObserved(db *gorm.DB, edgeDeviceID uint, category string) bool {
 	var count int64
 	if err := db.Model(&models.SensorFieldObs{}).
@@ -150,12 +160,7 @@ func (g *GroupService) categoryObserved(db *gorm.DB, edgeDeviceID uint, category
 		Count(&count).Error; err == nil && count > 0 {
 		return true
 	}
-	if err := db.Model(&models.UnifiedData{}).
-		Where("device_id = ? AND sensor_name = ?", edgeDeviceID, category).
-		Limit(1).Count(&count).Error; err == nil && count > 0 {
-		return true
-	}
-	return false
+	return telemetry.DeviceObservedField(db, edgeDeviceID, category)
 }
 
 // normalizeStalenessSec 把 StalenessSec=0 归一为**推导值**（Lead 裁决 2026-10-22：

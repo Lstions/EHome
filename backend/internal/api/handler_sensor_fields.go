@@ -360,13 +360,28 @@ func previewSensorField(db *gorm.DB, resolver *sensorfield.Registry) gin.Handler
 			maxSamples = 5000
 		}
 		since := time.Now().Add(-time.Duration(req.WindowHours) * time.Hour)
+		// ── 首选：帧表（2026-11-08 硬切换）──
+		//
+		// unified_data 已停写，原 SQL 在 now-24h 窗口内会迅速趋零 =>
+		// samples_considered=0 / frames=[] => 前端显示「没有数据」=> 用户以为 selector 配错了。
+		// 那是最坏的一类错误：不报错，且把「系统换了存储」伪装成「你的配置有问题」。
+		//
+		// 帧表解出来的是**完整帧**（该 slot 的全部字段），所以下方的 sparse_frames
+		// 判定在帧表路径上恒为 false —— 那不是口径丢失，而是新数据源本来就没有稀疏帧。
 		var rows []models.UnifiedData
-		q := db.Model(&models.UnifiedData{}).
-			Where("device_id = ? AND timestamp >= ? AND sensor_name IN ?", req.EdgeDeviceID, since, matched).
-			Order("timestamp ASC")
-		if err := q.Limit(maxSamples + 1).Find(&rows).Error; err != nil {
-			Error(c, http.StatusInternalServerError, "failed to query unified_data")
-			return
+		usedFrames := false
+		if fromFrames, ok := previewRowsFromFrames(db, req.EdgeDeviceID, since, matched); ok {
+			rows = fromFrames
+			usedFrames = true
+		} else {
+			// ── 回落：unified_data（过渡期 / 帧表不可用）──
+			q := db.Model(&models.UnifiedData{}).
+				Where("device_id = ? AND timestamp >= ? AND sensor_name IN ?", req.EdgeDeviceID, since, matched).
+				Order("timestamp ASC")
+			if err := q.Limit(maxSamples + 1).Find(&rows).Error; err != nil {
+				Error(c, http.StatusInternalServerError, "failed to query unified_data")
+				return
+			}
 		}
 		truncated := false
 		if len(rows) > maxSamples {
@@ -376,8 +391,27 @@ func previewSensorField(db *gorm.DB, resolver *sensorfield.Registry) gin.Handler
 		resp["samples_considered"] = len(rows)
 		resp["truncated"] = truncated
 
-		// 按 timestamp 分帧：生产端同一帧的所有物理量用同一个 now 写入（consumers_heavy.go），
-		// 因此"时间戳相等"即同帧；这样 family 缺员判定才与运行时帧语义一致。
+		// ==================== D4：按 timestamp 分帧（2026-11-07 L1 之后的语义）====================
+		//
+		// 生产端同一帧的所有物理量用同一个 now 写入（consumers_heavy.go），因此
+		// 「时间戳相等」即同帧 —— 这个判据本身**仍然成立**，不需要改。
+		//
+		// L1（值不变不入库）无条件生效后变的是**帧的密度**，不是帧的构造：
+		// 某个字段值没变且未到心跳时，它在库里**没有行**，于是这一帧看起来「缺员」。
+		// 举例: BMS 一帧 29 个字段，若只有 1 个字段变化，库里就只留 1 行 ⇒
+		// frames 里这一帧只有 1 个 reading，missing_known（family 缺员）会把它算成缺 28 个。
+		//
+		// 这不是 bug 而是口径变化，因此这里**只做两件事、不改判定逻辑**:
+		//   1. 在响应里显式标注口径（sparse_frames=true + frame_semantics 说明），
+		//      让调用方知道「这帧字段少」是 L1 的正常结果，不是设备丢帧；
+		//   2. 保留 frames 的原始构造（按 timestamp 分组），因为 duration_would_fire
+		//      与 trace 都需要「真实写过库的那一帧」的字段集合 —— 补全缺失字段反而
+		//      会给出从未发生过的求值。
+		//
+		// ⚠ 缺员判定的正确用法：`missing_known` 现在表达的是「本帧没有落库的字段」，
+		// 不等于「设备没上报该字段」。要判断后者，看 /sensor-fields/obs 的观测记录
+		// （那里按上报计数，不受 L1 影响）。此点已写入交付说明，待前端文案同步。
+		sparseFrames := false
 		frameOrder := make([]int64, 0, len(rows)/4)
 		frameRows := make(map[int64][]models.UnifiedData, len(rows)/4)
 		for _, row := range rows {
@@ -421,8 +455,35 @@ func previewSensorField(db *gorm.DB, resolver *sensorfield.Registry) gin.Handler
 			lastFrame = frame
 			lastVerdict = verdict
 		}
+		// D4: 判定本批数据是否受 L1 影响（帧内字段数 < 匹配到的字段数 ⇒ 该帧被收窄过）。
+		// 注意不能只看最后一帧：只要**任意**一帧的字段数少于 matched，就说明库里是稀疏帧。
+		for _, key := range frameOrder {
+			if len(frameRows[key]) < len(matched) {
+				sparseFrames = true
+				break
+			}
+		}
 		resp["frames"] = frames
 		resp["duration_would_fire"] = durationWouldFire
+		// D4: 口径标注（新增字段，不改动既有字段语义，旧前端忽略即可）。
+		//
+		// 2026-11-08 起口径**随数据源变化**，必须如实报告用的是哪一个：
+		//   · 帧表：帧 = 该 slot 的全部字段 => 不存在稀疏帧（sparse_frames 恒 false）
+		//   · unified_data：L1 收窄后同刻只留变化字段 => 可能出现稀疏帧
+		// 若在这里固定写死 unified_data 的说明，而实际数据来自帧表，那就是
+		// 「响应对调用方说了假话」—— 比字段缺失更难发现。
+		resp["sparse_frames"] = sparseFrames
+		if usedFrames {
+			resp["frame_semantics"] = "数据源：telemetry_frame（帧表）。帧 = 该 slot 的全部字段，" +
+				"因此 frames 里每一帧包含设备当时解析出的完整字段集合；" +
+				"missing_known 表达「本帧缺该字段」，在帧表口径下即「该时刻该字段确实没有值」。"
+			resp["data_source"] = "telemetry_frame"
+		} else {
+			resp["frame_semantics"] = "数据源：unified_data（过渡期回落）。该表自 2026-11-07 起按" +
+				"「值变化 + 60s 心跳」落库：某一帧字段数少于 matched 表示这些字段本帧没有变化（未落库），" +
+				"不代表设备未上报。missing_known 表达的是「本帧未落库的字段」，不是「设备缺报」。"
+			resp["data_source"] = "unified_data"
+		}
 
 		// 最近一帧的逐字段 trace（§8.3 明示格式）+ reducer 的 reduced / missing_known。
 		if len(lastFrame) > 0 {

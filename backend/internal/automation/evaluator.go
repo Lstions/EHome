@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sourceref"
 	"ehome/backend/internal/sun"
@@ -940,8 +939,6 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	rules := *snapPtr
 
 	target := edgeDeviceID
-	var logicalID uint
-	resolved := false
 	for _, r := range rules {
 		// 来源组规则：匹配/过滤由 sourceref 快照决定（按 kind 分流，裁决 1）。
 		//   primary_backup：只收 active 成员帧（备成员帧在此丢弃，S1 的前提）；
@@ -965,43 +962,27 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 				})
 			continue
 		}
-		// 存量单设备/逻辑设备匹配（逐字节保持原逻辑）:
+		// 存量单设备匹配:
 		// TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐, 文档标注);
-		// 否则必须精确命中上报设备 (或其逻辑身份)。
+		// 否则必须精确命中上报设备。
+		//
+		// 历史: 曾有一条「或用其逻辑身份命中」的兜底分支 (TriggerEdgeDeviceID 可能存
+		// 逻辑设备 ID)，需要每帧一次 SQL 把 edge_device_id 解析成逻辑身份。E6 缺陷
+		// 正是这条双口径造成的 (trigger_edge_device_id 里存的是逻辑 id，帧查询用
+		// 成员 edge id)。逻辑设备概念层已整体移除 (2026-10-23,
+		// .contract/logical-device-removal.md §7)，trigger_edge_device_id 语义本来就
+		// 是 edge device id，双口径不存在了。
 		if r.TriggerEdgeDeviceID != 0 && r.TriggerEdgeDeviceID != target {
-			if !resolved {
-				logicalID = e.resolveLogicalID(target)
-				resolved = true
-			}
-			if logicalID == 0 || r.TriggerEdgeDeviceID != logicalID {
-				continue
-			}
+			continue
 		}
 		e.evalRule(r, target, fields, at)
 	}
 }
 
-// resolveLogicalID 解析边缘设备的最终逻辑身份 (合并链跟随, 与 alert 同链)。
-func (e *Evaluator) resolveLogicalID(edgeDeviceID uint) uint {
-	var dev models.EdgeDevice
-	if err := e.db.Select("id", "logical_device_id").First(&dev, edgeDeviceID).Error; err != nil {
-		return 0
-	}
-	if dev.LogicalDeviceID == nil || *dev.LogicalDeviceID == 0 {
-		return 0
-	}
-	target, err := datalifecycle.ResolveMergeTarget(e.db, *dev.LogicalDeviceID)
-	if err != nil {
-		logger.Warn("automation: resolve merge target failed", "edge_device_id", edgeDeviceID, "error", err)
-		return 0
-	}
-	return target
-}
-
 // evalRule 单规则状态机: armed → triggered (连续满足 DurationSec) → 冷却到期回 armed。
 //
 // deviceID 是本次上报的**边缘设备 ID**（Evaluate 入参），用于解析层 plan 的
-// (device, selector) 编译 —— 不能用 rule.TriggerEdgeDeviceID（规则可能绑逻辑设备）。
+// (device, selector) 编译 —— 不能用 rule.TriggerEdgeDeviceID（规则可为 0=任意设备）。
 func (e *Evaluator) evalRule(rule models.AutomationRule, deviceID uint, fields []parser.Field, at time.Time) {
 	// trigger 求值走解析层（literal 路径内部与 matchField 逐字节等价）。
 	// ok=false（本批无该字段 / unbound / kill switch）⇒ 不更新窗口、不触发。

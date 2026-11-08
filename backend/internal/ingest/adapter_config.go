@@ -61,12 +61,11 @@ func (*AdapterConfigParser) Decode(ctx DecodeContext) (Sample, error) {
 	// Method 字符串保持改造前格式：fmt.Sprintf("ConfigParser(%s)", dc.Name)
 	// 它已进生产日志与审计，改格式会造成历史不可比（M1 等价性判据之一）。
 	return Sample{
-		EdgeDeviceID:    ctx.EdgeDevice.ID,
-		LogicalDeviceID: ctx.LogicalDeviceID,
-		At:              ctx.At,
-		Fields:          fromParserFields(fields),
-		Method:          "ConfigParser(" + ctx.ConfigName + ")",
-		Quality:         QualityOk,
+		EdgeDeviceID: ctx.EdgeDevice.ID,
+		At:           ctx.At,
+		Fields:       fromParserFields(fields),
+		Method:       "ConfigParser(" + ctx.ConfigName + ")",
+		Quality:      QualityOk,
 	}, nil
 }
 

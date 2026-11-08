@@ -65,9 +65,13 @@ func TestNeverReportedEdgeDeviceGoesOffline(t *testing.T) {
 	if err := db.Create(&dev).Error; err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// GORM 的 autoUpdateTime 会覆盖 CreatedAt，故显式回写过去的时间。
+	// GORM 的 autoUpdateTime 会覆盖 CreatedAt/UpdatedAt，故显式回写过去的时间。
+	// 2026-10-25：计时起点是 max(created_at, updated_at)，两者都要回退。
 	if err := db.Model(&dev).UpdateColumn("created_at", created).Error; err != nil {
 		t.Fatalf("backdate created_at: %v", err)
+	}
+	if err := db.Model(&dev).UpdateColumn("updated_at", created).Error; err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
 	}
 
 	// 模拟创建后进入缓存（OnEdgeDeviceCreated 写零值 last_data_at）。
@@ -175,6 +179,9 @@ func TestRuntimeCreatedDeviceEntersOfflineDetection(t *testing.T) {
 	if err := db.Model(&dev).UpdateColumn("created_at", created).Error; err != nil {
 		t.Fatalf("backdate created_at: %v", err)
 	}
+	if err := db.Model(&dev).UpdateColumn("updated_at", created).Error; err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
 
 	// 关键：不调用 OnEdgeDeviceCreated（生产代码也不调用），直接跑一轮检测。
 	d.checkEdgeDevicesOffline(db.Session(&gorm.Session{}))
@@ -222,5 +229,42 @@ func TestPeriodicReloadKeepsFreshInMemoryTimestamp(t *testing.T) {
 	d.mu.RUnlock()
 	if !after.Equal(fresh) {
 		t.Fatalf("periodic reload overwrote a fresh in-memory timestamp: %v -> %v", fresh, after)
+	}
+}
+
+// TestRestoredEdgeDeviceNotImmediatelyOffline — 「恢复已删除设备 / 换节点」复用旧
+// edge_devices 行：created_at 可能是几个月前，但行刚刚被 restore/PUT 更新过。
+//
+// 2026-10-25 修复前：从未上报的设备用 created_at 判超时 ⇒ 恢复后的**下一个 tick**
+// 就被判 offline（用户看到「恢复成功但立刻离线」，还会触发 source-offline hook）。
+// 现在计时起点是 max(created_at, updated_at)，restore 刷新 updated_at ⇒ 重新计时。
+func TestRestoredEdgeDeviceNotImmediatelyOffline(t *testing.T) {
+	d, db := setupExtraDetector(t)
+
+	dev := ehomeModels.EdgeDevice{
+		Name: "restored", NodeID: "NODE-11", ChannelID: 1,
+		Status: ehomeModels.EdgeDeviceStatusPending,
+	}
+	if err := db.Create(&dev).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 模拟「几个月前创建、刚刚被恢复」：created_at 很旧，updated_at 是现在。
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := db.Model(&dev).UpdateColumn("created_at", old).Error; err != nil {
+		t.Fatalf("backdate created_at: %v", err)
+	}
+	if err := db.Model(&dev).UpdateColumn("updated_at", time.Now()).Error; err != nil {
+		t.Fatalf("touch updated_at: %v", err)
+	}
+
+	d.OnEdgeDeviceCreated(dev.ID)
+	d.checkEdgeDevicesOffline(db.Session(&gorm.Session{}))
+
+	var stored ehomeModels.EdgeDevice
+	if err := db.First(&stored, dev.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.Status != ehomeModels.EdgeDeviceStatusPending {
+		t.Fatalf("刚恢复的设备状态是 %q，应保持 pending（按 updated_at 重新计时，不能立刻判离线）", stored.Status)
 	}
 }

@@ -313,8 +313,17 @@ func TestRetentionTask_RunsDeliveryCleanup(t *testing.T) {
 	seedDelivery(t, db, models.DeliveryStateFailed, now.AddDate(0, 0, -200))    // 审计窗外 → 删
 	seedDelivery(t, db, models.DeliveryStateFailed, now.AddDate(0, 0, -100))    // 审计窗内 → 留
 	seedNotification(t, db, "ancient-unread", false, now.AddDate(0, 0, -1000))  // 同批的 notifications 清理
-	ld := seedRetentionDevice(t, db, "d1-deliveries", 365, now.AddDate(0, 0, -400))
-	_ = ld
+	// 一台设备 + 一行到期数据, 证明清理不会打断 retention 主流程。
+	// (原 seedRetentionDevice 随逻辑设备层删除; 保留期现为系统级单一窗口。)
+	retDev := seedDevice(t, db, "d1-deliveries", "bms_jbd", "d1-deliveries-hw", false)
+	if err := db.Create(&models.UnifiedData{
+		DeviceID:   retDev.ID,
+		SensorName: "voltage",
+		Value:      1,
+		Timestamp:  now.AddDate(0, 0, -400),
+	}).Error; err != nil {
+		t.Fatalf("seed retention row: %v", err)
+	}
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }
