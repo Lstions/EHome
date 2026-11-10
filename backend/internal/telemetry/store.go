@@ -30,12 +30,26 @@ const (
 // 超出就直接报错让调用方去走 rollup，而不是让某个图表请求把 570 MB 拉进内存
 // 把进程打爆（§5.1 的 ⚠ 就是这条）。
 const (
-	// MaxDecodeFrames 是单次 DecodeRange 允许解码的帧数上限（≈ 6 小时 1 Hz）。
+	// MaxDecodeFrames 是**一次性解码**（DecodeRange / DecodeFrames 单批）的帧数上限
+	// （≈ 6 小时 1 Hz）。分页解码（DecodeRangeAnchored 的生产路径）不再受它限制，
+	// 由下面的 maxScanFrames 兜底 —— 32768 墙正是「锚点被截断丢掉」的根因。
 	MaxDecodeFrames = 32768
 	// MaxDecodeWindow 是单次 DecodeRange 允许的时间窗上限。
 	MaxDecodeWindow = 24 * time.Hour
 	// LatestSnapshotLookback 是 LatestSnapshot 无关键帧时的回退窗口。
 	LatestSnapshotLookback = 24 * time.Hour
+
+	// maxScanFrames 是分页解码的**扫描帧数**硬上限：从锚点起最多扫这么多帧。
+	//
+	// 为什么是 8 × MaxDecodeFrames = 262144 帧：分页解码去掉了「按请求窗口截断」
+	// 的墙（保留锚点），但仍需要防「锚点远古 + 大窗口」把无界帧拉进内存/CPU。
+	// 262144 帧 @1 Hz ≈ 72.8 小时，覆盖生产最坏形态（37 小时历史无关键帧 + 6 小时
+	// 请求窗口 ≈ 43 小时）仍有 ~1.7 倍余量；10 fps 设备也只多扫 7.3 小时。
+	// 超限**不静默**：剩余未解码帧数记进 DecodeStats.FramesTruncated，调用方据此报错/回落。
+	maxScanFrames = 8 * MaxDecodeFrames
+	// decodeScanPageSize 是分页解码每页取的帧数（≤ maxScanFrames）。
+	// 8192 帧 @1 Hz ≈ 2.3 小时/页；一页的解码工作 ≈ 几十毫秒，避免单页过大。
+	decodeScanPageSize = 8192
 )
 
 // RangeTooLargeError 表示请求超出解码护栏。
@@ -126,6 +140,63 @@ func (s *Store) EncodeAndPersist(deviceID uint, at time.Time, commandTemplateID 
 		return frame, err
 	}
 	return frame, nil
+}
+
+// frameCursor 是 (ts, seq) keyset 分页游标（上一页最后一帧的键）。
+type frameCursor struct {
+	ts  time.Time
+	seq int16
+}
+
+// queryFramesPage 按 (ts, seq) keyset 分页取帧（升序，[from, to) 左闭右开）。
+//
+// 为什么用 keyset 而不是 LIMIT/OFFSET：偏移分页在深翻页时要把前面所有行再扫一遍
+// （O(n²)），而读路径一次可能要翻 30+ 页（262144 帧 / 8192）。keyset 每页都走
+// 主键索引 (device_id, ts, seq) 的区间扫描，代价与页码无关。
+//
+// after == nil 表示第一页（等价于 ts >= from）；否则只取 (ts, seq) **严格大于**
+// 游标的帧 —— seq 参与比较，保证同一时间戳的多帧不会在页边界重复/丢帧。
+func (s *Store) queryFramesPage(deviceID uint, from, to time.Time, after *frameCursor, limit int) ([]models.TelemetryFrame, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("telemetry: nil db")
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	q := s.db.Session(&gorm.Session{}).
+		Where("device_id = ? AND ts >= ? AND ts < ?", deviceID, from, to)
+	if after != nil {
+		q = q.Where("(ts > ? OR (ts = ? AND seq > ?))", after.ts, after.ts, after.seq)
+	}
+	q = q.Order("ts ASC, seq ASC").Limit(limit)
+	var frames []models.TelemetryFrame
+	if err := q.Find(&frames).Error; err != nil {
+		return nil, fmt.Errorf("telemetry: query frame page for device %d [%s,%s): %w",
+			deviceID, from.Format(time.RFC3339), to.Format(time.RFC3339), err)
+	}
+	return frames, nil
+}
+
+// countFramesAfter 统计 [from, to) 内 (ts, seq) 严格大于游标的帧数。
+//
+// 只服务于「扫描预算耗尽」这一个分支（把未解码的剩余帧数如实记进
+// FramesTruncated），正常路径零额外查询。
+func (s *Store) countFramesAfter(deviceID uint, from, to time.Time, after *frameCursor) (int64, error) {
+	if s.db == nil {
+		return 0, fmt.Errorf("telemetry: nil db")
+	}
+	q := s.db.Session(&gorm.Session{}).
+		Model(&models.TelemetryFrame{}).
+		Where("device_id = ? AND ts >= ? AND ts < ?", deviceID, from, to)
+	if after != nil {
+		q = q.Where("(ts > ? OR (ts = ? AND seq > ?))", after.ts, after.ts, after.seq)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("telemetry: count remaining frames for device %d [%s,%s): %w",
+			deviceID, from.Format(time.RFC3339), to.Format(time.RFC3339), err)
+	}
+	return n, nil
 }
 
 // queryFrames 按时间窗取帧（升序）。
