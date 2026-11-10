@@ -33,10 +33,13 @@ package api
 //
 // **3) 不能静默扫几百万帧**
 //
-// 解码 N 帧的成本远超索引扫描。窗口 > 1 小时或帧数 > MaxDecodeFrames 时**不解码**，
-// 直接回落 unified_data 的 SQL 聚合（那是索引扫描 + 服务端分桶，成本本就低）。
+// 解码 N 帧的成本远超索引扫描。avg 模式：窗口 > frameDecodeMaxWindow 或帧数 >
+// MaxDecodeFrames 时**不解码**，交给 rollup 的分钟聚合（预聚合，写时算好）。
 // 超过 MaxDecodeWindow（24h）时 DecodeRange 本身会拒绝 —— 我们提前判掉，不让它
 // 走到报错路径。
+// change 模式（2026-11-10，task-5）：它有独立长窗通路 —— rollup 的 Min/Max/Last
+// 做**精确预筛**（min==max 的分钟不可能翻转，可安全跳过），只精解候选分钟
+// （生产 7 天实测 2.3%），30/90 天也只需解几万帧；见 change_longwindow.go。
 
 import (
 	"context"
@@ -68,6 +71,29 @@ const (
 	// 1 小时的依据：1 Hz 下 3,600 帧（MaxDecodeFrames=32,768 的 11%），解码耗时
 	// 与 unified_data 的索引扫描同量级；再长就该走 rollup 或回落 SQL 聚合。
 	defaultFrameDecodeMaxWindow = time.Hour
+
+	// maxChangeDecodeWindow 是 change 模式**纯帧分段解码**的窗口上限（8 天，fallback 用）。
+	//
+	// ============ change 为什么需要单独的长窗通路（2026-11-10，task-5）============
+	//
+	// change 不能直接用 rollup 的聚合值：rollup payload 只有 avg/min/max/last/count，
+	// 表达不了「首点 + 每次值变化」的翻转序列（用聚合值重建 0→1 跃变会算错触发次数，
+	// 见 rollup_read.go 文件头的硬约束）。改造前它只能单次逐帧解码，受
+	// frameDecodeMaxWindow（代码默认 1h / 生产 6h）与 MaxDecodeFrames(32768) 限制
+	// ⇒ >6h 的 change 窗口**必然失败**（200 + 空数组，被前端当成「暂无数据」）。
+	//
+	// 现在有两条通路（见 change_longwindow.go）：
+	//  1. 首选 **rollup 精确预筛 + 帧表精解候选分钟**：只解「这一分钟确实变过」的分钟
+	//     （生产 7 天实测 2.3%），30/90 天也在秒级；窗口上限 maxChangeLongWindow(90d)。
+	//  2. fallback **纯帧分段解码**（decodeFrameWindowSegmented）：预筛不可用时使用，
+	//     窗口切成 ≤frameDecodeMaxWindow 的段逐段解码、拼接原始点、最后只归约一次。
+	//
+	// 这个常量（8 天）是 **fallback 的上限**，与 device_history_frames.go 的
+	// maxFrameHistoryWindow 对齐（同一套分段机制；那里踩过「按段数定上限 = 上限随
+	// 配置漂移」的坑，所以上限按时长定）。8 天 = 32 段 x 6h ≈ 69 万帧（1 Hz）
+	// ≈ 9 s（12.8µs/帧），是 fallback 可接受的边界；30 天纯帧解码约 33 s，所以
+	// >8 天的窗口必须依赖 rollup 预筛，预筛不可用时返回**诚实错误**。
+	maxChangeDecodeWindow = maxFrameHistoryWindow
 )
 
 // frameReadEnabled / frameDecodeMaxWindow 是进程级状态（启动读一次 env，测试可覆盖）。
@@ -148,8 +174,50 @@ func (s frameSource) Points(ctx context.Context, q historyPointQuery) ([]History
 	if q.BatchHint {
 		scope = frameDecodeAllFields
 	}
-	// 整窗路径：0 点 + 有帧 ⇒ 视为解码故障，必须回落（allowEmpty=false）。
-	decoded, err := decodeFrameWindow(ctx, s.db, s.dict, q.EdgeDeviceID, q.Start, q.End, scope, false)
+	// ============ change 长窗：分段解码（2026-11-10）============
+	//
+	// 窗口 > frameDecodeMaxWindow 时把窗口切成 ≤frameDecodeMaxWindow 的段逐段解码，
+	// 按时间序拼接**原始点**，最后只做一次 change 归约（下面的 aggregateFramePoints）。
+	// 逐段归约会在每个接缝多出假翻转点，所以归约必须推迟到拼接之后。
+	//
+	// ⚠ 分段路径的 scope **必须是单字段**（q.Category），不能沿用批请求的 "*"：
+	// 8 天 x 29 字段 ≈ 2000 万个点会直接把进程内存打爆。批请求里两个 change 类
+	// （protection_status / fet_status）各自单字段解码一次，成本可接受（2 x 9 s 是
+	// 最坏情况；诊断卡只请求其中一个）。
+	segmented := q.Mode == AggModeChange && q.End.Sub(q.Start) > frameDecodeMaxWindow
+	if segmented {
+		scope = q.Category
+		// ============ 长窗 change 首选 rollup 预筛（2026-11-10，task-5）============
+		//
+		// 纯帧分段解码 7 天 ≈ 60 万帧 ≈ 7.7 s、30 天 ≈ 33 s，不可接受。
+		// change_longwindow.go 用 rollup 的分钟 Min/Max/Last 做**精确预筛**：
+		// 只精解「这一分钟确实变过」的分钟（生产 7 天实测 2.3%），30/90 天降到
+		// 秒级。预筛不可用（rollup 覆盖未验证 / 读取失败）时才回落纯帧分段解码。
+		if pts, handled, perr := s.changeLongWindowPoints(ctx, q); perr != nil {
+			return nil, perr
+		} else if handled {
+			return pts, nil
+		}
+		if q.End.Sub(q.Start) > maxChangeDecodeWindow {
+			// 预筛不可用 + 超过纯帧分段解码上限：返回**诚实错误**，绝不返回空数组
+			// （前端会把空数组渲染成「暂无数据」= 谎报没有保护触发）。
+			return nil, fmt.Errorf(
+				"change 长窗读路径不可用（rollup 覆盖未验证或读取失败），且窗口 %s 超过纯帧分段解码上限 %d 天；"+
+					"请缩小窗口到 %d 天以内，或等待分钟聚合回填覆盖该窗口",
+				q.End.Sub(q.Start).Truncate(time.Second),
+				int(maxChangeDecodeWindow/(24*time.Hour)), int(maxChangeDecodeWindow/(24*time.Hour)))
+		}
+	}
+	var (
+		decoded map[string][]HistoryPoint
+		err     error
+	)
+	if segmented {
+		decoded, err = decodeFrameWindowSegmented(ctx, s.db, s.dict, q.EdgeDeviceID, q.Start, q.End, scope)
+	} else {
+		// 整窗路径：0 点 + 有帧 ⇒ 视为解码故障，必须回落（allowEmpty=false）。
+		decoded, err = decodeFrameWindow(ctx, s.db, s.dict, q.EdgeDeviceID, q.Start, q.End, scope, false)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -416,6 +484,13 @@ func frameReadEligible(enabled bool, dict telemetry.SlotDictionary, q historyPoi
 		return false
 	}
 	window := q.End.Sub(q.Start)
+	if q.Mode == AggModeChange {
+		// change 有独立的长窗通路（rollup 预筛 / 纯帧分段解码），见 change_longwindow.go。
+		// 上限是 maxChangeLongWindow(90d)；超过它 → frameReadUnavailableError 给诚实错误。
+		return window <= maxChangeLongWindow
+	}
+	// avg（连续量）：短窗逐帧解码；> frameDecodeMaxWindow 本该由 rollup 服务，
+	// 不能在这里逐帧解（会撞 MaxDecodeFrames 并静默截断）。
 	if window > frameDecodeMaxWindow || window > telemetry.MaxDecodeWindow {
 		return false
 	}
@@ -460,10 +535,11 @@ func selectHistorySource(ctx context.Context, db *gorm.DB, q historyPointQuery) 
 	return frameSource{db: db, dict: dict}, nil
 }
 
-// frameReadUnavailableError 把 frameReadEligible=false 的**五种成因分别说清**。
+// frameReadUnavailableError 把 frameReadEligible=false 的**六种成因分别说清**。
 //
-// 为什么不用一个笼统的 "frame read unavailable"：五种成因的处置完全不同 ——
-// 配置错要改环境变量、启动未完成要等、调用方用错要改代码、窗口超限要缩小窗口。
+// 为什么不用一个笼统的 "frame read unavailable"：六种成因的处置完全不同 ——
+// 配置错要改环境变量、启动未完成要等、调用方用错要改代码、窗口超限要缩小窗口
+// （avg 与 change 的上限不同，见各自分支）。
 // 一句笼统的话会让排障的人从零开始猜。
 func frameReadUnavailableError(dict telemetry.SlotDictionary, q historyPointQuery) error {
 	switch {
@@ -479,11 +555,20 @@ func frameReadUnavailableError(dict telemetry.SlotDictionary, q historyPointQuer
 	case !q.End.After(q.Start):
 		return fmt.Errorf("时间窗口无效（start=%s end=%s）；end 必须晚于 start",
 			q.Start.Format(time.RFC3339), q.End.Format(time.RFC3339))
+	case q.Mode == AggModeChange && q.End.Sub(q.Start) > maxChangeLongWindow:
+		// change 的窗口上限（90 天）比 avg 的短窗分界宽松得多：它有独立的长窗通路
+		// （rollup 精确预筛 + 帧表精解，见 change_longwindow.go）。超过 90 天没有业务
+		// 场景（诊断卡最大档位就是 90 天），且 rollup 分区保留期之外也读不到分钟桶。
+		return fmt.Errorf("change 模式（翻转序列）窗口上限 %d 天；请求窗口 %s 超过该上限。"+
+			"change 语义必须逐帧重建翻转序列（不能走分钟聚合，否则触发次数会算错）；"+
+			"请把窗口缩小到 %d 天以内",
+			int(maxChangeLongWindow/(24*time.Hour)), q.End.Sub(q.Start).Truncate(time.Second),
+			int(maxChangeLongWindow/(24*time.Hour)))
 	default:
-		// 只剩「窗口超过帧表解码上限」这一种：请求窗口超过 frameDecodeMaxWindow（默认 6h）。
+		// 「窗口超过帧表单次解码上限」：请求窗口超过 frameDecodeMaxWindow（代码默认 1h / 生产 6h）。
 		//
-		// 这是**现实约束**而非故障：更长的窗口本该由 rollup 承担。走到这里说明 rollup
-		// 也没能服务这个窗口，所以确实答不了 —— 返回错误比返回空诚实。
+		// 这是**现实约束**而非故障：更长的 avg 窗口本该由 rollup 承担。走到这里说明
+		// rollup 也没能服务这个窗口，所以确实答不了 —— 返回错误比返回空诚实。
 		return fmt.Errorf("查询窗口 %s 超过帧表单次解码上限 %s，且该窗口尚未被分钟聚合覆盖；"+
 			"请缩小到 %s 以内（例如先看近 1 小时），或等待分钟聚合回填推进到该窗口",
 			q.End.Sub(q.Start).Truncate(time.Second), frameDecodeMaxWindow, frameDecodeMaxWindow)
@@ -659,6 +744,58 @@ func decodeFrameWindow(ctx context.Context, db *gorm.DB, dict telemetry.SlotDict
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// decodeFrameWindowSegmented 把 [from, to) 切成 ≤frameDecodeMaxWindow 的段，逐段解码后
+// 按时间序拼接**原始点**（未归约）。返回的 map[字段名] 内的点集仍按时间升序。
+//
+// ============ 为什么必须「先拼接、后归约」（2026-11-10，task-5）============
+//
+// change 归约 = 首点 + 每个「值变化」的点，它依赖**相邻原始点**的比较：
+//
+//	逐段归约再拼接 => 每段都会各自输出「本段首点」，即使它与上一段末点值相同
+//	                  => 每个接缝多 1 个假翻转点（前端会把触发次数算多）；
+//	先拼接原始点 => 归约只看一次完整序列 => 与单段解码**逐点相同**（有单测钉住）。
+//
+// 这是本函数存在的唯一理由：它是 change 长窗在 rollup 预筛不可用时的 fallback
+// （首选路径见 change_longwindow.go）。
+//
+// ============ 每段 allowEmpty=true 的理由 ============
+//
+// 单段可能合法地没有任何点（设备在段内离线 / 该字段在段内无采样）。整窗的
+// 「有帧但 0 点 = 解码坏了」判据放在**调用方拼接之后**做（见 frameSource.Points），
+// 不能在段内做：段内做会把「这段没数据」误判成故障，整窗 500。
+//
+// 段边界是**严格半开** [segStart, segEnd)，与 decodeFrameWindow 内部
+// ts >= from && ts < to 的裁剪口径一致 ⇒ 相邻段既不重叠也不留缝。
+func decodeFrameWindowSegmented(
+	ctx context.Context, db *gorm.DB, dict telemetry.SlotDictionary,
+	deviceID uint, from, to time.Time, scope string,
+) (map[string][]HistoryPoint, error) {
+	if !to.After(from) {
+		return nil, fmt.Errorf("segmented frame decode: empty range [%s, %s)",
+			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	out := make(map[string][]HistoryPoint, 32)
+	for segStart := from; segStart.Before(to); {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		segEnd := segStart.Add(frameDecodeMaxWindow)
+		if segEnd.After(to) {
+			segEnd = to
+		}
+		part, err := decodeFrameWindow(ctx, db, dict, deviceID, segStart, segEnd, scope, true)
+		if err != nil {
+			return nil, fmt.Errorf("segmented frame decode [%s, %s): %w",
+				segStart.Format(time.RFC3339), segEnd.Format(time.RFC3339), err)
+		}
+		for name, pts := range part {
+			out[name] = append(out[name], pts...)
+		}
+		segStart = segEnd
+	}
+	return out, nil
 }
 
 // decodeHookForTest 是**测试专用**的解码次数计数器（生产恒为 nil）。

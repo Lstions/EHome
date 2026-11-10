@@ -153,13 +153,26 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
     return '历史数据加载失败'
   }
 
+  /**
+   * batch 响应的解析结果。
+   *
+   * allFailedReason 非空表示：**每一个请求的 category 都带了服务端 error 字段**
+   * （后端 2026-11-10 新增的纯增量字段，见 handler_data.go 的 catResult.Error）。
+   * 这不是网络失败，而是「后端逐 category 查询/解码失败」—— 重试与逐测点降级都不会
+   * 改变结果，所以由 fetch 直接走失败态（诊断卡单 category ⇒ 立刻「加载失败」）。
+   */
+  interface BatchResult {
+    series: HistorySeries[]
+    allFailedReason: string
+  }
+
   async function requestBatch(
     deviceId: number | string,
     categories: string[],
     startTime: Date,
     endTime: Date,
     signal?: AbortSignal,
-  ): Promise<HistorySeries[]> {
+  ): Promise<BatchResult> {
     const batchRes = await client.get<unknown, any>(BATCH_URL, {
       params: {
         device_pk: deviceId,
@@ -173,15 +186,31 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
     })
     const collected: HistorySeries[] = []
     const batchData = batchRes?.data || batchRes || []
+    const requested = new Set(categories)
+    const seen = new Set<string>()
+    let errored = 0
+    let firstError = ''
     if (Array.isArray(batchData)) {
       for (const entry of batchData) {
-        const cat = entry.category
-        if (!cat) continue
+        const cat = entry?.category
+        if (!cat || !requested.has(cat)) continue
+        seen.add(cat)
+        const errMsg = typeof entry?.error === 'string' ? entry.error.trim() : ''
+        if (errMsg) {
+          // 该 category 查询失败：不要把它当成「没有数据」混进 series。
+          errored += 1
+          if (!firstError) firstError = errMsg
+          continue
+        }
         const s = buildSeries(cat, entry.data || [])
         if (s) collected.push(s)
       }
     }
-    return collected
+    const allFailed = requested.size > 0 && seen.size === requested.size && errored === requested.size
+    return {
+      series: collected,
+      allFailedReason: allFailed ? firstError || '历史数据加载失败' : '',
+    }
   }
 
   async function requestOneCategory(
@@ -285,15 +314,20 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
     error.value = ''
     try {
       let result: HistorySeries[]
+      let allCategoriesFailedReason = ''
       try {
-        result = await requestBatch(deviceId, categories, startTime, endTime, signal)
+        const batch = await requestBatch(deviceId, categories, startTime, endTime, signal)
+        result = batch.series
+        allCategoriesFailedReason = batch.allFailedReason
       } catch (firstError) {
         if (isCanceled(firstError, signal)) return series.value
         // ② 原样重试一次（同一 timeoutMs / signal）——「一次重试 + 明确错误态」比无限降级便宜得多
         await waitForRetry(signal)
         if (signal?.aborted || !isLatest()) return series.value
         try {
-          result = await requestBatch(deviceId, categories, startTime, endTime, signal)
+          const retryBatch = await requestBatch(deviceId, categories, startTime, endTime, signal)
+          result = retryBatch.series
+          allCategoriesFailedReason = retryBatch.allFailedReason
         } catch (retryError) {
           if (isCanceled(retryError, signal)) return series.value
           const canFallback = fallback === 'per-category' && categories.length <= maxFallbackCategories
@@ -304,6 +338,11 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
           result = degraded.series
         }
       }
+      // 服务端逐 category 报错（后端 200 + {"error": "..."}）：重试/降级都不会
+      // 改变结果，直接走失败态 —— 否则「存储/解码故障」会被渲染成「暂无数据」。
+      // 只在 throwOnError=true 时抛（诊断卡路径）；多 category 主图保持既有行为：
+      // 单点失败不影响其它曲线，全部失败时仍是空 series。
+      if (allCategoriesFailedReason && throwOnError) throw new Error(allCategoriesFailedReason)
       // 已被更新的请求取代：不得覆盖更新请求的状态与数据
       if (!isLatest()) return series.value
       series.value = result

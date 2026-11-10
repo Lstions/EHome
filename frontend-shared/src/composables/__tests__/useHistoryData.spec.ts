@@ -357,3 +357,76 @@ describe("并发 fetch + abort 竞态：旧请求不得熄灭新请求的 loadin
     expect(c.loading.value).toBe(false)
   })
 })
+
+describe('服务端逐 category error（后端 catResult.error 纯增量字段，task-5）', () => {
+  /**
+   * 背景：batch 端点曾经把单 category 的查询/解码失败吞成 200 + data: []，
+   * 前端与「这个字段确实没有数据」无法区分 ⇒ 故障被渲染成「暂无数据」，
+   * 这正是 BMS 诊断卡 bug 藏了数天的原因。后端现在会带 error 字段，
+   * 本组用例锁前端两件事：
+   *   ① throwOnError=true 且**全部**请求 category 都带 error ⇒ 立刻抛错（诊断卡失败态）；
+   *   ② 其余情况保持既有行为（部分成功照常返回；主图单点失败不拖垮整图）。
+   * 服务端逐 category error **不是网络失败**：不应该重试、也不应该逐测点降级。
+   */
+  const batchWith = (entries: Array<{ category: string; data?: unknown[]; error?: string }>) => ({
+    code: 0,
+    message: 'ok',
+    data: entries,
+  })
+  const CHANGE_ERR =
+    'change 模式（翻转序列）窗口上限 90 天；请求窗口 2184h0m0s 超过该上限。change 语义必须逐帧重建翻转序列'
+
+  it('诊断卡单 category：带 error ⇒ throwOnError 抛后端原因，且不重试、不降级', async () => {
+    clientGet.mockResolvedValue(
+      batchWith([{ category: 'protection_status', data: [], error: CHANGE_ERR }]),
+    )
+    const c = useHistoryData({ throwOnError: true })
+    await expect(c.fetch(DEVICE, ['protection_status'], START, END)).rejects.toThrow(/窗口上限 90 天/)
+    expect(c.error.value).toContain('加载失败')
+    expect(c.error.value).toContain('窗口上限 90 天')
+    expect(c.loading.value).toBe(false)
+    // 200 内的业务失败：重发同一请求不会改变结果 ⇒ 不重试、不降级（省 1 次请求 + 400ms）
+    expect(clientGet.mock.calls.filter((call) => call[0] === BATCH)).toHaveLength(1)
+    expect(clientGet.mock.calls.filter((call) => call[0] === SINGLE)).toHaveLength(0)
+  })
+
+  it('throwOnError=false（主图默认）：保持既有行为 —— 空 series、不置错、不弹 toast', async () => {
+    clientGet.mockResolvedValue(batchWith([{ category: 'a', data: [], error: 'boom' }]))
+    const c = useHistoryData()
+    const series = await c.fetch(DEVICE, ['a'], START, END)
+    expect(series).toEqual([])
+    expect(c.error.value).toBe('')
+    expect(handleError).not.toHaveBeenCalled()
+  })
+
+  it('多 category 部分失败：有数据照常返回，失败的点被跳过，不抛错（单点失败不影响主图）', async () => {
+    clientGet.mockResolvedValue(
+      batchWith([
+        { category: 'a', data: [{ created_at: POINT_TIME, value: 3.3 }] },
+        { category: 'b', data: [], error: 'boom' },
+        { category: 'c', data: [{ created_at: POINT_TIME, value: 9 }] },
+      ]),
+    )
+    const c = useHistoryData({ throwOnError: true })
+    const series = await c.fetch(DEVICE, ['a', 'b', 'c'], START, END)
+    expect(series.map((s) => s.category)).toEqual(['a', 'c'])
+    expect(c.error.value).toBe('')
+  })
+
+  it('只有「每个请求 category 都带 error」才抛；响应里缺某个 category 不算全失败', async () => {
+    clientGet.mockResolvedValue(batchWith([{ category: 'a', data: [], error: 'boom' }]))
+    const c = useHistoryData({ throwOnError: true })
+    // 请求 a,b 但响应只有 a（且 a 带 error）⇒ 未覆盖全部请求 category ⇒ 不抛
+    const series = await c.fetch(DEVICE, ['a', 'b'], START, END)
+    expect(series).toEqual([])
+    expect(c.error.value).toBe('')
+  })
+
+  it('成功响应（无 error 字段）不会被误判为失败', async () => {
+    clientGet.mockResolvedValue(batchPayload(['a']))
+    const c = useHistoryData({ throwOnError: true })
+    const series = await c.fetch(DEVICE, ['a'], START, END)
+    expect(series.map((s) => s.category)).toEqual(['a'])
+    expect(c.error.value).toBe('')
+  })
+})

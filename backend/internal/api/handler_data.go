@@ -565,9 +565,23 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		useAgg := aggMode != AggModeRaw && shouldAggregateHistory(db, maxPoints, startTime, endTime)
 
 		// Query all categories in parallel
+		//
+		// Error 是**纯增量**字段（2026-11-10，task-5）：单 category 查询失败时填可读原因。
+		//
+		// ============ 为什么必须加它（这正是一个 bug 藏了数天的原因）============
+		//
+		// 旧实现：单 category 出错 ⇒ Data=[] + HTTP 200 + 仅打 WARN 日志。
+		// 前端拿到的形状与「这个字段确实没有数据」**完全一样** ⇒ 渲染成「暂无数据」，
+		// 用户不会报障、运维看不到错误，而后端日志里其实一直有 WARN。
+		//
+		// 用 omitempty 保证：成功响应里**不出现**该字段 ⇒ 对既有前端契约零影响
+		// （只增字段、不改形状）。前端 useHistoryData 会收集带 error 的 category，
+		// throwOnError=true 时**全部** category 都带 error 才抛错（诊断卡单 category
+		// ⇒ 立刻「加载失败」；多 category 主图不受单点失败影响）。
 		type catResult struct {
 			Category string      `json:"category"`
 			Data     interface{} `json:"data"`
+			Error    string      `json:"error,omitempty"`
 		}
 		results := make([]catResult, len(categories))
 
@@ -610,11 +624,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 						BatchHint: true,
 					})
 					if err != nil {
-						// 单 category 查询错误: 保持现状 (忽略 error 返回空 data,
-						// 不改 500), 仅记录 warn。
+						// 单 category 查询错误：**保留 HTTP 200**（其它 category 已经成功，
+						// 整批 500 会让 9 个正常曲线一起消失），但把原因透传给前端 ——
+						// Data 保持 [] 兼容旧前端，Error 让新前端能显示「加载失败」而不是
+						// 谎报「暂无数据」。WARN 日志保留（服务端可观测）。
 						logger.Warnf("[unified-data-historical-batch] aggregate failed device_pk=%d category=%s: %v",
 							devicePK, category, err)
-						results[idx] = catResult{Category: category, Data: []HistoryPoint{}}
+						results[idx] = catResult{Category: category, Data: []HistoryPoint{}, Error: err.Error()}
 						return
 					}
 					results[idx] = catResult{Category: category, Data: points}
