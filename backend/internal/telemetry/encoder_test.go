@@ -105,7 +105,8 @@ func TestEncoderHeartbeatKeyFrame(t *testing.T) {
 	if mid.FrameKind != models.TelemetryFrameKindDelta {
 		t.Errorf("30s 后应为增量帧，得到 %d", mid.FrameKind)
 	}
-	// 距**上一帧**（at+30s）超过 60 s：必须强制关键帧（值完全没变也要发）
+	// 距**上一帧**（at+30s）超过 60 s：上报断流兜底必须强制关键帧（值完全没变也要发）。
+	// 此时间距上次关键帧也 >= 60s，周期判据同时成立 —— 两条判据都成立时只发一个关键帧。
 	hb, err := enc.EncodeFrame(1, at.Add(30*time.Second+61*time.Second), 0, readingsOf(vals, order3))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -115,6 +116,122 @@ func TestEncoderHeartbeatKeyFrame(t *testing.T) {
 	}
 	if got := enc.Stats().ChainBreaks; got != 1 {
 		t.Errorf("ChainBreaks = %d, want 1", got)
+	}
+}
+
+// TestEncoderPeriodicKeyFrameAt1Hz 钉住「周期关键帧」契约（方案 §4.5/§8：每 60 s 强制一个）。
+//
+// 这是一个**回归用例**（生产 dev14 图表全空的根因）：旧判据只有 at.Sub(st.lastAt)
+// （距**上一帧**），1 Hz 连续上报的帧间隔恒为 1 s ⇒ 永远不触发；该设备自进程启动后
+// 只有 1 个关键帧。读侧把任意窗口的起点锚回那个唯一关键帧，跨度超过
+// MaxDecodeFrames(32768 帧 ≈ 9h06m) 就截断丢锚点 ⇒ 0 点 ⇒ 图表空。
+func TestEncoderPeriodicKeyFrameAt1Hz(t *testing.T) {
+	dict := NewMemorySlots()
+	const interval = 60 * time.Second
+	enc := NewEncoder(EncoderConfig{KeyFrameInterval: interval}, dict)
+	at := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	vals := baseReadings(3.2, 10, 60)
+
+	var keyAt []time.Duration
+	for i := 0; i <= 180; i++ { // 1 Hz × 180 帧 = 3 分钟
+		off := time.Duration(i) * time.Second
+		f, err := enc.EncodeFrame(1, at.Add(off), 0, readingsOf(vals, order3))
+		if err != nil {
+			t.Fatalf("encode i=%d: %v", i, err)
+		}
+		isKey := f.FrameKind == models.TelemetryFrameKindKey
+		if isKey {
+			keyAt = append(keyAt, off)
+		}
+		// 逐帧钉住判据边界：只有整 60 s 处是关键帧。
+		// 判据是 >= interval（与回填引擎 partition_job.go 的
+		// k.TS.Sub(lastKeyFrameAt) >= KeyFrameInterval 对齐），恰在边界上的帧必须触发。
+		if want := i%60 == 0; want != isKey {
+			t.Fatalf("i=%d（t+%s）frame_kind=%d，want 关键帧=%v", i, off, f.FrameKind, want)
+		}
+	}
+	if len(keyAt) < 3 {
+		t.Fatalf("1 Hz × 180 帧的关键帧数 = %d，want >= 3（0s/60s/120s/180s）；"+
+			"只有 1 个就是「距上一帧」判据的回归", len(keyAt))
+	}
+	// 契约的本质：任意相邻关键帧间隔不超过 KeyFrameInterval（最坏错位窗口有界）。
+	for i := 1; i < len(keyAt); i++ {
+		if gap := keyAt[i] - keyAt[i-1]; gap > interval {
+			t.Fatalf("相邻关键帧间隔 = %s > %s（最坏错位窗口被放大）", gap, interval)
+		}
+	}
+	// 周期关键帧不是上报断流：ChainBreaks 必须保持 0（该指标只统计帧间间隙）。
+	if got := enc.Stats().ChainBreaks; got != 0 {
+		t.Errorf("ChainBreaks = %d, want 0（周期关键帧不能被计入断流）", got)
+	}
+	// 关键帧数也要计入统计（双写观测口径）。
+	if got := enc.Stats().KeyFrames; got != int64(len(keyAt)) {
+		t.Errorf("Stats().KeyFrames = %d, want %d", got, len(keyAt))
+	}
+}
+
+// TestEncoderSparseArrivalStillKeyFrames 钉住「上报断流兜底没被周期判据破坏」：
+// 帧间隔 > KeyFrameInterval 时每帧都必须重发关键帧，且每一次都计入 ChainBreaks。
+//
+// 独立价值：sparse slot（生产 device15 有两种帧 80.9 s / 140.9 s 才来一次）每次
+// 到达都必须带全量基线，否则解码端拿不到该 slot 的起点。
+func TestEncoderSparseArrivalStillKeyFrames(t *testing.T) {
+	dict := NewMemorySlots()
+	enc := NewEncoder(EncoderConfig{KeyFrameInterval: 60 * time.Second}, dict)
+	at := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	vals := baseReadings(3.2, 10, 60)
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		off := time.Duration(i*90) * time.Second // 间隔 90 s > 60 s
+		f, err := enc.EncodeFrame(1, at.Add(off), 0, readingsOf(vals, order3))
+		if err != nil {
+			t.Fatalf("encode i=%d: %v", i, err)
+		}
+		if f.FrameKind != models.TelemetryFrameKindKey {
+			t.Fatalf("间隔 90s（>KeyFrameInterval）的第 %d 帧必须是关键帧，得到 %d", i, f.FrameKind)
+		}
+	}
+	if got, want := enc.Stats().ChainBreaks, int64(n-1); got != want {
+		t.Errorf("ChainBreaks = %d, want %d（断流口径仍按「距上一帧」统计）", got, want)
+	}
+}
+
+// TestEncoderResetRestartsPeriodicCycle 钉住「Reset 后周期基准也一起清零」。
+//
+// states map 清空 ⇒ slotState 重建时 lastKeyFrameAt 为零值 ⇒ 第一个判定（无状态）
+// 自然成立（首帧关键帧），并写入新基准。旧基准不得残留，否则 Reset 后可能立刻又发
+// 一个多余的关键帧。
+func TestEncoderResetRestartsPeriodicCycle(t *testing.T) {
+	dict := NewMemorySlots()
+	enc := NewEncoder(EncoderConfig{KeyFrameInterval: 60 * time.Second}, dict)
+	at := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	vals := baseReadings(3.2, 10, 60)
+	encode := func(off time.Duration) (int16, error) {
+		f, err := enc.EncodeFrame(1, at.Add(off), 0, readingsOf(vals, order3))
+		return f.FrameKind, err
+	}
+
+	if kind, err := encode(0); err != nil || kind != models.TelemetryFrameKindKey {
+		t.Fatalf("首帧 frame_kind = %d, err=%v, want 关键帧", kind, err)
+	}
+	if kind, err := encode(30 * time.Second); err != nil || kind != models.TelemetryFrameKindDelta {
+		t.Fatalf("30s 帧 frame_kind = %d, err=%v, want 增量", kind, err)
+	}
+
+	enc.Reset()
+	// Reset 后首帧必须是关键帧（与 TestEncoderResetForcesKeyFrames 同一语义，这里连续跑
+	// 一个完整周期，验证周期基准确实从这一帧重新起算）。
+	if kind, err := encode(31 * time.Second); err != nil || kind != models.TelemetryFrameKindKey {
+		t.Fatalf("Reset 后首帧 frame_kind = %d, err=%v, want 关键帧", kind, err)
+	}
+	// 距 Reset 后首帧 59 s：仍是增量（不能因为 Reset 前的旧基准提前触发）。
+	if kind, err := encode(90 * time.Second); err != nil || kind != models.TelemetryFrameKindDelta {
+		t.Fatalf("Reset 后 59s 帧 frame_kind = %d, err=%v, want 增量", kind, err)
+	}
+	// 距 Reset 后首帧整 60 s：周期关键帧。
+	if kind, err := encode(91 * time.Second); err != nil || kind != models.TelemetryFrameKindKey {
+		t.Fatalf("Reset 后 60s 帧 frame_kind = %d, err=%v, want 关键帧", kind, err)
 	}
 }
 

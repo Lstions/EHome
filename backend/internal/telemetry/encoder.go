@@ -20,7 +20,7 @@ type Reading struct {
 type EncodeStats struct {
 	// Frames 编码帧数。
 	Frames int64
-	// KeyFrames 关键帧数（首帧 + 心跳关键帧 + 链断裂后重建）。
+	// KeyFrames 关键帧数（首帧 + 周期关键帧 + 断流后重建 + slot 切换重发）。
 	KeyFrames int64
 	// PayloadBytes payload 总字节数。
 	PayloadBytes int64
@@ -37,11 +37,12 @@ type EncodeStats struct {
 
 // EncoderConfig 是编码器参数。
 type EncoderConfig struct {
-	// KeyFrameInterval 是**强制关键帧**的最大间隔：距上次编码该 slot 超过这个
-	// 时长就发关键帧（方案 §8「60 s 关键帧限制最坏窗口」）。
+	// KeyFrameInterval 是**强制关键帧**的最大间隔：距该 slot 上次**关键帧**达到
+	// 这个时长就发关键帧（方案 §4.5/§8「60 s 关键帧限制最坏窗口」）。
 	//
 	// 为什么必须有：增量链一旦断（丢一帧、进程重启、slot 版本切换），后续所有帧
 	// 都会解错位置。定期关键帧把"最坏错位窗口"限制在一个区间内，而不是永久。
+	// 注意基准是「上次关键帧」而不是「上一帧」：1 Hz 连续上报时后者永远不触发。
 	// 0 表示用默认值 60s。
 	KeyFrameInterval time.Duration
 	// SpecVersion 量化规格版本（0 视为 SpecVersion）。
@@ -85,6 +86,12 @@ type slotState struct {
 	lastAt     time.Time
 	hasState   bool
 	lastSlotID int16
+	// lastKeyFrameAt 是**本 slot 上一次关键帧**的时间戳 —— 注意不是上一帧。
+	//
+	// 周期关键帧判据必须用它：用 lastAt（上一帧）时，1 Hz 连续上报的帧间隔恒为
+	// 1 s，永远跨不过 KeyFrameInterval；该设备自进程启动后只会有一个关键帧，
+	// 读侧把任意窗口的起点锚回它，一旦跨度超过 MaxDecodeFrames 就丢锚点 ⇒ 图表全空。
+	lastKeyFrameAt time.Time
 }
 
 // Encoder 是有状态增量编码器（并发安全）。
@@ -208,13 +215,27 @@ func (e *Encoder) EncodeFrame(deviceID uint, at time.Time, commandTemplateID int
 	key := stateKey{deviceID: deviceID, signature: slot.Signature}
 	st := e.states[key]
 
-	// 关键帧判定（三条，任一成立）：
+	// 关键帧判定（四条，任一成立）：
 	//  1. 没有状态（首帧 / 进程重启）；
-	//  2. 距上次编码该 slot 超过 KeyFrameInterval（心跳兜底，限制最坏错位窗口）；
-	//  3. slot 版本变了（规格快照不同 ⇒ 旧码点不能作为增量基线）。
+	//  2. 距上次编码该 slot 超过 KeyFrameInterval（上报断流兜底，限制最坏错位窗口）；
+	//  3. slot 版本变了（规格快照不同 ⇒ 旧码点不能作为增量基线）；
+	//  4. 距上次**关键帧**达到 KeyFrameInterval（周期关键帧，契约 §4.5「每 60 s 强制一个」）。
+	//
+	// 第 2 条与第 4 条的度量不同，**都必须留**：
+	//   · 第 2 条量的是「距上一帧」，语义是上报断流 —— sparse 帧每次到达都触发它，
+	//     同时计入 ChainBreaks 指标（运维口径）。它不能替代周期判据：1 Hz 连续上报
+	//     时间隔恒 1 s，永远不满足 ⇒ 设备只会有一个关键帧。
+	//   · 第 4 条量的是「距上次关键帧」，语义是周期强制 —— 不看中间有没有数据帧，
+	//     保证密集数据下最坏错位窗口 ≤ KeyFrameInterval。判据用 >= 与回填引擎
+	//     （backend/internal/backfill/partition_job.go 的 lastKeyFrameAt 逻辑）对齐：
+	//     恰好在边界上的帧就是关键帧，关键帧周期不随帧率漂移。
+	//  注：lastKeyFrameAt 恒 <= lastAt，故第 2 条成立时第 4 条必然也成立；保留第 2 条
+	//      是为了 ChainBreaks 语义与「断流」口径不被周期判据吞掉。
 	keyFrame := st == nil || !st.hasState ||
 		at.Sub(st.lastAt) > e.cfg.KeyFrameInterval ||
-		st.lastSlotID != slot.ID
+		st.lastSlotID != slot.ID ||
+		(!st.lastKeyFrameAt.IsZero() && at.Sub(st.lastKeyFrameAt) >= e.cfg.KeyFrameInterval)
+	// chainBreak 只统计**上报断流**（仍基于 lastAt）：周期关键帧不是断流，不计。
 	chainBreak := st != nil && st.hasState && at.Sub(st.lastAt) > e.cfg.KeyFrameInterval
 
 	changed := make([]bool, n)
@@ -250,6 +271,11 @@ func (e *Encoder) EncodeFrame(deviceID uint, at time.Time, commandTemplateID int
 	st.lastAt = at
 	st.hasState = true
 	st.lastSlotID = slot.ID
+	// 周期基准**只在关键帧时推进**：每帧都刷新等于把判据退回「距上一帧」，
+	// 1 Hz 数据会重新变成"只有一个关键帧"（本 bug 的回归路径）。
+	if keyFrame {
+		st.lastKeyFrameAt = at
+	}
 
 	// seq：同一 (device, ts) 内的自增序号。写路径的时间戳来自 time.Now()，
 	// 纳秒精度下同值几乎不可能，但主键冲突会**覆盖**前一帧（静默丢数据），
