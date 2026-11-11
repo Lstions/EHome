@@ -34,7 +34,7 @@
 - **日志能力缺口（实测）**：`ErrorCode != 0` 的事件**完全无日志**（只计数）；解析失败用 INFO 级且**不带原始字节**；docker `json-file` 日志**无 max-size/max-file**（单容器 24h 已 67 MB）。这些必须先在 P0 补齐，否则删掉取证源后无法排查。
 - **必须承认的损失**：「事后回放任意一帧原始字节」与「对比原始字节排查解析正确但数值错误」两项能力会失去。缓解方案推荐：**只在关键帧填充 `telemetry_frame.raw` 列**（关键帧实测 10,270 帧/24h = 7.1%，+0.13 MB/天，可 SQL 查询），优于打日志（+1.6 MB/天且不可查）。
 - **界面降级**：数据面板「原始数据」列与「错误码」列删除（后者本是恒 `undefined` 的既有 bug —— `/data` 响应从来没有 `error_code` 字段）。其余全部不变（趋势图走 `historical-batch`，详情页走 `latest-values` + WebSocket）。
-- **实施状态（2026-11-11 15:50）**：代码改造**已全部完成**。后端 `go build`/`go vet` 通过、43 包测试 ok（唯一红是 `internal/database` 两个基线既有红，已用 clean worktree 在 HEAD 复现）；前端 `typecheck` 0 error、`test` 2520 passed、`build` 成功；`ehomectl retire-device-data --dry-run` 已对生产只读验证通过（四条校验全绿、schema 指纹前后逐字节一致）。**生产尚未执行 DROP**，执行手册见 [设计/原始数据退役-部署执行手册-2026-11-11.md](设计/原始数据退役-部署执行手册-2026-11-11.md)。
+- **实施状态（2026-11-11 18:30）**：代码改造与**生产部署均已全部完成**。生产库 4,180 MB → **663 MB（−84.1%）**，宿主机磁盘 17 GB → 14 GB，冒烟 20 项全通过（42P01/panic/FATAL 全 0）。回滚点：容器 `ehome-prod-web-rollback-20261111-101334` + 备份 352 MB。改造前：后端 `go build`/`go vet` 通过、43 包测试 ok（唯一红是 `internal/database` 两个基线既有红，已用 clean worktree 在 HEAD 复现）；前端 `typecheck` 0 error、`test` 2520 passed、`build` 成功；`ehomectl retire-device-data --dry-run` 已对生产只读验证通过（四条校验全绿、schema 指纹前后逐字节一致）。**生产尚未执行 DROP**，执行手册见 [设计/原始数据退役-部署执行手册-2026-11-11.md](设计/原始数据退役-部署执行手册-2026-11-11.md)。
 - **附带收益（独立排期）**：帧表丢弃零变化帧（−6.9%，实测 9,770 帧/24h）、rollup payload v2 去字段名（−42%）。
 
 ### 2026-11-11（**新增：数据库表清单与数据字典** —— 生产只读实测）
