@@ -306,7 +306,7 @@ func TestNotificationDeliveryCleaner_Batches(t *testing.T) {
 // 每日 retention 任务上 (无新增 goroutine / 不动 main.go), 与 notifications
 // 清理同批执行, 且不干扰逐设备保留期处理。
 func TestRetentionTask_RunsDeliveryCleanup(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t) // 保留期现在只管帧表（两份原始表均已退役）
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 
 	seedDelivery(t, db, models.DeliveryStateDelivered, now.AddDate(0, 0, -200)) // 审计窗外 → 删
@@ -316,14 +316,8 @@ func TestRetentionTask_RunsDeliveryCleanup(t *testing.T) {
 	// 一台设备 + 一行到期数据, 证明清理不会打断 retention 主流程。
 	// (原 seedRetentionDevice 随逻辑设备层删除; 保留期现为系统级单一窗口。)
 	retDev := seedDevice(t, db, "d1-deliveries", "bms_jbd", "d1-deliveries-hw", false)
-	if err := db.Create(&models.UnifiedData{
-		DeviceID:   retDev.ID,
-		SensorName: "voltage",
-		Value:      1,
-		Timestamp:  now.AddDate(0, 0, -400),
-	}).Error; err != nil {
-		t.Fatalf("seed retention row: %v", err)
-	}
+	// 2026-11-11: 夹具从 unified_data 换成帧表（两张原始表均已退役，保留期只管帧表）。
+	seedExpiredFrame(t, db, retDev.ID, now.AddDate(0, 0, -400))
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }

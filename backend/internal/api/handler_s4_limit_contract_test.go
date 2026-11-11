@@ -106,16 +106,16 @@ func s4Seed(t *testing.T, db *gorm.DB) {
 	if err := db.Create(&ch).Error; err != nil {
 		t.Fatal(err)
 	}
-	dev := models.EdgeDevice{Name: "S4 Device", Type: "bms_jbd", NodeID: "S4-NODE", ChannelID: ch.ID, HardwareID: "0x76"}
-	if err := db.Create(&dev).Error; err != nil {
+	// 设备行仍要建：它是 edge_devices 表存在性的 fixture（S4 的站点虽然已不含
+	// device_data 的端点，但保留了"设备维度端点"的基本环境，避免将来再加站点时
+	// 因缺 fixture 而假失败）。
+	if err := db.Create(&models.EdgeDevice{Name: "S4 Device", Type: "bms_jbd", NodeID: "S4-NODE", ChannelID: ch.ID, HardwareID: "0x76"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		if err := db.Create(&models.DeviceData{
-			DeviceID: dev.ID, NodeID: "S4-NODE", DataJSON: fmt.Sprintf("{\"value\":%d}", i),
-		}).Error; err != nil {
-			t.Fatal(err)
-		}
+		// 原本这里还给 device_data 灌 5 行（S4 的两个站点用它取证）。device_data
+		// 退役后模型不存在、站点也不存在 —— fixture 一并去掉，不影响剩下三条站点
+		// （它们各自灌自己的表，见下方 Create）。
 		if err := db.Create(&models.Notification{Title: fmt.Sprintf("n%d", i), Type: "info", Message: "m"}).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -135,20 +135,18 @@ type s4Site struct {
 	table    string // SQL 里必须出现的表名
 	clampsTo int    // 修复后 SQL 里应当出现的 LIMIT 值
 	build    func(limitParam string) string
-	nodeAuth bool // /edge-devices/:id/data 在 setupTestRouter 下无需 token, 保留以备分组
+	nodeAuth bool // 无 token 访问的分组（当前无站点使用，保留字段以备分组）
 }
 
 // s4Sites 是本任务实测确认的**全部**活站点 (Lead 原始清单只列了第 1 条)。
 func s4Sites() []s4Site {
 	return []s4Site{
-		{
-			name:     "GET /nodes/:id/data (limit)",
-			table:    "device_data",
-			clampsTo: 100,
-			build: func(v string) string {
-				return "/api/v1/nodes/S4-NODE/data?limit=" + v
-			},
-		},
+		// 2026-11-11 删除两条站点：GET /nodes/:id/data 与 GET /edge-devices/:id/data
+		// 都随 device_data 整表退役被删除（原始数据退役方案 §2.1/§1.3）。
+		// 它们原本是 S4 缺陷的两个活样本，现在端点不存在 ⇒ 无法再作为"limit 未钳制"
+		// 的回归站点。**注意：这不削弱 S4 契约** —— 剩下三条站点（notifications /
+		// vendors / device-models）仍覆盖"未钳制的 limit 会让查询退化成无界"这个
+		// 缺陷本体，判据（取证到 SQL 文本里的 LIMIT）一字未改。
 		{
 			name:     "GET /notifications (limit)",
 			table:    "notifications",
@@ -171,14 +169,6 @@ func s4Sites() []s4Site {
 			clampsTo: 20,
 			build: func(v string) string {
 				return "/api/v1/device-models?page_size=" + v
-			},
-		},
-		{
-			name:     "GET /edge-devices/:id/data (page_size)",
-			table:    "device_data",
-			clampsTo: 50,
-			build: func(v string) string {
-				return "/api/v1/edge-devices/1/data?page_size=" + v
 			},
 		},
 	}
@@ -278,11 +268,10 @@ func TestS4_LegalValuesPreserved(t *testing.T) {
 		path  string
 		want  int
 	}{
-		{"device_data", "/api/v1/nodes/S4-NODE/data?limit=37", 37},
+		// 两条 device_data 站点已随端点删除（见 s4Sites 的说明）。
 		{"notifications", "/api/v1/notifications?limit=7", 7},
 		{"vendors", "/api/v1/vendors?page_size=3", 3},
 		{"device_models", "/api/v1/device-models?page_size=4", 4},
-		{"device_data", "/api/v1/edge-devices/1/data?page_size=9", 9},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			cap.reset()

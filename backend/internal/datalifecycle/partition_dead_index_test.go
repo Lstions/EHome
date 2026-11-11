@@ -46,9 +46,7 @@ func TestDeadIndexTemplatesRemoved(t *testing.T) {
 		{"unified_data", "sensor_name", "无读路径：所有 sensor_name 查询都以 device_id 为前导列，复合索引已覆盖"},
 		{"unified_data", "edge_device_id", "该列生产上全 NULL，索引对任何查询都无选择性"},
 		{"unified_data", "device_id", "task-20：被 (device_id, sensor_name, timestamp) / (device_id, timestamp) 前缀完全覆盖，生产 773 MB"},
-		{"device_data", "node_id", "唯一按 node_id 的读路径 GET /nodes/:id/data 前端零调用者（S3 待裁决）"},
-		{"device_data", "edge_device_id", "该列生产上全 NULL"},
-		{"device_data", "device_id", "task-20：被 (device_id, created_at DESC) / (device_id, timestamp) 前缀完全覆盖，生产 57 MB"},
+		// 2026-11-11: device_data 的三条死索引条目已删除 —— 该表整表退役，没有模板可删。
 	}
 	for _, c := range want {
 		cols := templateColumns(c.table)
@@ -80,9 +78,9 @@ func TestLiveIndexTemplatesKept(t *testing.T) {
 		{"unified_data", "timestamp"},
 		{"unified_data", "device_id, sensor_name, timestamp"},
 		{"unified_data", "device_id, timestamp"},
-		{"device_data", "timestamp"},
-		{"device_data", "device_id, created_at desc"},
-		{"device_data", "device_id, timestamp"},
+		// 2026-11-11: device_data 的三条活索引条目已删除（表整表退役）。
+		// ⚠ 这些索引在**统一数据表**上的等价物仍在（见上面 unified_data 三条），
+		// 所以"读路径有没有索引"这个语义没有被削弱。
 	}
 	for _, c := range cases {
 		cols := templateColumns(c.table)

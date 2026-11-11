@@ -39,7 +39,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.ConfigTemplate{},
 		&models.EdgeDevice{},
 		&models.DeviceConfig{},
-		&models.DeviceData{},
+		// 2026-11-11: &models.DeviceData{} 已删除（device_data 整表退役）。
 		&models.UnifiedData{},
 		&models.DataSource{},
 		&models.DataSourceHealth{},
@@ -629,26 +629,14 @@ func TestNode_GetChannels(t *testing.T) {
 	}
 }
 
-func TestNode_GetData(t *testing.T) {
-	db := setupTestDB(t)
-	r := setupRouter()
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: `{"temp":25}`, Timestamp: time.Now()})
-
-	v1 := r.Group("/api/v1")
-	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/nodes/1/data?limit=10", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-}
+// TestNode_GetData 已删除（2026-11-11）。
+//
+// 它测的是 GET /nodes/:id/data —— 该端点随 device_data 整表退役被删除
+// （原始数据退役方案 §1.3 读路径表第 3 行：前端零调用者）。
+// 端点不存在了，测它只会得到 404，改造它没有意义。
+//
+// ⚠ 不要再把它"补回来"：要给节点维度的数据视图做回归，应该为**新端点**
+// （走帧表）写用例，而不是复活一个查已退役表的端点。
 
 func TestNode_Capabilities(t *testing.T) {
 	db := setupTestDB(t)
@@ -1292,47 +1280,16 @@ func TestEdgeDevice_Delete(t *testing.T) {
 	}
 }
 
-func TestEdgeDevice_LatestData(t *testing.T) {
-	db := setupTestDB(t)
-	r := setupRouter()
-
-	v1 := r.Group("/api/v1")
-	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/latest-data", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	// 契约变更 (2026-10-23): 数据端点不再对"设备不存在"报 404 —— 它按
-	// device_id 直查，没有数据就返回零值。旧 404 规则的前提（"实例语义"，
-	// 即防止把逻辑身份的数据冒充成实例数据）已随逻辑设备层移除。
-	// 404 只保留给配置类端点 (GET /edge-devices/:id)。
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (data endpoint returns zero value when device has no data), got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestEdgeDevice_Data(t *testing.T) {
-	db := setupTestDB(t)
-	r := setupRouter()
-
-	v1 := r.Group("/api/v1")
-	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=1&page_size=10", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	// 契约变更 (2026-10-23): 同 TestEdgeDevice_LatestData —— 数据端点按
-	// device_id 直查，无数据即空页 200；配置类端点才是 404。
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (empty page when device has no data), got %d: %s", w.Code, w.Body.String())
-	}
-}
+// 2026-11-11: TestEdgeDevice_LatestData 与 TestEdgeDevice_Data 已删除。
+//
+// 它们测的 GET /:id/latest-data 与 GET /:id/data 随 device_data 整表退役被删除
+// （原始数据退役方案 §1.3 读路径表第 1/2 行）。端点不存在后用例只会拿到 404，
+// 无法再验证「无数据时返回 200 + 零值/空页」这个语义。
+//
+// 那条语义的**等价物仍然有效并被覆盖**：
+//   · GET /:id/latest-values  → latest_values_frame_first_pg_test.go（无帧时返回空 + 200）
+//   · GET /devices/:id/history → device_history_*_test.go（无帧时空结果，不是 500）
+// 若要为别的数据端点补「无数据不 404」的回归，请写到对应新端点的用例里。
 
 func TestEdgeDevice_OperationsIsNotProvidedByLegacyRoutes(t *testing.T) {
 	db := setupTestDB(t)

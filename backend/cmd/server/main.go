@@ -168,8 +168,10 @@ func main() {
 	startupTracker.Done(bootstrap.StepAutoMigrate, "表结构已同步")
 	logger.Infof("Database connected and migrated")
 
-	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data / device_data 分区迁移 +
-	// 滚动分区保障。迁移失败即 Fatal 中止启动, 不再静默降级为"继续用平表":
+	// 数据层时序化 (方案 v3.4 §3.2.1): 时序表分区迁移 + 滚动分区保障。
+	// （2026-11-08 unified_data、2026-11-11 device_data 两次整表/迁移退役后，
+	//  这一带只剩 telemetry_frame 与 telemetry_rollup_1m 的迁移。）
+	// 迁移失败即 Fatal 中止启动, 不再静默降级为"继续用平表":
 	// 失败路径已保证源平表与 legacy/_new 表完整 (安全门禁在行数校验前不 swap),
 	// 且搬迁幂等 (主键 (id,timestamp) + ON CONFLICT), 修好后重跑即可收敛;
 	// 而"带着未完成的迁移继续跑"会让后半段行为与预期不符且极难排查。
@@ -213,12 +215,24 @@ func main() {
 	//
 	// 同时从 bootstrap.DefaultSteps 移除 StepPartitionUnifiedData，其 22 权重按比例
 	// 分给剩余步骤（合计仍必须 100，TestDefaultStepsTable 守着）。
-	startupTracker.Begin(bootstrap.StepPartitionDeviceData)
-	if err := datalifecycle.MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
-		startupTracker.Fail(bootstrap.StepPartitionDeviceData, err)
-		abortStartup("device_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
-	}
-	startupTracker.Done(bootstrap.StepPartitionDeviceData, "device_data 分区就绪")
+	// ============ device_data 分区迁移已删除（2026-11-11 整表退役）============
+	//
+	// 这里原本是：
+	//
+	//	startupTracker.Begin(bootstrap.StepPartitionDeviceData)
+	//	if err := datalifecycle.MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil { ... abortStartup }
+	//	startupTracker.Done(bootstrap.StepPartitionDeviceData, "device_data 分区就绪")
+	//
+	// 删除理由与 unified_data 2026-11-08 那一次**完全相同**（见下方长注释的第 ② 条）：
+	// 表已经整表退役（写点/读点全删，DROP 后不存在），而 MigrateTableToPartitioned
+	// 的判定链 IsTablePartitioned→否 / flatExists→否 会走「全新部署 ⇒ 建空分区母表」
+	// 分支，**代码无法区分「全新部署」与「刚 DROP」** ⇒ 每次重启都会把 device_data
+	// 重新建出来（0 行、5 个月空分区）。磁盘没省、DROP 白做，而 pg_class 里它看起来
+	// 一切正常 —— 那正好抵消本次改造的全部收益。
+	//
+	// 因此这一步（bootstrap.StepPartitionDeviceData）从 DefaultSteps 也一并删除，
+	// 权重按原相对比例分给剩余步骤（合计仍 100，TestDefaultStepsTable 守着）。
+	// ======================================================================
 
 	// L2 帧表 telemetry_frame + slot 字典表 telemetry_slot
 	// (设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.4/§3.5)。
@@ -228,7 +242,7 @@ func main() {
 	// **主路径之一**：每一帧解析结果都要写进去。此时"表没建但服务照跑"是一条
 	// 静默丢数据的路径 —— unified_data 还在写，所有面板都正常，只有帧表空的，
 	// 而它要等到下一轮读路径切换/影子校验才会被发现，代价是那一整天的帧数据。
-	// 因此迁移失败必须中止启动（与 unified_data / device_data 同一口径）。
+	// 因此迁移失败必须中止启动（与已退役的 unified_data / device_data 同一口径）。
 	//
 	// 对比：下面 telemetry_rollup_1m 仍是 Warn —— 那是**派生数据**（丢了下一分钟
 	// 重新累积），且有 fail-open 回落到原始表。两者语义不同，不要统一。
@@ -243,8 +257,8 @@ func main() {
 	// L3 分钟级宽行预聚合表 (设计/遥测存储优化方案-2026-11-06.md §5.2): 建/迁移分区母表。
 	//
 	// 与上面两张表的关键差别 —— **失败不 Fatal**:
-	//   unified_data / device_data 是真值来源, 迁移失败必须中止启动 (半迁移状态会让
-	//   行为与预期不符且极难排查); 而 telemetry_rollup_1m 是**派生数据** (由原始表
+	//   真值来源表 (unified_data / device_data，均已退役) 迁移失败必须中止启动
+	//   (半迁移状态会让行为与预期不符且极难排查); 而 telemetry_rollup_1m 是**派生数据** (由原始表
 	//   旁路聚合而来, 丢了下一分钟会重新累积), 且读路径对它有 fail-open 回落
 	//   (api/rollup_read.go: 表空/坏/不存在 ⇒ 回落原始路径)。为一张派生表挡住整个
 	//   服务启动, 是把「预聚合不可用」升级成「服务不可用」—— 方向错了。
@@ -309,10 +323,11 @@ func main() {
 	// 为什么必须在这里接: 旧 rollup 表 (unified_data_rollup_1m) 退役理由之一是
 	// 「无界增长的第二张表」。新表若不配保留期，就是同一个问题的复刻。
 	// 实现复用统一窗口 (datalifecycle.SystemRetentionDays = EHOME_DATA_RETENTION_DAYS)，
-	// 且走「整月分区 DROP」这条 O(1) 路径 —— 与 unified_data/device_data 同款。
+	// 且走「整月分区 DROP」这条 O(1) 路径 —— 与 unified_data/device_data 同款
+	//（两张表已分别于 2026-11-08 / 2026-11-11 退役，机制不变，受益者只剩帧表与 rollup）。
 	//
-	// 为什么不挂进 RetentionTask（那里的表清单是 unified_data/device_data 两张，
-	// 由 retention_task.go 维护）: 本任务不动该文件（并行改动区），改为在此按同一
+	// 为什么不挂进 RetentionTask（那里的表清单由 retention_task.go 维护）:
+	// 本任务不动该文件（并行改动区），改为在此按同一
 	// 保留期语义独立驱动；两者都用 datalifecycle.SystemRetentionDays() 取值，口径一致。
 	// 失败只 Warn: 派生数据的清理失败不该阻断服务（分区 DROP 是幂等的，下一轮重试）。
 	reapRollupPartitions := func() {
@@ -332,7 +347,7 @@ func main() {
 	}
 	reapRollupPartitions()
 	// 每日滚动检查: 创建下月分区 + 回收到期 rollup 分区
-	//（unified_data/device_data 的到期分区由 retention_task 触发 DROP）。
+	//（telemetry_frame 的到期分区由 retention_task 触发 DROP）。
 	partitionStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
@@ -1087,71 +1102,19 @@ func main() {
 			logger.Infof("backfill: 已关闭（EHOME_BACKFILL_ENABLED=false）或不可用，跳过")
 		}
 	}
-
-	// ════════════════════════════════════════════════════════════════════════
-	// 存量 device_data 剥离冗余 sensors（task-21）
-	// ════════════════════════════════════════════════════════════════════════
+	// ============ 存量 device_data sensors 剥离任务已删除（2026-11-11 整表退役）============
 	//
-	// 为什么是「剥离」而不是「压缩」：实测 PostgreSQL 的 TOAST/pglz 一直在压缩
-	// data_json —— 那 4.4 GB 是**压缩后**的体积（A 类行原始 5.5 GB → 存储 1.98 GB，
-	// 2.78x）。再加一层应用层 gzip 只能再省 210 MB。而 sensors 与 unified_data /
-	// telemetry_frame 存的是同一份 (name,value,unit)，100% 重复 ——
-	// 压缩是在给一个不该存在的副本减肥，剥离是直接切掉它。
+	// 这里原本跑 datalifecycle.NewDeviceDataSensorStripper（task-21）：把 device_data 里
+	// 与 unified_data / telemetry_frame 100% 重复的 sensors 数组从 data_json 里剥掉，
+	// 预计省约 1.3 GB。
 	//
-	// 实测（2000 行真实样本 jsonb - 'sensors'）：1,278 kB → 468 kB。
-	// 全表外推 A 类 1,981 MB → 约 665 MB，省约 1.3 GB。
+	// 表已整表退役（DROP），剥离任务与它的 watermark 表（device_data_strip_progress）
+	// 一起删除 —— 留着它只会在启动时对一张不存在的表报 42P01，且日志会让人误以为
+	// 「还有个后台任务在跑」。
 	//
-	// ── 发布顺序由代码自证，不靠人工记忆（task-21 依赖 task-19）──
-	// RunIfSafe 会先看**最新一行** sensor_parser 形状的数据里还有没有 sensors：
-	// 有 ⇒ 写侧仍是旧版本，本轮跳过并 Warn；没有 ⇒ 写侧已升级，开始剥离。
-	// 这样「本任务镜像先上、写侧镜像后上」不会造成「剥了又被写回、下轮再剥」的循环。
-	//
-	// ── ⚠ 磁盘不会立刻变小 ──
-	// UPDATE 产生死元组，表文件不缩小。plain VACUUM 只是把空间标记为可重用
-	//（效果 = 阻止表继续增长），要真正还给操作系统必须 VACUUM FULL（独占锁 +
-	// 约等于表大小的临时空间，需维护窗口）。所以本任务**不**自动跑 VACUUM FULL，
-	// 只在日志与 /api/v1/system/backfill 之外的运维动作里提示。
-	stripCfg := datalifecycle.StripConfigFromEnv()
-	for _, w := range stripCfg.Warnings {
-		logger.Warnf("device_data strip: %s", w)
-	}
-	if stripCfg.Enabled {
-		stripper := datalifecycle.NewDeviceDataSensorStripper(db)
-		stripper.SetBatchSize(stripCfg.BatchSize)
-		go func() {
-			logger.Infof("device_data strip: 存量 sensors 剥离已启动（后台执行，不阻塞服务；batch=%d）",
-				stripCfg.BatchSize)
-			rep, err := stripper.RunIfSafe(context.Background())
-			if err != nil {
-				logger.Warnf("device_data strip: 中断（下次启动将从 watermark 继续）: %v", err)
-				return
-			}
-			if rep.Skipped {
-				logger.Infof("device_data strip: 本轮跳过（写侧仍在写 sensors 或没有可剥离的行）")
-				return
-			}
-			// selected / stripped / skipped 三个数一起打：
-			// skipped>0 意味着有行被 jsonb_typeof 守卫跳过（sensors 不是数组），
-			// 而那些行的 id 已被游标越过、**不会再重试** —— 必须让人看见。
-			logger.Infof("device_data strip: 完成 selected=%d stripped=%d skipped=%d "+
-				"bytes_before=%d bytes_after=%d logical_reclaimed=%d",
-				rep.RowsSelected, rep.RowsStripped, rep.RowsSkipped,
-				rep.BytesBefore, rep.BytesAfter, rep.BytesReclaimed())
-			if rep.RowsSkipped > 0 {
-				logger.Warnf("device_data strip: %d 行被跳过（sensors 不是 JSON 数组），"+
-					"其 id 已越过游标、不会重试；如需处理请用 device_data_strip_progress 的 "+
-					"watermark 排查后手动修复", rep.RowsSkipped)
-			}
-			if rep.BytesReclaimed() > 0 {
-				// 明确提示：账面省了，磁盘要 VACUUM FULL 才还回去 —— 否则运维会去 du 一下
-				// 发现没变，进而以为任务没生效。
-				logger.Infof("device_data strip: 逻辑空间已释放，但物理文件不会自动缩小；" +
-					"如需把空间还给操作系统，请在维护窗口执行 VACUUM FULL device_data（或 pg_repack）")
-			}
-		}()
-	} else {
-		logger.Infof("device_data strip: 已关闭（EHOME_DEVICE_DATA_STRIP_ENABLED=false），跳过")
-	}
+	// 历史收益的去向：那 3,488 MB 由 §3.3 的 DROP TABLE 一次性收回（比剥离更彻底），
+	// 详见 docs/设计/原始数据退役-改造方案-2026-11-11.md。
+	// ======================================================================================
 
 	startupTracker.Done(bootstrap.StepStartupTasks, "后台任务已启动")
 	// 收尾自检：任何一步既非 done 也非 skipped 都是**漏标**（新增步骤时最容易犯），

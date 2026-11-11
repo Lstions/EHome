@@ -24,7 +24,11 @@ import (
 )
 
 // seedPurgeCandidate 造一台「已软删且要求删数据」的设备，带 unified_data 与
-// device_data 各一行、一行 sensor_field_obs、一行 data_sources、一行校准缓存。
+// **帧表**各一行、一行 sensor_field_obs、一行 data_sources、一行校准缓存。
+//
+// 2026-11-11: 原来第二行 seed 的是 device_data。该表整表退役后，purge 的时序表
+// 清单（TimeseriesTables）只剩 telemetry_frame，所以这里改 seed 帧行 —— 那才是
+// 「这台设备的历史数据」现在的载体。
 //
 // 为什么台账两表也要 seed（2026-10-25 F-01 审核）: DevicePurger 曾只删两张时序表
 // 与 calibration，把 sensor_field_obs / data_sources 留在库里 —— 设备行已经物理
@@ -33,11 +37,17 @@ import (
 func seedPurgeCandidate(t *testing.T, db *gorm.DB, name string) *models.EdgeDevice {
 	t.Helper()
 	dev := seedDevice(t, db, name, "bms_jbd", name+"-hw", false)
-	if err := db.Create(&models.UnifiedData{DeviceID: dev.ID, SensorName: "voltage", Value: 1}).Error; err != nil {
-		t.Fatalf("seed unified_data: %v", err)
-	}
-	if err := db.Create(&models.DeviceData{DeviceID: dev.ID, NodeID: "NODE001", DataJSON: "{}"}).Error; err != nil {
-		t.Fatalf("seed device_data: %v", err)
+	// 2026-11-11: 原先还 seed 一行 unified_data（用于验证"两张时序表都清"）。
+	// 两张原始表都已退役，TimeseriesTables 只剩帧表 —— 所以时序数据只有帧这一份，
+	// RowsDeleted 的期望值也随之从 2 变成 1。
+	// 帧行：purge 必须清掉它（帧表主键含 device_id，走行值 IN 批量删）。
+	// 注意帧表不在 testutil 的 AutoMigrate 清单里，要显式建。
+	seedPurgeFrameTable(t, db)
+	if err := db.Create(&models.TelemetryFrame{
+		DeviceID: dev.ID, TS: time.Now().UTC(), Seq: 0,
+		FrameKind: models.TelemetryFrameKindKey, SlotID: 1, Payload: []byte{0x01},
+	}).Error; err != nil {
+		t.Fatalf("seed telemetry_frame: %v", err)
 	}
 	if err := db.Create(&models.CalibrationCache{
 		NodeID: "NODE001", EdgeDeviceID: dev.ID, DeviceType: "bms_jbd", Data: "{}",
@@ -84,15 +94,16 @@ func TestDevicePurger_HardDeletesDataAndDeviceRow(t *testing.T) {
 	if results[0].Outcome != Purged {
 		t.Fatalf("outcome = %s, want %s (err=%s)", results[0].Outcome, Purged, results[0].Error)
 	}
-	if results[0].RowsDeleted != 2 {
-		t.Errorf("RowsDeleted = %d, want 2 (1 unified_data + 1 device_data)", results[0].RowsDeleted)
+	// 2026-11-11: 行数口径从「unified_data + device_data」改为「unified_data + 帧表」
+	// （两份原始表都已退役，帧表是唯一时序载体）。
+	if results[0].RowsDeleted != 1 {
+		t.Errorf("RowsDeleted = %d, want 1 (telemetry_frame 是唯一时序载体)", results[0].RowsDeleted)
 	}
 	// 数据清了。
-	var unified, devdata int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", dev.ID).Count(&unified)
-	db.Model(&models.DeviceData{}).Where("device_id = ?", dev.ID).Count(&devdata)
-	if unified != 0 || devdata != 0 {
-		t.Errorf("rows left: unified_data=%d device_data=%d, want 0/0", unified, devdata)
+	var frames int64
+	db.Model(&models.TelemetryFrame{}).Where("device_id = ?", dev.ID).Count(&frames)
+	if frames != 0 {
+		t.Errorf("帧残留 = %d, want 0（彻底删除必须清空帧）", frames)
 	}
 	// 校准行清了（数据没了，工厂校准值不再有意义）。
 	var cals int64
@@ -137,11 +148,10 @@ func TestDevicePurger_AbandonsWhenDeviceRevived(t *testing.T) {
 		t.Fatalf("results = %+v, want one AbandonedRevived", results)
 	}
 	// 一行都没删。
-	var unified, devdata int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", dev.ID).Count(&unified)
-	db.Model(&models.DeviceData{}).Where("device_id = ?", dev.ID).Count(&devdata)
-	if unified != 1 || devdata != 1 {
-		t.Errorf("rows after abandon: unified=%d device_data=%d, want 1/1 (history must survive)", unified, devdata)
+	var frames int64
+	db.Model(&models.TelemetryFrame{}).Where("device_id = ?", dev.ID).Count(&frames)
+	if frames != 1 {
+		t.Errorf("rows after abandon: telemetry_frame=%d, want 1 (history must survive)", frames)
 	}
 	// 标记被撤回，否则下一轮又会想删。
 	var flag bool
@@ -242,10 +252,12 @@ func TestDevicePurger_StaleClaimThreshold(t *testing.T) {
 	if claimAt == nil {
 		t.Fatal("fresh claim must NOT be cleared by another purger run (这会重新打开 F-01 的窗口)")
 	}
-	var unified int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", fresh.ID).Count(&unified)
-	if unified != 1 {
-		t.Errorf("fresh-claim device data rows = %d, want 1 (must not be touched)", unified)
+	// 2026-11-11: 原先数 unified_data 行。两张原始表都已退役，时序数据只剩帧表 ——
+	// 「fresh 设备的数据一行不少」这条语义改为数它的帧。
+	var frames int64
+	db.Model(&models.TelemetryFrame{}).Where("device_id = ?", fresh.ID).Count(&frames)
+	if frames != 1 {
+		t.Errorf("fresh-claim device frame rows = %d, want 1 (must not be touched)", frames)
 	}
 	for _, r := range results {
 		if r.EdgeDeviceID == fresh.ID {
@@ -269,5 +281,20 @@ func TestDevicePurger_Idempotent(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("second run processed %d devices, want 0 (flag+garbage row both gone)", len(results))
+	}
+}
+
+// seedPurgeFrameTable 在测试库里建帧表。
+//
+// 为什么必须显式建：帧表**不在** testutil 的 AutoMigrate 清单里（生产上分区母表由
+// partition_mgr 用裸 DDL 建，AutoMigrate 会把母表降级改写成普通表）。而 purge 的
+// 时序表清单现在只剩帧表，不建它就没有可删的目标，本文件的断言会变成"删了 0 行"。
+func seedPurgeFrameTable(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if db.Migrator().HasTable(&models.TelemetryFrame{}) {
+		return
+	}
+	if err := db.AutoMigrate(&models.TelemetryFrame{}); err != nil {
+		t.Fatalf("automigrate telemetry_frame: %v", err)
 	}
 }

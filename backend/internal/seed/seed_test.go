@@ -27,7 +27,9 @@ func setupSeedDB(t *testing.T) *gorm.DB {
 		&models.ConfigTemplate{},
 		&models.EdgeDevice{},
 		&models.DeviceConfig{},
-		&models.DeviceData{},
+		// 2026-11-11: &models.DeviceData{} 已删除（device_data 整表退役）。
+		// 种子数据本来就不写 device_data —— 它只是 AutoMigrate 清单里的一行，
+		// 删掉不影响任何 fixture。
 		&models.UnifiedData{},
 		&models.OTATask{},
 		&models.Firmware{},

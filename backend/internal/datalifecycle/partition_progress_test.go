@@ -175,7 +175,10 @@ func TestPartitionStepIDMapping(t *testing.T) {
 		want  string
 	}{
 		{"unified_data", StepIDPartitionUnifiedData},
-		{"device_data", StepIDPartitionDeviceData},
+		// 2026-11-11: device_data 整表退役，partitionStepIDOf 的 case 已删除
+		// ⇒ 它现在落到 default 分支返回空串。这里显式钉住这个新行为：
+		// 「表已退役 ⇒ 不上报进度」，而不是悄悄沿用别的 stepID。
+		{"device_data", ""},
 		{"telemetry_rollup_1m", StepIDPartitionRollup},
 		// 未登记表：不上报（返回空串 ⇒ reportMigrationProgress 早退）。
 		{"zz_partition_probe", ""},
@@ -190,10 +193,12 @@ func TestPartitionStepIDMapping(t *testing.T) {
 	//（main.go 不再为 unified_data 调分区迁移，否则 DROP 后重启会把空表重建）。
 	// 但 datalifecycle 的 StepIDPartitionUnifiedData **保留** —— 它描述的是
 	// MigrateUnifiedDataToPartitioned 这个泛化入口自己的埋点映射，
-	// 该函数仍在（device_data / telemetry_frame 走同一套机制），且仍可能被
+	// 该函数仍在（telemetry_frame / telemetry_rollup_1m 走同一套机制），且仍可能被
 	// 非 main 的调用方使用。所以这里只校验**两边都还在的**常量。
-	if StepIDPartitionDeviceData != bootstrap.StepPartitionDeviceData ||
-		StepIDPartitionRollup != bootstrap.StepPartitionRollup ||
+	//
+	// 2026-11-11: StepIDPartitionDeviceData 已随 device_data 整表退役从**两边**同时
+	// 删除（bootstrap 与 datalifecycle），所以它不再出现在下面的对照里。
+	if StepIDPartitionRollup != bootstrap.StepPartitionRollup ||
 		StepIDParentIndexes != bootstrap.StepParentIndexes ||
 		StepIDRetireDeadIndexes != bootstrap.StepRetireDeadIndexes {
 		t.Fatal("datalifecycle 的 stepID 常量与 bootstrap 包不一致 —— 维护页会永远收不到进度")
@@ -313,8 +318,11 @@ func TestCopyMonthBatchedNilCallbackIsNoop(t *testing.T) {
 	db := newSQLiteProbeDB(t)
 	month := seedProbeMonth(t, db, "zz_prog_src", 15000)
 
+	// stepID 用 StepIDParentIndexes：device_data 的 stepID 已随表退役删除，
+	// 而本用例只关心「nil 回调下结果不变」，用哪个 stepID 都不影响语义
+	// （nil 回调时 reportMigrationProgress 直接早退）。
 	moved, err := copyMonthBatched(db, "zz_prog_dst", "zz_prog_src", month, monthProgress{
-		stepID: StepIDPartitionDeviceData, span: 80, label: "202611 第 1/1 批",
+		stepID: StepIDParentIndexes, span: 80, label: "202611 第 1/1 批",
 	})
 	if err != nil {
 		t.Fatalf("copyMonthBatched with nil callback: %v", err)

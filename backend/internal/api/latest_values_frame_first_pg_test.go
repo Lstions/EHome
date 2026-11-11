@@ -1,36 +1,32 @@
 package api
 
-// latest_values_frame_first_pg_test.go — 硬切换后「两个端点同源」的验收（2026-11-08）。
+// latest_values_frame_first_pg_test.go — 「/latest-values 的 miss 回落到帧表」的验收。
 //
 // ============ 守的是一条**结构不变量**，不是两次巧合相等 ============
 //
-// device_data_sensors.go 的 latestSensorViews 注释写着：
+// 原来钉的是「/latest-data 的 sensors 合成」与「/latest-values 的 miss 回落」
+// **两个端点同源**。2026-11-11 device_data 整表退役后，sensors 合成整段删除
+// （device_data_sensors.go / device_data_sensors_frames.go 都没了），
+// 这条「两个端点」的不变量随之只剩一半：**现在只有 /latest-values 一条数据路径**。
 //
-//	与 /latest-values 端点**同一口径**：两者若不一致，详情页(用 latest-values)
-//	与数据面板(用 latest-data) 会显示不同的数值，且这种不一致只在缓存冷热切换时出现，
-//	极难复现。
+// 因此本用例的断言收缩为「/latest-values 的 miss 回落真的从帧表取数且字段完整」，
+// 这正是它一半的价值里仍然有效的那一半。
 //
-// 停写之后这条不变量有了**新的失效方式**：如果一边走帧表、另一边走 unified_data，
-// 那么热路径（缓存命中）两边一致，但**冷缓存时**一个拿到停写前最后一刻的值、
-// 另一个拿到最后一帧的值 —— 数值与 timestamp 都可能不同。而冷缓存正是
-// 「重启后第一次请求」/「缓存被显式清空」这两个时刻。
+// ⚠ 变异验证改了：删掉 LatestRowsFromFrames 的帧表解码分支 ⇒ miss rows 返回
+// 0 行 ⇒ 本用例红。原来的「删掉 latestSensorViewsFromDB 的帧表分支」已不可用
+// （该函数随文件删除）。
 //
-// 所以本用例刻意造「帧表有数据、unified_data **一行都没有**」，
-// 让任何仍走 unified_data 的路径**返回空**，从而暴露出来。
-//
-// ============ 变异验证（两个都验过）============
-//
-//	删掉 latestSensorViewsFromDB 里的帧表分支
-//	  => latestSensorViewsFromDB 返回 0 项 => 本用例红
-//
-//	删掉 latestValuesMissRowsFromFramesOrDB 里的 LatestRowsFromFrames 分支
-//	  => miss rows 返回 0 行 => 本用例红
+// 完整的数据源一致性现在由另外两处保证：
+//   · /latest-values 的缓存预热（WarmupLatestValuesFromFrames）与 miss 回落
+//     共用 LatestRowsFromFrames（latest_values_frames.go 的注释说明）；
+//   · /devices/:id/history 走帧表解码，它有自己的用例。
 
 import (
 	"testing"
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
+	"ehome/backend/internal/models"
 	"ehome/backend/internal/telemetry"
 	"ehome/backend/testutil"
 )
@@ -60,36 +56,30 @@ func TestLatestValuesAndLatestData_ShareFrameSource(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
 	seedFramesOnlyFields(t, db, dev, start, start.Add(2*time.Minute), dict, want, 10*time.Second)
 
-	views := latestSensorViewsFromDB(db, dev)
-	if len(views) != len(want) {
-		t.Fatalf("latestSensorViewsFromDB 返回 %d 项，want %d（unified_data 已清空，"+
-			"只剩帧表可读；返回 0 说明帧表分支没生效）", len(views), len(want))
-	}
-
 	rows, err := latestValuesMissRowsFromFramesOrDB(t.Context(), db, dev)
 	if err != nil {
 		t.Fatalf("miss rows: %v", err)
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("latestValuesMissRowsFromFramesOrDB 返回 %d 行，want %d"+
-			"（unified_data 已空；返回 0 说明帧表分支没生效）", len(rows), len(want))
+			"（两张原始表都已退役；返回 0 说明帧表分支没生效）", len(rows), len(want))
 	}
 
-	byName := make(map[string]sensorView, len(views))
-	for _, v := range views {
-		byName[v.Name] = v
-	}
+	// 字段名与单位逐项核对（单位来自 sensor_field_obs，帧表没有 unit 列）。
+	byName := make(map[string]models.UnifiedData, len(rows))
 	for _, r := range rows {
-		v, ok := byName[r.SensorName]
+		byName[r.SensorName] = r
+	}
+	for _, name := range want {
+		row, ok := byName[name]
 		if !ok {
-			t.Errorf("/latest-values 有 %q 但 /latest-data 没有 => 两条路径不同源", r.SensorName)
+			t.Errorf("帧表里有 %q 但 /latest-values 的 miss 回落没返回它", name)
 			continue
 		}
-		if v.Value != r.Value {
-			t.Errorf("%q 值不一致: latest-data=%v latest-values=%v", r.SensorName, v.Value, r.Value)
-		}
-		if v.Unit != r.Unit {
-			t.Errorf("%q 单位不一致: latest-data=%q latest-values=%q", r.SensorName, v.Unit, r.Unit)
+		if row.Unit == "" {
+			// 单位缺失不一定会红（sensor_field_obs 未投影时本来就为空），
+			// 但在这条用例里 fixture 已显式写入单位，所以必须非空。
+			t.Errorf("%q 的 Unit 为空 —— unitMapForDevice 没读到 sensor_field_obs", name)
 		}
 	}
 }
@@ -103,9 +93,10 @@ func TestLatestValuesAndLatestData_ShareFrameSource(t *testing.T) {
 // 现在直接返回空，用户**同样**看到「—」，区别只是少一条必现的 42P01 日志。
 //
 // 所以本用例验的不再是「回落了」，而是「退役后的终态是干净的空」：
-//   ① 不报错（错误会让 handler 记 Warn 噪音）
-//   ② 返回空集（不是 nil 指针解引用 / 不是伪造数据）
-//   ③ 即使 unified_data 里**有**数据也不返回它（表已 DROP，这条是防「有人加回兜底」）
+//
+//	① 不报错（错误会让 handler 记 Warn 噪音）
+//	② 返回空集（不是 nil 指针解引用 / 不是伪造数据）
+//	③ 即使 unified_data 里**有**数据也不返回它（表已 DROP，这条是防「有人加回兜底」）
 func TestLatestValuesMiss_FramesEmptyReturnsEmpty(t *testing.T) {
 	requirePostgresAPI(t)
 	db := testutil.OpenTestDB(t)

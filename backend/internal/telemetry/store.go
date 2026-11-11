@@ -120,6 +120,9 @@ func (s *Store) PersistFrames(frames []EncodedFrame) error {
 			FrameKind: frames[i].FrameKind,
 			SlotID:    frames[i].SlotID,
 			Payload:   frames[i].Payload,
+			// Raw 只在关键帧上非 nil（写路径在 DualWriter.appendEncoded 里填）。
+			// 增量帧为 nil ⇒ 落 NULL，与「常规增量帧留 NULL」的设计口径一致。
+			Raw: frames[i].Raw,
 		}
 	}
 	return s.db.Session(&gorm.Session{}).

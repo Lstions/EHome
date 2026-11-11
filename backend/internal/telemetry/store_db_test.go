@@ -273,7 +273,7 @@ func TestDualWriterNonBlockingAndIsolated(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 500; i++ {
-			w.Observe(11, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i))
+			w.Observe(11, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i), nil)
 		}
 		close(done)
 	}()
@@ -354,7 +354,7 @@ func TestDualWriterPersistFailureIsolated(t *testing.T) {
 	}
 	base := time.Date(2026, 11, 4, 4, 0, 0, 0, time.UTC)
 	for i := 0; i < 20; i++ {
-		w.Observe(13, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i))
+		w.Observe(13, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i), nil)
 	}
 	w.Close()
 	st := w.Stats()

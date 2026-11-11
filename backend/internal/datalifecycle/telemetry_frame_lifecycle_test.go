@@ -47,22 +47,30 @@ func seedFrame(t *testing.T, db *gorm.DB, deviceID uint, ts time.Time, seq int16
 	}
 }
 
-// TestTimeseriesTablesIncludesFrame 守清单本身：三张表、列名正确。
+// TestTimeseriesTablesIncludesFrame 守清单本身：**一张表**（telemetry_frame）、列名正确。
 //
 // 这是**清单门禁**：任何一张表从清单里消失，对应的生命周期路径都会静默失效。
 // 列名断言同样重要 —— telemetry_frame 的时间列是 ts 不是 timestamp，写错就是
 // SQL 报「列不存在」，而这类错误只在真有数据时才会触发。
+//
+// ============ 2026-11-11：期望从三张收敛为一张 ============
+//
+// 这不是"为了过测试而改数字"：unified_data 2026-11-08 停写、device_data
+// 2026-11-11 整表退役（原始数据退役方案 §2.1），两张表都已不存在。
+// 保留它们会让 purge / retention 对不存在的表跑 SQL。
+//
+// ⚠ 断言仍然是**精确相等**（len != 1 就红），没有放宽成 ">= 1"：
+// 那样将来有人又把退役表加回来时本用例不会红，清单门禁就失效了。
 func TestTimeseriesTablesIncludesFrame(t *testing.T) {
 	tables := TimeseriesTables()
-	if len(tables) != 3 {
-		t.Fatalf("TimeseriesTables 有 %d 张表，want 3（unified_data/device_data/telemetry_frame）", len(tables))
+	if len(tables) != 1 {
+		t.Fatalf("TimeseriesTables 有 %d 张表，want 1（device_data/unified_data 均已退役，"+
+			"只剩 telemetry_frame —— 帧表是唯一时序载体）", len(tables))
 	}
 	want := map[string]string{
-		"unified_data":    "timestamp",
-		"device_data":     "timestamp",
 		"telemetry_frame": "ts",
 	}
-	hasID := map[string]bool{"unified_data": true, "device_data": true, "telemetry_frame": false}
+	hasID := map[string]bool{"telemetry_frame": false}
 	for _, tbl := range tables {
 		tsCol, ok := want[tbl.Name]
 		if !ok {
@@ -95,13 +103,10 @@ func TestRetentionDeletesExpiredFrames(t *testing.T) {
 	seedFrame(t, db, dev.ID, now.AddDate(0, 0, -400), 0, models.TelemetryFrameKindKey)
 	seedFrame(t, db, dev.ID, now.AddDate(0, 0, -400), 1, models.TelemetryFrameKindDelta)
 	seedFrame(t, db, dev.ID, now.AddDate(0, 0, -10), 0, models.TelemetryFrameKindKey)
-	// 另一张表也放一条过期行，确认多表都被清理（不是只清帧表）。
-	if err := db.Create(&models.UnifiedData{
-		DeviceID: dev.ID, SensorName: "voltage", Value: 1,
-		Timestamp: now.AddDate(0, 0, -400),
-	}).Error; err != nil {
-		t.Fatalf("seed unified row: %v", err)
-	}
+	// 2026-11-11: 原先这里还给 unified_data 塞一条过期行，用来验证"多表都被清理"。
+	// 两张原始表都已退役，TimeseriesTables 只剩帧表 —— 多表清理能力现在由
+	// TimeseriesTable 抽象本身承载（清单见 telemetry_frame_lifecycle.go），
+	// 不再有第二张真实的表可以 seed。
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }
@@ -116,11 +121,8 @@ func TestRetentionDeletesExpiredFrames(t *testing.T) {
 	if frames != 1 {
 		t.Errorf("保留期后帧数 = %d, want 1（过期 2 行必须被删、新鲜 1 行必须留）", frames)
 	}
-	var unified int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", dev.ID).Count(&unified)
-	if unified != 0 {
-		t.Errorf("unified_data 过期行未清理: 剩 %d 行", unified)
-	}
+	// （原先这里还断言 unified_data 过期行被清 —— 该表已退役，删掉这条断言；
+	//  帧表的断言上面已经覆盖"过期删、新鲜留"这条语义。）
 	// 新鲜帧必须还在原时间点（不能被误删）
 	var fresh models.TelemetryFrame
 	if err := db.Where("device_id = ?", dev.ID).First(&fresh).Error; err != nil {

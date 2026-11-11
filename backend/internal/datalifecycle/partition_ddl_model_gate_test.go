@@ -20,9 +20,10 @@ package datalifecycle
 // 本仓有**四张**分区母表，每张都有"裸 DDL"和"GORM model"两份列定义：
 //
 //	unified_data           ↔ models.UnifiedData
-//	device_data            ↔ models.DeviceData
 //	telemetry_rollup_1m    ↔ models.TelemetryRollup1m
 //	telemetry_frame        ↔ models.TelemetryFrame
+//
+// （2026-11-11 之前还有第四对 device_data ↔ models.DeviceData，随该表整表退役删除。）
 //
 // 这四对里**任何一对**发生列漂移，表现都完全相同且极难发现：
 //   · 生产 PG 上写入/读取报 "column ... does not exist"，功能整段失效；
@@ -65,7 +66,10 @@ var partitionDDLModelPairs = []struct {
 	model interface{}
 }{
 	{"unified_data", &models.UnifiedData{}},
-	{"device_data", &models.DeviceData{}},
+	// 2026-11-11: "device_data" 一行已删除 —— 该表整表退役（原始数据退役方案 §2.1），
+	// DDL 模板与 GORM 模型都删了，没有"DDL ↔ model"这一对可对照。
+	// 同一次改造删掉的还有 partitionParentIndexes / partitionCopyColumns /
+	// deadTimeseriesIndexes 三处的 device_data 条目（四处同改的纪律照旧）。
 	{"telemetry_rollup_1m", &models.TelemetryRollup1m{}},
 	{"telemetry_frame", &models.TelemetryFrame{}},
 }

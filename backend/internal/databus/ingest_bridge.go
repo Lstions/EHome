@@ -2,6 +2,7 @@ package databus
 
 import (
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"ehome/backend/internal/ingest"
@@ -39,6 +40,14 @@ type decodeOutcome struct {
 	FailReason ingest.Reason
 	// Err 是底层错误（用于日志）。
 	Err error
+	// Adapter 是失败时尝试/归因的 adapter 名（ingest.DecodeError.Adapter）。
+	//
+	// 2026-11-11 加（原始数据退役 §4.2.2）：device_data 退役后日志是唯一的原始
+	// 字节取证来源，排查时必须能回答「**哪个解析后端**拒绝了这帧」——
+	// "decode_failed" 单看无法区分是配置解析器还是驱动拒绝的（两者的修法完全不同：
+	// 补 device_configs vs 修驱动/换适配器）。该值是有界枚举（config_parser /
+	// driver + 驱动名），进日志可聚合，不会成为高基数。
+	Adapter string
 }
 
 // ok 报告解析是否成功。
@@ -58,7 +67,7 @@ func (c *SensorParserConsumer) decodeFrame(device models.EdgeDevice, merged []by
 
 	if c.ingestResolver == nil {
 		// 未接线：按 no_adapter 处理（安全降级 —— 绝不静默丢弃）。
-		return decodeOutcome{FailReason: ingest.ReasonNoAdapter}
+		return decodeOutcome{FailReason: ingest.ReasonNoAdapter, Adapter: ""}
 	}
 
 	// 驱动分支判定：与 adapter 内部使用**同一个函数**，防止
@@ -108,10 +117,19 @@ func (c *SensorParserConsumer) decodeFrame(device models.EdgeDevice, merged []by
 	if !classified {
 		reason = ingest.ReasonDecodeFailed
 	}
+	// Adapter 从分类错误里提取（ingest.DecodeError.Adapter）。不是 DecodeError
+	// （例如 adapter 内部 panic 转成的普通 error）时为空串 —— 日志里仍留下空字段，
+	// 不要用旧值兜底：那会让「谁拒的」看起来比实际更确定。
+	adapter := ""
+	var de *ingest.DecodeError
+	if errors.As(err, &de) {
+		adapter = de.Adapter
+	}
 	return decodeOutcome{
 		Attempted:  reason != ingest.ReasonNoAdapter,
 		FailReason: reason,
 		Err:        err,
+		Adapter:    adapter,
 	}
 }
 

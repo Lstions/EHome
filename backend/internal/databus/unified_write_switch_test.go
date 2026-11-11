@@ -81,7 +81,7 @@ func TestUnifiedWriteSwitch_OffStopsUnifiedDataOnly(t *testing.T) {
 	consumer.latestSink = func(models.UnifiedData) { latestHits++ }
 	// L2 帧表与 L3 rollup 的 sink 计数：门控必须在这两者之后。
 	frameHits, rollupHits := 0, 0
-	consumer.telemetrySink = func(uint, time.Time, int64, []telemetry.Reading) { frameHits++ }
+	consumer.telemetrySink = func(uint, time.Time, int64, []telemetry.Reading, []byte) { frameHits++ }
 	consumer.telemetryRollupSink = func(uint, []parser.Field, time.Time) { rollupHits++ }
 
 	skippedBefore := counterValue(t, metrics.UnifiedWritesSkippedTotal)

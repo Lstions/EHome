@@ -320,14 +320,21 @@ func (mgr *Manager) buildParserConsumers() {
 		if telemetrySink != nil {
 			parser.SetTelemetrySink(telemetrySink)
 		}
-		persist := databus.NewDBPersistConsumer(db)
+		// db_persist 消费者已随 device_data 整表退役删除（2026-11-11，
+		// docs/设计/原始数据退役-改造方案-2026-11-11.md §1.2/§2.1）。
+		//
+		// 为什么它的删除是安全的：它此前唯一的职责是「把原始字节写 device_data」，
+		// 而产品裁决「原始数据不入库」。原先它比 sensor_parser 多覆盖的三类样本
+		// （ErrorCode!=0 / 空 raw / Handle 内拒收）现在分别由以下路径承载：
+		//   · ErrorCode!=0 与空 raw → consumers_light.go 的 "rejected at ingest" WARN；
+		//   · 解析失败（含 Handle 内拒收）→ consumers_heavy.go 的 "decode failed" WARN。
+		// 即取证能力从"完整原始字节落库"降级为"失败样本前缀 128B 进日志"
+		// （方案 §4.2/§4.4 的能力损失表已明确接受）。
 		if parserShards <= 1 {
 			mgr.dataBus.Register(parser)
-			mgr.dataBus.Register(persist)
 			break
 		}
 		mgr.dataBus.Register(databus.NewShardConsumer(parser, i, parserShards))
-		mgr.dataBus.Register(databus.NewShardConsumer(persist, i, parserShards))
 	}
 }
 

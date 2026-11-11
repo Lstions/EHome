@@ -1606,40 +1606,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		Success(c, out)
 	})
 
-	// GET /api/v1/edge-devices/:id/latest-data
-	//
-	// 2026-10-23: 数据读取回到设备维度 —— 一条 device_id 等值查询，
-	// ORDER BY created_at DESC LIMIT 1，两个方言同一条 SQL（旧的 OR scope
-	// 条件在 PG 上会让规划器放弃任何前导列索引，退化为 200 万行 seq scan；
-	// 这是「逻辑设备列表 42 秒」同一类根因的另一个受害者）。
-	//
-	// 软删设备的数据仍然可读（历史不该因为设备行被软删就消失）；只有配置
-	// 类端点（GET /edge-devices/:id 等）才对已删设备返回 404。
-	// 2026-11-07 (task-19): 写侧不再把 sensors 塞进 device_data，改为**读时合成**，
-	// 使前端（useDeviceData.ts 读 data_json.sensors）零改动。
-	//
-	// 为什么不把 sensors 一起删掉、让前端改读 /latest-values：
-	// 详情页是 latest-data 与 latest-values **合并**渲染（先取聚合快照，再被单帧覆盖），
-	// 少一路会改变展示口径而不只是少个字段 —— 属接口破坏，不是存储优化。
-	//
-	// 合成口径见 device_data_sensors.go：**每 sensor 各取最新**，不是
-	// WHERE timestamp = 本行时刻（L1 收窄后那样会缺值）。
-	//
-	// 存量行本来就有 sensors ⇒ deviceDataJSONWithSensors 原样返回，不重算：
-	// 老帧的 sensors 是**那一帧的完整物理量**，比"各取最新"更准，覆盖它是倒退。
-	e.GET("/:id/latest-data", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		var data models.DeviceData
-		if err := db.WithContext(c.Request.Context()).
-			Where("device_id = ?", uint(id)).
-			Order("created_at DESC").Limit(1).Find(&data).Error; err != nil {
-			// 与旧实现一致: 查询错误忽略 (返回零值), 不 500。
-			logger.Warnf("[latest-data] query failed device_pk=%d: %v", id, err)
-		}
-		data.DataJSON = deviceDataJSONWithSensors(db, uint(id), data.DataJSON)
-		Success(c, data)
-	})
-
 	// GET /api/v1/edge-devices/:id/latest-values
 	//
 	// 返回该设备**每个传感器**各自的最新值（一帧里可能有 N 个物理量，
@@ -1736,55 +1702,19 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		Success(c, out)
 	})
 
-	// GET /api/v1/edge-devices/:id/data
+	// GET /api/v1/edge-devices/:id/data —— **已删除**（2026-11-11，破坏性更新）
 	//
-	// 全量历史（device_data 原始记录，分页）。设备维度直查；软删设备的数据
-	// 仍可读（历史不因设备行软删而消失）。
-	e.GET("/:id/data", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		from := c.Query("start_time")
-		to := c.Query("end_time")
-		// S4 修复 (2026-10-07): 本端点改前没有 clamp (与 /edge-devices 列表端点不同,
-		// 它一直有)。page_size=-1 → LIMIT 整条丢弃 → 返回该设备**全量**历史;
-		// page_size=0 或 "abc" → LIMIT 0 → 静默空页。归一后越界值回落到本端点默认 50。
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-		if page < 1 {
-			page = 1
-		}
-		if pageSize < 1 || pageSize > 200 {
-			pageSize = 50
-		}
-		var data []models.DeviceData
-		// P2.2 取消传播: device_data 分页查询绑定请求上下文。
-		q := db.WithContext(c.Request.Context()).Where("device_id = ?", uint(id))
-		if from != "" {
-			q = q.Where("created_at >= ?", from)
-		}
-		if to != "" {
-			q = q.Where("created_at <= ?", to)
-		}
-		var total int64
-		if err := q.Model(&models.DeviceData{}).Count(&total).Error; err != nil {
-			logger.Warnf("[edge-device-data] count failed id=%d: %v", id, err)
-			Error(c, http.StatusInternalServerError, "failed to count device data")
-			return
-		}
-		if err := q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&data).Error; err != nil {
-			logger.Warnf("[edge-device-data] query failed id=%d: %v", id, err)
-			Error(c, http.StatusInternalServerError, "failed to query device data")
-			return
-		}
-		// 2026-11-07 (task-19): 写侧停写 sensors 后，分页列表同样要补回，
-		// 否则数据面板(DataPanel)的「数据」列对新行会全部显示「—」。
-		//
-		// ⚠ 与 /latest-data **口径不同**：这里按「同一时间戳」取，不是「每 sensor 取最新」。
-		// 列表是历史帧 —— 拿今天的读数去填 3 天前的行是把历史伪造成现状。
-		// 详见 device_data_sensors.go 的 deviceDataJSONListWithSensors 文件头
-		// （含 L1 收窄导致的"字段比改造前少"这一已知降级）。
-		deviceDataJSONListWithSensors(db, uint(id), data)
-		Success(c, gin.H{"items": data, "total": total})
-	})
+	// 它读的是 device_data 的分页原始记录（含读时合成的 sensors）。device_data 整表退役后
+	// 这个端点没有任何数据来源 —— 不是暂时空，是永远空。
+	//
+	// 前端替代路径（另一个 teammate 同步改前端）：
+	//   · 数据面板表格 → GET /devices/:id/history（一次返回 []UnifiedData，一字段一行）
+	//   · 实时读数     → GET /:id/latest-values（本来就有，且是本仓唯一可信的实时口径）
+	//
+	// 保留这条注释而不是干脆删干净：handler 按路由前缀注册，后人 grep /data 时
+	// 需要一眼看到它被人有意删了、替代在哪，否则很容易照着老文档再加回来（加回来
+	// 只会得到 42P01）。
+	// 方案：docs/设计/原始数据退役-改造方案-2026-11-11.md §1.3 读路径表第 1 行。
 
 	// GET /api/v1/edge-devices/deleted — 可恢复的已删除设备列表。
 	//
@@ -2239,30 +2169,51 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		// ── 5. 迁移时序表（分批，独立事务 + 批间 sleep）──
 		//
-		// 两张「每行有自增 id」的表可以 UPDATE device_id 直接改归属；
-		// **帧表不行** —— 主键是 (device_id, ts, seq)，直接把源行改成目标
-		// device_id 会在目标同 (ts,seq) 已有行时撞主键，整批失败。
-		// 因此帧表走 datalifecycle.MigrateTelemetryFramesToDevice 的
-		// 「复制 + ON CONFLICT DO NOTHING + 精确删源」(评审 B-3)。
+		// ============ 表清单改为**动态**（2026-11-11 device_data 退役）============
+		//
+		// 这里原本是硬编码的 []string{"unified_data", "device_data"}：
+		//
+		//	· unified_data 已于 2026-11-08 停写、DROP 后不存在；
+		//	· device_data 于 2026-11-11 整表退役（原始数据退役方案 §2.1）。
+		//
+		// 硬编码的后果不是"多搬一张空表"这么轻：**表不存在时该 SQL 直接报 42P01**，
+		// 于是一次正常的合并历史会返回 500，而用户看到的是"合并失败"。
+		// 这正是方案 §5.3 冒烟清单第 12 项（合并历史成功、无 42P01）要挡的东西。
+		//
+		// 改法：走 datalifecycle.ExistingTimeseriesTables(db)，与 purge / retention
+		// / data-summary 共用同一个清单源（telemetry_frame_lifecycle.go 的
+		// TimeseriesTables），它已经自动过滤掉不存在的表。新增/退役时序表时
+		// 只改那一处，这里零改动 —— 这也正是"清单集中"的目的。
+		//
+		// ⚠ 仍然只处理 HasID=true 的表（UPDATE device_id 直接改归属）。
+		// **帧表不行** —— 主键是 (device_id, ts, seq)，直接把源行改成目标 device_id
+		// 会在目标同 (ts,seq) 已有行时撞主键、整批失败。它走下面的
+		// datalifecycle.MigrateTelemetryFramesToDevice（复制 + ON CONFLICT DO NOTHING
+		// + 精确删源，评审 B-3）。HasID 字段就是为了让这两条路径能自动分流：
+		// 这里的 if 不是防御性冗余，而是"帧表永远不该进这个 UPDATE 循环"的表达。
 		batchSize := 10000
 		if db.Dialector != nil && db.Dialector.Name() != "postgres" {
 			batchSize = 1000
 		}
 		var migrated int64
-		for _, table := range []string{"unified_data", "device_data"} {
+		for _, table := range datalifecycle.ExistingTimeseriesTables(mdb) {
+			if !table.HasID {
+				// 复合主键表（telemetry_frame）另有迁移函数，见下方。
+				continue
+			}
 			for {
 				var affected int64
 				err := mdb.Transaction(func(tx *gorm.DB) error {
 					res := tx.Exec(
-						fmt.Sprintf("UPDATE %s SET device_id = ? WHERE id IN (SELECT id FROM %s WHERE device_id IN ? LIMIT ?)", table, table),
+						fmt.Sprintf("UPDATE %s SET device_id = ? WHERE id IN (SELECT id FROM %s WHERE device_id IN ? LIMIT ?)", table.Name, table.Name),
 						targetID, sources, batchSize)
 					affected = res.RowsAffected
 					return res.Error
 				})
 				if err != nil {
-					logger.Warnf("[merge-history] update %s failed target=%d sources=%v: %v", table, targetID, sources, err)
+					logger.Warnf("[merge-history] update %s failed target=%d sources=%v: %v", table.Name, targetID, sources, err)
 					// 已提交的批次保持已迁移（分批事务各自提交，重试幂等）。
-					Error(c, http.StatusInternalServerError, "failed to migrate "+table+"（已迁移的行保持迁移，重试是幂等的）")
+					Error(c, http.StatusInternalServerError, "failed to migrate "+table.Name+"（已迁移的行保持迁移，重试是幂等的）")
 					return
 				}
 				migrated += affected
@@ -2605,9 +2556,10 @@ func edgeDeviceDisableBlockReason(db *gorm.DB, edgeDeviceID uint) (string, error
 // 所以删掉回落是行为等价 + 消除噪音，不是功能退化。
 //
 // ⚠ 这个能力（离线设备仍显示最后已知值）曾经存在，同日随 unified_data DROP 退役。
-//   如果将来需要它，正确做法是**扩展帧表**（让帧解码能枚举该设备的全部
-//   sensor_name），而不是把 unified_data 加回来 —— 加回来意味着「DROP 后重启会
-//   重建空表」那个陷阱一起回来。
+//
+//	如果将来需要它，正确做法是**扩展帧表**（让帧解码能枚举该设备的全部
+//	sensor_name），而不是把 unified_data 加回来 —— 加回来意味着「DROP 后重启会
+//	重建空表」那个陷阱一起回来。
 func latestValuesMissRowsFromFramesOrDB(
 	ctx context.Context, db *gorm.DB, deviceID uint,
 ) ([]models.UnifiedData, error) {

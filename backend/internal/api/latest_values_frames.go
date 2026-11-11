@@ -207,6 +207,12 @@ func LatestValuesRowsFromFrames(
 		if derr != nil || len(points) == 0 {
 			continue
 		}
+		// frameSnapshot 是「某一时刻的累积 as-of 状态」：解码结果是按时间升序的
+		// (name, value) 点序列，同一字段后者覆盖前者 ⇒ 循环结束即「每字段最后已知值」。
+		//
+		// 类型定义见文件下方。它原本住在已删除的 device_data_sensors_frames.go
+		// （那个文件随 device_data 退役被删），现在只有本文件还在用它，所以搬到这里 ——
+		// 定义跟着唯一使用者走，而不是留在一个只为兼容而存在的空壳文件里。
 		final := frameSnapshot{Values: make(map[string]float64, 32)}
 		for _, pt := range points {
 			final.Values[pt.Name] = pt.Value
@@ -233,6 +239,20 @@ func LatestValuesRowsFromFrames(
 		}
 	}
 	return out, nil
+}
+
+// frameSnapshot 是某一帧时刻的**累积 as-of 状态**（不是该帧自己的字段）。
+//
+// 为什么要累积：device15 有 7 种帧类型，单帧只带自己 slot 的字段。
+// 只取单帧字段会让读数显示成「最后那条命令的产物」，另外 30+ 个字段永远看不到
+// （setup 见 handler_edge_device.go 的 /latest-values 注释：这正是多命令设备的
+// 原始缺陷）。累积 as-of 状态不受轮询间隔影响，天然给出完整设备状态。
+//
+// 2026-11-11 迁到这里：它原本定义在 device_data_sensors_frames.go，那个文件随
+// device_data 退役被删；删完只有本文件还在用它，定义跟着唯一使用者走。
+type frameSnapshot struct {
+	TS     time.Time
+	Values map[string]float64
 }
 
 // LatestRowsFromFrames 返回某台设备**最后已知的全部物理量**（models.UnifiedData 形状）。

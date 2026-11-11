@@ -28,7 +28,21 @@ import (
 //
 // 为什么 commandTemplateID 不能省：方案 §4.4 的 ⚠ —— device15 的 7 种帧类型
 // 来自 7 条不同指令，硬编码/省略它会把不同指令的值写进同一 slot（写串）。
-type Sink func(deviceID uint, at time.Time, commandTemplateID int64, readings []Reading)
+//
+// ==================== 为什么加 raw（2026-11-11，原始数据退役 §4.4 方案 A）====================
+//
+// device_data 退役后，「**解析成功但数值错误**」（量化规格配错/寄存器偏移错）这类
+// 问题会彻底失去追溯能力：库里只剩解析值，没有原始字节可比对。缓解方案 A 是
+// 保留 telemetry_frame.raw 列，**只在关键帧填充**：
+//
+//	· 关键帧实测 10,270 帧/24h（7.1%），原始帧 78~256 B ⇒ 约 +0.13 MB/天；
+//	· 比「关键帧 raw 打进日志」省 10 倍（hex 会膨胀），且**可 SQL 按时间/设备查**；
+//	· 增量帧的 raw 留 NULL：它们只有「与上一帧的差」，脱离增量链没有独立追溯价值，
+//	  而「回放某一时刻」只需要最近的那个关键帧（关键帧自带全字段）。
+//
+// 注意 raw 与 readings 必须来自**同一次重组结果**（databus.Handle 里的 merged）：
+// 拿单帧片段去配关键帧的解析值，事后核对会得出错误结论。
+type Sink func(deviceID uint, at time.Time, commandTemplateID int64, readings []Reading, raw []byte)
 
 // SinkOrNil 把 *DualWriter 变成可安全注入的 Sink（w 为 nil 时返回 nil）。
 //

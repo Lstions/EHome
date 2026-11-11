@@ -11,16 +11,18 @@
 //
 //	ID                        Label                Weight  它在 main.go 里对应什么
 //	------------------------  -------------------  ------  --------------------------------------------
-//	db_connect                连接数据库                4  database.Connect（含重试）
-//	auto_migrate              数据库结构迁移           13  database.AutoMigrate
-//	partition_device_data     device_data 分区迁移     17  datalifecycle.MigrateTableToPartitioned(device_data)
-//	partition_telemetry_frame L2 帧表分区迁移           8  datalifecycle.MigrateTelemetryFrameToPartitioned
-//	partition_rollup          聚合表分区就绪            3  datalifecycle.MigrateTelemetryRollup1mToPartitioned
-//	ensure_partitions         滚动分区保障              4  EnsurePartitionsFor × N（[上月, 未来 3 月]）
-//	parent_indexes            补齐父表索引             30  ensurePartitionParentIndexes（分钟级 DDL，最耗时）
-//	retire_dead_indexes       退役死索引                6  retireDeadTimeseriesIndexes（DROP INDEX，ACCESS EXCLUSIVE）
-//	warmup                    缓存预热                  9  最新值缓存/字段解析器预热
-//	startup_tasks             后台任务启动              6  purger / retention / notify / 分区每日巡检 …
+//	db_connect                连接数据库                5  database.Connect（含重试）
+//	auto_migrate              数据库结构迁移           16  database.AutoMigrate
+//	partition_telemetry_frame L2 帧表分区迁移          10  datalifecycle.MigrateTelemetryFrameToPartitioned
+//	partition_rollup          聚合表分区就绪            4  datalifecycle.MigrateTelemetryRollup1mToPartitioned
+//	ensure_partitions         滚动分区保障              5  EnsurePartitionsFor × N（[上月, 未来 3 月]）
+//	parent_indexes            补齐父表索引             35  ensurePartitionParentIndexes（分钟级 DDL，最耗时）
+//	retire_dead_indexes       退役死索引                7  retireDeadTimeseriesIndexes（DROP INDEX，ACCESS EXCLUSIVE）
+//	warmup                    缓存预热                 11  最新值缓存/字段解析器预热
+//	startup_tasks             后台任务启动              7  purger / retention / notify / 分区每日巡检 …
+//
+// （2026-11-11 device_data 整表退役后，partition_device_data 这一步已删除，
+// 其权重按原相对比例分给剩余步骤 —— 见 steps.go 的完整演算。）
 //
 // 权重**不是**按耗时精确标定的，而是按"最坏情况下这一段会不会让维护页看起来卡死"排：
 // 最耗时的分钟级 DDL（parent_indexes 30）独占近三分之一。
@@ -40,7 +42,15 @@
 // TestMigrateUnifiedData_FreshDeploy_PartitionedParentAtFinalName
 //
 // MigrateUnifiedDataToPartitioned 函数本身保留（partition_mgr 的泛化入口，
-// device_data / telemetry_frame 仍走同一套机制），只是 main.go 不再为 unified_data 调它。
+// telemetry_frame / telemetry_rollup_1m 仍走同一套机制），只是 main.go 不再为
+// unified_data 调它。
+//
+// ============ 1.0b 为什么也没有 partition_device_data（2026-11-11 整表退役）============
+//
+// 同因同果：device_data 整表退役（写点/读点/DDL/剥离任务全删），保留迁移调用会在
+// 表被 DROP 之后把它重新建出来。产品裁决见 docs/设计/原始数据退役-改造方案-2026-11-11.md。
+// 与 unified_data 那一步唯一的区别：这次连表的**模型**都没有了（models.DeviceData 已删），
+// 所以 DDL 模板 / 索引模板 / 迁移列清单 / 分区列校正四处的 device_data 条目也一并删除。
 //
 // ============ 1.1 为什么 partition_telemetry_frame 单独一步（2026-11-07 增补）============
 //
@@ -59,9 +69,11 @@
 // 并成一步的后果是维护页只能显示一个状态：要么把 Fatal 显示成"不挡启动"，要么把
 // Warn 显示成"启动失败"。前端运维看到的那一行，会与真实后果不符。
 //
-// 权重 6 的来源：它插在两条主表迁移之后、rollup 之前，让出方式为
-// unified_data 25→22 / device_data 15→13 / parent_indexes 25→24，合计仍为 100
-// （TestDefaultStepsTable 守着这张表，漂移即红）。
+// 权重 10 的来源：它插在 auto_migrate 之后、rollup 之前，且是**唯一**还会走
+// 「分区迁移」Fatal 路径的时序表（2026-11-11 device_data 退役后）。历次让出：
+// unified_data 25→22 / device_data 15→13 / parent_indexes 25→24（2026-11-07），
+// 再在 device_data 整步移除后按相对比例放大（2026-11-11）。
+// 合计恒为 100（TestDefaultStepsTable 守着这张表，漂移即红）。
 //
 // ⚠ 步骤顺序可以调整，但 **ID 不能改**：前端的阶段列表、api 的 /health phase、
 // datalifecycle 的埋点 stepID 三处都按字符串字面量对齐（见 steps.go 的导出常量）。

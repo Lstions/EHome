@@ -9,6 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 )
 
@@ -79,6 +80,12 @@ type dualItem struct {
 	at                time.Time
 	commandTemplateID int64
 	readings          []Reading
+	// raw 是重组后的原始总线帧，只在关键帧上落库（原始数据退役 §4.4 方案 A）。
+	//
+	// 为什么随队列一起传而不是在 worker 里回查：worker 与写路径不在同一 goroutine，
+	// 而且那时原始字节早已被复用的缓冲区覆盖（reassembler 的 caller 只在 Handle
+	// 内持有它）。跟着 item 走是唯一安全的传递方式。
+	raw []byte
 }
 
 // 配置项名（环境变量）。
@@ -217,7 +224,7 @@ func NewDualWriter(db *gorm.DB, dict SlotDictionary, cfg DualWriterConfig) (*Dua
 //   - commandTemplateID = DataEvent.CommandTemplateID（device15 的 7 种帧类型
 //     唯一可靠判据，§4.4）；
 //   - readings = 解析出的物理量。
-func (w *DualWriter) Observe(deviceID uint, at time.Time, commandTemplateID int64, readings []Reading) {
+func (w *DualWriter) Observe(deviceID uint, at time.Time, commandTemplateID int64, readings []Reading, raw []byte) {
 	if w == nil || len(readings) == 0 {
 		return
 	}
@@ -225,8 +232,16 @@ func (w *DualWriter) Observe(deviceID uint, at time.Time, commandTemplateID int6
 	// （"现在没复用"不等于"以后不会复用"），这里付一次小拷贝换取安全。
 	cp := make([]Reading, len(readings))
 	copy(cp, readings)
+	// raw 同理必须拷贝：databus 的 merged 来自 reassembler 的内部缓冲，
+	// 下一帧 Append 可能就地扩展/覆盖它。不拷贝 ⇒ 落库的 raw 与 payload 对不上，
+	// 而那种错**不会报错**，只有在事后核对时才会发现（最坏的一种 bug）。
+	var rawCopy []byte
+	if len(raw) > 0 {
+		rawCopy = make([]byte, len(raw))
+		copy(rawCopy, raw)
+	}
 	select {
-	case w.queue <- dualItem{deviceID: deviceID, at: at, commandTemplateID: commandTemplateID, readings: cp}:
+	case w.queue <- dualItem{deviceID: deviceID, at: at, commandTemplateID: commandTemplateID, readings: cp, raw: rawCopy}:
 	default:
 		// 队列满 ⇒ 丢弃本帧，不阻塞。**不重试、不落盘缓冲**：双写是影子，
 		// 队列满说明落库已经跟不上采集；攒更多只会让延迟无限增长。
@@ -347,6 +362,17 @@ func (w *DualWriter) appendEncoded(batch *[]EncodedFrame, it dualItem) {
 		logger.Debugf("telemetry: dual write encode skipped: %v", err)
 		return
 	}
+	// ==================== 关键帧才填 raw（原始数据退役 §4.4 方案 A）====================
+	//
+	// 判据用 frame.FrameKind（编码器已经算好的那一个），**不要**在这里重新判断
+	// 「是不是首帧/距上次多久」—— 那会把关键帧判据变成两处实现，而它们一定会漂移
+	// （本仓 §8 已经有过一次同类事故：加定时器前的 flush 判据）。
+	//
+	// 增量帧显式置 nil（而不是留着 it.raw）：增量帧的 raw 对事后追溯没有独立价值，
+	// 而留着的成本是 78~256 B × 92.9% 的帧 ⇒ 本方案的收益被吃掉大半。
+	if frame.FrameKind == models.TelemetryFrameKindKey {
+		frame.Raw = it.raw
+	}
 	w.payloadSum.Add(int64(frame.Size()))
 	*batch = append(*batch, frame)
 }
@@ -404,7 +430,7 @@ func (w *DualWriter) Encoder() *Encoder {
 //	consumer.SetTelemetrySink(dual.Sink())   // dual 为 nil 时得到 nil，零成本
 //
 // 而不需要到处判空。
-func (w *DualWriter) Sink() func(uint, time.Time, int64, []Reading) {
+func (w *DualWriter) Sink() Sink {
 	if w == nil {
 		return nil
 	}

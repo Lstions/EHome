@@ -74,6 +74,12 @@ type EncodedFrame struct {
 	FrameKind int16
 	SlotID    int16
 	Payload   []byte
+	// Raw 是重组后的原始总线帧（**只在关键帧上填**，增量帧为 nil ⇒ 落 NULL）。
+	//
+	// 2026-11-11 加（原始数据退役 §4.4 方案 A）：device_data 退役后这是保留
+	// 「解析成功但数值错误」追溯能力的唯一数据库副本。填不填由调用方（写路径）
+	// 在 EncodeFrame 之后决定 —— 编码器本身不持有原始字节（它只吃量化后的读数）。
+	Raw []byte
 }
 
 // Size 返回该行的 payload 字节数（验收口径：§4.5 的"平均 payload"就是它的均值）。

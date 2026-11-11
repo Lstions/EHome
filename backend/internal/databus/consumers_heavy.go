@@ -1,7 +1,6 @@
 package databus
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -52,78 +51,6 @@ func (c *PendingWriteConsumer) Handle(evt DataEvent) {
 	// never satisfy another BMP280's initialization on the same node.
 	if c.deviceInit != nil && evt.EdgeDeviceID > 0 && evt.RequestID != 0 {
 		c.deviceInit.HandleDataReportAck(evt.DeviceID, uint(evt.EdgeDeviceID), uint32(evt.RequestID), evt.ErrorCode, evt.RawData)
-	}
-}
-
-// DBPersistConsumer writes raw data to device_data table for audit/history.
-// It persists command responses and scheduler samples; uncorrelated terminal
-// RX data remains memory/WS-only.
-//
-// ==================== S3: 为什么 device_data 会有"两行" ====================
-// 同一个 DataEvent 会落到 device_data **两行**, 由两个消费者各写一行:
-//
-//	· 本消费者 (db_persist)  → DataJSON={"raw":<hex>,"channel":...}   device_id=0
-//	· SensorParserConsumer   → DataJSON={"raw_hex":...,"sensors":[...]} device_id=<真实 id>
-//
-// **这不是重复, 不要"顺手去重"删掉任何一个** —— 实测 (2026-10-07,
-// s3_duplicate_device_data_probe_test.go) 证明两者**覆盖面不同**:
-//
-//	输入                                  | db_persist | sensor_parser
-//	可解析的调度采样 (ErrorCode=0, 有 raw)   |    写      |     写
-//	ErrorCode != 0 (关键样本)              |    写      |    不写  ← ShouldParse() 为假
-//	RawData 为空                           |    写      |    不写  ← ShouldParse() 为假
-//	驱动/校准在 Handle 内拒收                |    写      |    不写  ← ShouldHandle 为真, 运行期才失败
-//
-// 即: 后三类样本**只有本消费者会留下原始字节**。删掉本行 ⇒ 告警类样本的取证数据永久
-// 丢失 (本类型职责原文就是 "for audit/history"); 删掉解析行 ⇒ /edge-devices/:id/data
-// 与 latest-data 拿不到 data_json.sensors, 前端 DataPanel 直接空 (读契约见
-// internal/api/s3_read_shape_probe_test.go)。
-//
-// 注意最后一行: "驱动/校准在 Handle 内拒收"这一类**无法**通过收窄 ShouldHandle 覆盖,
-// 因为是否写入取决于 Handle 内部的运行期结果。所以两个写入点必须各自保留。
-//
-// 已知遗留 (本轮**故意未动**, 见 Lead task-16 裁决): GET /nodes/:id/data 按 node_id
-// 过滤, 两种形状都会命中 ⇒ 该端点返回的 items 里混着 raw 与 parsed 两形状。
-// 它**没有任何生产调用者** (全仓 grep + docs/分析/功能模块与业务功能实测盘点-2026-09-23.md:163
-// 「无包装、无调用者」), 为一个无人调用的端点改接口只承担风险而无收益, 故留作待裁决项。
-// 结构性收敛 (原始字节与解析结果分表) 是独立议题, 见审计 S3 的 3.0 方向。
-// ==========================================================================
-type DBPersistConsumer struct {
-	db *gorm.DB
-}
-
-func NewDBPersistConsumer(db *gorm.DB) *DBPersistConsumer {
-	return &DBPersistConsumer{db: db}
-}
-
-func (c *DBPersistConsumer) Name() string { return "db_persist" }
-func (c *DBPersistConsumer) ShouldHandle(evt DataEvent) bool {
-	return evt.ShouldPersist()
-}
-func (c *DBPersistConsumer) Handle(evt DataEvent) {
-	if c.db == nil {
-		return
-	}
-	dataJSON, err := json.Marshal(map[string]interface{}{
-		"raw":            fmt.Sprintf("%x", evt.RawData),
-		"channel":        evt.ChannelID,
-		"sequence":       evt.Sequence,
-		"error_code":     evt.ErrorCode,
-		"request_id":     evt.RequestID,
-		"edge_device_id": evt.EdgeDeviceID,
-		"command_index":  evt.CommandIndex,
-	})
-	if err != nil {
-		logger.Warn("databus: failed to marshal raw device data", "consumer", c.Name(), "node_id", evt.DeviceID, "error", err)
-		return
-	}
-	if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
-		NodeID:    evt.DeviceID,
-		DataJSON:  string(dataJSON),
-		Timestamp: evt.ReceivedAt,
-	}).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
-		logger.Warn("databus: failed to persist raw device data", "consumer", c.Name(), "node_id", evt.DeviceID, "error", err)
 	}
 }
 
@@ -402,17 +329,44 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	outcome := c.decodeFrame(device, merged, time.Now(), evt.CommandTemplateID)
 	if !outcome.ok() {
 		reason := outcome.FailReason
+		// ==================== 解析失败日志（S1，2026-11-11 改造）====================
+		//
+		// 改造前：配置缺陷 WARN（格式化 kv），数据问题 logger.Infof("[%s] Failed to
+		// parse data: %v")。生产实测 24h **0 条** —— INFO 级在生产日志里等于不存在。
+		//
+		// 改造后两条硬要求（docs/设计/原始数据退役-改造方案-2026-11-11.md §4.2.2）：
+		//
+		//  1. **都是 WARN**。device_data 退役后日志是唯一取证来源，数据问题同样需要
+		//     被看见 —— 原来那条 INFO 的 0 条命中就是证据。
+		//  2. **结构化字段**。只有 kv 才能按 edge_device_id / reason / adapter 聚合
+		//     与 grep；格式化字符串只能全文匹配，且无法回答「这台设备最近哪个
+		//     reason 最多」。
+		//
+		// raw_len / raw_hex 是本次最关键的补强：**没有它，解析失败无法复盘** ——
+		// 事后拿到一条日志却不知道原始帧长什么样，等于没记（这与方案 §4.4
+		// 「解析成功但数值错误无法追溯」是同一个坑，提前在失败路径上堵住）。
+		// 用 merged 而不是 evt.RawData：多帧重组后 merged 才是**解析器真正看到的**
+		// 那一串字节，拿单帧片段去复盘会得出错误结论。
+		fields := []interface{}{
+			"node_id", evt.DeviceID,
+			"edge_device_id", device.ID,
+			"device_type", device.Type,
+			"channel_id", evt.ChannelID,
+			"command_index", evt.CommandIndex,
+			"reason", string(reason),
+			"adapter", outcome.Adapter,
+			"err", outcome.Err,
+			"raw_len", len(merged),
+			"raw_hex", rawHexForLog(merged),
+		}
 		if ingestReasonIsConfigDefect(reason) {
-			// 配置缺陷（缺适配器/缺标定/缺命令模板）：需要人去补配置 ⇒ WARN。
-			logger.Warn("databus: decode failed (config defect); refusing to persist sample",
-				"node_id", evt.DeviceID,
-				"edge_device_id", device.ID,
-				"device_type", device.Type,
-				"reason", string(reason),
-				"error", outcome.Err)
+			// 配置缺陷（缺适配器/缺标定/缺命令模板）：需要人去补配置。
+			// 保留两条 msg 而不合并成一条 + level 字段：msg 是日志系统的第一分类维度，
+			// 运维按 "config defect" grep 就能捞全「该补配置」的样本。
+			logger.Warn("databus: decode failed (config defect)", fields...)
 		} else {
-			// 数据问题（帧格式不符/零字段）：重发即可 ⇒ INFO（保持改造前级别）。
-			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, outcome.Err)
+			// 数据问题（帧格式不符/零字段）：重发即可，但同样要留证。
+			logger.Warn("databus: decode failed (data defect)", fields...)
 		}
 		c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 		return
@@ -476,7 +430,10 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 		// commandTemplateID 不能省: 它是 device15 那 7 种帧类型（3/14/2/5/5/9/4 字段）
 		// 的唯一可靠判据，省掉会把不同指令的值写进同一 slot（方案 §4.4 的 ⚠）。
-		c.telemetrySink(device.ID, now, int64(evt.CommandTemplateID), readings)
+		// merged 是**重组后**的原始帧（解析器真正看到的那串字节）。传它而不是
+		// evt.RawData：多帧协议下两者不同，拿单帧片段去配关键帧的解析值，
+		// 事后核对会得出错误结论（原始数据退役 §4.4 方案 A）。
+		c.telemetrySink(device.ID, now, int64(evt.CommandTemplateID), readings, merged)
 	}
 	if c.telemetryRollupSink != nil && len(sensorData) > 0 {
 		c.telemetryRollupSink(device.ID, sensorData, now)
@@ -615,41 +572,46 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		})
 	}
 
-	// Store raw data for this edge device.
+	// ==================== device_data 写点已删除（2026-11-11，破坏性更新）====================
 	//
-	// S3: 本行与 DBPersistConsumer 写的行**不是重复** —— 见该消费者类型上方的完整
-	// 对照表。要点: ErrorCode!=0 / 空 raw / 本函数提前 return 的三类样本
-	// **只有 DBPersistConsumer 会写**。删任何一行都会丢数据。
+	// 产品裁决「原始数据不入库、只有解析值入库」（见 docs/设计/原始数据退役-改造方案-
+	// 2026-11-11.md §1.2）。本处原先写的是 sensor_parser 形状的行：
 	//
-	// ==================== 停写 "sensors"（task-19，2026-11-07）====================
-	// 改前本行形状:
-	//   {"raw_hex":"...","sensors":[{Name,Value,Unit,StringValue}...],"channel_id":1,"timestamp":...}
-	// 其中 sensors 与 unified_data / telemetry_frame 存的是**同一份 (name,value,unit)**:
-	// 生产实测 device_data 单行 1,251 B 里 **83%（约 1,038 B）** 就是这个数组,
-	// 折合 147 MB/天、占全库日增（344 MB）的 43%。同一份物理量存三份
-	// （unified_data 1,294 B + 本数组 1,251 B + 帧表 129 B）是当前最大的一块冗余。
+	//   {"raw_hex":"...","channel_id":N,"timestamp":<ms>,"str_values":{...}}
 	//
-	// 现在改为**读时合成**（internal/api/device_data_sensors.go 的
-	// deviceDataJSONWithSensors）: /latest-data 返回前按「每 sensor 各取最新」把
-	// sensors 补回，前端零改动。合成口径不能用 WHERE timestamp = X ——
-	// L1 收窄后同一时间戳只有**变化**字段会入库，等值查会缺值。
+	// 删除后**原始字节不再有任何数据库副本**，但仍然可取证，走两条路径（缺一不可）：
 	//
-	// ⚠ 唯一不能丢的是 StringValue: unified_data 与 telemetry_frame **都没有**这一列,
-	// 所以 device_data 是 BMS hardware_version("V19") / serial_number 的**唯一**落库位置。
-	// 故保留 "str_values" 映射，且**仅在有非空 StringValue 时出现**（绝大多数帧没有这个键,
-	// 典型的 read_basic_info 帧就是零额外字节）。
-	// ==========================================================================
-	dataJSON, err := marshalParsedDeviceData(merged, evt.ChannelID, now, sensorData)
-	if err != nil {
-		logger.Warn("databus: failed to marshal parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
-	} else if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
-		DeviceID:  device.ID,
-		NodeID:    evt.DeviceID,
-		DataJSON:  string(dataJSON),
-		Timestamp: now,
-	}).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
-		logger.Warn("databus: failed to persist parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+	//   1. **关键帧** raw 落 telemetry_frame.raw（internal/telemetry/dualwrite.go 的
+	//      appendEncoded，仅 frame_kind=1 时填）—— 可 SQL 按设备/时间查，
+	//      用于「解析成功但数值错误」的事后比对（本方案 §4.4 方案 A）；
+	//   2. 解析失败与 ErrorCode!=0 的样本进 WARN 日志（consumers_heavy.go 的
+	//      "decode failed" 分支 + consumers_light.go 的 "rejected at ingest"），
+	//      带 raw_hex 前缀截断 128 B（本方案 §4.2）。
+	//
+	// ⚠ 被牺牲的是「非关键帧 + 解析成功」的原始字节：它们既不入库也不打日志。
+	// 这是产品裁决接受的能力损失（§4.4 能力损失表），不是遗漏。
+	//
+	// ── StringValue 的处置（本次唯一的"信息损失"，必须留痕）──
+	//
+	// unified_data 与 telemetry_frame **都没有** StringValue 列，所以 device_data
+	// 曾是 BMS hardware_version("V19") / serial_number 的**唯一**落库位置。
+	// 删除写点后它不再入库，改由**日志承载**：下面这个分支把非空 StringValue 打成
+	// INFO（而不是 WARN —— 它不是异常，是正常读数）。代价：只有日志窗口（约 3.7 天）
+	// 内可查，过后不可恢复；收益：不再为它保留整张表。
+	//
+	// 生产实测该键**全表 0 行非空**（§1.1），且只有 read_hardware_version(0x05) /
+	// write_sn(0xA2) 两类帧才可能产生、这两条命令默认 interval=0（不同步）——
+	// 所以这条日志在生产上几乎不会出现，不构成日志刷屏风险。
+	// ======================================================================================
+	if sv := stringValuesOf(sensorData); len(sv) > 0 {
+		logger.Info("databus: string-only field observed (StringValue no longer persisted; carried by log only)",
+			"node_id", evt.DeviceID,
+			"edge_device_id", device.ID,
+			"device_type", device.Type,
+			"channel_id", evt.ChannelID,
+			"command_index", evt.CommandIndex,
+			"values", sv,
+		)
 	}
 
 	// HomeAssistant publish was REMOVED with MQTT (2026-10-08). It published
@@ -731,14 +693,22 @@ func (c *SensorParserConsumer) nodeIngestDropReason(nodeID string) string {
 
 // stringValuesOf 抽取 StringValue 非空的字段（BMS 的 hardware_version / serial_number）。
 //
-// 为什么单独抽这个函数：2026-11-07 起 device_data 不再写 sensors 数组（读时按
-// 「每 sensor 取最新」合成），但 StringValue **只存在于 device_data** ——
-// unified_data 与 telemetry_frame 都没有这一列。若一并丢弃，BMS 的
-// hardware_version("V19") 与 serial_number 会永久消失，且**没有任何其他副本**可恢复。
+// ==================== 为什么这个函数还活着（2026-11-11）====================
 //
-// 成本：只有 read_hardware_version(0x05) / write_sn(0xA2) 这两类帧才非空，
-// 且这两条命令默认 interval=0（不同步），所以绝大多数帧连这个 key 都不会出现。
-// 返回空 map 时调用方**不写该 key**，避免给每帧加 ~15 字节。
+// 它原本只服务于 device_data 的 "str_values" 键，而 device_data 已整表退役
+// （原始数据退役方案 §2.1）。保留它的原因：unified_data 与 telemetry_frame
+// **都没有** StringValue 一列，因此这两个字符串字段（hardware_version="V19" /
+// serial_number）现在**完全靠日志承载** —— 调用方在 Handle 里把它们打成一条 INFO。
+//
+// 代价必须说清楚：只有日志窗口（约 3.7 天，50m×5 轮转）内可查，过后不可恢复。
+// 生产实测 device_data 全表 str_values **0 行非空**（方案 §1.1），且只有
+// read_hardware_version(0x05) / write_sn(0xA2) 两类帧才可能产生、这两条命令默认
+// interval=0（不同步），所以这是一条**几乎不会触发**的日志，不构成刷屏风险。
+//
+// 若将来需要长期留存，正确做法是给 telemetry_slot 加字符串字段（而不是复活
+// device_data）；本次按产品裁决「不入库」处置。
+//
+// 返回空 map 时调用方**不打日志**，避免给每帧增加一条无用日志。
 func stringValuesOf(fields []parser.Field) map[string]string {
 	var out map[string]string
 	for i := range fields {
@@ -751,29 +721,4 @@ func stringValuesOf(fields []parser.Field) map[string]string {
 		out[fields[i].Name] = fields[i].StringValue
 	}
 	return out
-}
-
-// marshalParsedDeviceData 构造 sensor_parser 写进 device_data 的 data_json。
-//
-// 抽成独立函数是为了**能被单独测**：这段形状是前端契约的一部分（前端读
-// data_json.sensors / raw_hex），埋在 Handle 里就只能靠总线上端到端跑一遍
-// 才能验证，而端到端跑会同时依赖驱动、校准缓存、重组器三件与形状无关的东西。
-//
-// 形状（2026-11-07 task-19 起）:
-//
-//	{"raw_hex":"<hex>","channel_id":N,"timestamp":<ms>}                  绝大多数帧
-//	{...同上...,"str_values":{"hardware_version":"V19"}}                  仅字符串读数帧
-//
-// **没有 sensors 键** —— 它由读路径按「每 sensor 取最新」合成
-// （internal/api/device_data_sensors.go），这是本次改造省下 83% 行字节的来源。
-func marshalParsedDeviceData(raw []byte, channelID uint64, at time.Time, fields []parser.Field) ([]byte, error) {
-	payload := map[string]interface{}{
-		"raw_hex":    fmt.Sprintf("%x", raw),
-		"channel_id": channelID,
-		"timestamp":  at.UnixMilli(),
-	}
-	if sv := stringValuesOf(fields); len(sv) > 0 {
-		payload["str_values"] = sv
-	}
-	return json.Marshal(payload)
 }

@@ -36,7 +36,8 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 	// Keep the original handle (used by AutoMigrate) alive for the test.
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.CalibrationCache{}, &models.UnifiedData{}, &models.DeviceData{}); err != nil {
+		&models.CalibrationCache{}, &models.UnifiedData{}); err != nil {
+		// 2026-11-11: &models.DeviceData{} 已移除（device_data 整表退役）。
 		t.Fatalf("migrate: %v", err)
 	}
 

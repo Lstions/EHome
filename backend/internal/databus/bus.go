@@ -29,7 +29,18 @@ type DataEvent struct {
 func (e *DataEvent) IsPassive() bool         { return e.RequestID == 0 && e.EdgeDeviceID == 0 }
 func (e *DataEvent) IsCommandResponse() bool { return e.RequestID != 0 }
 func (e *DataEvent) IsScheduledSample() bool { return e.RequestID == 0 && e.EdgeDeviceID != 0 }
-func (e *DataEvent) ShouldPersist() bool     { return !e.IsPassive() }
+
+// ShouldPersist reports 「这条事件是否属于要进数据管道的非被动事件」。
+//
+// 名字沿用历史（来自已退役的 db_persist 消费者：它把每条这样的原始事件写一行
+// device_data）。2026-11-11 device_data 整表退役后，该消费者已删除，本方法
+// **不再对应任何"持久化原始数据"的行为**，仅被 ShouldParse 复用其语义：
+// 被动（无 request_id 且无 edge_device_id）的终端 RX 数据不解析也不落库。
+//
+// 保留而不是内联进 ShouldParse：两侧共用同一个"非被动"判据，任何一处改动都必须
+// 同时影响两者 —— 拆开写迟早会漂移（历史上「调度采样被当成被动数据丢掉」就是
+// 这类漂移）。若要重命名，请连 ShouldParse 一起改名并同步 nodemgr 的调用点。
+func (e *DataEvent) ShouldPersist() bool { return !e.IsPassive() }
 func (e *DataEvent) ShouldParse() bool {
 	return e.ShouldPersist() && e.ErrorCode == 0 && len(e.RawData) > 0
 }

@@ -2,6 +2,7 @@ package database
 
 import (
 	"testing"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
@@ -103,16 +104,21 @@ func TestAutoMigrate(t *testing.T) {
 		}
 	})
 
-	t.Run("DeviceData", func(t *testing.T) {
-		// 数据层时序化 (v3.4 §3.2.1): DeviceData 移出 AutoMigrate（PG 生产库走
-		// partition_mgr 分区母表）。本测试库无该表，改为验证模型 tag 可迁移性:
-		// 单独 AutoMigrate 该模型确认复合主键 tag 合法 (与上方 UnifiedData 同款)。
-		if err := db.AutoMigrate(&models.DeviceData{}); err != nil {
-			t.Fatalf("automigrate device_data: %v", err)
+	t.Run("TelemetryFrame", func(t *testing.T) {
+		// 2026-11-11: 本子测试原来验的是 models.DeviceData（device_data 整表退役后
+		// 模型已删除）。它的**真实意图**是「时序类模型的复合主键 tag 合法、能
+		// AutoMigrate 出来」—— 那个职责现在由帧表承担（主键 (device_id, ts, seq)，
+		// 是仓里最复杂的复合主键）。
+		//
+		// ⚠ 为什么这里敢直接 AutoMigrate 帧表：生产禁止 AutoMigrate 它（分区母表
+		// 必须由 partition_mgr 用裸 DDL 建，见 models/telemetry_frame.go 的注记）。
+		// 本测试库是 SQLite 内存库、一次性用完即弃，不会与生产路径冲突。
+		if err := db.AutoMigrate(&models.TelemetryFrame{}); err != nil {
+			t.Fatalf("automigrate telemetry_frame: %v", err)
 		}
-		dd := models.DeviceData{DeviceID: 1, NodeID: "TEST001", DataJSON: `{"temp": 25.5}`}
-		if err := db.Create(&dd).Error; err != nil {
-			t.Fatalf("create device data: %v", err)
+		f := models.TelemetryFrame{DeviceID: 1, TS: time.Now(), Seq: 0, FrameKind: 1, SlotID: 1, Payload: []byte{0x01}}
+		if err := db.Create(&f).Error; err != nil {
+			t.Fatalf("create telemetry frame: %v", err)
 		}
 	})
 

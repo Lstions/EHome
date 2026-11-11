@@ -17,8 +17,8 @@ package testutil
 import (
 	"ehome/backend/internal/dbschema"
 	"fmt"
-	"slices"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,7 +41,10 @@ var allModels = []interface{}{
 	&models.ConfigTemplate{},
 	&models.EdgeDevice{},
 	&models.DeviceConfig{},
-	&models.DeviceData{},
+	// models.DeviceData 已删除（2026-11-11 device_data 整表退役，
+	// docs/设计/原始数据退役-改造方案-2026-11-11.md §2.1）。
+	// **不要**为了"让某个老用例跑起来"把它加回来：模型都不存在了，
+	// 建出来的表没有任何生产读写路径。
 	&models.UnifiedData{},
 	&models.DataSource{},
 	&models.DataSourceHealth{},

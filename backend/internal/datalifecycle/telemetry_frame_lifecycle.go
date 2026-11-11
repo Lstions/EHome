@@ -5,25 +5,36 @@ package datalifecycle
 //
 // ============ 为什么需要这个文件 ============
 //
-// L2 帧级编码从「影子旁路」变成**主路径**后，帧表就是和 unified_data/device_data
-// 平级的历史数据表。生命周期（保留期清理 / 彻底删除设备 / 合并历史 / 数据量与
-// 时间范围统计）必须覆盖它，否则会出现两类事故：
+// L2 帧级编码从「影子旁路」变成**主路径**后，帧表就是历史数据表。
+// 生命周期（保留期清理 / 彻底删除设备 / 合并历史 / 数据量与时间范围统计）
+// 必须覆盖它，否则会出现两类事故：
 //
 //	· 设备删了、帧数据还在（GDPR/「彻底删除」语义被打破）；
 //	· 帧数据永不清理（第二张无界增长表，正是 rollup 退役裁决里点名的问题）。
 //
-// ============ 为什么必须按表分支，不能 foreach 加表名 ============
+// ============ 为什么还保留 TimeseriesTable 这层抽象（2026-11-11 后只剩一张表）============
 //
-// 三张表的**形状不同**，把表名塞进同一个循环会在 SQL 层直接报错或静默删错：
+// 2026-11-11 之后清单只剩 telemetry_frame 一张（unified_data 2026-11-08 停写、
+// device_data 2026-11-11 整表退役 —— docs/设计/原始数据退役-改造方案-2026-11-11.md）。
+// 看起来可以退化成"直接写死表名"，但**不要**：
 //
-//	                unified_data      device_data       telemetry_frame
-//	  时间列         timestamp         timestamp         ts          ← 名字不同
-//	  主键           (id,timestamp)    (id,timestamp)    (device_id,ts,seq)  ← 无 id 列
-//	  批量删的锚      id                id                (device_id,ts,seq)
+//  1. purge / retention / merge-history / data-summary 四处都通过本抽象分流
+//     （HasID 决定「UPDATE device_id 改归属」还是「复合主键复制 + 幂等插入 + 删源」），
+//     把它删掉意味着把这套形状判定复制到四个调用点 —— 而它们已经在真实事故里
+//     证明过会漂移（device_data 与帧表的主键差异就是当初引入它的原因）；
+//  2. 下一张时序表加进来时（例如把 logstream 也纳入保留期），只需在本清单加一条，
+//     四处自动生效。引入它的原因没有随表数量减少而消失。
 //
 // 因此下面用一个 TimeseriesTable 描述「每张表是什么形状」，调用方（retention /
 // purge / merge / api）按 spec 分支生成 SQL。**禁止**把表名直接拼进
-// 「WHERE id IN (...)」这类 unified_data 专用语句里 —— telemetry_frame 没有 id 列。
+// 「WHERE id IN (...)」这类「每行有自增 id」专用语句里 —— telemetry_frame 没有 id 列。
+//
+// 历史形状对照（两张退役表的列已不存在，留档用于读旧代码/旧文档时对照）：
+//
+//	                unified_data(退役)  device_data(退役)  telemetry_frame
+//	  时间列         timestamp           timestamp           ts          ← 名字不同
+//	  主键           (id,timestamp)      (id,timestamp)      (device_id,ts,seq) ← 无 id 列
+//	  批量删的锚      id                  id                  (device_id,ts,seq)
 
 import (
 	"context"
@@ -51,7 +62,7 @@ const TelemetryFrameTable = "telemetry_frame"
 type TimeseriesTable struct {
 	// Name 物理表名。
 	Name string
-	// TSColumn 时间列名（unified_data/device_data 是 timestamp，帧表是 ts）。
+	// TSColumn 时间列名（帧表是 ts；已退役的 unified_data/device_data 是 timestamp）。
 	TSColumn string
 	// HasID 是否含单列自增主键 id。
 	//
@@ -64,10 +75,30 @@ type TimeseriesTable struct {
 //
 // 返回副本：调用方（含测试）不得修改这份清单 —— 漏掉任何一张表都意味着
 // 那条生命周期路径对它静默失效，这是本文件要防的事故本身。
+//
+// ============ 2026-11-11：清单从三张收敛到两张 ============
+//
+// 移除的两张（原因不同，不要混为一谈）：
+//
+//	· device_data —— **整表退役**（产品裁决「原始数据不入库」，见
+//	  docs/设计/原始数据退役-改造方案-2026-11-11.md §2.1）。表的模型、写点、读点、
+//	  DDL 全部删除，DROP 之后不存在，所以生命周期路径也就不该再有它。
+//	· unified_data —— 已于 2026-11-08 停写，DROP 后同样不存在。
+//
+// 为什么**不能**只靠 existingTimeseriesTables 的表存在性过滤把它挡住：
+// 过滤解决的是"表不存在时不报错"，而本清单还要回答另一件事 ——
+// 「这张表是否**应该**参与保留期清理 / 设备彻底删除」。设备已退役的表如果留在
+// 清单里，任何一次「表被重建」（例如有人手滑跑了旧版本的迁移）都会让一条本不该
+// 存在的数据通路复活。清单是**意图**，存在性过滤是**防御**，两者都要。
+//
+// 现存两张表的形状差异（保留这段说明是因为它是本文件存在的理由）：
+//
+//	              unified_data(退役)  device_data(退役)  telemetry_frame
+//	时间列         timestamp           timestamp           ts          ← 名字不同
+//	主键           (id,timestamp)      (id,timestamp)      (device_id,ts,seq) ← 无 id 列
+//	批量删的锚      id                  id                  (device_id,ts,seq)
 func TimeseriesTables() []TimeseriesTable {
 	return []TimeseriesTable{
-		{Name: "unified_data", TSColumn: "timestamp", HasID: true},
-		{Name: "device_data", TSColumn: "timestamp", HasID: true},
 		{Name: TelemetryFrameTable, TSColumn: "ts", HasID: false},
 	}
 }
@@ -110,7 +141,7 @@ func existingTimeseriesTables(db *gorm.DB) []TimeseriesTable {
 
 // partitionLifecycleTables 返回参与「整月分区 DROP」的表名清单。
 //
-// 与 TimeseriesTables 的区别：这里只关心「是否月分区」——三张表都是
+// 与 TimeseriesTables 的区别：这里只关心「是否月分区」—— 清单里的表都是
 // （telemetry_frame 由 partition_mgr 按月建分区，见 partitionParentDDL）。
 // 分区 DROP 与列名无关（DropPartitionsBeforeFor 只按分区名的 YYYYMM 后缀判定），
 // 所以这个清单可以是纯表名。
@@ -176,7 +207,7 @@ func deleteDeviceRowsFromTable(tx *gorm.DB, table TimeseriesTable, deviceID uint
 //     TelemetryFrame 不进生产 AutoMigrate（分区母表必须由 partition_mgr 建），
 //     而 TelemetrySlot 也没被登记到任何清单里，导致「代码上线但表不存在」。
 //     这里补上，且与帧表迁移绑在同一次调用里：两者同生共死。
-//  2. telemetry_frame：走与 unified_data/device_data 相同的泛化迁移入口
+//  2. telemetry_frame：走与（已退役的）unified_data/device_data 相同的泛化迁移入口
 //     （partitionParentDDL / partitionParentIndexes / partitionCopyColumns 已在
 //     commit 63fe95a8 登记），失败即返回 error。
 //
@@ -200,7 +231,7 @@ func MigrateTelemetryFrameToPartitioned(db *gorm.DB) error {
 
 // DropTelemetryFramePartitionsBefore 删除整月早于 cutoff 的帧表分区（保留期的 O(1) 路径）。
 //
-// 帧表是月分区表，因此保留期与 unified_data/device_data 同款：整分区 DROP
+// 帧表是月分区表，因此保留期与（已退役的）unified_data/device_data 同款：整分区 DROP
 // （元数据操作，不逐行 DELETE）。这既是性能要求，也是「帧数据真的会按保留期
 // 消失」的唯一可靠实现 —— 逐行 DELETE 在 1 Hz × 每设备的数据量下永远跑不完。
 func DropTelemetryFramePartitionsBefore(db *gorm.DB, cutoff time.Time) ([]string, error) {
@@ -215,7 +246,7 @@ func DropTelemetryFramePartitionsBefore(db *gorm.DB, cutoff time.Time) ([]string
 
 // MigrateTelemetryFramesToDevice 把源设备的帧迁到目标设备（合并历史用）。
 //
-// # 为什么不能像 unified_data 那样 UPDATE device_id
+// # 为什么不能像（已退役的）unified_data 那样 UPDATE device_id
 //
 // 帧表主键是 (device_id, ts, seq)。直接把源行改成目标 device_id，一旦目标在
 // 同一 (ts, seq) 上已有行就撞主键 ⇒ 整批失败。因此走「复制 + 幂等插入 + 精确删源」：

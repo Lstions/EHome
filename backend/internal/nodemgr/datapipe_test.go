@@ -163,8 +163,9 @@ func datapipePipelineDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	// 2026-11-11: &models.DeviceData{} 已移除（device_data 整表退役）。
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.CalibrationCache{}, &models.UnifiedData{}, &models.DeviceData{}); err != nil {
+		&models.CalibrationCache{}, &models.UnifiedData{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -205,17 +206,6 @@ func assertUnifiedCount(t *testing.T, db *gorm.DB, want int, ctx string) {
 	}
 }
 
-func assertDeviceDataCount(t *testing.T, db *gorm.DB, want int, ctx string) {
-	t.Helper()
-	var count int64
-	if err := db.Model(&models.DeviceData{}).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count device_data: %v", ctx, err)
-	}
-	if int(count) != want {
-		t.Errorf("[%s] device_data count = %d, want %d", ctx, count, want)
-	}
-}
-
 func assertUnifiedForDevice(t *testing.T, db *gorm.DB, deviceID uint, want int, ctx string) {
 	t.Helper()
 	var count int64
@@ -227,31 +217,11 @@ func assertUnifiedForDevice(t *testing.T, db *gorm.DB, deviceID uint, want int, 
 	}
 }
 
-func assertDeviceDataForDevice(t *testing.T, db *gorm.DB, deviceID uint, want int, ctx string) {
-	t.Helper()
-	var count int64
-	if err := db.Model(&models.DeviceData{}).Where("device_id = ?", deviceID).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count device_data: %v", ctx, err)
-	}
-	if int(count) != want {
-		t.Errorf("[%s] device_data(device=%d) = %d, want %d", ctx, deviceID, count, want)
-	}
-}
-
 func countUnifiedForDevice(t *testing.T, db *gorm.DB, deviceID uint, ctx string) int {
 	t.Helper()
 	var count int64
 	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", deviceID).Count(&count).Error; err != nil {
 		t.Fatalf("[%s] count unified_data: %v", ctx, err)
-	}
-	return int(count)
-}
-
-func countDeviceDataForDevice(t *testing.T, db *gorm.DB, deviceID uint, ctx string) int {
-	t.Helper()
-	var count int64
-	if err := db.Model(&models.DeviceData{}).Where("device_id = ?", deviceID).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count device_data: %v", ctx, err)
 	}
 	return int(count)
 }
@@ -271,7 +241,6 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 		RequestID: 1, RawData: []byte{1, 2, 3, 4, 5, 6},
 	})
 	assertUnifiedCount(t, db, 0, "unknown device")
-	assertDeviceDataCount(t, db, 0, "unknown device")
 }
 
 // TestDataPipeline_EmptyRaw:空 payload(ShouldParse→false)不进入消费者处理
@@ -290,7 +259,6 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	})
 	// 空数据在 bus 分发阶段即被 ShouldParse 过滤,消费者不执行
 	assertUnifiedCount(t, db, 0, "empty raw")
-	assertDeviceDataCount(t, db, 0, "empty raw")
 }
 
 // TestDataPipeline_EndToEnd:完整链路(未校准 BMP280 fail-closed)
@@ -313,7 +281,6 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	})
 	// 校准缺失 → 拒收:unified_data 与 device_data 均为 0
 	assertUnifiedForDevice(t, db, dev.ID, 0, "uncalibrated bmp280")
-	assertDeviceDataForDevice(t, db, dev.ID, 0, "uncalibrated bmp280")
 }
 
 // TestDataPipeline_EndToEnd_Calibrated:注入校准后同一负载应成功解析落库
@@ -342,7 +309,6 @@ func TestDataPipeline_EndToEnd_Calibrated(t *testing.T) {
 	})
 	// BMP280 有 2 个解析字段;device_data 新语义无条件写 1 行
 	assertUnifiedForDevice(t, db, dev.ID, 2, "calibrated bmp280")
-	assertDeviceDataForDevice(t, db, dev.ID, 1, "calibrated bmp280")
 }
 
 // TestDataPipeline_FormatDecision:请求级校验语义 — 错误码 / 空数据事件
@@ -362,7 +328,6 @@ func TestDataPipeline_FormatDecision(t *testing.T) {
 		RequestID: 1, ErrorCode: 2, RawData: []byte{1, 2, 3, 4, 5, 6},
 	})
 	assertUnifiedForDevice(t, db, dev.ID, 0, "error code")
-	assertDeviceDataForDevice(t, db, dev.ID, 0, "error code")
 
 	// 空数据事件:ShouldParse=false,消费者不执行
 	fc.postAndDrain(t, databus.DataEvent{
@@ -370,7 +335,6 @@ func TestDataPipeline_FormatDecision(t *testing.T) {
 		RequestID: 2, RawData: []byte{},
 	})
 	assertUnifiedForDevice(t, db, dev.ID, 0, "empty raw")
-	assertDeviceDataForDevice(t, db, dev.ID, 0, "empty raw")
 }
 
 // TestFindEdgeDeviceByChannelID_C6IndexFallback:寻址语义在新消费者下的等价覆盖。
@@ -401,11 +365,10 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 
 	// 子测试共享同一 db,用「发布前后行数增量」断言,避免跨子测试累计误报。
 	cases := []struct {
-		name           string
-		evt            databus.DataEvent
-		wantDevice     uint // 期望落到哪个设备(0=无设备命中)
-		wantUnified    int
-		wantDeviceData int
+		name        string
+		evt         databus.DataEvent
+		wantDevice  uint // 期望落到哪个设备(0=无设备命中)
+		wantUnified int
 	}{
 		{
 			name: "edge device id (PK fast path)",
@@ -413,7 +376,7 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 				DeviceID: node.NodeID, ChannelID: 0, EdgeDeviceID: uint64(d2.ID),
 				RequestID: 10, RawData: payload,
 			},
-			wantDevice: d2.ID, wantUnified: 2, wantDeviceData: 1,
+			wantDevice: d2.ID, wantUnified: 2,
 		},
 		{
 			name: "direct channel id (node-scoped)",
@@ -421,7 +384,7 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 				DeviceID: node.NodeID, ChannelID: uint64(ch1.ID),
 				RequestID: 11, RawData: payload,
 			},
-			wantDevice: d1.ID, wantUnified: 2, wantDeviceData: 1,
+			wantDevice: d1.ID, wantUnified: 2,
 		},
 		{
 			name: "out of range index",
@@ -429,7 +392,7 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 				DeviceID: node.NodeID, ChannelID: 99,
 				RequestID: 12, RawData: payload,
 			},
-			wantDevice: 0, wantUnified: 0, wantDeviceData: 0,
+			wantDevice: 0, wantUnified: 0,
 		},
 		{
 			name: "cross node channel id is not resolved",
@@ -439,45 +402,41 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 				DeviceID: node.NodeID, ChannelID: 200,
 				RequestID: 13, RawData: payload,
 			},
-			wantDevice: 0, wantUnified: 0, wantDeviceData: 0,
+			wantDevice: 0, wantUnified: 0,
 		},
 	}
 	allDevices := []uint{d1.ID, d2.ID, d3.ID}
 	unifiedBaseline := map[uint]int{}
-	deviceDataBaseline := map[uint]int{}
 	for _, id := range allDevices {
 		unifiedBaseline[id] = countUnifiedForDevice(t, db, id, "baseline")
-		deviceDataBaseline[id] = countDeviceDataForDevice(t, db, id, "baseline")
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			beforeUnified := map[uint]int{}
-			beforeDeviceData := map[uint]int{}
 			for _, id := range allDevices {
 				beforeUnified[id] = countUnifiedForDevice(t, db, id, tc.name+" before")
-				beforeDeviceData[id] = countDeviceDataForDevice(t, db, id, tc.name+" before")
 			}
 			fc.postAndDrain(t, tc.evt)
 			for _, id := range allDevices {
 				unifiedDelta := countUnifiedForDevice(t, db, id, tc.name) - beforeUnified[id]
-				deviceDataDelta := countDeviceDataForDevice(t, db, id, tc.name) - beforeDeviceData[id]
-				wantU, wantD := 0, 0
+				wantU := 0
 				if id == tc.wantDevice {
-					wantU, wantD = tc.wantUnified, tc.wantDeviceData
+					wantU = tc.wantUnified
 				}
 				if unifiedDelta != wantU {
 					t.Errorf("[%s] unified_data delta(device=%d) = %d, want %d", tc.name, id, unifiedDelta, wantU)
 				}
-				if deviceDataDelta != wantD {
-					t.Errorf("[%s] device_data delta(device=%d) = %d, want %d", tc.name, id, deviceDataDelta, wantD)
-				}
+				// 2026-11-11: 原本还断言 device_data 增量。该表整表退役（原始数据
+				// 退役方案 §2.1），写入点删除后不存在"它应该有 1 行"这个期望 ——
+				// 而 unified_data 的增量断言已经覆盖了「帧是否被路由到正确的设备」
+				// 这个本用例真正要守的语义（寻址分支）。
 			}
 		})
 	}
 	// 基线本身必须为 0(全部设备在用例开始前无数据),保证增量断言语义干净
 	for _, id := range allDevices {
-		if unifiedBaseline[id] != 0 || deviceDataBaseline[id] != 0 {
-			t.Errorf("device %d baseline not clean: unified=%d device_data=%d", id, unifiedBaseline[id], deviceDataBaseline[id])
+		if unifiedBaseline[id] != 0 {
+			t.Errorf("device %d baseline not clean: unified=%d", id, unifiedBaseline[id])
 		}
 	}
 }
@@ -509,18 +468,14 @@ func TestDataPipeline_C6ChannelIndexFallback(t *testing.T) {
 		DeviceID: node.NodeID, ChannelID: 0, RequestID: 1, RawData: payload,
 	})
 	assertUnifiedForDevice(t, db, d1.ID, 2, "c6 idx 0 -> ch1")
-	assertDeviceDataForDevice(t, db, d1.ID, 1, "c6 idx 0 -> ch1")
 	assertUnifiedForDevice(t, db, d2.ID, 0, "c6 idx 0 (ch2 untouched)")
-	assertDeviceDataForDevice(t, db, d2.ID, 0, "c6 idx 0 (ch2 untouched)")
 
 	// C6 发送 channel_id=1 → 下标 1 → ch2 (real id=101)
 	fc.postAndDrain(t, databus.DataEvent{
 		DeviceID: node.NodeID, ChannelID: 1, RequestID: 2, RawData: payload,
 	})
 	assertUnifiedForDevice(t, db, d1.ID, 2, "c6 idx 1 (ch1 unchanged)")
-	assertDeviceDataForDevice(t, db, d1.ID, 1, "c6 idx 1 (ch1 unchanged)")
 	assertUnifiedForDevice(t, db, d2.ID, 2, "c6 idx 1 -> ch2")
-	assertDeviceDataForDevice(t, db, d2.ID, 1, "c6 idx 1 -> ch2")
 }
 
 // ---------------------------------------------------------------------------

@@ -174,7 +174,9 @@ func newConsumerTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{}, &models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{}, &models.CalibrationCache{}); err != nil {
+	// 2026-11-11: &models.DeviceData{} 已从清单移除（device_data 整表退役）。
+	// 保留下方 UnifiedData 是因为它仍是本包部分用例的记录载体（停写开关语义）。
+	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{}, &models.ConfigTemplate{}, &models.UnifiedData{}, &models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -408,11 +410,14 @@ func TestDataEventBus_ScheduledSampleIsNotPassive(t *testing.T) {
 	if scheduled.IsPassive() {
 		t.Fatal("scheduled sample with edge_device_id must not be passive")
 	}
-	if !NewDBPersistConsumer(nil).ShouldHandle(scheduled) {
-		t.Fatal("scheduled sample must be persisted")
-	}
+	// 2026-11-11: 这里原有一条 NewDBPersistConsumer(nil).ShouldHandle(scheduled)
+	// 断言（"scheduled sample must be persisted"）。该消费者随 device_data 退役
+	// 删除，而"它必须被持久化"这个语义现在由 sensor_parser 承担：
+	// ShouldParse = ShouldPersist && ErrorCode==0 && len(RawData)>0。
+	// 所以只保留下面那条解析断言 —— 它同时覆盖了"非被动"这个前提。
 	if !NewSensorParserConsumer(nil, nil, nil).ShouldHandle(scheduled) {
-		t.Fatal("scheduled sample must be parsed")
+		t.Fatal("scheduled sample must be parsed (ShouldParse 蕴含 ShouldPersist；" +
+			"db_persist 消费者已随 device_data 退役)")
 	}
 }
 
@@ -545,24 +550,15 @@ func TestDataMetricsConsumerCountsSuccessfulAndFailedReports(t *testing.T) {
 	}
 }
 
-func TestDBPersistConsumerCountsWriteFailure(t *testing.T) {
-	db := newConsumerTestDB(t)
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqlDB.Close(); err != nil {
-		t.Fatal(err)
-	}
-	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data")
-	before := counterValue(t, counter)
-
-	NewDBPersistConsumer(db).Handle(DataEvent{DeviceID: "node", ReceivedAt: time.Now()})
-
-	if got := counterValue(t, counter) - before; got != 1 {
-		t.Fatalf("DB write failure metric delta = %v, want 1", got)
-	}
-}
+// TestDBPersistConsumerCountsWriteFailure 已删除（2026-11-11）。
+//
+// DBPersistConsumer 整个类型随 device_data 整表退役删除（原始数据退役方案 §2.1），
+// 本用例测的是它写库失败时的指标自增 —— 被测对象不存在，用例失去意义。
+//
+// ⚠ 这条指标（ehome_data_consumer_db_write_failures_total）本身**仍然存在且仍在用**：
+// sensor_parser 写 unified_data 失败时照样自增，由下面的
+// TestSensorParserConsumerCountsUnifiedDataWriteFailure 覆盖。所以删的是"db_persist
+// 这个消费者"的用例，不是指标能力的回归。
 
 func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
 	db := newConsumerTestDB(t)
@@ -595,36 +591,15 @@ func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
 	}
 }
 
-func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
-	db := newConsumerTestDB(t)
-	node := models.Node{NodeID: "node-device-data-fail"}
-	if err := db.Create(&node).Error; err != nil {
-		t.Fatal(err)
-	}
-	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
-	if err := db.Create(&channel).Error; err != nil {
-		t.Fatal(err)
-	}
-	device := models.EdgeDevice{Name: "device-data-fail", NodeID: node.NodeID, ChannelID: channel.ID, Type: "plain_test", Status: "active"}
-	if err := db.Create(&device).Error; err != nil {
-		t.Fatal(err)
-	}
-	db.Callback().Create().Before("gorm:create").Register("test:fail-device-data", func(tx *gorm.DB) {
-		if tx.Statement.Table == "device_data" {
-			tx.AddError(errors.New("forced device_data write failure"))
-		}
-	})
-	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "device_data")
-	before := counterValue(t, counter)
-
-	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
-		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
-	})
-
-	if got := counterValue(t, counter) - before; got != 1 {
-		t.Fatalf("device_data write failure metric delta = %v, want 1", got)
-	}
-}
+// TestSensorParserConsumerCountsDeviceDataWriteFailure 已删除（2026-11-11）。
+//
+// sensor_parser 不再写 device_data（写点已删，原始数据退役方案 §2.1），
+// 因此"它写 device_data 失败时指标自增"这条用例没有可触发的路径。
+//
+// ⚠ 不要为了"保留指标覆盖面"而把它改写成"人为让某张表失败"：那些指标标签
+// (consumer="sensor_parser", table="device_data") 已经不会再产出，断言它们等于
+// 断言一个不存在的行为。真正的写入失败指标覆盖见
+// TestSensorParserConsumerCountsUnifiedDataWriteFailure。
 
 // TestDataConsumerDBWriteFailuresPrometheusExposition asserts the F6 alerting
 // prerequisite end-to-end: after a DB write failure increments the counter, the
@@ -632,19 +607,47 @@ func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
 // (routes.go:55) carries the series with its consumer/table labels and counter
 // TYPE declaration — the exact input PromQL rate(...[1m]) consumes.
 func TestDataConsumerDBWriteFailuresPrometheusExposition(t *testing.T) {
-	before := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data"))
+	// 2026-11-11: 标签组合从 ("db_persist","device_data") 改为
+	// ("sensor_parser","unified_data") —— 前者对应的消费者与表都已退役，指标不再
+	// 产出，继续断言它会让本用例永远红。本用例**真正守的东西没变**：
+	// 「写入失败计数器在 /metrics 上有 series + TYPE 声明，且标签完整」。
+	before := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data"))
 
 	db := newConsumerTestDB(t)
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqlDB.Close(); err != nil {
-		t.Fatal(err)
-	}
-	NewDBPersistConsumer(db).Handle(DataEvent{DeviceID: "exposition-node", ReceivedAt: time.Now()})
 
-	if got := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data")) - before; got != 1 {
+	// 先把 fixture 建好，**再**关库 —— 顺序不能反：关库之后任何 Create 都会报
+	// "sql: database is closed"，连 node 都建不出来（第一版就是这么红的）。
+	node := models.Node{NodeID: "exposition-node"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	device := models.EdgeDevice{Name: "exposition-device", NodeID: node.NodeID, ChannelID: channel.ID,
+		Type: "plain_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 制造一次**真实**的 unified_data 写入失败：DROP 掉那张表。
+	//
+	// ⚠ 不能用 sqlDB.Close()（第一版就是这么写的，红得很隐蔽）：consumer 的
+	// Handle 在写库**之前**要先查 edge_devices（设备定位）—— 关库会让那次查询
+	// 就失败并 return，永远走不到写 unified_data 的失败分支，指标自然不涨。
+	// 消息是 "sql: database is closed"、"metric delta = 0"，很难一眼看出是顺序问题。
+	//
+	// DROP 表的做法只破坏写路径，不影响查询路径 —— 这也更贴近生产里那种
+	// "列不存在/表不存在导致写入失败"的真实形态。
+	if err := db.Migrator().DropTable(&models.UnifiedData{}); err != nil {
+		t.Fatal(err)
+	}
+	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
+		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
+	})
+
+	if got := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data")) - before; got != 1 {
 		t.Fatalf("DB write failure metric delta = %v, want 1", got)
 	}
 
@@ -652,7 +655,7 @@ func TestDataConsumerDBWriteFailuresPrometheusExposition(t *testing.T) {
 	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `ehome_data_consumer_db_write_failures_total{consumer="db_persist",table="device_data"} `) {
+	if !strings.Contains(body, `ehome_data_consumer_db_write_failures_total{consumer="sensor_parser",table="unified_data"} `) {
 		t.Fatalf("exposition missing labeled counter series; sample:\n%s", sampleMetrics(body))
 	}
 	if !strings.Contains(body, "# TYPE ehome_data_consumer_db_write_failures_total counter") {

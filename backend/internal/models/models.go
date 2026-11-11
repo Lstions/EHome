@@ -287,17 +287,6 @@ type DeviceConfig struct {
 
 // =====================================================================
 
-// DeviceData 原始数据 (保留, v2.2 加 edge_device_id 关联)
-type DeviceData struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	DeviceID     uint      `gorm:"index;not null" json:"device_id"`                               // v2.2: 改为 EdgeDeviceID
-	NodeID       string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
-	DataJSON     string    `gorm:"type:text" json:"data_json"`
-	Timestamp    time.Time `gorm:"index" json:"timestamp"`
-	CreatedAt    time.Time `json:"created_at"`
-	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增 (与 DeviceID 二选一)
-}
-
 // =====================================================================
 
 // UnifiedData 统一数据 (保留)

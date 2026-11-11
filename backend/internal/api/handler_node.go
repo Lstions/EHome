@@ -272,30 +272,21 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		Success(c, channels)
 	})
 
-	// Get node data
+	// ============ GET /nodes/:id/data —— **已删除**（2026-11-11，破坏性更新）============
 	//
-	// S4 修复 (2026-10-07): limit 必须归一到有界默认值。
-	// 改前 limit 的错误被丢弃、也不做范围检查, 于是:
-	//   ?limit=-1  → GORM 丢弃整条 LIMIT 子句 → 返回**全表**(无界);
-	//   ?limit=0 或 ?limit=abc → GORM 写 LIMIT 0 → **静默空页**(用户看不到任何提示);
-	//   ?limit=100000000 → 未钳制的超大值 → 单次响应体不受控。
-	// 三种都归 100, 与 handler_data.go 的 limit 写法保持同一口径。
-	v1.GET("/nodes/:id/data", func(c *gin.Context) {
-		id := c.Param("id")
-		limitStr := c.DefaultQuery("limit", "100")
-		limit, _ := strconv.Atoi(limitStr)
-		if limit <= 0 || limit > 1000 {
-			limit = 100
-		}
-		node, err := findNodeByID(db, id)
-		if err != nil {
-			Error(c, http.StatusNotFound, "node not found")
-			return
-		}
-		var data []models.DeviceData
-		db.Where("node_id = ?", node.NodeID).Order("timestamp DESC").Limit(limit).Find(&data)
-		Success(c, data)
-	})
+	// 它按 node_id 查 device_data 的原始记录（并且历史上混着两种 data_json 形状 ——
+	// db_persist 行的 raw 与 sensor_parser 行的 raw_hex/sensors）。
+	// device_data 整表退役后没有数据来源。
+	//
+	// 补充依据（方案 §1.3 读路径表第 3 行）：该端点**前端零调用者** ——
+	//   · 全仓 grep 无任何调用（api 层/前端 api wrapper 都没有）；
+	//   · docs/分析/功能模块与业务功能实测盘点-2026-09-23.md:163 记为
+	//     「无包装、无调用者」。
+	// 所以它是纯粹的死端点：删掉零影响，留着则是一颗 42P01 定时炸弹。
+	//
+	// 若要恢复「按节点看数据」，正确做法是走 /nodes/:id/... + edge_device 维度的
+	// 新端点（读帧表），而不是把 device_data 查回来。
+	// ==================================================================================
 
 	// Ping node
 	v1.POST("/nodes/:id/ping", func(c *gin.Context) {

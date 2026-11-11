@@ -7,6 +7,7 @@ import (
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/internal/websocket"
 
 	"gorm.io/gorm"
@@ -99,9 +100,9 @@ func TestSensorParserConsumer_SoftDeletedNodeIngestIsRejected(t *testing.T) {
 	if got := countRows(t, db, &models.UnifiedData{}); got != 0 {
 		t.Errorf("unified_data rows = %d, want 0 for a soft-deleted node", got)
 	}
-	if got := countRows(t, db, &models.DeviceData{}); got != 0 {
-		t.Errorf("device_data rows = %d, want 0 for a soft-deleted node", got)
-	}
+	// 2026-11-11: 原本还断言 device_data 0 行。该表已整表退役（原始数据退役方案
+	// §2.1），写入点删除后**没有任何代码路径**会写它 —— 断言一张不存在的表只会
+	// 在编译期报错。unified_data 的 0 行断言已覆盖 "fail-closed 不放行" 这个语义。
 	if !reassembler.consumedRequest(7) {
 		t.Error("reassembly buffer for the dropped frame was not released (Consume not called)")
 	}
@@ -133,13 +134,11 @@ func TestSensorParserConsumer_SoftDeletedNodeIngestIsRejected_LegacyChannelIndex
 	if got := countRows(t, db, &models.UnifiedData{}); got != 0 {
 		t.Errorf("unified_data rows = %d, want 0 for a soft-deleted node via channel-index lookup", got)
 	}
-	if got := countRows(t, db, &models.DeviceData{}); got != 0 {
-		t.Errorf("device_data rows = %d, want 0 for a soft-deleted node via channel-index lookup", got)
-	}
+	// 同上：device_data 已退役，见上一条用例的说明。
 }
 
 // TestSensorParserConsumer_LiveNodeIngestStillPersists 是对照组: 与软删用例
-// 完全相同的夹具, 仅 nodes 行未删 —— 必须照常写 unified_data/device_data 并
+// 完全相同的夹具, 仅 nodes 行未删 —— 必须照常写 unified_data、调用帧旁路，并
 // 广播 node_id/node_name 正确的 data_update。没有它, "把整条链路关掉" 也能让
 // 上面的断言通过。
 func TestSensorParserConsumer_LiveNodeIngestStillPersists(t *testing.T) {
@@ -152,6 +151,11 @@ func TestSensorParserConsumer_LiveNodeIngestStillPersists(t *testing.T) {
 	defer hub.Unsubscribe(sub)
 
 	consumer := newIngestGateConsumer(t, db, hub, passthroughReassembler{})
+	// 2026-11-11: 对照组原本还断言 device_data 1 行。该表已整表退役，改为断言
+	// **帧旁路**被调用 —— 那才是现在承接「同一帧的第二份记录」的路径，而且能
+	// 证明「整条链路真的没被关掉」（比断言一张已退役表的存在更有意义）。
+	frameCalls := 0
+	consumer.SetTelemetrySink(func(uint, time.Time, int64, []telemetry.Reading, []byte) { frameCalls++ })
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 9, RawData: []byte{0x01},
 	})
@@ -159,8 +163,8 @@ func TestSensorParserConsumer_LiveNodeIngestStillPersists(t *testing.T) {
 	if got := countRows(t, db, &models.UnifiedData{}); got != 1 {
 		t.Fatalf("unified_data rows = %d, want 1 for a live node", got)
 	}
-	if got := countRows(t, db, &models.DeviceData{}); got != 1 {
-		t.Fatalf("device_data rows = %d, want 1 for a live node", got)
+	if frameCalls == 0 {
+		t.Fatal("live node 的帧旁路未被调用 — 对照组要证明链路是活的")
 	}
 
 	got := collectWS(sub, 3*time.Second, events.DataUpdate, events.ChannelData)

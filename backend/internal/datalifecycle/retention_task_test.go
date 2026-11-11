@@ -18,34 +18,23 @@ import (
 	"gorm.io/gorm"
 
 	"ehome/backend/internal/models"
-	"ehome/backend/testutil"
 )
 
-// seedRetentionRows 建一台设备并写入两行数据: expired(now-days 之前) 与 fresh。
+// seedRetentionRows 建一台设备并写入两帧数据: expired(now-days 之前) 与 fresh。
+//
+// 2026-11-11: 原先 seed 的是 unified_data 两行。两张原始表退役后保留期只管帧表
+// （TimeseriesTables 只剩 telemetry_frame），所以夹具改为两帧 —— 否则本文件的
+// 「过期删、新鲜留」断言没有被测对象。调用方必须用 openFrameLifecycleDB。
 func seedRetentionRows(t *testing.T, db *gorm.DB, name string, now time.Time, expiredDaysAgo, freshDaysAgo int) *models.EdgeDevice {
 	t.Helper()
 	dev := seedDevice(t, db, name, "bms_jbd", name+"-hw", false)
-	if err := db.Create(&models.UnifiedData{
-		DeviceID:   dev.ID,
-		SensorName: "voltage",
-		Value:      1,
-		Timestamp:  now.AddDate(0, 0, -expiredDaysAgo),
-	}).Error; err != nil {
-		t.Fatalf("seed expired row: %v", err)
-	}
-	if err := db.Create(&models.UnifiedData{
-		DeviceID:   dev.ID,
-		SensorName: "voltage",
-		Value:      2,
-		Timestamp:  now.AddDate(0, 0, -freshDaysAgo),
-	}).Error; err != nil {
-		t.Fatalf("seed fresh row: %v", err)
-	}
+	seedExpiredFrame(t, db, dev.ID, now.AddDate(0, 0, -expiredDaysAgo))
+	seedExpiredFrame(t, db, dev.ID, now.AddDate(0, 0, -freshDaysAgo))
 	return dev
 }
 
 func TestRetentionTask_DeletesExpiredKeepsFresh(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
@@ -66,19 +55,19 @@ func TestRetentionTask_DeletesExpiredKeepsFresh(t *testing.T) {
 		t.Fatalf("RowsDeleted = %d, want 1 (only the expired row)", results[0].RowsDeleted)
 	}
 	var remaining int64
-	db.Model(&models.UnifiedData{}).Count(&remaining)
+	db.Model(&models.TelemetryFrame{}).Count(&remaining)
 	if remaining != 1 {
-		t.Errorf("remaining rows = %d, want 1 (fresh row kept)", remaining)
+		t.Errorf("remaining frames = %d, want 1 (fresh frame kept)", remaining)
 	}
-	var kept models.UnifiedData
+	var kept models.TelemetryFrame
 	db.First(&kept)
-	if kept.Value != 2 {
-		t.Errorf("kept row value = %v, want 2 (the fresh row)", kept.Value)
+	if !kept.TS.Equal(now.AddDate(0, 0, -10)) {
+		t.Errorf("kept frame ts = %s, want %s (the fresh frame)", kept.TS, now.AddDate(0, 0, -10))
 	}
 }
 
 func TestRetentionTask_NothingExpired(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
@@ -94,16 +83,16 @@ func TestRetentionTask_NothingExpired(t *testing.T) {
 		t.Errorf("RowsDeleted = %d, want 0", results[0].RowsDeleted)
 	}
 	var count int64
-	db.Model(&models.UnifiedData{}).Count(&count)
+	db.Model(&models.TelemetryFrame{}).Count(&count)
 	if count != 2 {
-		t.Errorf("rows = %d, want 2 (nothing expired)", count)
+		t.Errorf("frames = %d, want 2 (nothing expired)", count)
 	}
 }
 
 // TestRetentionTask_CoversAllDevices — 系统级窗口对所有设备一视同仁（这正是
 // 移除「按身份配置保留期」后要保住的性质: 不再有谁能逃过保留期）。
 func TestRetentionTask_CoversAllDevices(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
@@ -121,9 +110,9 @@ func TestRetentionTask_CoversAllDevices(t *testing.T) {
 		t.Errorf("RowsDeleted = %d, want 2 (one expired row per device)", results[0].RowsDeleted)
 	}
 	var remaining int64
-	db.Model(&models.UnifiedData{}).Count(&remaining)
+	db.Model(&models.TelemetryFrame{}).Count(&remaining)
 	if remaining != 2 {
-		t.Errorf("remaining = %d, want 2 (fresh rows on both devices kept)", remaining)
+		t.Errorf("remaining = %d, want 2 (fresh frames on both devices kept)", remaining)
 	}
 }
 
@@ -134,7 +123,7 @@ func TestRetentionTask_CoversAllDevices(t *testing.T) {
 // 保留负值拒绝的理由：把负值当「永久」会让一个笔误变成「再也不清理」的静默事故，
 // 因此 fail-safe 到原窗口。
 func TestRetentionTask_NegativeWindowIgnored(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
@@ -175,14 +164,8 @@ func TestRetentionTask_NegativeWindowIgnored(t *testing.T) {
 func seedPermanentRetentionRows(t *testing.T, db *gorm.DB, now time.Time) (*models.EdgeDevice, *models.Notification) {
 	t.Helper()
 	dev := seedDevice(t, db, "perm", "bms_jbd", "perm-hw", false)
-	if err := db.Create(&models.UnifiedData{
-		DeviceID:   dev.ID,
-		SensorName: "voltage",
-		Value:      1,
-		Timestamp:  now.AddDate(0, 0, -4000), // 远古行：任何有限窗口都该删它
-	}).Error; err != nil {
-		t.Fatalf("seed ancient row: %v", err)
-	}
+	// 远古帧：任何有限窗口都该删它。
+	seedExpiredFrame(t, db, dev.ID, now.AddDate(0, 0, -4000))
 	// 已读通知 + 1000 天前 ⇒ 远超通知默认窗口（已读 90 天）。
 	notif := seedNotification(t, db, "perm-notif", true, now.AddDate(0, 0, -1000))
 	return dev, notif
@@ -190,7 +173,7 @@ func seedPermanentRetentionRows(t *testing.T, db *gorm.DB, now time.Time) (*mode
 
 // TestRetentionTask_PermanentRetentionKeepsAllData — days=0 ⇒ 不删任何数据行。
 func TestRetentionTask_PermanentRetentionKeepsAllData(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(0)
 	defer SetSystemRetentionDays(90)
@@ -217,9 +200,9 @@ func TestRetentionTask_PermanentRetentionKeepsAllData(t *testing.T) {
 	}
 
 	var remaining int64
-	db.Model(&models.UnifiedData{}).Count(&remaining)
+	db.Model(&models.TelemetryFrame{}).Count(&remaining)
 	if remaining != 1 {
-		t.Errorf("unified_data 剩余 = %d, want 1（4000 天前的行也必须留着）", remaining)
+		t.Errorf("telemetry_frame 剩余 = %d, want 1（4000 天前的帧也必须留着）", remaining)
 	}
 }
 
@@ -228,7 +211,7 @@ func TestRetentionTask_PermanentRetentionKeepsAllData(t *testing.T) {
 // 这是本轮最容易做错的一处：直接 return 会让 8 张元数据表无限增长，
 // 而且不会有任何报错（它们的清理器没有独立 goroutine，唯一调用点就是 RunOnce）。
 func TestRetentionTask_PermanentRetentionStillRunsBypassCleaners(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(0)
 	defer SetSystemRetentionDays(90)
@@ -251,9 +234,9 @@ func TestRetentionTask_PermanentRetentionStillRunsBypassCleaners(t *testing.T) {
 	}
 	// 同时数据行仍在（上一条用例已单独断言，这里再确认两条路径互不干扰）。
 	var rows int64
-	db.Model(&models.UnifiedData{}).Count(&rows)
+	db.Model(&models.TelemetryFrame{}).Count(&rows)
 	if rows != 1 {
-		t.Errorf("unified_data 剩余 = %d, want 1", rows)
+		t.Errorf("telemetry_frame 剩余 = %d, want 1", rows)
 	}
 }
 
@@ -262,7 +245,7 @@ func TestRetentionTask_PermanentRetentionStillRunsBypassCleaners(t *testing.T) {
 // 契约要求「days=1 时行为不变」。这里同时钉住三个量：删掉过期行、留下新行、
 // Permanent=false（不能因为 Days 小就误判成永久）。
 func TestRetentionTask_FiniteWindowStillDeletes(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(1)
 	defer SetSystemRetentionDays(90)
@@ -285,9 +268,9 @@ func TestRetentionTask_FiniteWindowStillDeletes(t *testing.T) {
 		t.Errorf("RowsDeleted = %d, want 1（2 天前的行超出 1 天窗口）", results[0].RowsDeleted)
 	}
 	var remaining int64
-	db.Model(&models.UnifiedData{}).Count(&remaining)
+	db.Model(&models.TelemetryFrame{}).Count(&remaining)
 	if remaining != 1 {
-		t.Errorf("remaining = %d, want 1（今天的行必须留着）", remaining)
+		t.Errorf("remaining = %d, want 1（今天的帧必须留着）", remaining)
 	}
 }
 

@@ -32,7 +32,7 @@ func newNodeBindingTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.UnifiedData{}, &models.DeviceData{}, &models.CalibrationCache{}); err != nil {
+		&models.UnifiedData{}, &models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db

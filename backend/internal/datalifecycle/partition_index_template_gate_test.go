@@ -157,7 +157,10 @@ func TestNoTwoTemplatesShareColumnList(t *testing.T) {
 //	latest-data 与分页始终用 (device_id, created_at DESC)，删前删后计划完全相同
 //	data-summary 始终用 (device_id, timestamp)，删前删后计划完全相同
 func TestSingleColumnDeviceIDIndexIsPrefixCovered(t *testing.T) {
-	for _, table := range []string{"unified_data", "device_data"} {
+	// 2026-11-11: device_data 已整表退役，从被测清单移除 —— 它不再有索引模板，
+	// 「单列索引是否被复合索引前缀覆盖」这个问题对不存在的表没有意义。
+	// unified_data 仍是同一形态的活样本，判据一个字没改。
+	for _, table := range []string{"unified_data"} {
 		cols := templateColumns(table)
 		if _, still := cols["device_id"]; still {
 			t.Errorf("%s: (device_id) 单列索引仍在模板里 —— task-20 要求删除（它被复合索引前缀覆盖）", table)

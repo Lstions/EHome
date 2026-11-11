@@ -516,7 +516,7 @@ func TestAutomationEventCleaner_NilDB(t *testing.T) {
 // 挂在既有每日 retention 任务上 (无新增 goroutine / 不动 main.go), 与
 // notifications / deliveries 清理同批执行, 且不干扰逐设备保留期处理。
 func TestRetentionTask_RunsAutomationEventCleanup(t *testing.T) {
-	db := testutil.OpenTestDB(t)
+	db := openFrameLifecycleDB(t) // 保留期现在只管帧表（两份原始表均已退役）
 	now := time.Date(2026, 9, 14, 13, 30, 0, 0, time.UTC)
 	ago := func(d int) time.Time { return now.AddDate(0, 0, -d) }
 
@@ -531,14 +531,8 @@ func TestRetentionTask_RunsAutomationEventCleanup(t *testing.T) {
 	// key 会拼成 edge_devices 的 name (varchar(16)) —— PG 下超长直接
 	// SQLSTATE 22001 (SQLite 不校验长度, 第一次只跑 SQLite 时此处静默通过)。
 	retDev := seedDevice(t, db, "d1-autoev", "bms_jbd", "d1-autoev-hw", false)
-	if err := db.Create(&models.UnifiedData{
-		DeviceID:   retDev.ID,
-		SensorName: "voltage",
-		Value:      1,
-		Timestamp:  ago(400),
-	}).Error; err != nil {
-		t.Fatalf("seed retention row: %v", err)
-	}
+	// 2026-11-11: 夹具从 unified_data 换成帧表（两张原始表均已退役，保留期只管帧表）。
+	seedExpiredFrame(t, db, retDev.ID, ago(400))
 
 	r := NewRetentionTask(db)
 	r.now = func() time.Time { return now }

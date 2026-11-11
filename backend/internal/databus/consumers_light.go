@@ -7,6 +7,7 @@ import (
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
+	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 )
 
@@ -49,6 +50,33 @@ func (c *DataMetricsConsumer) ShouldHandle(evt DataEvent) bool {
 func (c *DataMetricsConsumer) Handle(evt DataEvent) {
 	if evt.IsError() || len(evt.RawData) == 0 {
 		metrics.DataReportErrors.Inc()
+		// ==================== 为什么这里必须打日志（S1，2026-11-11）====================
+		//
+		// 改造前本分支**只** +1 指标，零日志。而 device_data 退役后（原始数据不入库，
+		// 见 docs/设计/原始数据退役-改造方案-2026-11-11.md §4.2.1），日志是这类
+		// 「设备上报了错误码 / 空数据」的**唯一**取证来源：
+		//
+		//	错误样本（生产 24h 17,278 条，全部来自设备 16）在原 device_data 里有行
+		//	（db_persist 消费者写 raw + error_code）。现在没有行了 —— 不打日志就等于
+		//	「设备 16 从来没数据」这个现象**无法归因**（§4.3 排查手册第 3 行）。
+		//
+		// 指标仍然保留：它回答「有多少」，日志回答「哪台设备、哪条命令、错误码几」。
+		// 两者不可互相替代，所以不是把 Inc() 换成日志，而是**并列**。
+		//
+		// 字段口径与解析失败日志（consumers_heavy.go 的 "decode failed"）对齐，
+		// 同一个 edge_device_id / channel_id / command_index 可以跨两类日志串联。
+		// raw_hex 走 rawHexForLog（前缀截断 128 B）：这类样本生产实测 raw 就是空串，
+		// 但 ErrorCode!=0 且带 raw 的形态也存在（固件会回带出错时的原始帧）。
+		logger.Warn("databus: data report rejected at ingest",
+			"node_id", evt.DeviceID,
+			"edge_device_id", evt.EdgeDeviceID,
+			"channel_id", evt.ChannelID,
+			"command_index", evt.CommandIndex,
+			"error_code", evt.ErrorCode,
+			"request_id", evt.RequestID,
+			"raw_len", len(evt.RawData),
+			"raw_hex", rawHexForLog(evt.RawData),
+		)
 		return
 	}
 	metrics.DataReportsProcessed.Inc()

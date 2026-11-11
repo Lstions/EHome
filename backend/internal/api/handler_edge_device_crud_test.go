@@ -50,7 +50,10 @@ func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Regis
 	}
 	db.AutoMigrate(
 		&models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
-		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.DeviceData{},
+		// 2026-11-11: models.DeviceData 已删除（device_data 整表退役）。原本紧跟
+		// DeviceConfig 的 &models.DeviceData{} 一并移除 —— 不要再从 git history 把
+		// 它抄回来，模型都不存在了。
+		&models.EdgeDevice{}, &models.DeviceConfig{},
 		&models.UnifiedData{}, &models.User{}, &models.OTATask{},
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.DeviceModel{},
@@ -63,6 +66,15 @@ func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Regis
 		// 2026-10-25：合并历史的台账/投影表（sensor_field_obs / data_sources）也要在
 		// 测试库里存在，否则 merge-history 的台账迁移分支永远走「跳过」，测试假绿。
 		&models.SensorFieldObs{}, &models.DataSource{},
+		// 2026-11-11：帧表进测试库。device_data 整表退役后，data-summary 的行数估算
+		// 与时间范围、merge-history 的时序迁移、purge 的清理对象**全部只剩帧表**
+		// （datalifecycle.TimeseriesTables）。不建它，这些用例的断言会全部退化成
+		// "0 行"，看起来像功能坏了。
+		//
+		// ⚠ 关于「AutoMigrate 帧表会不会加 id 列」：不会。模型主键 tag 已显式声明
+		// (device_id, ts, seq) 三列，GORM 建出的是 PRIMARY KEY (device_id, ts, seq)、
+		// 没有 id 列（已用 sqlite_master 的 DDL 实测确认）。这与生产分区母表一致。
+		&models.TelemetryFrame{}, &models.TelemetrySlot{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -658,119 +670,17 @@ func TestEdgeDevice_Delete_NonExistent(t *testing.T) {
 
 // ==================== EdgeDevice Sub-resource Tests ====================
 
-// TestEdgeDevice_LatestData_DeletedDeviceStillReadable — 契约变更 (2026-10-23)。
+// 2026-11-11: TestEdgeDevice_LatestData_DeletedDeviceStillReadable 与
+// TestEdgeDevice_Data_DeletedDeviceStillReadable 已删除。
 //
-// 旧语义: 实例已删 → 404（"实例语义"）。但那条规则的真正目的是**阻止把
-// 逻辑身份的数据当成实例自己的数据**，逻辑身份层移除后它失去依据。
-// 新语义: 数据端点按 device_id 直查，软删设备的历史**仍然可读** ——
-// 这正是用户要的「换节点/重建后历史不丢」；只有配置类端点（GET
-// /edge-devices/:id 等）对已删设备 404。
-func TestEdgeDevice_LatestData_DeletedDeviceStillReadable(t *testing.T) {
-	r, db := setupEdgeDeviceTest(t)
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"}
-	db.Create(&dev)
-	db.Create(&models.DeviceData{DeviceID: dev.ID, NodeID: "NODE001", DataJSON: `{"v":1}`})
-	db.Delete(&dev) // 设备行软删，数据还在
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/latest-data", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (soft-deleted device's data stays readable), got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-// TestEdgeDevice_Data_DeletedDeviceStillReadable — 同上的 /:id/data 版本。
-func TestEdgeDevice_Data_DeletedDeviceStillReadable(t *testing.T) {
-	r, db := setupEdgeDeviceTest(t)
-
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	dev := models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"}
-	db.Create(&dev)
-	db.Create(&models.DeviceData{DeviceID: dev.ID, NodeID: "NODE001", DataJSON: `{"v":1}`})
-	db.Delete(&dev)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=1&page_size=5", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (soft-deleted device's data stays readable), got %d: %s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Data struct {
-			Items []json.RawMessage `json:"items"`
-			Total int64             `json:"total"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("bad json: %v", err)
-	}
-	if resp.Data.Total != 1 || len(resp.Data.Items) != 1 {
-		t.Errorf("total/items = %d/%d, want 1/1 (history must survive soft delete)", resp.Data.Total, len(resp.Data.Items))
-	}
-}
-
-func TestEdgeDevice_Data_LivingInstanceTimeRange(t *testing.T) {
-	// 存活实例: resolve 后按 scope 查询 (无数据 → total=0 的 200)。
-	r, db := setupEdgeDeviceTest(t)
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?start_time=2024-01-01T00:00:00Z&end_time=2025-12-31T23:59:59Z", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for living instance, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data := resp["data"].(map[string]interface{})
-	if data["total"] != float64(0) {
-		t.Errorf("expected total=0 for empty data, got %v", data["total"])
-	}
-}
-
-func TestEdgeDevice_Operations_PostIsNotProvidedByLegacyRoutes(t *testing.T) {
-	r, _ := setupEdgeDeviceTest(t)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"operation": "read",
-		"params":    map[string]interface{}{"register": "0x00"},
-	})
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/edge-devices/1/operations", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 without the Phase 1 operation service, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestEdgeDevice_OperationsHistoryIsNotProvidedByLegacyRoutes(t *testing.T) {
-	r, _ := setupEdgeDeviceTest(t)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/operations/history?limit=20", nil)
-	req.Header.Set("Authorization", authHeader(t))
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 without the Phase 1 operation service, got %d: %s", w.Code, w.Body.String())
-	}
-}
+// 它们断言的端点 GET /:id/latest-data 与 GET /:id/data 都随 device_data 整表退役
+// 被删除（原始数据退役方案 §1.3 读路径表第 1/2 行）。端点不存在 ⇒ 用例只能得到 404，
+// 改写它没有意义。
+//
+// 这两条用例原本守的**语义**（软删设备的历史仍可读，历史不因设备行软删而消失）依然
+// 成立，但已经由别的用例覆盖：/devices/:id/history（帧表）与 /:id/latest-values 都是
+// 按 device_id 直查、不看设备行的 deleted_at。若将来要为新端点补回归，请写到对应新
+// 端点的用例里，而不是复活这两个端点。
 
 // ==================== DeviceConfig-optional (driver fallback) tests ====================
 
@@ -1203,8 +1113,11 @@ func TestEdgeDevice_Delete_DeleteDataSetsPurgeRequestedOnly(t *testing.T) {
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
 	// 该设备名下有数据行 — API 事务内不得删除（只置标记，删数据由后台任务做）。
+	// 2026-11-11: 第二行原本是 device_data，随该表退役改成帧表（帧表是 purge
+	// 现在唯一会清的时序表，见 telemetry_frame_lifecycle.go 的 TimeseriesTables）。
 	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12})
-	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: "{}"})
+	seedFrameTable(t, db)
+	seedFrameRow(t, db, 1, time.Now())
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1?delete_data=true", nil)
@@ -1221,11 +1134,11 @@ func TestEdgeDevice_Delete_DeleteDataSetsPurgeRequestedOnly(t *testing.T) {
 		t.Error("data_purge_requested must be TRUE with delete_data=true")
 	}
 	// 数据行仍在（异步 purge，不在 API 事务里删）。
-	var unified, devdata int64
+	var unified, frames int64
 	db.Model(&models.UnifiedData{}).Count(&unified)
-	db.Model(&models.DeviceData{}).Count(&devdata)
-	if unified != 1 || devdata != 1 {
-		t.Errorf("data must survive the API transaction, got unified=%d device_data=%d", unified, devdata)
+	db.Model(&models.TelemetryFrame{}).Count(&frames)
+	if unified != 1 || frames != 1 {
+		t.Errorf("data must survive the API transaction, got unified=%d telemetry_frame=%d", unified, frames)
 	}
 }
 
@@ -1280,9 +1193,19 @@ func TestEdgeDevice_DataSummary(t *testing.T) {
 	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
 	old := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	newer := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12, Timestamp: old})
-	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "current", Value: 3, Timestamp: newer})
-	db.Create(&models.DeviceData{DeviceID: 1, NodeID: "NODE001", DataJSON: "{}", Timestamp: newer})
+	// ============ 2026-11-11：三行夹具改为两帧 ============
+	//
+	// 原夹具：unified_data 两行（old/newer）+ device_data 一行（newer）。
+	// 两张原始表先后退役后，data-summary 的「行数」与「时间范围」**都只从帧表读**
+	// （handler 的 tsTables 走 datalifecycle.ExistingTimeseriesTables；行数走
+	// row_estimate.EstimateDeviceRows）。所以夹具必须换成帧行，否则时间范围会只剩
+	// 一份来源、行数恒为 0 —— 那不是"功能坏了"，是夹具指向了已退役的表。
+	//
+	// 两帧分别落在 old / newer：既保证 target_rows = 2，也保证
+	// first_time = old、last_time = newer（时间范围跨两端这条语义原样保留）。
+	seedFrameTable(t, db)
+	seedFrameAt(t, db, 1, old)
+	seedFrameAt(t, db, 1, newer)
 
 	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary", "")
 	if w.Code != http.StatusOK {
@@ -1306,8 +1229,10 @@ func TestEdgeDevice_DataSummary(t *testing.T) {
 	if resp.Data.Target.DeviceType != "bms_jbd" {
 		t.Errorf("target.device_type = %q, want bms_jbd", resp.Data.Target.DeviceType)
 	}
-	if resp.Data.TargetRows == nil || *resp.Data.TargetRows != 3 {
-		t.Errorf("target_rows = %v, want 3 (2 unified_data + 1 device_data)", resp.Data.TargetRows)
+	// 2026-11-11: 行数口径从「unified_data + device_data」改为「只数帧表」
+	// （row_estimate.go 的 EstimateDeviceRows）。上面 seed 了两帧 ⇒ want 2。
+	if resp.Data.TargetRows == nil || *resp.Data.TargetRows != 2 {
+		t.Errorf("target_rows = %v, want 2 (帧表是唯一时序载体，unified_data/device_data 均已退役)", resp.Data.TargetRows)
 	}
 	if len(resp.Data.Sources) != 0 {
 		t.Errorf("sources = %+v, want empty (没有传 source_ids)", resp.Data.Sources)
@@ -1334,10 +1259,12 @@ func TestEdgeDevice_DataSummary_SeparatesTargetFromSources(t *testing.T) {
 	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
 	db.Create(&models.EdgeDevice{Name: "Old", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
 	// 目标自己有 2 行（**不应**出现在 source_rows 里），源有 1 行。
+	// 2026-11-11: 夹具从 unified_data 换成帧表（两张原始表均已退役，行数估算只数帧）。
+	seedFrameTable(t, db)
 	for i := 0; i < 2; i++ {
-		db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: float64(i)})
+		seedFrameAt(t, db, 1, time.Now().Add(time.Duration(i)*time.Second))
 	}
-	db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: 9})
+	seedFrameAt(t, db, 2, time.Now())
 
 	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary?source_ids=2", "")
 	if w.Code != http.StatusOK {
@@ -1376,7 +1303,9 @@ func TestEdgeDevice_DataSummary_MarksMissingSource(t *testing.T) {
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.EdgeDevice{Name: "Target", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1})
-	db.Create(&models.UnifiedData{DeviceID: 999, SensorName: "voltage", Value: 1})
+	// 2026-11-11: 孤儿历史改成帧行（device_id=999 没有设备行 ⇒ 走 CountDeviceRowsCapped）。
+	seedFrameTable(t, db)
+	seedFrameAt(t, db, 999, time.Now())
 
 	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary?source_ids=999", "")
 	if w.Code != http.StatusOK {
@@ -1667,25 +1596,39 @@ func rr2Merge(t *testing.T, r *gin.Engine, body map[string]interface{}) (int, rr
 	return w.Code, resp.Data
 }
 
-// TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent — 一条 UPDATE 把旧 device_id
-// 的历史改挂到新设备，重复调用返回 0 行（幂等）。源必须已软删（主用途）。
+// TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent — 把旧 device_id 的历史
+// 改挂到新设备，重复调用返回 0 行（幂等）。源必须已软删（主用途）。
+//
+// ============ 2026-11-11：夹具与断言全面改为帧表 ============
+//
+// 原夹具是 3 行 unified_data + 1 行 device_data，断言 rows_migrated=4。
+// 两张原始表先后退役后，merge-history 的时序迁移只覆盖**帧表**：
+//
+//	· UPDATE device_id 的循环走 existingTimeseriesTables → 只剩帧表，且它 HasID=false
+//	  会被 continue 跳过；
+//	· 帧表走 MigrateTelemetryFramesToDevice（复制 + ON CONFLICT + 精确删源）。
+//
+// 所以 rows_migrated 现在等于「迁入的帧数」。继续塞 unified_data 只会得到一个
+// 永远不被搬的干扰项 —— 那会让断言看起来"数字不对"，实际是用例在测一条已退役的路径。
 func TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
 	rr2SeedMergeBase(t, db)
 	old := models.EdgeDevice{}
 	db.First(&old, 2)
 	db.Delete(&old) // 源已删（历史仍在）
+	seedFrameTable(t, db)
+	// 源设备 3 帧（不同时间戳，避免撞主键被 ON CONFLICT 丢弃）。
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
 	for i := 0; i < 3; i++ {
-		db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: float64(i)})
+		seedFrameAt(t, db, 2, base.Add(time.Duration(i)*time.Minute))
 	}
-	db.Create(&models.DeviceData{DeviceID: 2, NodeID: "NODE001", DataJSON: "{}"})
 
 	code, resp := rr2Merge(t, r, map[string]interface{}{"source_ids": []uint{2}})
 	if code != http.StatusOK {
 		t.Fatalf("merge expected 200, got %d", code)
 	}
-	if resp.RowsMigrated != 4 {
-		t.Fatalf("rows_migrated = %v, want 4 (3 unified_data + 1 device_data)", resp.RowsMigrated)
+	if resp.RowsMigrated != 3 {
+		t.Fatalf("rows_migrated = %v, want 3 (3 telemetry_frame)", resp.RowsMigrated)
 	}
 	if len(resp.Sources) != 1 || resp.Sources[0].ID != 2 || resp.Sources[0].State != "deleted" {
 		t.Errorf("sources = %+v, want [{id:2,state:deleted}]", resp.Sources)
@@ -1694,10 +1637,10 @@ func TestEdgeDevice_MergeHistory_MovesRowsAndIsIdempotent(t *testing.T) {
 		t.Errorf("source device_type = %q, want bms_jbd", resp.Sources[0].DeviceType)
 	}
 	var targetRows, sourceRows int64
-	db.Model(&models.UnifiedData{}).Where("device_id = 1").Count(&targetRows)
-	db.Model(&models.UnifiedData{}).Where("device_id = 2").Count(&sourceRows)
+	db.Model(&models.TelemetryFrame{}).Where("device_id = 1").Count(&targetRows)
+	db.Model(&models.TelemetryFrame{}).Where("device_id = 2").Count(&sourceRows)
 	if targetRows != 3 || sourceRows != 0 {
-		t.Errorf("after merge target=%d source=%d, want 3/0", targetRows, sourceRows)
+		t.Errorf("after merge frames target=%d source=%d, want 3/0", targetRows, sourceRows)
 	}
 	// 目标设备的「最后采集」必须跟着合并进来的历史前移，否则列表与历史图表自相矛盾。
 	var target models.EdgeDevice

@@ -49,9 +49,36 @@ type TelemetryFrame struct {
 	SlotID int16 `gorm:"column:slot_id;not null" json:"slot_id"`
 	// Payload 编码后的位流（1B flags + ceil(N/8)B mask + LSB 位打包量化值）。
 	Payload []byte `gorm:"column:payload;not null" json:"payload"`
-	// Raw 原始总线帧（可选）。只在关键帧/错误帧上保留，供"停写旧表后仍可回放"
-	// （§9.6 可回滚）。常规增量帧留 NULL：raw 平均 78 B，占满会吃掉本方案的
+	// Raw 可选载荷列。常规增量帧留 NULL：raw 平均 78 B，占满会吃掉本方案的
 	// 大部分收益（§1.2「帧级行 + 原始 raw(78B) 列」= 174.3 B/行）。
+	//
+	// ==================== ⚠ 这一列有**两种互不兼容的语义**（必读）====================
+	//
+	// 本列被两条**互不相关**的写路径复用，内容格式完全不同。2026-11-11 原始数据
+	// 退役（device_data 整表删除）时没有清洗历史数据，因此生产库里两种格式**混存**，
+	// 判断依据只能靠内容与相邻列本身：
+	//
+	//   A. 实时写路径（internal/telemetry/dualwrite.go 的 appendEncoded）
+	//      · 谁写：databus.SensorParserConsumer.Handle → telemetry.Sink → DualWriter
+	//      · 写什么：**总线原始字节**（重组后的完整帧，即解析器真正吃进去的那串字节）
+	//      · 何时写：**仅关键帧**（frame_kind = 1）。增量帧留 NULL。
+	//      · 为什么：device_data 退役后，这是「解析成功但数值错误」唯一的数据库
+	//        追溯手段（原始数据退役方案 §4.4 方案 A）。可拿 raw 重新解析，与 payload
+	//        解出的值对比，定位量化规格/寄存器偏移配错。
+	//      · 识别：frame_kind ∈ {0,1} 且 slot_id > 0，内容为二进制总线帧。
+	//
+	//   B. 回填路径（internal/backfill/encode.go 的 buildRawPayload）
+	//      · 谁写：internal/backfill 的老数据迁移任务（unified_data → telemetry_frame）
+	//      · 写什么：**超量程字段原文的 JSON**，形如
+	//        {"clamped":[{"field":"battery_voltage","value":1e12,"spec_max":204.7,...}]}
+	//      · 何时写：仅当该帧真的发生 clamp（编码有损）时。常规帧留 NULL。
+	//      · 为什么：老数据来自 unified_data 的**解析值行**，本来就没有总线字节
+	//        （unified_data 从不存 raw），只能把「被 clamp 掉的原文」用可读 JSON 留下。
+	//      · 识别：内容以 {"clamped": 开头（JSON 而非二进制）。
+	//
+	// **不要**据此写「自动判别后清洗/迁移」的逻辑：本次改造明确不做数据清洗
+	// （两种格式都是各自场景下的最优解，且历史可解释性要求保持原样）。
+	// 读到非空 raw 时，先看 frame_kind / slot_id 与首字节，再决定怎么解释。
 	Raw []byte `gorm:"column:raw" json:"raw,omitempty"`
 }
 

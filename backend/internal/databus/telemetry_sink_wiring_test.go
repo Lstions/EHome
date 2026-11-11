@@ -91,13 +91,19 @@ func TestTelemetrySink_RunsOnSkippedFrame(t *testing.T) {
 		gotSeq   []int64
 		gotNames [][]string
 	)
-	consumer.SetTelemetrySink(func(deviceID uint, at time.Time, commandTemplateID int64, readings []telemetry.Reading) {
+	consumer.SetTelemetrySink(func(deviceID uint, at time.Time, commandTemplateID int64, readings []telemetry.Reading, raw []byte) {
 		calls++
 		if deviceID != device.ID {
 			t.Errorf("telemetry sink deviceID = %d, want %d", deviceID, device.ID)
 		}
 		if at.IsZero() {
 			t.Error("telemetry sink 收到零值 at —— 必须传 unified_data.timestamp 用的同一个 now")
+		}
+		// raw 必须是**重组后**的原始帧（原始数据退役 §4.4 方案 A）：
+		// 关键帧靠它保留「解析成功但数值错误」的追溯能力，传空等于白加这个参数。
+		if len(raw) == 0 {
+			t.Error("telemetry sink 收到空 raw —— 关键帧 raw 落库（telemetry_frame.raw）是 " +
+				"device_data 退役后唯一的原始字节追溯来源")
 		}
 		gotSeq = append(gotSeq, commandTemplateID)
 		names := make([]string, len(readings))

@@ -30,7 +30,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.DeviceConfig{}, &models.UnifiedData{}, &models.DeviceData{},
+		&models.DeviceConfig{}, &models.UnifiedData{},
 		&models.User{}, &models.OTATask{}, &models.Firmware{}, &models.Vendor{},
 		&models.Notification{})
 

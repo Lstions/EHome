@@ -246,7 +246,7 @@ func twoDoorTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	}
 	db.AutoMigrate(
 		&models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
-		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.DeviceData{},
+		&models.EdgeDevice{}, &models.DeviceConfig{},
 		&models.UnifiedData{}, &models.User{}, &models.OTATask{},
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.DeviceModel{}, &models.NodeEvent{}, &models.CalibrationCache{},

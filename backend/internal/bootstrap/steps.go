@@ -9,10 +9,9 @@ package bootstrap
 // 步骤 ID 常量。用常量而不是散落的字面量：datalifecycle 埋点、api 适配器、
 // 前端假设都指向同一组字符串，任何一处拼错都应该是编译期错误而不是运行期空进度。
 const (
-	StepDBConnect           = "db_connect"
-	StepAutoMigrate         = "auto_migrate"
-	StepPartitionDeviceData = "partition_device_data"
-	StepPartitionRollup      = "partition_rollup"
+	StepDBConnect       = "db_connect"
+	StepAutoMigrate     = "auto_migrate"
+	StepPartitionRollup = "partition_rollup"
 	// StepPartitionTelemetryFrame 是 L2 帧表（+ slot 字典表）的分区迁移。
 	//
 	// 为什么单独一步而不是并进 StepPartitionRollup: 两者失败语义相反 ——
@@ -35,8 +34,6 @@ const (
 // 2026-11-07 增补 StepPartitionTelemetryFrame（L2 帧表迁移，契约
 // docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.5）：权重从相邻
 // 步骤里让出，**合计仍必须是 100**（TestDefaultStepsTable 守着）。
-// 让出方式：unified_data 25→22、device_data 15→13、parent_indexes 25→24
-// （帧表迁移插在两主表之后、rollup 之前，与 main.go 的执行顺序一致）。
 //
 // ============ 2026-11-08 移除 StepPartitionUnifiedData（硬切换）============
 //
@@ -44,13 +41,32 @@ const (
 // （MigrateTableToPartitioned 的 flatExists==0 分支无法区分「全新部署」与「刚 DROP」）。
 // 所以 main.go 不再调用 MigrateUnifiedDataToPartitioned，这一步随之消失。
 //
-// 它的 22 权重**按原相对比例分给剩余步骤**（不是塞给某一步）：
+// ============ 2026-11-11 移除 StepPartitionDeviceData（device_data 整表退役）============
 //
-//	原合计 78（剔除 22 后）=> 放大 100/78 ≈ 1.282 倍
-//	  db_connect            3 => 3.85  => 4
-//	  auto_migrate         10 => 12.82 => 13
-//	  device_data          13 => 16.67 => 17（实取 18 凑整，见下）
-//	  其余同理，个别 ±1 微调把合计凑回 100
+// 产品裁决「原始数据不入库、只有解析值入库」（docs/设计/原始数据退役-改造方案-
+// 2026-11-11.md §2.1）：device_data 的写点、读点、分区 DDL、剥离任务**全部删除**，
+// 自然也就不再有「这张表的分区迁移」这一步。
+//
+// 与 2026-11-08 移除 unified_data 那一步**同因同果**：留下迁移调用不只是"多跑一次空转"，
+// 而是会在表已被 DROP 之后把它**重新建出来**（MigrateTableToPartitioned 的
+// flatExists==0 分支无法区分「全新部署」与「刚 DROP」）—— 那正好抵消本次改造的全部收益。
+//
+// 该步的 17 权重按**原相对比例**分给剩余步骤（不是塞给某一步）：
+//
+//	原合计 83（剔除 17 后）=> 放大 100/83 ≈ 1.205 倍
+//	  db_connect             4 => 4.82  => 5
+//	  auto_migrate          13 => 15.66 => 16
+//	  partition_telemetry_frame 8 => 9.64 => 10
+//	  partition_rollup       3 => 3.61  => 4
+//	  ensure_partitions      4 => 4.82  => 5
+//	  parent_indexes        30 => 36.14 => 35
+//	  retire_dead_indexes    6 => 7.23  => 7
+//	  warmup                 9 => 10.84 => 11
+//	  startup_tasks          6 => 7.23  => 7
+//	合计 = 5+16+10+4+5+35+7+11+7 = 100 ✅
+//
+// parent_indexes 取 35 而不是 36：它是"最坏情况下最耗时"的那一步，
+// 只该增不该减，但为了把合计凑回 100 且不虚增到 37+，取 35（相对占比仍最大）。
 //
 // 权重是**相对值**，语义只要求「合计 100 + 大致反映耗时占比」，
 // 合计由 TestDefaultStepsTable 硬断言。
@@ -66,17 +82,17 @@ func DefaultSteps() []Step {
 	// 直接序列化成 {"state":""}，前端的状态机不认这个值（契约 §3.1 只定义了
 	// pending/running/done/failed/skipped 五个字面量）。
 	return []Step{
-		{ID: StepDBConnect, Label: "连接数据库", Weight: 4, State: StepPending},
-		{ID: StepAutoMigrate, Label: "数据库结构迁移", Weight: 13, State: StepPending},
-		{ID: StepPartitionDeviceData, Label: "device_data 分区迁移", Weight: 17, State: StepPending},
+		{ID: StepDBConnect, Label: "连接数据库", Weight: 5, State: StepPending},
+		{ID: StepAutoMigrate, Label: "数据库结构迁移", Weight: 16, State: StepPending},
 		// L2 帧表是主写入路径（2026-11-07 无条件启用），迁移失败即 Fatal，
-		// 因此权重与两张主表同量级。
-		{ID: StepPartitionTelemetryFrame, Label: "L2 帧表分区迁移", Weight: 8, State: StepPending},
-		{ID: StepPartitionRollup, Label: "聚合表分区就绪", Weight: 3, State: StepPending},
-		{ID: StepEnsurePartitions, Label: "滚动分区保障", Weight: 4, State: StepPending},
-		{ID: StepParentIndexes, Label: "补齐父表索引", Weight: 30, State: StepPending},
-		{ID: StepRetireDeadIndexes, Label: "退役死索引", Weight: 6, State: StepPending},
-		{ID: StepWarmup, Label: "缓存预热", Weight: 9, State: StepPending},
-		{ID: StepStartupTasks, Label: "后台任务启动", Weight: 6, State: StepPending},
+		// 因此权重与剩下的主表同量级（2026-11-11 device_data 退役后，它是
+		// 唯一还会走「分区迁移」这一步 Fatal 路径的时序表）。
+		{ID: StepPartitionTelemetryFrame, Label: "L2 帧表分区迁移", Weight: 10, State: StepPending},
+		{ID: StepPartitionRollup, Label: "聚合表分区就绪", Weight: 4, State: StepPending},
+		{ID: StepEnsurePartitions, Label: "滚动分区保障", Weight: 5, State: StepPending},
+		{ID: StepParentIndexes, Label: "补齐父表索引", Weight: 35, State: StepPending},
+		{ID: StepRetireDeadIndexes, Label: "退役死索引", Weight: 7, State: StepPending},
+		{ID: StepWarmup, Label: "缓存预热", Weight: 11, State: StepPending},
+		{ID: StepStartupTasks, Label: "后台任务启动", Weight: 7, State: StepPending},
 	}
 }

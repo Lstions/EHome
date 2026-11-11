@@ -20,7 +20,7 @@ func newWSPayloadTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{},
+		&models.ConfigTemplate{}, &models.UnifiedData{},
 		&models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

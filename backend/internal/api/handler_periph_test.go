@@ -46,7 +46,7 @@ func setupPeriphTestDownlink(t *testing.T, down downlink.Publisher) (*gin.Engine
 	}
 	db.AutoMigrate(
 		&models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
-		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.DeviceData{},
+		&models.EdgeDevice{}, &models.DeviceConfig{},
 		&models.UnifiedData{}, &models.User{}, &models.OTATask{},
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.DeviceModel{},

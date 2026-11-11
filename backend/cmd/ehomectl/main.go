@@ -35,6 +35,14 @@ func main() {
 			fatal(fmt.Sprintf("retire logical device layer failed: %v", err))
 		}
 		fmt.Printf("logical device layer retired (rows touched=%d)\n", rows)
+	case "retire-device-data":
+		// device_data 整表退役的「校验 + 删表」入口（2026-11-11）。
+		//
+		// 与 retire-logical-device 的区别：那一条在**启动时**也会幂等重跑（表结构退役，
+		// 重跑零成本）；本命令是**一次性不可逆**动作（DROP 整表），所以刻意
+		// **不**接到启动流程里 —— 它必须由人在维护窗口显式执行，且默认只校验。
+		// 语义见 retire_device_data.go 的文件头。
+		runRetireDeviceDataCLI()
 	case "command-intervals":
 		runCommandIntervalsCleanupCLI()
 	default:
@@ -45,19 +53,58 @@ func main() {
 func usage() {
 	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
 		"       ehomectl retire-logical-device\n" +
+		retireUsageLine() +
 		"       ehomectl command-intervals cleanup")
 }
 
+// autoMigrateFn 是 database.AutoMigrate 的间接引用。
+//
+// 为什么做成变量：**只读子命令绝不能跑 schema 迁移**，而"有没有跑"在单元测试里
+// 无法从外部观察（它执行的是 DDL，副作用是 schema 变化，很难在 sqlite 上注入
+// 一个可靠的探针）。做成可替换的变量后，测试可以把它换成一个计数器，
+// 直接断言「retire-device-data 路径没有调用它」。
+//
+// 生产里它恒为 database.AutoMigrate，没有任何调用方会改写它 —— 替换只发生在测试中。
+var autoMigrateFn = database.AutoMigrate
+
 func connectDB() *gorm.DB {
+	db := connectDBNoMigrate()
+	if err := autoMigrateFn(); err != nil {
+		fatal(err.Error())
+	}
+	return db
+}
+
+// connectDBNoMigrate 只连库（`Connect` + `GetDB`），**不执行 AutoMigrate**。
+//
+// ==================== 为什么必须有它（2026-11-11 生产事故）====================
+//
+// `ehomectl retire-device-data` 的自我声明是「默认/--dry-run **只校验只打印，
+// 绝不改库**」。但它原先走的是 `connectDB()`，而那一行里藏着
+// `database.AutoMigrate()` —— 也就是说**它在连库的瞬间就对生产库执行了
+// schema 迁移**。生产实测确实触发了（review 时发现的）。
+//
+// 为什么这是严重问题（不是洁癖）：
+//
+//  1. **违反部署顺序的安全前提**。方案 §3.3 的顺序是
+//     「停容器 → **备份 pg_dump** → 校验 → DROP」。校验跑在备份**之前**，
+//     若这次 AutoMigrate 改了 schema 而随后 DROP 出问题需要回滚，
+//     **备份里没有那次 schema 改动** —— 回滚后 schema 与代码不一致。
+//  2. **违反工具自己的声明**。一个自称只读的运维工具偷偷改 schema，是最坏的一类
+//     违反预期：运维会据此认为"dry-run 是安全的、可以随时跑"。
+//  3. 这个命令**根本不需要 schema 迁移**：它只读 device_data / telemetry_frame /
+//     edge_devices / telemetry_rollup_coverage 四张表并做 DROP。任何一张表的结构
+//     都不是它关心的（列不存在会在校验 SQL 里直接报错，那正是我们想要的信号）。
+//
+// 其余子命令（auth / retire-logical-device / command-intervals）**继续用
+// connectDB()**（带 AutoMigrate）：那三个是"要么改 schema、要么依赖最新 schema"的
+// 维护动作，AutoMigrate 是它们的前置条件。区别写在各自的调用点。
+func connectDBNoMigrate() *gorm.DB {
 	cfg := config.Load().DBConfig()
 	if err := database.Connect(database.Config{Host: cfg.Host, Port: cfg.Port, User: cfg.User, Password: cfg.Password, DBName: cfg.DBName, SSLMode: cfg.SSLMode}); err != nil {
 		fatal(err.Error())
 	}
-	db := database.GetDB()
-	if err := database.AutoMigrate(); err != nil {
-		fatal(err.Error())
-	}
-	return db
+	return database.GetDB()
 }
 
 // runMaintenance 是运维维护窗口的同步入口。

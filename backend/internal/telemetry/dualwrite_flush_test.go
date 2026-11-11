@@ -71,7 +71,7 @@ func TestDualWriterFlushesOnTimer(t *testing.T) {
 	base := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
 	const n = 5 // 远小于 dualWriteBatchSize(128)，绝不会触发"攒满"路径
 	for i := 0; i < n; i++ {
-		w.Observe(23, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i))
+		w.Observe(23, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i), nil)
 	}
 
 	// 先确认「此刻还没落盘」——否则用例会因为 Close 之外的路径提前落盘而假绿。
@@ -113,7 +113,7 @@ func TestDualWriterNoFramesLostWithoutClose(t *testing.T) {
 	const n = 7
 	base := time.Date(2026, 11, 7, 11, 0, 0, 0, time.UTC)
 	for i := 0; i < n; i++ {
-		w.Observe(24, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i))
+		w.Observe(24, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i), nil)
 	}
 
 	got, ok := waitForFrames(t, w, n, 3*time.Second)
@@ -145,7 +145,7 @@ func TestDualWriterTimerDoesNotChangeBatchSemantics(t *testing.T) {
 
 	base := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < dualWriteBatchSize; i++ {
-		w.Observe(25, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i))
+		w.Observe(25, base.Add(time.Duration(i)*time.Second), 0, synthFrame(base, i), nil)
 	}
 	got, ok := waitForFrames(t, w, dualWriteBatchSize, 5*time.Second)
 	if !ok {

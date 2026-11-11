@@ -30,18 +30,23 @@ func TestDefaultStepsTable(t *testing.T) {
 		// 2026-11-08 硬切换移除 partition_unified_data（该表已停写，且保留迁移
 		// 会在 DROP 后重启时把空表重建出来）。权重按原相对比例分给剩余步骤，
 		// 合计仍为 100（由本用例末尾的 sum 断言守着）。
-		{"db_connect", "连接数据库", 4},
-		{"auto_migrate", "数据库结构迁移", 13},
-		{"partition_device_data", "device_data 分区迁移", 17},
+		// 2026-11-11: device_data 整表退役（原始数据退役方案 §2.1），
+		// partition_device_data 一步随之删除，其权重按原相对比例分给剩余步骤。
+		//
+		// 2026-11-08 硬切换移除 partition_unified_data（该表已停写，且保留迁移
+		// 会在 DROP 后重启时把空表重建出来）。权重同样按原相对比例分给剩余步骤，
+		// 合计仍为 100（由本用例末尾的 sum 断言守着）。
+		{"db_connect", "连接数据库", 5},
+		{"auto_migrate", "数据库结构迁移", 16},
 		// 2026-11-07: L2 帧表迁移（契约 docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.5）。
 		// 它单独一步是因为失败语义与 rollup 相反：帧表 Fatal，rollup 只 Warn。
-		{"partition_telemetry_frame", "L2 帧表分区迁移", 8},
-		{"partition_rollup", "聚合表分区就绪", 3},
-		{"ensure_partitions", "滚动分区保障", 4},
-		{"parent_indexes", "补齐父表索引", 30},
-		{"retire_dead_indexes", "退役死索引", 6},
-		{"warmup", "缓存预热", 9},
-		{"startup_tasks", "后台任务启动", 6},
+		{"partition_telemetry_frame", "L2 帧表分区迁移", 10},
+		{"partition_rollup", "聚合表分区就绪", 4},
+		{"ensure_partitions", "滚动分区保障", 5},
+		{"parent_indexes", "补齐父表索引", 35},
+		{"retire_dead_indexes", "退役死索引", 7},
+		{"warmup", "缓存预热", 11},
+		{"startup_tasks", "后台任务启动", 7},
 	}
 	got := DefaultSteps()
 	if len(got) != len(want) {
@@ -157,17 +162,16 @@ func TestPercentWeighted(t *testing.T) {
 // TestPercentOnDefaultSteps 用真实权重表复核一次中间态。
 func TestPercentOnDefaultSteps(t *testing.T) {
 	tr := NewTracker(nil)
-	tr.Done(StepDBConnect, "")            // 4
-	tr.Done(StepAutoMigrate, "")          // 13
-	tr.Begin(StepPartitionDeviceData)     // 17
-	tr.StepProgress(StepPartitionDeviceData, 40, "202608 第 2/7 批")
-	// (4 + 13 + 17*0.4) / 100 = 23.8
-	if p := tr.Snapshot().Percent; p != 23.8 {
-		t.Errorf("percent = %v, want 23.8", p)
+	tr.Done(StepDBConnect, "")            // 5
+	tr.Done(StepAutoMigrate, "")          // 16
+	tr.Begin(StepPartitionTelemetryFrame) // 10
+	tr.StepProgress(StepPartitionTelemetryFrame, 40, "202608 第 2/7 批")
+	// (5 + 16 + 10*0.4) / 100 = 25.0
+	if p := tr.Snapshot().Percent; p != 25 {
+		t.Errorf("percent = %v, want 25", p)
 	}
 	// 补齐剩余：全部 done/skip 后必须正好 100。
-	tr.Done(StepPartitionDeviceData, "")
-	tr.Done(StepPartitionDeviceData, "")
+	tr.Done(StepPartitionTelemetryFrame, "")
 	tr.Done(StepPartitionTelemetryFrame, "")
 	tr.Skip(StepPartitionRollup, "non-pg")
 	tr.Done(StepEnsurePartitions, "")
@@ -201,11 +205,12 @@ func TestProgressClamped(t *testing.T) {
 // TestFailedState 守失败态（含 Fatal 前 tracker.Fail 的用法）。
 func TestFailedState(t *testing.T) {
 	tr := NewTracker(nil)
-	// 用 device_data 而不是原来的 partition_unified_data：后者已随硬切换移除
-	// （2026-11-08）。这条用例测的是 **tracker 的失败态语义**，与具体步骤无关 ——
-	// 换一个仍然存在的步骤即可，不必为它保留一个已删除的常量。
-	tr.Begin(StepPartitionDeviceData)
-	tr.Fail(StepPartitionDeviceData, errors.New("row count mismatch"))
+	// 用 partition_telemetry_frame 而不是原来的 partition_unified_data /
+	// partition_device_data：两者都已随各自的退役移除（2026-11-08 / 2026-11-11）。
+	// 这条用例测的是 **tracker 的失败态语义**，与具体步骤无关 —— 换一个仍然存在的
+	// 步骤即可，不必为它保留一个已删除的常量。
+	tr.Begin(StepPartitionTelemetryFrame)
+	tr.Fail(StepPartitionTelemetryFrame, errors.New("row count mismatch"))
 
 	snap := tr.Snapshot()
 	if snap.Ready {
@@ -219,7 +224,7 @@ func TestFailedState(t *testing.T) {
 	}
 	var st Step
 	for _, s := range snap.Steps {
-		if s.ID == StepPartitionDeviceData {
+		if s.ID == StepPartitionTelemetryFrame {
 			st = s
 		}
 	}

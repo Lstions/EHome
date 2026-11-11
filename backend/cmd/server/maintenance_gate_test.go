@@ -368,11 +368,14 @@ func TestStartupFailureVisibleBeforeFatal(t *testing.T) {
 		},
 		// 2026-11-08 硬切换移除 partition_unified_data 这条致命路径：
 		// main.go 不再调 MigrateUnifiedDataToPartitioned（否则 DROP 后重启会把空表重建）。
-		// 这里同步删掉，否则 mustIndex 找不到符号 => 用例红。
+		//
+		// 2026-11-11 device_data 整表退役（原始数据退役方案 §2.1），它的致命路径同样
+		// 随之删除 —— 表都不存在了，没有"迁移失败"这回事。
+		// 剩下的分区迁移致命路径见下面 telemetry_frame（L2 主写入路径，缺表 = 静默丢帧）。
 		{
-			name:  "partition_device_data",
-			fail:  "startupTracker.Fail(bootstrap.StepPartitionDeviceData, err)",
-			fatal: "device_data partition migration failed",
+			name:  "partition_telemetry_frame",
+			fail:  "startupTracker.Fail(bootstrap.StepPartitionTelemetryFrame, err)",
+			fatal: "telemetry_frame partition migration failed",
 		},
 	}
 	for _, p := range pairs {
@@ -402,7 +405,8 @@ func TestStartupAllStepsMarked(t *testing.T) {
 	steps := []string{
 		bootstrapStepDBConnect,
 		bootstrapStepAutoMigrate,
-		bootstrapStepPartitionDeviceData,
+		// 2026-11-11: bootstrapStepPartitionDeviceData 已删除（device_data 整表退役）。
+		bootstrapStepPartitionTelemetryFrame,
 		bootstrapStepPartitionRollup,
 		bootstrapStepEnsurePartitions,
 		bootstrapStepParentIndexes,
@@ -422,15 +426,15 @@ func TestStartupAllStepsMarked(t *testing.T) {
 // bootstrap 步骤常量名在源码里的字面量（避免本测试 import bootstrap 只为拿字符串：
 // 门禁要检的正是 main.go 里写的那个符号）。
 const (
-	bootstrapStepDBConnect            = "bootstrap.StepDBConnect"
-	bootstrapStepAutoMigrate          = "bootstrap.StepAutoMigrate"
-	bootstrapStepPartitionDeviceData  = "bootstrap.StepPartitionDeviceData"
-	bootstrapStepPartitionRollup      = "bootstrap.StepPartitionRollup"
-	bootstrapStepEnsurePartitions     = "bootstrap.StepEnsurePartitions"
-	bootstrapStepParentIndexes        = "bootstrap.StepParentIndexes"
-	bootstrapStepRetireDeadIndexes    = "bootstrap.StepRetireDeadIndexes"
-	bootstrapStepWarmup               = "bootstrap.StepWarmup"
-	bootstrapStepStartupTasks         = "bootstrap.StepStartupTasks"
+	bootstrapStepDBConnect               = "bootstrap.StepDBConnect"
+	bootstrapStepAutoMigrate             = "bootstrap.StepAutoMigrate"
+	bootstrapStepPartitionRollup         = "bootstrap.StepPartitionRollup"
+	bootstrapStepPartitionTelemetryFrame = "bootstrap.StepPartitionTelemetryFrame"
+	bootstrapStepEnsurePartitions        = "bootstrap.StepEnsurePartitions"
+	bootstrapStepParentIndexes           = "bootstrap.StepParentIndexes"
+	bootstrapStepRetireDeadIndexes       = "bootstrap.StepRetireDeadIndexes"
+	bootstrapStepWarmup                  = "bootstrap.StepWarmup"
+	bootstrapStepStartupTasks            = "bootstrap.StepStartupTasks"
 )
 
 // TestStartupMigrationProgressWired 门禁：datalifecycle 的细粒度埋点必须接到 tracker。

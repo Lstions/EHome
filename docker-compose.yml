@@ -46,6 +46,20 @@ services:
       EHOME_STATIC_DIR: /app/static/dist
     volumes:
       - ./backend/firmwares:/app/firmwares
+    # ── 日志轮转（2026-11-11，原始数据退役的必须配套）─────────────────────────
+    #
+    # 为什么必须在这里配：device_data 整表退役后，日志成了**唯一**的原始字节与
+    # 解析失败取证来源（docs/设计/原始数据退役-改造方案-2026-11-11.md §4.2.3）。
+    # 而生产实测该容器 24h 已产生 67 MB，此前的 LogConfig 是
+    # {"Type":"json-file","Config":{}} —— **无任何轮转**，磁盘会被无界写满。
+    #
+    # 50m × 5 = 250 MB 上限，按 67 MB/24h 约可容纳 3.7 天，覆盖「发现问题→复盘」
+    # 的窗口（与方案 §4.4 的能力损失表一致）。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     # 就绪探针 —— 必须用 /readyz，**不能**用 /health：
     #
     #   启动期数据库优化（分区迁移 / 补建 F-10 索引 / DROP 死索引）会在

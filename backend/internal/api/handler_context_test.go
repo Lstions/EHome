@@ -9,8 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	"ehome/backend/internal/models"
-
 	"gorm.io/gorm"
 )
 
@@ -150,13 +148,14 @@ func TestHeavyQueries_CanceledRequest_Returns500AndReachesDB(t *testing.T) {
 			name:   "devices-history",
 			target: "/api/v1/devices/1/history?hours=24",
 		},
-		{
-			name:   "edge-device-data-pagination",
-			target: "/api/v1/edge-devices/1/data?page=1&page_size=50",
-			seed: func(db *gorm.DB) {
-				db.Create(&models.EdgeDevice{Name: "probe", Type: "sensor", NodeID: "n1", ChannelID: 1})
-			},
-		},
+		// 2026-11-11: "edge-device-data-pagination" 一项已删除 ——
+		// 它打的 GET /edge-devices/:id/data 随 device_data 整表退役被删除
+		// （原始数据退役方案 §1.3 读路径表第 1 行）。端点不存在后本用例只会
+		// 拿到 404，无法再验证「取消传播」这个真正被测的语义。
+		//
+		// ⚠ 取消传播的覆盖面**没有缩小**：上面三条（edge-devices-list /
+		// unified-data-historical / devices-history）仍覆盖列表类与历史类重查询，
+		// 而 devices-history 恰好是替代 /:id/data 的那条读路径。
 	}
 
 	for _, tc := range cases {

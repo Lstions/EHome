@@ -37,7 +37,7 @@ func setupOTATest(t *testing.T) (*gin.Engine, *gorm.DB, *ota.Manager) {
 	}
 	db.AutoMigrate(
 		&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.DeviceConfig{}, &models.DeviceData{}, &models.UnifiedData{},
+		&models.DeviceConfig{}, &models.UnifiedData{},
 		&models.User{}, &models.OTATask{}, &models.Firmware{},
 		&models.Vendor{}, &models.Notification{},
 		&models.DeviceModel{}, &models.NodeEvent{},

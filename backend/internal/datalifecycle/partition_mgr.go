@@ -70,8 +70,6 @@ func isPostgres(db *gorm.DB) bool {
 const (
 	// StepIDPartitionUnifiedData 对应 bootstrap.StepPartitionUnifiedData。
 	StepIDPartitionUnifiedData = "partition_unified_data"
-	// StepIDPartitionDeviceData 对应 bootstrap.StepPartitionDeviceData。
-	StepIDPartitionDeviceData = "partition_device_data"
 	// StepIDPartitionRollup 对应 bootstrap.StepPartitionRollup（telemetry_rollup_1m 的建表/分区就绪）。
 	StepIDPartitionRollup = "partition_rollup"
 	// StepIDParentIndexes 对应 bootstrap.StepParentIndexes（补齐父表索引，生产上最耗时）。
@@ -147,8 +145,10 @@ func partitionStepIDOf(table string) string {
 	switch table {
 	case partitionedTable: // unified_data
 		return StepIDPartitionUnifiedData
-	case "device_data":
-		return StepIDPartitionDeviceData
+	// device_data 已整表退役（2026-11-11），迁移入口随之删除 ⇒ 不再有它的
+	// stepID 映射。若将来有人重新登记"device_data"，这里刻意**不**回退到
+	// StepIDPartitionUnifiedData（那会让维护页显示错误的步骤）—— 未登记表一律
+	// 返回空串，不上报进度。
 	case TelemetryRollupTable: // telemetry_rollup_1m
 		return StepIDPartitionRollup
 	default:
@@ -644,10 +644,14 @@ func dropStaleMonthPartitions(db *gorm.DB, table string) error {
 // partitionParentDDL maps a logical table name to the CREATE TABLE template of
 // its partitioned parent (%s = physical table name; <table> on the fresh path,
 // <table>_new during legacy migration). Per-table switch keeps the existing
-// unified_data column definition verbatim (防回归) while device_data aligns
-// with models.DeviceData. Both use the composite PK (id, timestamp) required
+// column definition verbatim (防回归). Each entry uses the composite PK required
 // by PG partitioning (the partition key must be part of the primary key) and
-// RANGE-partition on timestamp.
+// RANGE-partition on its own partition key column.
+//
+// 2026-11-11：device_data 整表退役（docs/设计/原始数据退役-改造方案-2026-11-11.md
+// §2.1），其 DDL 条目已删除。**不要**因为"回滚方便"把它加回来 —— 建表模板里
+// 留一条已退役的条目，等于下次启动时把一张空表重新建出来（本表历史上已经因为
+// 同样的原因删掉了 unified_data 的迁移调用，见 bootstrap/doc.go §1.0）。
 var partitionParentDDL = map[string]string{
 	"unified_data": `CREATE TABLE %s (
 		id BIGSERIAL,
@@ -655,17 +659,6 @@ var partitionParentDDL = map[string]string{
 		sensor_name VARCHAR(32) NOT NULL,
 		value DOUBLE PRECISION NOT NULL,
 		unit VARCHAR(16),
-		timestamp TIMESTAMPTZ NOT NULL,
-		created_at TIMESTAMPTZ,
-		edge_device_id BIGINT,
-		PRIMARY KEY (id, timestamp)
-	) PARTITION BY RANGE (timestamp)`,
-	// device_data: data_json TEXT; device_id/node_id NOT NULL (models 对齐)。
-	"device_data": `CREATE TABLE %s (
-		id BIGSERIAL,
-		device_id BIGINT NOT NULL,
-		node_id VARCHAR(32) NOT NULL,
-		data_json TEXT,
 		timestamp TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ,
 		edge_device_id BIGINT,
@@ -797,8 +790,8 @@ func effectiveParentIndexTemplates(db *gorm.DB, table, name string) []string {
 //
 // 判存在**按列清单而不是按索引名**: 旧库路径的母表先建为 <table>_new，索引名
 // 因此带 _new_ 前缀，而 PG 的 ALTER TABLE ... RENAME TO 不会重命名索引（同一
-// 事实在 partition_mgr_device_data_pg_test.go 的注释里有记录）。按名字判断会把
-// 「已有的等价索引」误判为缺失，重复建索引。
+// 事实在历史 PG 用例的注释里有记录）。按名字判断会把「已有的等价索引」误判为
+// 缺失，重复建索引。
 //
 // 代价与边界（必须让运维知道）: 首次升级会在启动阶段对已分区母表执行
 // CREATE INDEX（取 SHARE 锁；分区表上父索引会为每个现有分区建子索引）——
@@ -884,7 +877,7 @@ func partitionParentIndexDefs(db *gorm.DB, table string) ([]string, error) {
 //
 // 2026-10-24（审核 P1）：**只有单列 device_id 索引不够**。生产实测
 //
-//	/latest-data     0.39 ms → 400~2000 ms（device 14 / device_data 1.0M 行）
+//	/latest-data     0.39 ms → 400~2000 ms（device 14，当时读的是 device_data）
 //	30 天历史图表     0.46 s → 5.3 s（单设备独占 29.2M 行，device_id 选择性极差）
 //
 // 根因是旧复合索引 idx_devdata_logical_created / idx_unified_logical_sensor_ts
@@ -892,16 +885,16 @@ func partitionParentIndexDefs(db *gorm.DB, table string) ([]string, error) {
 //
 //	unified_data (device_id, sensor_name, timestamp) INCLUDE (value)
 //	  —— 历史图表按 (device, 字段) + 时间窗取 value，可走纯 index-only scan
-//	device_data  (device_id, created_at DESC)
-//	  —— latest-data 取「该设备最新一条」，ORDER BY created_at DESC LIMIT 1
+//	（device_data 侧的 (device_id, created_at DESC) 已随该表退役删除，2026-11-11；
+//	  它的用途「取该设备最新一条」现在由帧表的关键帧部分索引承接）
 //
 // 2026-10-25（F-10 审核）：data-summary 的「时间范围」对每个来源跑
 // `WHERE device_id = ? ORDER BY timestamp ASC/DESC LIMIT 1`（handler 的
-// /:id/data-summary）。上面的复合索引都带 sensor_name（unified_data）或
-// created_at（device_data），对 **ORDER BY timestamp** 帮不上忙；单列 timestamp
-// 索引只能「扫时间序 + Filter device_id」，对已停写的老设备（DESC 要扫过比它新的
-// 全部行）代价随「新数据量」线性增长 —— data-summary 的核心对象恰是这类老设备。
-// 补 (device_id, timestamp) 两条复合索引，让该形态变成有序索引扫描、命中即停。
+// /:id/data-summary）。上面的复合索引带 sensor_name，对 **ORDER BY timestamp**
+// 帮不上忙；单列 timestamp 索引只能「扫时间序 + Filter device_id」，对已停写的
+// 老设备（DESC 要扫过比它新的全部行）代价随「新数据量」线性增长 —— data-summary
+// 的核心对象恰是这类老设备。补 (device_id, timestamp) 复合索引，让该形态变成
+// 有序索引扫描、命中即停。
 //
 // INCLUDE 仅在 PG 支持；SQLite 无 INCLUDE，故用两条模板按方言选择（见下）。
 var partitionParentIndexes = map[string][]string{
@@ -927,24 +920,6 @@ var partitionParentIndexes = map[string][]string{
 		// partition_dead_index_test.go 的 TestSingleColumnDeviceIDIndexIsPrefixCovered。
 		"CREATE INDEX %s_timestamp_idx ON %s (timestamp)",
 		"CREATE INDEX %s_device_sensor_ts_idx ON %s (device_id, sensor_name, timestamp)",
-		// ORDER BY timestamp 的设备维度边界查询（data-summary / 时间范围）。
-		"CREATE INDEX %s_device_ts_idx ON %s (device_id, timestamp)",
-	},
-	"device_data": {
-		// 阶段0 死索引清理: 删 node_id_idx / edge_device_id_idx。
-		//   · node_id_idx —— 唯一按 node_id 过滤的读路径是 GET /nodes/:id/data
-		//     （handler_node.go:296），前端零调用者（docs/分析/功能模块与业务功能
-		//     实测盘点-2026-09-23.md:163「无包装、无调用者」），且该端点同时混着
-		//     两种数据形状，已列为待裁决项（S3 已知遗留）。
-		//   · edge_device_id_idx —— 与 unified_data 同名索引同因: 该列在生产上
-		//     全 NULL（写入只写 device_id / node_id）。
-		//
-		// ── task-20 索引瘦身（2026-11-07）──
-		// 删 device_id 单列索引（生产 57 MB）: 被 (device_id, created_at DESC) 与
-		// (device_id, timestamp) 双向前缀覆盖。实测删前删后三条关键查询
-		// （latest-data / 分页 / data-summary）计划完全不变。
-		"CREATE INDEX %s_timestamp_idx ON %s (timestamp)",
-		"CREATE INDEX %s_device_created_idx ON %s (device_id, created_at DESC)",
 		// ORDER BY timestamp 的设备维度边界查询（data-summary / 时间范围）。
 		"CREATE INDEX %s_device_ts_idx ON %s (device_id, timestamp)",
 	},
@@ -979,8 +954,8 @@ var partitionParentIndexes = map[string][]string{
 	// device_id/bucket/payload 三列)。
 	//
 	// 同理: 本表也不在 deadTimeseriesIndexes 里登记 —— 阶段0 的死索引清单只针对
-	// unified_data / device_data，本表没有"待退役的历史索引"，finalize 对它是
-	// no-op（这正是期望行为，别为了"对称"塞空条目）。
+	// unified_data（device_data 已整表退役，2026-11-11），本表没有"待退役的历史
+	// 索引"，finalize 对它是 no-op（这正是期望行为，别为了"对称"塞空条目）。
 	//
 	// 主键 (device_id, bucket) 本身就是唯一需要的访问路径: 长窗图表恒为
 	// device_id 等值 + bucket 有序范围扫描 (分区裁剪 + 主键索引前导列命中)，
@@ -1002,7 +977,6 @@ var partitionParentIndexesPG = map[string][]string{
 // 或列数不匹配)。
 var partitionCopyColumns = map[string]string{
 	"unified_data": "id, device_id, sensor_name, value, unit, timestamp, created_at, edge_device_id",
-	"device_data":  "id, device_id, node_id, data_json, timestamp, created_at, edge_device_id",
 	// telemetry_frame: 新表无存量平表可迁（建表即分区），登记列清单只为
 	// 「四处同改」的一致性纪律（方案 §8 风险表最后一条）：partitionParentDDL /
 	// partitionParentIndexes / partitionCopyColumns / models 四处必须同源，
@@ -1018,7 +992,8 @@ var partitionCopyColumns = map[string]string{
 // the first partitions.
 func createPartitionedParent(db *gorm.DB, table, name string, fresh bool) error {
 	// 未登记表沿用 unified_data 的列结构与索引清单（与泛化探针测试及历史硬编码
-	// 行为兼容）；登记表（unified_data / device_data）按各自定义。
+	// 行为兼容）；登记表（unified_data / telemetry_frame / telemetry_rollup_1m）
+	// 按各自定义。
 	ddlTable := table
 	if _, ok := partitionParentDDL[ddlTable]; !ok {
 		ddlTable = partitionedTable
@@ -1214,12 +1189,6 @@ var deadTimeseriesIndexes = map[string][][]string{
 		// 判据同样按**列清单**（不是索引名），与 ensurePartitionParentIndexes 的
 		// 判定口径一致。删它的安全性由 EXPLAIN 实测背书: 见
 		// partition_dead_index_test.go 的 TestSingleColumnDeviceIDIndexIsPrefixCovered。
-		{"device_id"},
-	},
-	"device_data": {
-		{"node_id"},
-		{"edge_device_id"},
-		// task-20: 生产 57 MB, 被 (device_id, created_at DESC) 前缀覆盖。
 		{"device_id"},
 	},
 }

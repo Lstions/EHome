@@ -32,8 +32,16 @@ func seedFrameTable(t *testing.T, db *gorm.DB) {
 	}
 }
 
-// seedFrameRow 往帧表写一行。
+// seedFrameRow 往帧表写一行（关键帧，时间戳 = now）。
 func seedFrameRow(t *testing.T, db *gorm.DB, deviceID uint, ts time.Time) {
+	seedFrameAt(t, db, deviceID, ts)
+}
+
+// seedFrameAt 往帧表写一行关键帧（指定时间戳）。
+//
+// 与 seedFrameRow 的差别只有时间戳是否显式：保留两个名字是因为调用点的可读性
+// 不同（"随便什么时候"vs"必须是这个时刻"）。实现合一，避免两份 fixture 漂移。
+func seedFrameAt(t *testing.T, db *gorm.DB, deviceID uint, ts time.Time) {
 	t.Helper()
 	f := models.TelemetryFrame{
 		DeviceID:  deviceID,
@@ -97,9 +105,14 @@ func TestMergeHistoryMigratesTelemetryFrames(t *testing.T) {
 	if tgtFrames != 3 {
 		t.Errorf("目标设备帧数 = %d, want 3（1 原有 + 2 迁入，1 帧因同 (ts,seq) 丢弃）", tgtFrames)
 	}
-	// rows_migrated 必须把帧算进去：1 unified_data + 2 帧 = 3。
-	if resp.RowsMigrated != 3 {
-		t.Errorf("rows_migrated = %v, want 3（1 unified_data + 2 telemetry_frame）", resp.RowsMigrated)
+	// rows_migrated 必须把帧算进去。
+	//
+	// 2026-11-11: 期望从 3 降到 2 —— 原夹具里那 1 行 unified_data 已不会迁移
+	// （unified_data 已停写、退役，且 merge-history 的 UPDATE device_id 循环现在
+	// 走动态表清单 ExistingTimeseriesTables，里面只剩帧表）。
+	// 所以本用例现在真实覆盖的是「帧走 MigrateTelemetryFramesToDevice 迁移并计数」。
+	if resp.RowsMigrated != 2 {
+		t.Errorf("rows_migrated = %v, want 2（2 telemetry_frame；unified_data 已退役不参与迁移）", resp.RowsMigrated)
 	}
 
 	// 幂等：源已空，重跑不应再搬任何东西。
@@ -114,9 +127,13 @@ func TestMergeHistoryMigratesTelemetryFrames(t *testing.T) {
 
 // TestDataSummaryCountsFrameTimeRange 守 data-summary 的时间范围涵盖帧表。
 //
-// 场景：设备在 unified_data 里有旧数据、帧表里有**更新**的数据（L2 主路径上线后
-// 的常态 —— 帧表每帧都写，unified_data 因 L1 收窄而稀疏）。若 data-summary 只读
-// 两张原始表，last_time 会停在旧值，删除确认弹窗会告诉用户"最近数据是三天前"。
+// 场景：帧表里有该设备的数据，data-summary 必须读到它。
+//
+// 2026-11-11: 夹具从「unified_data 一条更早的行 + 帧表一条更新的行」改为「两帧」。
+// 原来的场景（帧表比 unified_data 新）已经不存在 —— 两张原始表都退役了，
+// data-summary 的 tsTables 只剩帧表。所以本用例现在钉的是「first/last 两端都真的
+// 从帧表读出来了」，仍然是**有信息量的断言**：漏读帧表的 ts 列（写成 timestamp）、
+// 或把两端时间取反，都会立刻红。
 func TestDataSummaryCountsFrameTimeRange(t *testing.T) {
 	r, db := setupEdgeDeviceTest(t)
 	rr2SeedMergeBase(t, db) // 设备 1、2
@@ -124,11 +141,7 @@ func TestDataSummaryCountsFrameTimeRange(t *testing.T) {
 
 	oldTS := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	frameTS := time.Date(2026, 11, 7, 5, 0, 0, 0, time.UTC)
-	if err := db.Create(&models.UnifiedData{
-		DeviceID: 1, SensorName: "voltage", Value: 1, Timestamp: oldTS,
-	}).Error; err != nil {
-		t.Fatalf("seed unified: %v", err)
-	}
+	seedFrameRow(t, db, 1, oldTS)
 	seedFrameRow(t, db, 1, frameTS)
 
 	w := rr2Do(t, r, "GET", "/api/v1/edge-devices/1/data-summary", "")

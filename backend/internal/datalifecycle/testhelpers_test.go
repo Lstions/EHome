@@ -8,6 +8,7 @@ package datalifecycle
 
 import (
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -42,4 +43,28 @@ func seedDevice(t *testing.T, db *gorm.DB, name, devType, hardwareID string, sof
 		}
 	}
 	return dev
+}
+
+// seedExpiredFrame 写一行**过期**帧，用于「保留期主路径会删时序数据」的断言。
+//
+// 2026-11-11: 这些用例原先 seed 的是 models.UnifiedData。两张原始表退役后，
+// TimeseriesTables() 只剩 telemetry_frame —— retention / purge 的时序清理**只**
+// 作用于帧表，所以夹具必须换成帧行。否则「到期的时序数据被删」这条语义在测试里
+// 没有任何被测对象：断言会得到 0 行，看起来像是"保留期失效"，而实际是夹具还指向
+// 一张不再被清理的表。
+//
+// ⚠ 调用方必须先用 openFrameLifecycleDB(t) 或在测试库里 AutoMigrate 帧表
+// （testutil 的 allModels 里刻意没有它，见 models/telemetry_frame.go 的范式说明）。
+func seedExpiredFrame(t *testing.T, db *gorm.DB, deviceID uint, ts time.Time) {
+	t.Helper()
+	if err := db.Create(&models.TelemetryFrame{
+		DeviceID:  deviceID,
+		TS:        ts,
+		Seq:       0,
+		FrameKind: models.TelemetryFrameKindKey,
+		SlotID:    1,
+		Payload:   []byte{0x01, 0x00},
+	}).Error; err != nil {
+		t.Fatalf("seed telemetry_frame device=%d ts=%s: %v", deviceID, ts.Format(time.RFC3339), err)
+	}
 }
