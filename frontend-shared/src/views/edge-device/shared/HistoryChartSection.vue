@@ -124,7 +124,6 @@ import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
-import { edgeDeviceApi } from '@/api/edgeDevice'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import { useTimeRange } from '@/composables/useTimeRange'
@@ -508,46 +507,19 @@ async function fetchHistoryData() {
 
       const result = await historyFetch(props.deviceId, knownCategories, startTime, endTime)
 
-      if (result.length > 0) {
-        chartSeries.value = result
-        historyData.value = []
-      } else {
-        // Fallback: device_data table
-        const response = await edgeDeviceApi.getHistoryData(props.deviceId, {
-          start_time: startTime.toISOString(), end_time: endTime.toISOString(), page: 1, page_size: 1000
-        })
-        chartSeries.value = []
-        /*
-         * ⚠ 2026-10-20 实测崩溃：`response` 可能是 **null**（后端该端点在无数据/
-         * 参数异常时返回 data:null），旧代码直接 response.items ⇒
-         * "TypeError: Cannot read properties of null (reading 'items')"，
-         * 被 catch 后弹「获取历史数据失败」，用户看到的是报错而不是空态。
-         * 这里先把响应收敛成数组，缺失即空态（空态是正常业务状态，不是错误）。
-         */
-        const items = (response && Array.isArray(response.items)) ? response.items : []
-        if (items.length > 0) {
-          const firstItem = items[0]
-          const data = firstItem.data || {}
-          // 过滤掉状态量字段
-          const numericKeys = Object.keys(data)
-            .filter(key => key !== 'raw_data' && typeof data[key] === 'number')
-            .filter(key => !statusCategories.includes(key))
-          if (numericKeys.length > 1) {
-            chartSeries.value = numericKeys.map(key => ({
-              name: sensorNameMap[key] || key, unit: sensorUnitMap[key] || '', category: key,
-              data: items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
-            }))
-            historyData.value = []
-          } else {
-            const valueKey = numericKeys[0] || Object.keys(data).find(key => typeof data[key] === 'number' && !statusCategories.includes(key))
-            historyData.value = valueKey
-              ? items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
-              : []
-          }
-        } else {
-          historyData.value = []
-        }
-      }
+      // 主路径（unified-data/historical-batch）是**唯一**路径。
+      //
+      // 这里原本还有一段「批量返回空 ⇒ 回落 /edge-devices/:id/data 读 device_data」
+      // 的兜底。2026-11-11 原始数据退役把 device_data 整表删除，兜底的数据源
+      // 已不存在，故整段删除。
+      //
+      // 顺带记录一段历史：那个兜底**在删除之前就已经是死的** —— 它读
+      // `firstItem.data`，而后端 JSON tag 是 `data_json`，且 2026-11-07 起内容
+      // 只有 {channel_id, raw_hex, timestamp}（数值在 data_json.sensors 里，由后端
+      // 读时合成）。实测兜底拿到 0 条（见 .scratch_chart/图表无数据-只读分析-
+      // 2026-11-10.md §128）。所以删它不改变任何用户可见行为。
+      chartSeries.value = result
+      historyData.value = []
     }
   } catch (error: any) {
     logger.error('获取历史数据失败', { error: String(error) })

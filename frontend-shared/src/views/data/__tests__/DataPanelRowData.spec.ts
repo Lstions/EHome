@@ -4,38 +4,53 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, type VNode } from 'vue'
 import DataPanel, { parseRowData } from '@/views/data/DataPanel.vue'
+import { aggregateHistoryRows } from '@/views/data/historyRows'
 import { UNKNOWN } from '@/utils/format'
 import { edgeDeviceApi } from '@/api/edgeDevice'
+import type { UnifiedDataRow } from '@/api/edgeDevice'
 
 /**
- * DataPanel「数据 / 原始数据」两列恒显示 — 的回归锁（P2，实测 2026-09-17）。
+ * DataPanel「历史数据」表格的回归锁（**2026-11-11 原始数据退役后重写**）。
  *
- * 根因：GET /api/v1/edge-devices/:id/data 只返回 data_json
- * （实测键：created_at, data_json, device_id, id, node_id, timestamp；
- *   2026-10-23 逻辑设备移除后该行不再有 logical_device_id 列），
- * 而表格读 row.parsed_data || row.data / row.raw_data ⇒ 恒 undefined ⇒ 恒「—」。
+ * ============ 历史（为什么曾经有这一整个文件）============
  *
- * 本文件刻意分两层：
- *   ① 纯函数层（parseRowData）—— 「坏 JSON 不崩、不把取不到落成 0」；
- *   ② **真实渲染层**（执行 el-table-column 的 #default 作用域插槽）——
- *      缺陷的现象是"单元格里恒显示 —"，只断言函数等于不守渲染路径。
+ * 改造前表格数据源是 `GET /edge-devices/:id/data`（device_data 分页）。
+ * 那个接口只返回 data_json，而表格读 row.parsed_data || row.data / row.raw_data
+ * ⇒ 恒 undefined ⇒ 「数据」「原始数据」两列**恒显示 —**（实测 2026-09-17）。
+ * 于是有了两层用例：① parseRowData 纯函数层；② 真实渲染层（必须执行
+ * el-table-column 的 #default 插槽 —— 只断言函数等于不守渲染路径）。
  *
- * 为什么不用 src/test-setup.ts 的全局 ElTable stub：它把整行 Object.values 拍平成一个
- * <td>，列插槽根本不执行 ⇒ 本缺陷在测试里永远看不见（这正是改前 22 条既有用例全绿却漏掉它的原因）。
- * 下面的替身与 views/alert/__tests__/AlertRules.spec.ts 的 slotTable() 同一范式。
+ * ============ 现在（device_data 整表删除）============
+ *
+ * 数据源换成 `GET /devices/:id/history`，响应是 **一字段一行**（[]UnifiedData）。
+ * 表格要的是"一次采集一行"，所以中间多了一步 aggregateHistoryRows()。
+ * 于是本文件的关注点变成：
+ *
+ *   ① **聚合才是新的最易错点**：把「同一 timestamp 的 N 行字段」合成一行。
+ *      合错了表格会莫名其妙多行/少行，而且看不出错。
+ *   ② 渲染层仍要守：单元格必须显示真实值，取不到才显示「—」。
+ *   ③ 「原始数据」「状态」两列已删除 —— 用例要钉住它们**不会**被加回来
+ *      （加回来就是指向不存在的数据源）。
+ *
+ * 为什么不用 src/test-setup.ts 的全局 ElTable stub：它把整行 Object.values
+ * 拍平成一个 <td>，列插槽根本不执行 ⇒ "单元格恒显示 —" 这类缺陷在测试里
+ * 永远看不见。下面的替身与 views/alert/__tests__/AlertRules.spec.ts 的
+ * slotTable() 同一范式。
  */
 
-// ── 实测（生产环境真实雨量计）接口返回行 ──────────────────────────────────
-const REAL_DATA_JSON = '{"channel_id":1,"raw_hex":"01030200057847","sensors":[{"Name":"rainfall","Value":0.5,"Unit":"mm","StringValue":""}],"timestamp":1789628509271}'
-const REAL_ROW = {
-  id: 3080755,
-  device_id: 2,
-  node_id: 'F0F5BDFFFE02',
-  data_json: REAL_DATA_JSON,
-  timestamp: '2026-09-17T07:01:49.271798Z',
-  created_at: '2026-09-17T07:01:49.271798Z',
+// ─── /devices/:id/history 的真实行形状（一字段一行）────────────────────────
+const TS = '2026-09-17T07:01:49.271798Z'
 
-}
+/** 一次采集：同一 timestamp 的三行字段（后端整帧共用一个 now） */
+const ONE_COLLECTION: UnifiedDataRow[] = [
+  { id: 11, device_id: 42, sensor_name: 'rainfall', value: 0.5, unit: 'mm', timestamp: TS, created_at: TS },
+  { id: 12, device_id: 42, sensor_name: 'temperature', value: 21.5, unit: '°C', timestamp: TS, created_at: TS },
+  { id: 13, device_id: 42, sensor_name: 'humidity', value: 60, unit: '%', timestamp: TS, created_at: TS },
+]
+
+const row = (sensorName: string, value: number, timestamp: string, id: number): UnifiedDataRow => ({
+  id, device_id: 42, sensor_name: sensorName, value, unit: '', timestamp, created_at: timestamp,
+})
 
 // ── API / store mocks（与 DataPanel.spec.ts 同一套，缺一即页面挂载失败）──
 vi.mock('@/api/edgeDevice', () => ({
@@ -45,8 +60,8 @@ vi.mock('@/api/edgeDevice', () => ({
     create: vi.fn(() => Promise.resolve({ id: 1 })),
     update: vi.fn(() => Promise.resolve()),
     delete: vi.fn(() => Promise.resolve()),
-    getHistoryData: vi.fn(() => Promise.resolve({ items: [], total: 0 })),
-    getLatestData: vi.fn(() => Promise.resolve(null)),
+    getDeviceHistory: vi.fn(() => Promise.resolve([])),
+    getLatestValues: vi.fn(() => Promise.resolve([])),
   },
 }))
 
@@ -88,7 +103,7 @@ vi.mock('@/utils/feedback', () => ({
   feedback: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 vi.mock('@/utils/exportData', () => ({ exportCSV: vi.fn(), exportJSON: vi.fn() }))
-// A5：DataPanel 现在在 onMounted 里消费 `?device=`/`?range=`，故必须有 vue-router 替身。
+// A5：DataPanel 在 onMounted 里消费 `?device=`/`?range=`，故必须有 vue-router 替身。
 // 缺它时 useRoute() 返回 undefined → applyQueryPrefill 抛 "Cannot read properties of
 // undefined (reading 'query')"，表现为**未处理拒绝**（测试仍绿、但 vitest 退出码 1）。
 vi.mock('vue-router', () => ({
@@ -97,10 +112,9 @@ vi.mock('vue-router', () => ({
 }))
 vi.mock('@/utils/downsample', () => ({ downsampleData: vi.fn((data: unknown[]) => data) }))
 vi.mock('@/utils/sensor', () => ({
-  sensorNameMap: { rainfall: '雨量' },
-  sensorUnitMap: { rainfall: 'mm' },
+  sensorNameMap: { rainfall: '雨量', temperature: '温度', humidity: '湿度' },
+  sensorUnitMap: { rainfall: 'mm', temperature: '°C', humidity: '%' },
 }))
-vi.mock('@/utils/errorCode', () => ({ getErrorInfo: vi.fn(() => ({ type: 'info', label: '正常' })) }))
 vi.mock('@/utils/logger', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
@@ -127,14 +141,18 @@ function slotTable() {
     props: { data: { type: Array, default: () => [] } },
     setup(props, { slots }) {
       return () => {
-        const columns = (slots.default?.() ?? []) as VNode[]
+        // ⚠ 过滤掉注释/文本 VNode：模板里写在 <el-table> 内部的 HTML 注释会被
+        // 当作子节点传进插槽（真实 el-table 忽略它们）。不过滤就会多出一个
+        // 没有 label 的「幽灵列」，把"只剩两列"的断言搞成假红。
+        const columns = ((slots.default?.() ?? []) as VNode[])
+          .filter((vn) => vn && typeof vn === 'object' && vn.props && 'label' in (vn.props as object))
         const rows = props.data as Array<Record<string, unknown>>
         return h('table', { class: 'el-table' }, [
-          h('tbody', rows.map((row, index) => h('tr', { key: String(row?.id ?? index) }, columns.map((vn) => {
+          h('tbody', rows.map((r, index) => h('tr', { key: String(r?.id ?? index) }, columns.map((vn) => {
             const scoped = defaultSlotOf(vn)
             const content = scoped
-              ? scoped({ row })
-              : String(row?.[String(vn.props?.['prop'] ?? '')] ?? '')
+              ? scoped({ row: r })
+              : String(r?.[String(vn.props?.['prop'] ?? '')] ?? '')
             return h('td', { class: 'el-table__cell', 'data-label': String(vn.props?.['label'] ?? '') }, content)
           })))),
         ])
@@ -142,9 +160,6 @@ function slotTable() {
     },
   })
   return {
-    // Element Plus 组件在本文件里沿用 src/test-setup.ts 的全局 stub
-    // （PascalCase 与 kebab-case 各注册一次；test-utils 的 stubs 只按 PascalCase 匹配，
-    //  所以必须像 ElTable 这样两种写法都给）。
     ElTable: SlotTable,
     'el-table': SlotTable,
     ElTableColumn: SlotColumn,
@@ -171,6 +186,8 @@ function slotTable() {
     ElSkeleton: { template: '<div class="el-skeleton" />' },
     'el-tag': { template: '<span class="el-tag"><slot /></span>' },
     ElTag: { template: '<span class="el-tag"><slot /></span>' },
+    'el-alert': { template: '<div class="el-alert" :data-testid="$attrs[\'data-testid\']">{{ title }}{{ description }}</div>', props: ['title', 'description', 'type', 'closable', 'showIcon'] },
+    ElAlert: { template: '<div class="el-alert">{{ title }}{{ description }}</div>', props: ['title', 'description', 'type', 'closable', 'showIcon'] },
     'el-empty': { template: '<div class="el-empty"><slot /></div>' },
     ElEmpty: { template: '<div class="el-empty"><slot /></div>' },
     'el-tooltip': { template: '<span class="el-tooltip"><slot /></span>' },
@@ -183,28 +200,32 @@ function slotTable() {
 }
 
 /**
- * 必须走 stubs 而不是 components 的几个：DataPanel 里的 PageHeader / LineChart / 图标都是
- * **本地注册**的（import 后直接用在模板里），本地注册优先于 global.components ⇒ 放 components 里
- * 不生效。真实 LineChart 在 happy-dom 里没有 canvas，mounted 会抛（zrender Layer.initContext），
- * 整个 mount 随之失败、wrapper.vm 为 null —— 这正是本文件第一版 8 条用例报
- * "Cannot read properties of null (reading '$')" 的原因。
+ * 必须走 stubs 而不是 components 的几个：DataPanel 里的 PageHeader / LineChart /
+ * 图标都是**本地注册**的（import 后直接用在模板里），本地注册优先于
+ * global.components ⇒ 放 components 里不生效。真实 LineChart 在 happy-dom 里
+ * 没有 canvas，mounted 会抛（zrender Layer.initContext），整个 mount 随之失败。
  */
 const componentStubs = {
   PageHeader: { template: '<div class="page-header"><slot /><slot name="extra" /></div>' },
   LineChart: { template: '<div class="line-chart" />' },
   Download: { template: '<i />' },
   Connection: { template: '<i />' },
+  DataAnalysis: { template: '<i />' },
+  DocumentChecked: { template: '<i />' },
+  Timer: { template: '<i />' },
+  Cpu: { template: '<i />' },
+  WarningFilled: { template: '<i />' },
 }
 
-/** 以「真实雨量计」的一条历史行挂载并触发查询；返回挂载后的 wrapper。 */
-async function mountWithHistory(items: unknown[], total = items.length) {
-  vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({ items, total } as never)
+/** 以给定历史响应（一字段一行）挂载并触发一次查询；返回挂载后的 wrapper。 */
+async function mountWithHistory(rows: UnifiedDataRow[]) {
+  vi.mocked(edgeDeviceApi.getDeviceHistory).mockResolvedValue(rows)
   mockClientGet.mockImplementation((url: string) => {
     if (url === '/api/v1/unified-data/categories') {
       return Promise.resolve([{ code: 'rainfall', unit: 'mm' }])
     }
     if (url === '/api/v1/unified-data/historical-batch') {
-      return Promise.resolve([{ category: 'rainfall', data: [{ timestamp: '2026-09-17T07:01:49Z', value: 0.5 }] }])
+      return Promise.resolve([{ category: 'rainfall', data: [{ timestamp: TS, value: 0.5 }] }])
     }
     return Promise.resolve([])
   })
@@ -231,120 +252,145 @@ async function mountWithHistory(items: unknown[], total = items.length) {
 const cellText = (wrapper: VueWrapper, label: string) =>
   wrapper.find(`td[data-label="${label}"]`).text()
 
-describe('parseRowData —— 本页唯一的行取数入口（纯函数层）', () => {
-  it('真实形状的行（只有 data_json）解析出 sensors 的 Name→Value', () => {
-    expect(parseRowData(REAL_ROW).values).toEqual({ rainfall: 0.5 })
+// ═══════════════════════════════════════════════════════════════════════
+// ① aggregateHistoryRows —— 一字段一行 → 一次采集一行
+// ═══════════════════════════════════════════════════════════════════════
+describe('aggregateHistoryRows —— 一字段一行聚合成一次采集一行', () => {
+  it('同一 timestamp 的多行字段合成一行，指标在 data 里', () => {
+    const rows = aggregateHistoryRows(ONE_COLLECTION)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].data).toEqual({ rainfall: 0.5, temperature: 21.5, humidity: 60 })
+    expect(rows[0].timestamp).toBe(TS)
   })
 
-  it('同一行解析出 data_json 内的 raw_hex（不带 0x 前缀）', () => {
-    expect(parseRowData(REAL_ROW).rawHex).toBe('01030200057847')
+  it('行 id 取该采集里最小的后端 id（稳定可当 v-for key）', () => {
+    expect(aggregateHistoryRows(ONE_COLLECTION)[0].id).toBe(11)
   })
 
-  it('值是 0 时得到 0（不是 null）——「真的是 0」必须可与「取不到」区分', () => {
-    const zeroRow = {
-      ...REAL_ROW,
-      data_json: JSON.stringify({ sensors: [{ Name: 'rainfall', Value: 0 }] }),
-    }
-    expect(parseRowData(zeroRow).values).toEqual({ rainfall: 0 })
-    expect(parseRowData(zeroRow).values).not.toBeNull()
+  it('不同 timestamp 各成一行，按时间**倒序**（最新在前）', () => {
+    const rows = aggregateHistoryRows([
+      row('rainfall', 1, '2026-09-17T07:00:00Z', 1),
+      row('rainfall', 2, '2026-09-17T07:02:00Z', 2),
+      row('rainfall', 3, '2026-09-17T07:01:00Z', 3),
+    ])
+    expect(rows.map(r => r.data.rainfall)).toEqual([2, 3, 1])
   })
 
-  it('data_json 是坏 JSON：不抛异常，values 为 null（绝不落成 0）', () => {
-    expect(() => parseRowData({ ...REAL_ROW, data_json: '{not json' })).not.toThrow()
-    const { values } = parseRowData({ ...REAL_ROW, data_json: '{not json' })
-    expect(values).toBeNull()
-    expect(values).not.toEqual({ rainfall: 0 })
+  it('⚠ 关键：1Hz 连续上报**不得被合并**（相邻采集只差 1 秒也各成一行）', () => {
+    // 这是一条防"±2 秒模糊合并"的回归锁。BMS 以 1Hz 上报，模糊合并会把
+    // 两次真实采集并成一行 —— 表格莫名少行，且丢数据完全不可见。
+    const rows = aggregateHistoryRows([
+      row('total_voltage', 52.4, '2026-09-17T07:00:00.000000001Z', 1),
+      row('total_voltage', 52.5, '2026-09-17T07:00:01.000000001Z', 2),
+      row('total_voltage', 52.6, '2026-09-17T07:00:02.000000001Z', 3),
+    ])
+    expect(rows).toHaveLength(3)
+    expect(rows.map(r => r.data.total_voltage)).toEqual([52.6, 52.5, 52.4])
   })
 
-  it('data_json 为空/空串/空结构：不抛异常且 values 为 null', () => {
-    for (const data_json of ['', '   ', '{}', 'null', '{"sensors":[]}', '{"sensors":"nope"}', '[]']) {
-      const result = parseRowData({ ...REAL_ROW, data_json })
-      expect(result.values, 'data_json=' + JSON.stringify(data_json)).toBeNull()
-    }
+  it('逆变器的 9 条命令各是一次解析 ⇒ 表格里就是 9 行（不合并）', () => {
+    // 每条约间隔 250ms，都不是"同一次解析"（各自独立 now）。
+    const rows = aggregateHistoryRows([
+      row('grid_voltage', 220, '2026-09-17T07:00:00.000Z', 1),
+      row('output_voltage', 219, '2026-09-17T07:00:00.250Z', 2),
+      row('battery_voltage', 26, '2026-09-17T07:00:00.500Z', 3),
+    ])
+    expect(rows).toHaveLength(3)
   })
 
-  it('行本身缺失/非对象：不抛异常，values 与 rawHex 均为 null', () => {
-    for (const row of [null, undefined, 'x', 42, true]) {
-      expect(() => parseRowData(row)).not.toThrow()
-      expect(parseRowData(row)).toEqual({ values: null, numbers: null, rawHex: null })
-    }
+  it('值是 0 时保留 0（不是丢弃）——「真的是 0」必须可与「取不到」区分', () => {
+    const rows = aggregateHistoryRows([row('rainfall', 0, TS, 1)])
+    expect(rows).toHaveLength(1)
+    expect(rows[0].data.rainfall).toBe(0)
   })
 
-  it('字符串数值（"0.5"）不被静默转成数字：宁可为 null 也不伪造事实', () => {
-    const row = { data_json: JSON.stringify({ sensors: [{ Name: 'rainfall', Value: '0.5' }] }) }
-    expect(parseRowData(row).values).toBeNull()
+  it('缺 timestamp / 缺 sensor_name / value 非有限数值的行被丢弃（不伪造采集）', () => {
+    const rows = aggregateHistoryRows([
+      { ...row('rainfall', 1, TS, 1) },
+      { ...row('', 1, TS, 2) },
+      { ...row('rainfall', 1, '', 3) },
+      { ...row('humidity', NaN, TS, 4) },
+      { ...row('humidity', Infinity, TS, 5) },
+    ] as UnifiedDataRow[])
+    // 只剩第一条：同一 TS 下其余行都被丢弃
+    expect(rows).toHaveLength(1)
+    expect(rows[0].data).toEqual({ rainfall: 1 })
   })
 
-  it('坏 JSON 时行级 raw_hex 仍可用于「原始数据」列', () => {
-    const row = { ...REAL_ROW, data_json: '{broken', raw_hex: '01030200057847' }
-    expect(parseRowData(row).values).toBeNull()
-    expect(parseRowData(row).rawHex).toBe('01030200057847')
-  })
-
-  it('兼容既有形状：{ data: {...} } 与扁平行（既有用例的 fixture），并排除 raw_data 键', () => {
-    expect(parseRowData({ id: 1, data: { temperature: 21 }, raw_data: 'aabb' }))
-      .toEqual({ values: { temperature: 21 }, numbers: { temperature: 21 }, rawHex: 'aabb' })
-    expect(parseRowData({ temperature: 21, humidity: 40 }))
-      .toEqual({ values: { temperature: 21, humidity: 40 }, numbers: { temperature: 21, humidity: 40 }, rawHex: null })
-    // raw_data / raw_hex 不是"指标"，不得混进数值列
-    expect(parseRowData({ data: { temperature: 21 }, raw_hex: 'aabb' }).values).toEqual({ temperature: 21 })
-  })
-
-  it('hex 规整：0x 前缀与空白被剥掉（formatRawData 期望不带前缀的 hex）', () => {
-    expect(parseRowData({ raw_hex: '0x01030200057847' }).rawHex).toBe('01030200057847')
-    expect(parseRowData({ raw_hex: '  01030200057847  ' }).rawHex).toBe('01030200057847')
-    expect(parseRowData({ raw_hex: '' }).rawHex).toBeNull()
-  })
-
-  // ── P7：字符串型读数（StringValue）────────────────────────────────────────
-  // 后端 SensorData 有 StringValue 字段（drivers/registry.go:13），承载字符串真值：
-  // jiabaida_parse.go 的 hardware_version / serial_number 的 **Value 恒为 0**，
-  // 真值只在 StringValue。只取 Value ⇒ 显示成 0（比「—」更糟：0 像真实读数）。
-  describe('P7 字符串型读数（StringValue）', () => {
-    // 实测形状（驱动单测 jiabaida_test.go:677 断言 StringValue === "V19"）
-    const stringSensorRow = {
-      data_json: JSON.stringify({
-        channel_id: 1,
-        raw_hex: 'dd050003563139ff3d77',
-        sensors: [
-          { Name: 'hardware_version', Value: 0, Unit: '', StringValue: 'V19' },
-          { Name: 'rainfall', Value: 0.5, Unit: 'mm', StringValue: '' },
-        ],
-      }),
-    }
-
-    it('StringValue 非空时取它，而不是把它显示成 0', () => {
-      const { values } = parseRowData(stringSensorRow)
-      expect(values?.hardware_version).toBe('V19')
-      expect(values?.hardware_version).not.toBe(0)
-      expect(values?.rainfall).toBe(0.5)
-    })
-
-    it('StringValue 为空串时回退到 Value（不得把空串当读数）', () => {
-      const row = { data_json: JSON.stringify({ sensors: [{ Name: 'r', Value: 7, StringValue: '' }] }) }
-      expect(parseRowData(row).values?.r).toBe(7)
-    })
-
-    it('numbers 只含数值型：字符串读数不得进入数值统计（否则被当 0 拉低均值）', () => {
-      const { numbers } = parseRowData(stringSensorRow)
-      expect(numbers).toEqual({ rainfall: 0.5 })
-      expect(numbers && 'hardware_version' in numbers).toBe(false)
-    })
-
-    it('只有字符串读数时 numbers 为 null（趋势/统计不得画出掉到 0 的假线）', () => {
-      const row = { data_json: JSON.stringify({ sensors: [{ Name: 'sn', Value: 0, StringValue: 'SIM-BMS-0001' }] }) }
-      expect(parseRowData(row).values?.sn).toBe('SIM-BMS-0001')
-      expect(parseRowData(row).numbers).toBeNull()
-    })
-
-    it('纯数值行：values 与 numbers 一致（既有行为不回归）', () => {
-      const { values, numbers } = parseRowData(REAL_ROW)
-      expect(values).toEqual({ rainfall: 0.5 })
-      expect(numbers).toEqual({ rainfall: 0.5 })
-    })
+  it('空输入 / 非数组：返回空数组，不抛异常', () => {
+    expect(aggregateHistoryRows([])).toEqual([])
+    expect(aggregateHistoryRows(undefined as unknown as UnifiedDataRow[])).toEqual([])
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════
+// ② parseRowData —— 本页唯一的行取数入口（纯函数层）
+// ═══════════════════════════════════════════════════════════════════════
+describe('parseRowData —— 本页唯一的行取数入口（纯函数层）', () => {
+  it('聚合后的历史行：从 data 取出全部指标', () => {
+    const parsed = parseRowData(aggregateHistoryRows(ONE_COLLECTION)[0])
+    expect(parsed.values).toEqual({ rainfall: 0.5, temperature: 21.5, humidity: 60 })
+    expect(parsed.numbers).toEqual({ rainfall: 0.5, temperature: 21.5, humidity: 60 })
+  })
+
+  it('值是 0 时得到 0（不是 null）', () => {
+    const parsed = parseRowData({ data: { rainfall: 0 } })
+    expect(parsed.values).toEqual({ rainfall: 0 })
+    expect(parsed.values).not.toBeNull()
+  })
+
+  it('行本身缺失/非对象：不抛异常，values 与 numbers 均为 null', () => {
+    for (const r of [null, undefined, 'x', 42, true]) {
+      expect(() => parseRowData(r)).not.toThrow()
+      expect(parseRowData(r)).toEqual({ values: null, numbers: null })
+    }
+  })
+
+  it('空对象 / 空 data：values 为 null（不是空对象）', () => {
+    expect(parseRowData({}).values).toBeNull()
+    expect(parseRowData({ data: {} }).values).toBeNull()
+    expect(parseRowData({ data: [] }).values).toBeNull()
+  })
+
+  it('兼容扁平形状 { rainfall: 0.5 }（既有 fixture 走这里）', () => {
+    expect(parseRowData({ rainfall: 0.5 }).values).toEqual({ rainfall: 0.5 })
+  })
+
+  it('元数据字段不被当成读数（id / device_id / timestamp ...）', () => {
+    const parsed = parseRowData({
+      id: 1, device_id: 42, node_id: 'X', channel_id: 2,
+      timestamp: TS, created_at: TS,
+      data: { rainfall: 0.5 },
+    })
+    expect(parsed.values).toEqual({ rainfall: 0.5 })
+  })
+
+  it('字符串数值（"0.5"）不被静默转成数字：原文保留，但绝不进 numbers', () => {
+    // 判据是"不得做 Number(str)"，而不是"必须丢弃"：把后端给的文本原样展示
+    // 是诚实的，静默转成 0.5 才是伪造。numbers 必须排除它 —— 否则 "V19"
+    // 会被当 0 拉低均值、并在趋势图上画出掉到 0 的假线。
+    const parsed = parseRowData({ data: { rainfall: '0.5' } })
+    expect(parsed.values?.rainfall).toBe('0.5')
+    expect(parsed.numbers).toBeNull()
+  })
+
+  it('字符串读数（真值本就是文本）保留为字符串，但不进 numbers', () => {
+    // 实时 WS 推送可能带文本字段；只认数字会把真实读数丢掉显示成 —
+    const parsed = parseRowData({ data: { hardware_version: 'V19', rainfall: 0.5 } })
+    expect(parsed.values).toEqual({ hardware_version: 'V19', rainfall: 0.5 })
+    expect(parsed.numbers).toEqual({ rainfall: 0.5 })
+  })
+
+  it('只有字符串读数时 numbers 为 null（趋势/统计不得画出掉到 0 的假线）', () => {
+    const parsed = parseRowData({ data: { sn: 'SIM-BMS-0001' } })
+    expect(parsed.values?.sn).toBe('SIM-BMS-0001')
+    expect(parsed.numbers).toBeNull()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// ③ 真实渲染层 —— 单元格必须显示真实值；删掉的列不得回来
+// ═══════════════════════════════════════════════════════════════════════
 describe('DataPanel 历史表渲染 —— 真实行不得再显示「—」', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -352,79 +398,52 @@ describe('DataPanel 历史表渲染 —— 真实行不得再显示「—」', (
     mockSubscribe.mockImplementation(() => vi.fn())
   })
 
-  it('「数据」列显示 rainfall: 0.50，「原始数据」列显示 hex 字节数（7 字节 → 7B hex）', async () => {
-    const wrapper = await mountWithHistory([REAL_ROW])
+  it('「数据」列显示该次采集的全部指标（rainfall: 0.50 等）', async () => {
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
 
-    // 缺陷现象是"两列恒显示 —"，故先断言**不是**占位符，再断言真实值
     expect(cellText(wrapper, '数据')).not.toBe(UNKNOWN)
     expect(cellText(wrapper, '数据')).toContain('rainfall: 0.50')
+    expect(cellText(wrapper, '数据')).toContain('temperature: 21.50')
     expect(wrapper.find('[data-testid="row-values"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="values-unknown"]').exists()).toBe(false)
-
-    // formatRawData 对 14 个 hex 字符 => 7 字节 => "7B hex"
-    expect(cellText(wrapper, '原始数据')).toBe('7B hex')
-    expect(wrapper.find('[data-testid="row-raw-hex"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="raw-unknown"]').exists()).toBe(false)
   })
 
-  it('回归锁：data_json 有数据时，两列都不得是统一未知占位符「—」', async () => {
-    const wrapper = await mountWithHistory([REAL_ROW])
-    const cells = wrapper.findAll('td.el-table__cell').map((c) => c.text())
-
-    expect(cells, '分母为 0：表格没有渲染出任何单元格，断言会假绿').not.toHaveLength(0)
-    expect(cellText(wrapper, '数据'), '「数据」列退回恒 —（本次缺陷的原始形态）').not.toBe(UNKNOWN)
-    expect(cellText(wrapper, '原始数据'), '「原始数据」列退回恒 —').not.toBe(UNKNOWN)
+  it('一次采集在表格里只占**一行**（三行字段被聚合）', async () => {
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
   })
 
-  it('坏 JSON 的行显示「—」而不是 0，且不抛异常', async () => {
-    const brokenRow = { ...REAL_ROW, id: 2, data_json: '{not json' }
-    const wrapper = await mountWithHistory([brokenRow])
-
-    // 页面还在（没被坏 JSON 打崩）
-    expect(wrapper.find('.data-panel').exists()).toBe(true)
-    expect(cellText(wrapper, '数据')).toBe(UNKNOWN)
-    expect(wrapper.find('[data-testid="values-unknown"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="row-values"]').exists()).toBe(false)
-    // 关键：不得把"取不到"渲染成 0
-    expect(cellText(wrapper, '数据')).not.toContain('0')
-    expect(cellText(wrapper, '数据')).not.toContain('rainfall')
-    // 这一行的 raw_hex 只存在于**解析不出来的** data_json 里 ⇒ 原始数据列同样无从得知，
-    // 显示「—」才是诚实的（不得凭正则去猜一段 hex）
-    expect(cellText(wrapper, '原始数据')).toBe(UNKNOWN)
-  })
-
-  it('行级 raw_hex（实时推送形态）在坏 JSON 下仍能显示', async () => {
-    // 实时流把 raw_hex 放在行上（useDeviceData / useRealtimeData 同此形状），
-    // 此时即便 data_json 坏掉，「原始数据」列也不该跟着变成 —
-    const row = { ...REAL_ROW, id: 4, data_json: '{not json', raw_hex: '01030200057847' }
-    const wrapper = await mountWithHistory([row])
-
-    expect(cellText(wrapper, '数据')).toBe(UNKNOWN)
-    expect(cellText(wrapper, '原始数据')).toBe('7B hex')
+  it('⚠ 「原始数据」「状态/错误码」两列已删除（不得被加回来）', async () => {
+    // 原始数据列的 raw_hex 随 device_data 退役已无数据源；
+    // 状态列的 error_code 后端从未返回（既有 bug，一直恒显示「正常」）。
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
+    // 只看历史表（弹层里的详情表也是 el-table，不排除会把它的列算进来）
+    const labels = wrapper.find('table.el-table').findAll('td.el-table__cell')
+      .map((c) => c.attributes('data-label'))
+    expect(labels).not.toContain('原始数据')
+    expect(labels).not.toContain('状态')
+    // 只有「采集时间」「数据」两列
+    expect([...new Set(labels)]).toEqual(['采集时间', '数据'])
   })
 
   it('真的是 0 的行显示 rainfall: 0.00 —— 与"取不到"的 — 可区分', async () => {
-    const zeroRow = {
-      ...REAL_ROW,
-      id: 3,
-      data_json: JSON.stringify({
-        channel_id: 1,
-        raw_hex: '01030200007845',
-        sensors: [{ Name: 'rainfall', Value: 0, Unit: 'mm', StringValue: '' }],
-      }),
-    }
-    const wrapper = await mountWithHistory([zeroRow])
+    const wrapper = await mountWithHistory([row('rainfall', 0, TS, 1)])
 
     expect(cellText(wrapper, '数据')).toBe('rainfall: 0.00')
     expect(cellText(wrapper, '数据')).not.toBe(UNKNOWN)
-    expect(cellText(wrapper, '原始数据')).toBe('7B hex')
+  })
+
+  it('接口返回空 ⇒ 表格走空态（不是显示一行「—」）', async () => {
+    const wrapper = await mountWithHistory([])
+    expect(wrapper.find('tbody tr').exists()).toBe(false)
+    expect(wrapper.find('.el-empty').exists()).toBe(true)
   })
 
   it('统计卡不再因读不到字段而整组消失：rainfall=0.5 时渲染出「最新雨量」卡', async () => {
-    const wrapper = await mountWithHistory([REAL_ROW])
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
 
     const cards = wrapper.findAll('.stat-card')
-    expect(cards.length, '统计卡为 0 张：dynamicStats 又读不到 data_json 了').toBeGreaterThan(0)
+    expect(cards.length, '统计卡为 0 张：dynamicStats 又读不到行数据了').toBeGreaterThan(0)
     const rainfallCard = cards.find((c) => c.text().includes('雨量'))
     expect(rainfallCard, '没有渲染出 rainfall 统计卡').toBeDefined()
     const valueText = rainfallCard!.find('.stat-value').text()
@@ -433,8 +452,8 @@ describe('DataPanel 历史表渲染 —— 真实行不得再显示「—」', (
     expect(valueText).toContain('mm')
   })
 
-  it('实时推送的新条目与表格期望同形状：数值与 raw_hex 都能在表格里渲染出来', async () => {
-    const wrapper = await mountWithHistory([REAL_ROW])
+  it('实时推送的新条目与表格期望同形状：数值能渲染出来，且行上没有 raw_hex 字段', async () => {
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
 
     // 打开实时开关（test-setup 的 ElSwitch stub 真实 emit change）
     await wrapper.find('.el-switch').trigger('click')
@@ -456,7 +475,23 @@ describe('DataPanel 历史表渲染 —— 真实行不得再显示「—」', (
     expect(firstRow.exists()).toBe(true)
     // 实时行的「数据」列必须解析出 payload.data，而不是恒 —
     expect(firstRow.text()).toContain('rainfall: 1.25')
-    // 实时行的「原始数据」列必须解析出 payload.raw_hex（2 字节 → 2B hex）
-    expect(firstRow.text()).toContain('2B hex')
+    // 「原始数据」列已删除 ⇒ 帧里的 raw_hex 不得出现在表格里
+    expect(firstRow.text()).not.toContain('2B hex')
+  })
+
+  it('响应被服务端降采样时给出提示（否则"只剩 1 个指标"会被误认为设备只上报一个字段）', async () => {
+    // 2000 行 = max_points 上限 ⇒ 服务端抽过样
+    const many: UnifiedDataRow[] = []
+    for (let i = 0; i < 2000; i += 1) {
+      const ts = new Date(Date.UTC(2026, 8, 17, 0, 0, 0) + i * 1000).toISOString()
+      many.push(row('rainfall', i % 7, ts, i + 1))
+    }
+    const wrapper = await mountWithHistory(many)
+    expect(wrapper.find('[data-testid="history-downsampled"]').exists()).toBe(true)
+  })
+
+  it('未降采样（行数远小于上限）时不显示降采样提示', async () => {
+    const wrapper = await mountWithHistory(ONE_COLLECTION)
+    expect(wrapper.find('[data-testid="history-downsampled"]').exists()).toBe(false)
   })
 })

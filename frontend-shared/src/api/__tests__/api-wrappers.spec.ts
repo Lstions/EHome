@@ -1028,18 +1028,43 @@ describe('edgeDeviceApi', () => {
     expect(edgeDeviceApi).not.toHaveProperty('changeAddress')
   })
 
-  it('getLatestData returns data', async () => {
-    mockClient.get.mockResolvedValue({ data: { temp: 25 } })
-    const res = await edgeDeviceApi.getLatestData(1)
-    expect(res).toEqual({ temp: 25 })
+  // 2026-11-11 原始数据退役：getLatestData / getHistoryData 随 device_data 表删除。
+  // 这里锁住"它们不会被悄悄加回来" —— 加回来就等于指向一个已不存在的端点。
+  it('does not expose the retired device_data endpoints', () => {
+    expect(edgeDeviceApi).not.toHaveProperty('getLatestData')
+    expect(edgeDeviceApi).not.toHaveProperty('getHistoryData')
   })
 
-  it('getHistoryData passes params', async () => {
-    mockClient.get.mockResolvedValue({ data: [] })
-    await edgeDeviceApi.getHistoryData(1, { start_time: '2024-01-01', end_time: '2024-12-31' })
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/1/data', {
-      params: { start_time: '2024-01-01', end_time: '2024-12-31' },
+  it('getDeviceHistory 走 /devices/:id/history 并原样透传参数', async () => {
+    mockClient.get.mockResolvedValue({
+      data: [
+        { id: 1, device_id: 14, sensor_name: 'rainfall', value: 0.5, unit: 'mm', timestamp: '2026-11-11T06:00:00Z', created_at: '2026-11-11T06:00:00Z' },
+      ],
     })
+    const rows = await edgeDeviceApi.getDeviceHistory(14, {
+      start_time: '2026-11-11T05:00:00Z',
+      end_time: '2026-11-11T06:00:00Z',
+      max_points: 2000,
+    })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/14/history', {
+      params: {
+        start_time: '2026-11-11T05:00:00Z',
+        end_time: '2026-11-11T06:00:00Z',
+        max_points: 2000,
+      },
+    })
+    // 一字段一行的形状原样返回，不在这一层聚合（聚合是页面的职责）
+    expect(rows).toHaveLength(1)
+    expect(rows[0].sensor_name).toBe('rainfall')
+  })
+
+  it('getDeviceHistory 对非数组响应返回空数组（不返回 undefined 让调用方 .map 崩）', async () => {
+    // 后端形状保证是 []，但 envelope 解包异常时 data 可能是 null/缺失
+    mockClient.get.mockResolvedValue({ data: null })
+    await expect(edgeDeviceApi.getDeviceHistory(1, {
+      start_time: '2024-01-01T00:00:00Z',
+      end_time: '2024-01-02T00:00:00Z',
+    })).resolves.toEqual([])
   })
 
   // ⚠ 2026-10-11：原 3 条 getOperationHistory 用例已随该方法一并删除。

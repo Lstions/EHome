@@ -23,6 +23,25 @@ export interface LatestSensorValue {
   timestamp: string
 }
 
+/**
+ * `GET /api/v1/devices/:id/history` 的单行（后端 models.UnifiedData）。
+ *
+ * ⚠ **一行 = 一个字段的一次采样**，不是"一次采集"。同一时刻解析出的 N 个物理量
+ * 是 N 行，它们的 `timestamp` 完全相同（后端整帧共用一个 now）。需要"一次采集
+ * 一行"的视图必须自己按 timestamp 聚合。
+ */
+export interface UnifiedDataRow {
+  id: number
+  device_id: number
+  sensor_name: string
+  value: number
+  unit: string
+  timestamp: string
+  created_at: string
+  /** 帧表解码路径会带（= device_id），unified_data 回落路径可能缺省 */
+  edge_device_id?: number
+}
+
 export interface EdgeDeviceChannel {
   id?: number
   /**
@@ -758,26 +777,17 @@ export const edgeDeviceApi = {
     }
   },
 
-  async getLatestData(id: number): Promise<any> {
-    // 单独放宽到 20s：实测（2026-10-20）设备 14 在历史批量查询并发时该接口 10s 内不返回，
-    // 默认超时会让「实时数据流」卡首屏就常驻一条超时错误（快照只是 WS 的兜底，不该抢戏）。
-    const response = await client.get<unknown, ApiEnvelope<any>>(
-      `/api/v1/edge-devices/${id}/latest-data`,
-      { timeout: 20000 },
-    )
-    return response.data
-  },
-
   /**
    * 该设备**每个传感器**各自的最新值（跨命令聚合）。
    *
-   * 与 getLatestData 的区别（2026-10-18 实测缺陷）：
-   *   getLatestData 返回 device_data 的**一条**原始记录 —— 对 Modbus 设备够用
-   *   （一条命令读出全部物理量），但对 ASCII 一问一答设备（Techfine 逆变器）
-   *   只能拿到**最后执行的那条命令**的产物（实测 3/36 个字段），其余字段
-   *   在库里但界面永远看不到，表现为"页面大部分是空的"。
+   * 2026-11-11 原始数据退役后，这是详情页实时读数**唯一**的 REST 取数路径：
+   * 原 `/latest-data`（device_data 最后一条原始记录）已随表一并删除。
    *
-   * 本方法返回全部传感器的最新值，是详情页展示实时读数应使用的接口。
+   * 它就是按 sensor_name 聚合后的全量快照 —— 不是"最后一条命令的产物"。
+   * 历史缺陷（2026-10-18 实测）正是由后者引起的：ASCII 一问一答设备
+   * （Techfine 逆变器）一个轮询周期发 9 条命令，每条各带 2~14 个物理量，
+   * 取"最新那一条"只能看到最后执行的那条命令，实测 36 个字段里只显示 3 个；
+   * 而其余字段在库里、界面永远看不到，表现为"页面大部分是空的"。
    */
   async getLatestValues(id: number): Promise<LatestSensorValue[]> {
     const response = await client.get<unknown, ApiEnvelope<LatestSensorValue[]>>(`/api/v1/edge-devices/${id}/latest-values`)
@@ -785,14 +795,41 @@ export const edgeDeviceApi = {
     return Array.isArray(data) ? data : []
   },
 
-  async getHistoryData(id: number, params: {
+  /**
+   * 该设备的**原始历史采样**（一字段一行）。
+   *
+   * 2026-11-11 原始数据退役：原 `GET /edge-devices/:id/data`（device_data 分页）
+   * 随表一并删除，历史明细改由本方法取数。响应是 `[]UnifiedData`：
+   *
+   *   {id, device_id, sensor_name, value, unit, timestamp, created_at, edge_device_id}
+   *
+   * ⚠ **一行一个字段，不是一行一次采集**。同一时刻解析出来的 N 个物理量是 N 行，
+   * 且这 N 行的 timestamp **完全相等**（后端 SensorParserConsumer 用同一个
+   * `now := time.Now()` 写整帧，见 consumers_heavy.go:412）。调用方若需要
+   * 「一次采集一行」，必须自己按 timestamp 聚合 —— DataPanel 就是这么做的。
+   *
+   * 服务端**没有分页**：一次返回整个时间窗（`max_points` 只是降采样，且降采样
+   * 发生在解码之后，不能省内存）。所以 `max_points` 要按「前端最多想要多少行」
+   * 传，不要按页大小传 —— 传小了会把不同时刻的字段抽成残缺行。
+   *
+   * 内存护栏（后端 history_frame_budget.go）：帧数 × 字段数 > 300 万行直接 413。
+   * 生产实测 29 字段设备 24h 约 246 万行放行，48h/168h 会 413 —— 这是**服务端
+   * 拒绝**，不是前端能兜住的，调用方应把 413 转成「缩小时间范围」的提示。
+   */
+  async getDeviceHistory(id: number, params: {
     start_time: string
     end_time: string
-    page?: number
-    page_size?: number
-  }): Promise<any> {
-    const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/edge-devices/${id}/data`, { params })
-    return response.data
+    /** 可选：只看某个字段（不传 = 全部字段） */
+    sensor?: string
+    /** 可选：服务端降采样上限（0/不传 = 不降采样） */
+    max_points?: number
+  }): Promise<UnifiedDataRow[]> {
+    const response = await client.get<unknown, ApiEnvelope<UnifiedDataRow[]>>(
+      `/api/v1/devices/${id}/history`,
+      { params },
+    )
+    const data = response?.data
+    return Array.isArray(data) ? data : []
   },
 
   // ⚠ 2026-10-11：此处原有 getOperationHistory()，指向 `GET /edge-devices/:id/operations/history`。

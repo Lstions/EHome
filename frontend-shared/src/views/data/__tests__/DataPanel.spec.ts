@@ -18,8 +18,10 @@ vi.mock('@/api/edgeDevice', () => ({
     create: vi.fn(() => Promise.resolve({ id: 1 })),
     update: vi.fn(() => Promise.resolve()),
     delete: vi.fn(() => Promise.resolve()),
-    getHistoryData: vi.fn(() => Promise.resolve({ items: [], total: 0 })),
-    getLatestData: vi.fn(() => Promise.resolve(null)),
+    // 2026-11-11 原始数据退役：getHistoryData / getLatestData 已随 device_data 删除，
+    // 表格改调 /devices/:id/history（一字段一行）
+    getDeviceHistory: vi.fn(() => Promise.resolve([])),
+    getLatestValues: vi.fn(() => Promise.resolve([])),
   },
   // type EdgeDevice is erased at runtime; no mock needed
 }))
@@ -109,12 +111,28 @@ vi.mock('@/utils/logger', () => ({
 
 // ── Stub Element Plus components and local components ──
 /**
- * 取 getHistoryData 最后一次调用的实参。
+ * 取 getDeviceHistory 最后一次调用的实参。
  * 用索引而非 Array.prototype.at —— tsconfig 的 lib 未含 ES2022。
  */
 function lastHistoryCall() {
-  const calls = vi.mocked(edgeDeviceApi.getHistoryData).mock.calls
+  const calls = vi.mocked(edgeDeviceApi.getDeviceHistory).mock.calls
   return calls[calls.length - 1]
+}
+
+/**
+ * 造一行 /devices/:id/history 响应（**一字段一行**）。
+ * 同一 timestamp 的 N 行 = 一次采集的 N 个物理量。
+ */
+function historyRow(sensorName: string, value: number, timestamp: string, id = 1) {
+  return {
+    id,
+    device_id: 1,
+    sensor_name: sensorName,
+    value,
+    unit: '',
+    timestamp,
+    created_at: timestamp,
+  }
 }
 
 const stubs = {
@@ -277,10 +295,9 @@ describe('DataPanel', () => {
   }
 
   const mockHistoryWithOneRow = () => {
-    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({
-      items: [{ id: 1, collected_at: '2024-01-01T00:00:00Z', data: { temperature: 21 } }],
-      total: 1,
-    })
+    vi.mocked(edgeDeviceApi.getDeviceHistory).mockResolvedValue([
+      historyRow('temperature', 21, '2024-01-01T00:00:00Z'),
+    ])
   }
 
   it('unwraps envelope categories + historical-batch to render chart series', async () => {
@@ -356,39 +373,41 @@ describe('DataPanel', () => {
   })
 
   // ─── 查询范围变化重置页码 (U-4 / §3.2.6 MUST) ───
-  // 断言真实请求参数: 审计实测「翻到第 3 页后换设备/时间范围, 新查询仍发 page=3」。
+  //
+  // 2026-11-11 换源后**服务端分页已不存在**（/devices/:id/history 无 page 参数），
+  // 分页改为前端切片。原来的两条用例断言「请求里的 page 参数」——那个参数已经
+  // 不存在了，断言它只会得到 undefined。
+  //
+  // 但 §3.2.6 的**意图**仍然成立且更重要：换设备/换时间范围后必须以第 1 页显示，
+  // 否则用户翻到第 3 页后换条件，会看到"新条件下的第 3 页"——一个既不是开头
+  // 也不是他上次看的位置的随机片段，且没有任何解释。所以改判行为面：
+  // 重新查询后展示的应是**最新那次采集**（第 1 页首行）。
 
-  it('查询按钮重置页码: 翻页后换设备再查询, 请求的 page 参数为 1', async () => {
-    mockHistoryWithOneRow()
+  it('查询按钮重置页码: 翻页后换设备再查询, 回到第 1 页', async () => {
+    mockMultiPageHistory()
     mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
 
     const wrapper = getMounted()
     await flushPromises()
-
-    // 第 1 次查询 (设备 1)
     await triggerQuery(wrapper, '1')
-    const first = lastHistoryCall()
-    expect((first[1] as Record<string, unknown>).page).toBe(1)
 
-    // 翻到第 3 页: 直接点分页器两次 (真实分页组件的 current-change)
+    // 翻到第 3 页（本地切片，不发请求）
     const pagination = wrapper.find('.el-pagination')
     expect(pagination.exists()).toBe(true)
     await pagination.trigger('click')
-    await flushPromises() // 两次点击之间必须 flush: 否则第二次仍读到旧 props.currentPage
+    await flushPromises()
     await wrapper.find('.el-pagination').trigger('click')
     await flushPromises()
-    const paged = lastHistoryCall()
-    expect((paged[1] as Record<string, unknown>).page).toBe(3)
 
-    // 换设备后点「查询」→ 必须以 page=1 发出 (改前会继续发 page=3)
+    // 换设备后点「查询」→ 新设备的数据，且回到第 1 页
     await triggerQuery(wrapper, '42')
-    const afterDevice = lastHistoryCall()
-    expect(afterDevice[0]).toBe(42)
-    expect((afterDevice[1] as Record<string, unknown>).page).toBe(1)
+    expect(lastHistoryCall()[0]).toBe(42)
+    expect(wrapper.find('[data-testid="history-table"]').attributes('data-page')).toBe('1')
+    expect(wrapper.find('[data-testid="history-table"]').attributes('data-total')).toBe('137')
   })
 
-  it('查询按钮重置页码: 换时间范围后请求的 page 参数为 1', async () => {
-    mockHistoryWithOneRow()
+  it('查询按钮重置页码: 换时间范围后回到第 1 页', async () => {
+    mockMultiPageHistory()
     mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
 
     const wrapper = getMounted()
@@ -398,7 +417,6 @@ describe('DataPanel', () => {
     const pagination = wrapper.find('.el-pagination')
     await pagination.trigger('click')
     await flushPromises()
-    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(2)
 
     // 换时间范围 (第二个 select) 后再查询
     const selects = wrapper.findAll('select.el-select')
@@ -406,8 +424,10 @@ describe('DataPanel', () => {
     await wrapper.find('[data-test="query"]').trigger('click')
     await flushPromises()
 
-    const params = lastHistoryCall()[1] as Record<string, unknown>
-    expect(params.page).toBe(1)
+    // 新请求仍以该设备发出（时间范围变化被带上），且回到第 1 页
+    expect(lastHistoryCall()[0]).toBe(1)
+    expect(lastHistoryCall()[1]).toMatchObject({ max_points: 2000 })
+    expect(wrapper.find('[data-testid="history-table"]').attributes('data-page')).toBe('1')
   })
 
   // ─── 统计卡范围标注（F14 / §4.3 统计卡 MUST） ───
@@ -417,16 +437,22 @@ describe('DataPanel', () => {
 
   const SCALE_WORDS = /本页|当前筛选|全局/
 
+  /**
+   * 造 137 次采集（每次 1 个字段 = 1 行历史响应），复现审计现场
+   * 「共 137 条」与「本次数据点」并排的歧义。
+   *
+   * 注：改造前 total 由服务端返回；现在没有服务端分页，total 是聚合后的采集
+   * 条数（= 本地分页的页数依据）—— 所以这里必须真的给 137 次采集。
+   */
   const mockMultiPageHistory = () => {
-    // 关键：total(137) 远大于本页行数(3)，复现审计现场「共 137 条」与「本次数据点」并排的歧义
-    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({
-      items: [
-        { id: 1, collected_at: '2024-01-01T00:00:00Z', data: { temperature: 21 } },
-        { id: 2, collected_at: '2024-01-01T00:05:00Z', data: { temperature: 22 } },
-        { id: 3, collected_at: '2024-01-01T00:20:00Z', data: { temperature: 23 } },
-      ],
-      total: 137,
-    })
+    const rows = []
+    for (let i = 0; i < 137; i += 1) {
+      // 每 5 分钟一次采集；时间严格递增保证聚合后仍是 137 行
+      const minutes = i * 5
+      const ts = new Date(Date.UTC(2024, 0, 1, 0, minutes)).toISOString()
+      rows.push(historyRow('temperature', 21 + (i % 3), ts, i + 1))
+    }
+    vi.mocked(edgeDeviceApi.getDeviceHistory).mockResolvedValue(rows)
   }
 
   it('每张统计卡都带范围词，且范围与实际计算口径一致', async () => {
@@ -458,12 +484,13 @@ describe('DataPanel', () => {
     expect(totalCard.text()).toBe('137')
     expect(cards.find(c => c.text().includes('数据点总数'))!.find('.stat-label').text()).toContain('当前筛选')
 
-    // ③「采集覆盖时长」只由当前页 3 行算出，范围词必须是「本页」
+    // ③「采集覆盖时长」只由当前页 20 行算出，范围词必须是「本页」
     const durationCard = wrapper.find('[data-testid="stat-duration"]')
     expect(durationCard.exists()).toBe(true)
     expect(cards.find(c => c.text().includes('采集覆盖时长'))!.find('.stat-label').text()).toContain('本页')
-    // 本页 3 行跨 20 分钟 → 数值确由当前页算出（而非 137 条的全量跨度）
-    expect(durationCard.text()).toBe('20分钟')
+    // 本页 20 行、每行相隔 5 分钟 ⇒ 跨 19*5 = 95 分钟。
+    // （全量 137 行跨 680 分钟，两者可区分 ⇒ 数值确实只由当前页算出）
+    expect(durationCard.text()).toBe('1小时35分钟')
   })
 
   it('范围词与分页器总数并排时不再产生「全量」歧义', async () => {
@@ -488,7 +515,7 @@ describe('DataPanel', () => {
 
   it('本页无数据时时长显示统一未知占位符 —，而不是 0 或 --', async () => {
     // 空数组 = 「本页没有数据」，不是「时长 0 分钟」
-    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({ items: [], total: 0 })
+    vi.mocked(edgeDeviceApi.getDeviceHistory).mockResolvedValue([])
     mockClientGet.mockImplementation(() => Promise.resolve([]))
 
     const wrapper = getMounted()
@@ -529,22 +556,26 @@ describe('DataPanel', () => {
     expect(dataPanelSource).not.toMatch(/\?\s*'[^']*'\s*:\s*'-'/)
   })
 
-  it('翻页本身不重置页码 (分页控件入口不得被打回第 1 页)', async () => {
-    mockHistoryWithOneRow()
+  it('翻页本身不重置页码，也不重新发请求（本地切片）', async () => {
+    mockMultiPageHistory()
     mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
 
     const wrapper = getMounted()
     await flushPromises()
     await triggerQuery(wrapper, '1')
 
+    // 查询发了 1 次；之后的翻页必须**零请求**（数据已整窗在手）
+    const callsAfterQuery = vi.mocked(edgeDeviceApi.getDeviceHistory).mock.calls.length
+
     const pagination = wrapper.find('.el-pagination')
     await pagination.trigger('click')
     await flushPromises()
-    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(2)
-
+    expect(wrapper.find('[data-testid="history-table"]').attributes('data-page')).toBe('2')
     await wrapper.find('.el-pagination').trigger('click')
     await flushPromises()
-    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(3)
+
+    expect(vi.mocked(edgeDeviceApi.getDeviceHistory).mock.calls.length).toBe(callsAfterQuery)
+    expect(wrapper.find('[data-testid="history-table"]').attributes('data-page')).toBe('3')
   })
 
   // ── A5：`?device=` / `?range=` 深链预填 ──
@@ -557,7 +588,7 @@ describe('DataPanel', () => {
     /**
      * 断言走**行为面**而非 `wrapper.vm`：`<script setup>` 不暴露内部状态
      * （本仓惯例见 Profile.spec.ts:95），且 vm 断言在 vue-tsc 下是 TS2339。
-     * 这里直接看真实请求——deviceId 是 getHistoryData 的第 1 个实参。
+     * 这里直接看真实请求——deviceId 是 getDeviceHistory 的第 1 个实参。
      */
     const deviceIdOf = (call: unknown[] | undefined) => call?.[0]
 
@@ -574,21 +605,21 @@ describe('DataPanel', () => {
       mockRouteQuery.value = { device: 'abc' }
       getMounted()
       await flushPromises()
-      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+      expect(vi.mocked(edgeDeviceApi.getDeviceHistory)).not.toHaveBeenCalled()
     })
 
     it('?device=999（不在设备列表里）被忽略 —— 避免选中态空白', async () => {
       mockRouteQuery.value = { device: '999' }
       getMounted()
       await flushPromises()
-      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+      expect(vi.mocked(edgeDeviceApi.getDeviceHistory)).not.toHaveBeenCalled()
     })
 
     it('?range=99d（非法枚举）被忽略：不发查询，时间范围保持默认', async () => {
       mockRouteQuery.value = { range: '99d' }
       const wrapper = getMounted()
       await flushPromises()
-      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+      expect(vi.mocked(edgeDeviceApi.getDeviceHistory)).not.toHaveBeenCalled()
       // 时间范围下拉的当前值：替身是原生 <select>，读它的 value
       const rangeSelect = wrapper.findAll('select')[1]
       expect(rangeSelect?.element.value).toBe('24h')

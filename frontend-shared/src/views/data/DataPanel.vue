@@ -217,6 +217,21 @@
       </template>
       <el-skeleton v-if="loading" :rows="5" animated />
       <template v-else>
+        <!--
+          降采样提示（2026-11-11 原始数据退役配套）。
+          服务端 max_points 是**按行**（一字段一行）抽的 ⇒ 抽得越狠，每条采集剩下
+          的字段越少。不提示的话「这次采集只有 total_voltage」会被当成设备只上报了
+          一个字段，把排障方向带偏。 -->
+        <el-alert
+          v-if="historyDownsampled"
+          type="warning"
+          :closable="false"
+          show-icon
+          data-testid="history-downsampled"
+          title="数据量较大，本表已按服务端降采样显示"
+          description="降采样按「字段行」抽取，因此部分采集记录只保留了少数指标；缩小时间范围可看到完整字段。"
+          style="margin-bottom: 12px;"
+        />
         <EmptyState
           v-if="!historyData || historyData.length === 0"
           kind="empty"
@@ -240,19 +255,12 @@
             layout="prev, pager, next"
             class="data-card-pagination"
             data-testid="data-pagination-top"
-            @current-change="fetchData"
+            @current-change="handlePageChange"
           />
-          <div v-for="(row, rowIndex) in historyData" :key="row.id ?? rowIndex" class="data-card">
+          <!-- key 用 id（后端稳定合成）；WS 实时行 id 为 0 ⇒ 回落行号 -->
+          <div v-for="(row, rowIndex) in historyData" :key="row.id || rowIndex" class="data-card">
             <div class="data-card-head">
               <span class="data-card-time">{{ rowTimeText(row) }}</span>
-              <el-tag
-                v-if="row.error_code && row.error_code > 0"
-                :type="getErrorInfo(row.error_code).type"
-                size="small"
-              >
-                {{ getErrorInfo(row.error_code).label }}
-              </el-tag>
-              <span v-else class="data-card-ok">正常</span>
             </div>
             <div class="data-card-metrics">
               <span v-for="metric in summarizeRow(row)" :key="metric.key" class="data-card-metric">
@@ -262,7 +270,6 @@
               <span v-if="summarizeRow(row).length === 0" class="data-card-metric muted">无可解析数值</span>
             </div>
             <div class="data-card-foot">
-              <span class="data-card-raw">原始数据：{{ rowRawText(row) }}</span>
               <el-button
                 link
                 type="primary"
@@ -276,7 +283,17 @@
           </div>
         </div>
 
-        <div v-else class="mobile-table-wrapper">
+        <!-- data-page / data-total 是**可观测的翻页状态**：
+             分页改成前端切片后，"当前在第几页"不再体现在请求参数里，
+             而 el-table 的行在单测替身里不渲染插槽 —— 没有这两个属性就
+             无法从外部验证"换条件后回到第 1 页"这条 MUST（§3.2.6）。 -->
+        <div
+          v-else
+          class="mobile-table-wrapper"
+          data-testid="history-table"
+          :data-page="currentPage"
+          :data-total="total"
+        >
           <p class="mobile-table-hint">左右滑动查看完整历史数据</p>
           <el-table :data="historyData" stripe>
             <el-table-column prop="created_at" label="采集时间" width="180">
@@ -284,10 +301,10 @@
                 <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
               </template>
             </el-table-column>
-            <!-- 两列都经 parseRowData(row) 这**唯一**入口取数：
-                 接口 GET /edge-devices/:id/data 只返回 data_json（无 parsed_data/data/raw_data），
-                 改前表格读 row.parsed_data || row.data ⇒ 恒 undefined ⇒ 恒「—」。
-                 解析失败（坏 JSON / 空）返回 null ⇒ 仍显示「—」，与"值真的是 0"区分开。 -->
+            <!-- 经 parseRowData(row) 这**唯一**入口取数：
+                 行里的指标在 data 下（历史行由 aggregateHistoryRows 产出、实时行由
+                 WS payload 构造）。解析不出来返回 null ⇒ 显示「—」，
+                 与"值真的是 0"区分开。 -->
             <el-table-column prop="data" label="数据">
               <template #default="{ row }">
                 <!-- 判据是 .values 而不是整个返回对象：后者恒为真对象，
@@ -296,22 +313,20 @@
                 <span v-else style="color: var(--el-text-color-placeholder);" data-testid="values-unknown">{{ UNKNOWN }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="原始数据" width="120" align="center">
-              <template #default="{ row }">
-                <span v-if="parseRowData(row).rawHex" style="font-size: 12px; color: var(--el-text-color-secondary);" data-testid="row-raw-hex">{{ formatRawData(parseRowData(row).rawHex) }}</span>
-                <span v-else style="color: var(--el-text-color-placeholder);" data-testid="raw-unknown">{{ UNKNOWN }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="100" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.error_code && row.error_code > 0"
-                        :type="getErrorInfo(row.error_code).type"
-                        size="small">
-                  {{ getErrorInfo(row.error_code).label }}
-                </el-tag>
-                <span v-else style="color: var(--el-color-success);">正常</span>
-              </template>
-            </el-table-column>
+            <!--
+              2026-11-11 原始数据退役，本表删除两列：
+
+              · 「原始数据」列（原渲染 data_json.raw_hex）：device_data 整表删除，
+                原始帧字节不再有 REST 数据源。帧表的 raw 列只对**关键帧**填充
+                （internal/telemetry/dualwrite.go 的 appendEncoded 显式判
+                FrameKind==Key），且没有对外接口 —— 不能拿来当列数据源，
+                否则绝大多数行会是「—」，比删列更误导。
+              · 「状态/错误码」列（原渲染 row.error_code）：这是**既有 bug** 的清理 ——
+                /edge-devices/:id/data 的响应从来没有 error_code 字段
+                （实测键：created_at, data_json, device_id, id, node_id, timestamp），
+                该列恒为 undefined ⇒ 恒显示「正常」。删端点时顺手删掉它，
+                不是本次改造引入的问题（方案 §1.5 已记录）。
+            -->
           </el-table>
         </div>
 
@@ -322,8 +337,8 @@
           :page-sizes="[20, 50, 100]"
           layout="total, sizes, prev, pager, next, jumper"
           style="margin-top: 20px; justify-content: flex-end;"
-          @current-change="fetchData"
-          @size-change="fetchData"
+          @current-change="handlePageChange"
+          @size-change="handlePageChange"
         />
       </template>
     </el-card>
@@ -339,7 +354,6 @@
       <div class="row-detail">
         <div class="row-detail-meta">
           <span>采集时间：{{ rowTimeText(rowDetailRow) }}</span>
-          <span>原始数据：{{ rowRawText(rowDetailRow) }}</span>
         </div>
         <!-- F8：弹层内 4 列表最小宽 400px > 393 弹窗可视宽，必须自带横滚容器 + 提示。 -->
         <div class="mobile-table-wrapper">
@@ -352,7 +366,7 @@
           </el-table>
         </div>
         <p v-if="rowDetailEntries(rowDetailRow).length === 0" class="row-detail-empty">
-          该条数据无法解析出指标（原始帧见上）。
+          该条数据无法解析出指标。
         </p>
       </div>
       <template #footer>
@@ -367,20 +381,22 @@
  * 行数据解析（纯函数，**本页唯一**的取数入口）。
  *
  * 为什么单独开一个非 setup 的 script 块：模板、统计卡（dynamicStats）、趋势兜底、CSV 导出、
- * 实时条目都要取同一份数据，散落多处必然再次漂移（本次缺陷正是"表格读 parsed_data、接口只给
+ * 实时条目都要取同一份数据，散落多处必然再次漂移（历史缺陷正是"表格读 parsed_data、接口只给
  * data_json"）。函数放在模块作用域后，script setup 块内可直接调用、模板也能解析 ——
  * 已用本仓 @vue/compiler-sfc 3.5.40 实测确认（两块共享作用域，导出照常生成）。
  *
- * 为什么不用"把函数 defineExpose 出去、让测试调它"的既有范式：本缺陷的回归点是
+ * 为什么不用"把函数 defineExpose 出去、让测试调它"的既有范式：缺陷的回归点是
  * **表格列恒显示 —**，只暴露函数等于不守渲染路径；测试必须打到真实渲染出的单元格。
  *
  * 契约（规范 §3.2.5 不得以本地默认值伪造事实）：
- *   · 取不到 / JSON 坏 ⇒ values = null ⇒ 界面显示「—」；
+ *   · 取不到 / 形状不认识 ⇒ values = null ⇒ 界面显示「—」；
  *   · 值是 0 ⇒ values = { rainfall: 0 } ⇒ 界面显示「rainfall: 0.00」。
  *   二者绝不互相顶替，尤其**不得**把解析失败落成 0。
+ *
+ * 行形状的**唯一真源**见 ./historyRows.ts —— 历史行的聚合规则写在那里。
  */
 
-/** parseRowData 的返回：数值指标 + 原始帧 hex。 */
+/** parseRowData 的返回：数值指标。 */
 export interface RowData {
   /**
    * 指标名 → **展示值**（数值或字符串）；解析不出来时为 null
@@ -390,6 +406,12 @@ export interface RowData {
    * `StringValue` 字段（drivers/registry.go:13），此时 `Value` 恒为 0 而真值在
    * StringValue 里 —— 典型是 BMS 的 hardware_version（"V19"）与 serial_number。
    * 只取 Value 会把它显示成 **0**，比「—」更糟：0 看起来像真实读数。
+   *
+   * ⚠ 2026-11-11 原始数据退役后，**本页已不可能收到字符串读数**：
+   * 唯一承载 StringValue 的 device_data.data_json.str_values 随表删除，
+   * 而 /devices/:id/history 只返回 float64 的 value。类型保留字符串分支，
+   * 是因为实时 WS 推送（handleDataUpdate）仍可能带上字符串字段，
+   * 且行解析不该对"值是不是数字"做两次不同的假设。
    */
   values: Record<string, number | string> | null
   /**
@@ -399,17 +421,17 @@ export interface RowData {
    * 它会被当成 0 ⇒ 拉低均值并在图上画出掉到 0 的假线。
    */
   numbers: Record<string, number> | null
-  /** 原始帧 hex，**不带 0x 前缀**（formatRawData 依赖该约定），没有则为 null */
-  rawHex: string | null
 }
 
-/** GET /api/v1/edge-devices/:id/data 的真实行形状（另有 id/device_id/node_id/timestamp/created_at） */
-interface DeviceDataRow {
-  data_json?: unknown
-  parsed_data?: unknown
+/**
+ * 表格行的形状。
+ *
+ * 两个来源，**形状已经统一**（无需再按响应格式分支）：
+ *   · 历史行  —— aggregateHistoryRows() 的产物（一次采集一行，指标在 data 里）；
+ *   · 实时行  —— handleDataUpdate() 由 WS payload 构造，同样把指标放进 data。
+ */
+interface DataRow {
   data?: unknown
-  raw_data?: unknown
-  raw_hex?: unknown
 }
 
 /**
@@ -425,93 +447,72 @@ const asNumber = (value: unknown): number | null => {
 }
 
 /**
- * 单个传感器的展示值。
+ * 行内单个字段的展示值。
  *
  * 口径与本仓既有正确范式一致（views/edge-device/shared/DeviceControlPanel.vue:76
- * 的 `value.string_value || value.value`）：**StringValue 非空时优先**，否则取 Value。
+ * 的 `value.string_value || value.value`）：**字符串非空时优先**，否则取数值。
  *
- * 为什么不能只取 Value：后端 SensorData.StringValue 承载字符串型读数
- * （jiabaida_parse.go 的 hardware_version / serial_number，其 Value 恒为 0），
- * 只取 Value 会把 "V19" 显示成 0。
+ * 为什么保留字符串分支：实时 WS 推送的 payload 可能带字符串型读数
+ * （device_data 时代是 StringValue；退役后仍有设备上报非数值文本字段）。
+ * 只认数字会把真实文本读数丢掉，显示成「—」。
  * 刻意**不**做 Number(str)：把 "0.5" 静默转成数字属于以本地推断伪造事实。
- * 返回 null 表示"这条传感器没有可信值"，与"值是 0"区分。
+ * 返回 null 表示"这个字段没有可信值"，与"值是 0"区分。
  */
-const asDisplayValue = (sensor: { Value?: unknown; StringValue?: unknown }): number | string | null => {
-  const sv = sensor.StringValue
-  if (typeof sv === 'string' && sv.trim() !== '') return sv
-  return asNumber(sensor.Value)
-}
-
-/** hex 字符串规整：容忍 0x/0X 前缀与大小写，空串视为"没有" */
-const asHex = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null
-  const hex = value.trim().replace(/^0x/i, '')
-  return hex.length > 0 ? hex : null
+const asDisplayRowValue = (value: unknown): number | string | null => {
+  if (typeof value === 'string') return value.trim() !== '' ? value : null
+  return asNumber(value)
 }
 
 /**
- * 非指标字段（行元数据 + 原始帧）。扁平兜底分支必须排除它们，否则会把
- * id / device_id 这类**元数据数字**当成传感器读数渲染出来
- * （实测真实行就带这两个数字键 —— 本文件新增用例抓到过）。
+ * 非指标字段。扁平兜底分支必须排除它们，否则会把 id / device_id 这类
+ * **元数据数字**当成传感器读数渲染出来（实测真实行就带这两个数字键 ——
+ * 本文件新增用例抓到过）。
  *
  * 2026-10-23（逻辑设备移除）：原来这里还有一个 logical_device_id，
  * 后端已删除该列（契约 §2），故从排除表里一并去掉 —— 保留它等于给一个
  * 不可能再出现的键留位。
+ *
+ * 2026-11-11（原始数据退役）：raw_data / raw_hex / data_json / parsed_data
+ * 一并从排除表里删掉。它们原本是 device_data 行上的字段，现在行来自
+ * /devices/:id/history（一字段一行）或 WS 推送，都不再有这些键；
+ * 留着一串永不出现的名字只会让后来者以为还存在那种形状。
  */
 const NON_METRIC_KEYS = new Set([
-  'id', 'device_id', 'node_id', 'channel_id', 'error_code',
+  'id', 'device_id', 'node_id', 'channel_id',
   'timestamp', 'created_at', 'collected_at', 'updated_at',
-  'raw_data', 'raw_hex', 'data_json', 'parsed_data',
 ])
 
+/**
+ * 行数据解析（**本页唯一**的取数入口）。
+ *
+ * 契约（规范 §3.2.5 不得以本地默认值伪造事实）：
+ *   · 取不到 / 形状不认识 ⇒ values = null ⇒ 界面显示「—」；
+ *   · 值是 0 ⇒ values = { rainfall: 0 } ⇒ 界面显示「rainfall: 0.00」。
+ *   二者绝不互相顶替，尤其**不得**把解析失败落成 0。
+ *
+ * 2026-11-11 原始数据退役后**大幅简化**：原来有两条分支（解析 data_json 的
+ * sensors / 扁平兜底），现在历史行与实时行的形状已经统一 —— 指标都直接放在
+ * `data` 里（历史行由 aggregateHistoryRows 产出，实时行由 WS payload 构造）。
+ * data_json 分支随 device_data 表一起删除，坏 JSON 的处理也就没有了对象。
+ */
 export function parseRowData(row: unknown): RowData {
-  if (!row || typeof row !== 'object') return { values: null, numbers: null, rawHex: null }
-  const r = row as DeviceDataRow
+  if (!row || typeof row !== 'object') return { values: null, numbers: null }
+  const r = row as DataRow
 
   let values: Record<string, number | string> | null = null
-  // raw_hex 也可能来自 data_json 内部（真实帧就在 sensors 的同一层）
-  let rawHex = asHex(r.raw_hex) ?? asHex(r.raw_data)
-  const hasDataJson = typeof r.data_json === 'string' && r.data_json.trim() !== ''
 
-  // ① 现代契约：data_json = {"channel_id":1,"raw_hex":"01030200057847","sensors":[{"Name":"rainfall","Value":0.5}]}
-  if (hasDataJson) {
-    let parsed: unknown = null
-    try {
-      parsed = JSON.parse(r.data_json as string)
-    } catch {
-      // 坏 JSON：**不抛**，values 保持 null ⇒ 表格显示「—」而不是 0
-      parsed = null
-    }
-    if (parsed && typeof parsed === 'object') {
-      const dj = parsed as { sensors?: unknown; raw_hex?: unknown; raw_data?: unknown }
-      rawHex = rawHex ?? asHex(dj.raw_hex) ?? asHex(dj.raw_data)
-      const sensors: unknown[] = Array.isArray(dj.sensors) ? dj.sensors : []
-      const entries: Array<[string, number | string]> = []
-      for (const sensor of sensors) {
-        if (!sensor || typeof sensor !== 'object') continue
-        const s = sensor as { Name?: unknown; Value?: unknown; StringValue?: unknown }
-        const value = asDisplayValue(s)
-        if (typeof s.Name === 'string' && s.Name !== '' && value !== null) entries.push([s.Name, value])
-      }
-      // 空 sensors 与"解析失败"同处理：都没有可信数值可展示
-      if (entries.length > 0) values = Object.fromEntries(entries)
-    }
-    // 刻意**不再**退到扁平兜底：行是 data_json 形态却解不出 sensors 时，
-    // 去扫行顶层的数字（id/device_id...）就是把元数据伪造成读数 —— 宁可为「—」。
-    return { values, numbers: numericOnly(values), rawHex }
-  }
-
-  // ② 兼容 { data: {...} } 与扁平 {...} 两种既有形状（既有单测的 fixture 走这里）
+  // ① 首选 { data: {...} }（历史行与实时行都是这个形状）
+  // ② 兼容扁平 {...}（既有用例的 fixture 走这里）
   const flat = r.data && typeof r.data === 'object' && !Array.isArray(r.data)
     ? r.data as Record<string, unknown>
     : r
   const entries = Object.entries(flat)
     .filter(([key]) => !NON_METRIC_KEYS.has(key))
-    .map(([key, value]) => [key, asNumber(value)] as const)
-    .filter((entry): entry is readonly [string, number] => entry[1] !== null)
+    .map(([key, value]) => [key, asDisplayRowValue(value)] as const)
+    .filter((entry): entry is readonly [string, number | string] => entry[1] !== null)
   if (entries.length > 0) values = Object.fromEntries(entries)
 
-  return { values, numbers: numericOnly(values), rawHex }
+  return { values, numbers: numericOnly(values) }
 }
 
 /** 从展示值里挑出纯数值子集（统计卡 / 趋势图专用），字符串读数不得进入。 */
@@ -538,7 +539,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import client from '@/api/client'
-import { getErrorInfo } from '@/utils/errorCode'
+import { aggregateHistoryRows, looksDownsampled, type CollectedRow } from './historyRows'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
@@ -570,12 +571,41 @@ const rowDetailRow = ref<Record<string, any> | null>(null)
 const TIME_RANGE_VALUES = ['1h', '24h', '7d', '30d'] as const
 
 const deviceList = ref<EdgeDevice[]>([])
-const historyData = ref<any[]>([])
+/**
+ * 当前页的历史行（一次采集一行）。
+ *
+ * ⚠ 这**不是**接口原始行：/devices/:id/history 返回一字段一行，必须先经
+ * aggregateHistoryRows() 转置成"一次采集一行"，否则表格一条采集会炸成 N 行。
+ */
+const historyData = ref<CollectedRow[]>([])
+/** 当前查询窗口内的**全部**采集行（分页从它切片，historyData 是它的一页）。 */
+const allHistoryRows = ref<CollectedRow[]>([])
 const chartSeries = ref<any[]>([])
 const loading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+/**
+ * 本表请求服务端降采样的上限（**行**，不是采集数）。
+ *
+ * 为什么是 2000 而不是趋势图的 500：
+ *   · 趋势图要的是"形状"，500 个点足够画线；
+ *   · 表格要的是"明细"，且 /devices/:id/history 一行 = **一个字段**。
+ *     一台 29 字段设备，2000 行只够约 69 次采集（2000/29）—— 已经是表格
+ *     一页（20 条）的 3.4 倍。再小就会让每次采集只剩几个字段，表格看起来像
+ *     "设备只上报了一半指标"。
+ *
+ * 为什么必须传它：服务端没有分页，不传就是把整个窗口（29 字段 × 24h ≈ 246
+ * 万行）一次拉回浏览器。传了才在服务端抽样，响应体可控。
+ */
+const HISTORY_MAX_POINTS = 2000
+/**
+ * 最近一次响应是否被服务端降采样过。
+ *
+ * 降采样是**按行**（一字段一行）抽的 ⇒ 抽得越狠，每条采集剩下的字段越少。
+ * 界面必须明说，否则"只剩 1 个指标"会被误认为设备只上报了一个字段。
+ */
+const historyDownsampled = ref(false)
 
 // 实时数据
 const realtimeEnabled = ref(false)
@@ -604,9 +634,10 @@ interface RealtimeDataPayload {
   collected_at?: string
   data?: Record<string, unknown>
   sensors?: Record<string, unknown>
-  /** WS 帧里的原始 hex（stores/websocket.ts 的 payload 契约），随行落库给 parseRowData 解析 */
-  raw_hex?: unknown
-  raw_data?: unknown
+  // ⚠ 不再声明 raw_hex / raw_data：WS 帧仍可能带这两个字段（stores/websocket.ts
+  // 的 payload 契约由 ChannelTerminal 消费），但**本页已不消费它们** ——
+  // 「原始数据」列随 device_data 退役已删除。声明一个从不读取的可选字段
+  // 只会让后来者以为页面上还存在那种展示。
 }
 const availableCategories = ref<MeasurementCategory[]>([])
 const compareCategories = ref<MeasurementCategory[]>([])
@@ -687,7 +718,7 @@ const calculateStats = () => {
 
   const times = items
     .map(item => item.timestamp || item.created_at || item.collected_at)
-    .filter(Boolean)
+    .filter((t): t is string => typeof t === 'string' && t !== '')
     .map(t => new Date(t).getTime())
     .filter(t => !Number.isNaN(t))
     .sort((a, b) => a - b)
@@ -817,26 +848,84 @@ const fetchData = async () => {
         break
     }
 
-    const response = await edgeDeviceApi.getHistoryData(queryForm.deviceId, {
+    // ⚠ 换源（2026-11-11 原始数据退役）：
+    //   旧  GET /edge-devices/:id/data        —— device_data 分页，一行一次采集
+    //   新  GET /devices/:id/history          —— 帧表解码，**一字段一行**、无分页
+    //
+    // 两个差异都在这一层抹平，下游（表格/统计卡/CSV）形状不变：
+    //   ① 一字段一行 → aggregateHistoryRows() 按 timestamp 聚合成一次采集一行；
+    //   ② 无分页 → 整窗取回后在前端切片（allHistoryRows + 分页器改成本地翻页）。
+    const rows = await edgeDeviceApi.getDeviceHistory(queryForm.deviceId, {
       start_time: startTime.toISOString(),
       end_time: endTime.toISOString(),
-      page: currentPage.value,
-      page_size: pageSize.value
+      max_points: HISTORY_MAX_POINTS,
     })
 
-    historyData.value = response.items || []
-    total.value = response.total || 0
+    allHistoryRows.value = aggregateHistoryRows(rows)
+    total.value = allHistoryRows.value.length
+    historyDownsampled.value = looksDownsampled(rows.length, HISTORY_MAX_POINTS)
+    applyPage()
 
     await loadDeviceCategories()
     calculateStats()
 
     // 构建图表数据：从 unified_data API 获取解析后的数值数据
     buildChartSeries()
-  } catch {
+  } catch (error) {
+    // 413 是**服务端主动拒绝**（帧数 × 字段数超 300 万行的内存护栏），
+    // 与"网络失败/接口 500"是两回事：它不该被说成"获取历史数据失败"，
+    // 因为用户缩小时间范围就能成功 —— 文案必须给出这个可执行动作。
+    if (isPayloadTooLarge(error)) {
+      feedback.error('时间范围内的数据量过大，服务端已拒绝：请缩小时间范围后重试')
+      allHistoryRows.value = []
+      historyData.value = []
+      total.value = 0
+      historyDownsampled.value = false
+      return
+    }
     feedback.error('获取历史数据失败')
   } finally {
     loading.value = false
   }
+}
+
+/**
+ * 分页**改成本地**：/devices/:id/history 没有 page/page_size 参数。
+ *
+ * 这不是"偷懒不接服务端分页"——该端点根本没有分页能力（它按时间窗一次性
+ * 解码返回，见 backend/internal/api/handler_data.go 的 /devices/:id/history）。
+ * 要在前端保持"翻页可用"，只能整窗取回后切片。
+ *
+ * 代价（已权衡）：一次取 max_points=2000 行，约 10~20 次采集的量级；
+ * 对表格一页 20 条而言足够翻好几页。若不做降采样上限，24h × 29 字段 ≈ 246 万行
+ * 会把浏览器拖死 —— 所以 max_points 是这条路的**必要**参数，不是优化。
+ */
+function applyPage() {
+  const start = (currentPage.value - 1) * pageSize.value
+  historyData.value = allHistoryRows.value.slice(start, start + pageSize.value)
+  calculateStats()
+}
+
+/**
+ * 翻页 / 改每页条数的入口 —— **只重排当前页，不重新请求**。
+ *
+ * 改造前这两个事件直连 fetchData()：那时靠服务端分页，翻页必须发请求。
+ * 现在数据已经整窗在手（前端切片），再发请求是纯浪费 —— 而 /devices/:id/history
+ * 每次都要解码整个时间窗，代价远高于一次数组切片。
+ */
+function handlePageChange() {
+  // size 变化后当前页可能越界（第 7 页 + 每页 100 条 ⇒ 只剩 2 页）：夹回有效范围，
+  // 否则会显示空表却没有任何解释。
+  const maxPage = Math.max(1, Math.ceil(allHistoryRows.value.length / pageSize.value))
+  if (currentPage.value > maxPage) currentPage.value = maxPage
+  applyPage()
+}
+
+/** 是否 413（后端内存护栏拒绝）。axios 把它包成 ApiError，status 挂在 error.status。 */
+function isPayloadTooLarge(error: unknown): boolean {
+  const status = (error as { status?: unknown; response?: { status?: unknown } } | null)?.status
+  if (status === 413) return true
+  return (error as { response?: { status?: unknown } } | null)?.response?.status === 413
 }
 
 /**
@@ -866,7 +955,10 @@ const buildChartSeries = async () => {
   chartFailed.value = false
   /** 逐个类别回退时统计"请求本身失败"的条数：全失败且无序列 ⇒ 真失败（错误态）。 */
   let fallbackFailures = 0
-  if (historyData.value.length === 0) {
+  // 判据用 allHistoryRows（整窗）而不是 historyData（当前页）：
+  // 趋势图画的是整个时间范围，用当前页判断"有没有数据"会让"第 2 页为空但
+  // 第 1 页有数据"的窗口把整张图判成无数据。
+  if (allHistoryRows.value.length === 0) {
     chartSeries.value = []
     chartLoading.value = false
     syncMobileMetric()
@@ -999,16 +1091,17 @@ const buildChartSeries = async () => {
       && fallbackFailures === categoryNames.length
   } catch (error) {
     logger.error('获取趋势数据失败', { error: String(error) })
-    // Fallback: 从 data_json 提取数值字段（与表格/统计卡同一解析入口）
-    // 趋势是数值图：同样只看 numbers，字符串读数不能进（否则画出掉到 0 的假线）
-    const numericKeys = Object.keys(parseRowData(historyData.value[0]).numbers ?? {})
+    // Fallback: 直接用已聚合的历史行里出现过的数值字段建序列
+    // （与表格/统计卡同一解析入口）。趋势是数值图：同样只看 numbers，
+    // 字符串读数不能进（否则画出掉到 0 的假线）。
+    const numericKeys = Object.keys(parseRowData(allHistoryRows.value[0]).numbers ?? {})
 
     if (numericKeys.length > 0) {
       chartSeries.value = numericKeys.map(key => ({
         name: key,
         unit: '',
         category: key,
-        data: historyData.value
+        data: allHistoryRows.value
           .filter((item) => {
             const t = item.timestamp || item.collected_at || item.created_at
             return t && !t.startsWith('0001-01-01')
@@ -1119,11 +1212,6 @@ function rowTimeText(row: Record<string, any> | null): string {
   return time ? formatTime(time) : UNKNOWN
 }
 
-function rowRawText(row: Record<string, any> | null): string {
-  const rawHex = row ? parseRowData(row).rawHex : null
-  return rawHex ? formatRawData(rawHex) : UNKNOWN
-}
-
 interface RowDetailEntry { key: string; label: string; value: string; unit: string }
 function rowDetailEntries(row: Record<string, any> | null): RowDetailEntry[] {
   const values = row ? parseRowData(row).values : null
@@ -1164,28 +1252,32 @@ const handleDataUpdate = (message: WebSocketMessage) => {
   if (!payload || payload.edge_device_id !== queryForm.deviceId) return
 
   realtimeCount.value++
-  // 形状必须与表格期望一致：历史行推入表格后由 parseRowData 解析，
-  // raw_hex 放在行内部，否则实时行的「原始数据」列会因数据只在 payload 上而显示「—」。
-  const newItem = {
-    collected_at: payload.collected_at || new Date().toISOString(),
-    timestamp: payload.collected_at || new Date().toISOString(),
-    data: (payload.data || payload.sensors || {}) as Record<string, unknown>,
-    raw_hex: asHex(payload.raw_hex) ?? asHex(payload.raw_data) ?? undefined,
-    error_code: 0
+  // 形状必须与表格期望一致：一次采集一行、指标在 data 里。
+  //
+  // 2026-11-11 原始数据退役：不再往行上挂 raw_hex / error_code ——
+  // 「原始数据」「错误码」两列已删除（前者无数据源，后者一直是 undefined）。
+  const timestamp = payload.collected_at || new Date().toISOString()
+  const newItem: CollectedRow = {
+    // WS 行没有后端合成 id，用时间戳当 key：同一时间戳的两次推送本就该合并
+    id: 0,
+    timestamp,
+    created_at: timestamp,
+    data: (payload.data || payload.sensors || {}) as Record<string, number>,
+    collected_at: timestamp,
   }
 
-  // 添加到实时数据列表
+  // 添加到实时数据列表（页面上的「共 N 条」计数用）
   realtimeData.value.unshift(newItem)
   if (realtimeData.value.length > 50) {
     realtimeData.value = realtimeData.value.slice(0, 50)
   }
 
-  // 同时更新历史数据表格（添加到顶部）
-  historyData.value.unshift(newItem)
-  if (historyData.value.length > pageSize.value) {
-    historyData.value = historyData.value.slice(0, pageSize.value)
-  }
+  // 同时插入表格数据源（顶部），并整体重排当前页：
+  // 直接改 historyData 会把"当前页切片"这个不变量破坏掉（第 2 页会跟着变），
+  // 所以改 allHistoryRows 再 applyPage()。
+  allHistoryRows.value.unshift(newItem)
   total.value++
+  applyPage()
 
   // 标记stats为脏（统计计算），但不标记chartDirty
   statsDirty = true
@@ -1243,15 +1335,18 @@ const handleExport = () => {
   const device = deviceList.value.find(d => d.id === queryForm.deviceId)
   const deviceName = device?.name || queryForm.deviceId
 
-  const rows = [['时间', '数据', '原始数据', '错误码']]
+  // 2026-11-11 原始数据退役：CSV 同步删掉「原始数据」列（raw_hex 无数据源）
+  // 与「错误码」列（后端从未返回 error_code，该列一直是常量 0）。
+  //
+  // 导出范围仍是**当前页**（与表格同源）。这不是本次引入的限制：改造前
+  // historyData 就只装接口当前页的 20 行（见 docs/分析/功能与UIUX优化方案独立复核
+  // -2026-09-23.md 的 R3-4），只是现在"当前页"由前端切片算出。
+  const rows = [['时间', '数据']]
   for (const item of historyData.value) {
-    // 导出与表格同源：JSON.parse 后再按行序列化，直接把 data_json 原串写进单元格没有意义
-    const { values, rawHex } = parseRowData(item)
+    const { values } = parseRowData(item)
     rows.push([
-      formatTime(item.timestamp || item.created_at || item.collected_at),
+      formatTime(item.timestamp || item.created_at || item.collected_at || ''),
       values ? JSON.stringify(values) : '',
-      rawHex ?? '',
-      String(item.error_code || 0)
     ])
   }
 
@@ -1323,8 +1418,7 @@ const formatData = (data: Record<string, unknown> | null | undefined) => {
   // 也会落回「—」而不是渲染成 "0" 或空白。
   if (!data || typeof data !== 'object' || Array.isArray(data)) return UNKNOWN
 
-  // Filter out raw_data from display (shown in separate column)
-  const entries = Object.entries(data).filter(([key]) => key !== 'raw_data')
+  const entries = Object.entries(data)
   if (entries.length === 0) return UNKNOWN
 
   return entries
@@ -1347,22 +1441,8 @@ const formatData = (data: Record<string, unknown> | null | undefined) => {
     .join(', ')
 }
 
-// 参数放宽到可空：调用点（表格列）拿到的是 parseRowData 的 rawHex，类型就是 string | null；
-// 函数体本来就以 !rawData 兜底返回 UNKNOWN，放宽类型不改变任何行为。
-const formatRawData = (rawData?: string | Record<string, any> | null) => {
-  if (!rawData) return UNKNOWN
-  // raw_data may be a hex string from data field, or base64 from raw_data field
-  if (typeof rawData === 'string') {
-    // Detect hex pattern (all lowercase hex chars)
-    if (/^[0-9a-f]+$/.test(rawData)) {
-      const bytes = rawData.length / 2
-      return `${bytes}B hex`
-    }
-    // base64 or other
-    return rawData.length > 20 ? rawData.substring(0, 20) + '...' : rawData
-  }
-  return JSON.stringify(rawData)
-}
+// 2026-11-11 原始数据退役：原 formatRawData()（把 raw_hex 渲染成 "7B hex"）
+// 随「原始数据」列一并删除 —— 没有数据源了，留着它就是死代码。
 
 watch(compareDevices, async () => {
   if (compareMode.value && compareDevices.value.length >= 2) {

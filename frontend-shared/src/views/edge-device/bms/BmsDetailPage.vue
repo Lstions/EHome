@@ -598,7 +598,6 @@ import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useControlAction } from '@/composables/useControlAction'
 import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
 import { deviceOperationApi } from '@/api/deviceOperation'
-import type { DataItem } from '@/types/realtime'
 
 // ════════════ 通用小工具 ════════════
 const DASH = '—'
@@ -728,38 +727,41 @@ const wsStore = useWebSocketStore()
  * 改前自建页头没有这个状态位 —— 统一页头后补上，用户一眼能看出数据是否在推。
  */
 const wsConnected = computed(() => wsStore.isConnected)
-const { dataItems, latestData } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
+// 只消费 latestData（按 sensor_name 取值的字典）。dataItems（实时流列表）本页
+// 已于 2026-10-21 按用户要求移除渲染，不再解构 —— 留着会是一个永不被读的 ref。
+const { latestData } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
 
-/** 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。 */
+/**
+ * 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。
+ *
+ * 2026-11-11 原始数据退役：原 `/latest-data`（device_data 最后一条原始记录）
+ * 已随表删除，改读 `/latest-values`（每个传感器各自的最新值，跨命令聚合）。
+ *
+ * 这不是"换个地址拿同一份数据"，展示口径**变好了**：/latest-data 只含最后
+ * 执行的那条命令的物理量，对 ASCII 一问一答设备（逆变器，9 条命令/周期）
+ * 表现为"页面大部分是空的"；/latest-values 是全集。本页各指标卡本来就把
+ * latestData 当「按 sensor_name 取值的字典」用（latestData.value?.cell_voltage_1
+ * 之类），形状完全兼容。
+ */
 async function loadLatestSnapshot() {
   snapshotError.value = ''
   snapshotLoading.value = true
   try {
-    const response = await edgeDeviceApi.getLatestData(deviceId.value)
-    if (!response) return
-    let parsed: Record<string, any> = response.data || {}
-    if (response.data_json) {
-      try {
-        const dj = JSON.parse(response.data_json)
-        if (dj.sensors && Array.isArray(dj.sensors)) {
-          parsed = {}
-          for (const s of dj.sensors) {
-            // StringValue 优先：字符串型读数的真值在 StringValue 里，Value 恒为 0。
-            const sv = s?.StringValue
-            parsed[s.Name] = (typeof sv === 'string' && sv.trim() !== '') ? sv : s.Value
-          }
-        }
-      } catch { /* 解析失败时退回 data 字段 */ }
-    }
+    const values = await edgeDeviceApi.getLatestValues(deviceId.value)
+    if (values.length === 0) return
+    // 只取数值：/latest-values 的契约是 {sensor_name, value, unit, timestamp}。
+    //
+    // ⚠ 能力损失（方案 §3.1 已裁决，非本次引入）：字符串型读数
+    // （hardware_version="V19" / serial_number）原来只存在
+    // device_data.data_json.str_values 里，随表删除后无落库位置 ——
+    // 生产实测该字段全库 0 行，这条路径从未被走过，故不丢真实数据。
+    const parsed: Record<string, any> = {}
+    for (const v of values) parsed[v.sensor_name] = v.value
     latestData.value = { ...(latestData.value ?? {}), ...parsed }
-    const item: DataItem = {
-      id: 'latest-' + Date.now(),
-      timestamp: response.created_at || new Date().toISOString(),
-      data: parsed,
-      rawData: response.raw_data,
-      isRealtime: false,
-    }
-    dataItems.value = [item, ...dataItems.value].slice(0, REALTIME_MAX_ITEMS)
+    // 实时数据流只由 WebSocket 填充：快照是"现在各字段是多少"的点，
+    // 不是"刚收到了一帧"的事件。把快照包装成一条历史 item 塞进流里，
+    // 会凭空造出一条用户从未见过的"收到记录"（时间戳还是快照时刻）。
+    // 该列表已于 2026-10-21 按用户要求从页面移除，这里顺带删掉死写入。
   } catch (e) {
     // 快照只是兜底：失败不弹 toast，但原因常驻页面（WS 仍会带来数据）。
     snapshotError.value = extractErrorMessage(e, '最新快照加载失败')

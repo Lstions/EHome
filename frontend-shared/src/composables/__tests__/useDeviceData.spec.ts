@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { useDeviceData } from '../useDeviceData'
 
-const { mockFetchDetail, mockGetLatestData, mockSyncDevice, success, error, message } = vi.hoisted(() => ({
+const { mockFetchDetail, mockGetLatestValues, mockSyncDevice, success, error, message } = vi.hoisted(() => ({
   mockFetchDetail: vi.fn(),
-  mockGetLatestData: vi.fn(),
+  mockGetLatestValues: vi.fn(),
   mockSyncDevice: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
@@ -16,7 +16,8 @@ vi.mock('@/stores/edgeDevice', () => ({
   useEdgeDeviceStore: () => ({ fetchDetail: mockFetchDetail }),
 }))
 vi.mock('@/api/edgeDevice', () => ({
-  edgeDeviceApi: { getLatestData: mockGetLatestData },
+  // 2026-11-11 原始数据退役：getLatestData 已删，composable 只调 /latest-values
+  edgeDeviceApi: { getLatestValues: mockGetLatestValues },
 }))
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ connected: false, subscribe: vi.fn(() => vi.fn()) }),
@@ -53,7 +54,7 @@ describe('useDeviceData', () => {
 
   it('does not report refresh success when latest data fails', async () => {
     mockFetchDetail.mockResolvedValue({ id: 1, name: 'Device' })
-    mockGetLatestData.mockRejectedValue(new Error('failed'))
+    mockGetLatestValues.mockRejectedValue(new Error('failed'))
     const state = useDeviceData(ref(1))
     await state.handleRefresh()
     expect(success).not.toHaveBeenCalledWith('数据已刷新')
@@ -63,6 +64,56 @@ describe('useDeviceData', () => {
       type: 'error',
       duration: 5000,
     }))
+  })
+
+  // ── 2026-11-11 原始数据退役：快照来源只剩 /latest-values ──
+  describe('fetchLatestData（/latest-values 单一路径）', () => {
+    it('把「每传感器一行」的快照铺成 latestData 的字段字典', async () => {
+      mockFetchDetail.mockResolvedValue({ id: 1, name: 'Device' })
+      mockGetLatestValues.mockResolvedValue([
+        { sensor_name: 'total_voltage', value: 52.4, unit: 'V', timestamp: '2026-11-11T06:00:00Z' },
+        { sensor_name: 'rsoc', value: 87, unit: '%', timestamp: '2026-11-11T06:00:00Z' },
+      ])
+      const state = useDeviceData(ref(1))
+      await state.fetchLatestData()
+      expect(mockGetLatestValues).toHaveBeenCalledWith(1)
+      expect(state.latestData.value).toEqual({ total_voltage: 52.4, rsoc: 87 })
+    })
+
+    it('快照是**合并**不是覆盖：WS 已推来的、快照里没有的字段必须保留', async () => {
+      // 快照是几秒前的点，WS 才是最新。直接赋值会把 WS 的新值抹掉（回退成旧值）。
+      mockFetchDetail.mockResolvedValue({ id: 1, name: 'Device' })
+      mockGetLatestValues.mockResolvedValue([
+        { sensor_name: 'total_voltage', value: 52.4, unit: 'V', timestamp: '2026-11-11T06:00:00Z' },
+      ])
+      const state = useDeviceData(ref(1))
+      await state.fetchLatestData()
+      state.latestData.value = { ...(state.latestData.value ?? {}), current: 3.1 }
+      await state.fetchLatestData()
+      expect(state.latestData.value).toEqual({ total_voltage: 52.4, current: 3.1 })
+    })
+
+    it('实时数据流**只由 WebSocket 填充**：快照不再往 dataItems 里塞历史项', async () => {
+      // 改前会把快照包装成一条 isRealtime:false 的 item 塞进流里 —— 那是
+      // "现在每个字段是多少"被伪装成"刚收到了一帧"，用户会看到一条从未发生的记录。
+      // 端点删除后这个语义混装一并结束，本用例是防它被加回来的回归锁。
+      mockFetchDetail.mockResolvedValue({ id: 1, name: 'Device' })
+      mockGetLatestValues.mockResolvedValue([
+        { sensor_name: 'total_voltage', value: 52.4, unit: 'V', timestamp: '2026-11-11T06:00:00Z' },
+      ])
+      const state = useDeviceData(ref(1))
+      await state.fetchLatestData()
+      expect(state.realtimeDataItems.value).toEqual([])
+    })
+
+    it('快照为空数组时不改 latestData（空=还没预热，不是"清零"）', async () => {
+      mockFetchDetail.mockResolvedValue({ id: 1, name: 'Device' })
+      mockGetLatestValues.mockResolvedValue([])
+      const state = useDeviceData(ref(1))
+      state.latestData.value = { total_voltage: 52.4 }
+      await state.fetchLatestData()
+      expect(state.latestData.value).toEqual({ total_voltage: 52.4 })
+    })
   })
 
   it('I-1: 同步到 HA 失败时展示服务端 message 而非拼接文案', async () => {

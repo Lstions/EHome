@@ -102,79 +102,48 @@ export function useDeviceData(
 
   // ── API: fetch latest data snapshot ──────────────────────────
   //
-  // 两个端点并用，各自不可替代（2026-10-18 实测缺陷后改）：
+  // 2026-11-11 原始数据退役后，只剩**一条**取数路径：
   //
-  //   /latest-values  ⇒ **每个传感器**的最新值（跨命令聚合）。这是详情页
-  //                     展示实时读数必须用的：ASCII 一问一答设备（逆变器）
-  //                     一个轮询周期发 9 条命令、每条各带 2~14 个物理量，
-  //                     而 /latest-data 只返回**最后一条命令**的记录 ⇒
-  //                     实测 36 个字段里只显示 3 个，其余在库里但界面看不到。
+  //   /latest-values ⇒ **每个传感器**的最新值（跨命令聚合）。
   //
-  //   /latest-data    ⇒ 最新**一条原始记录**（含 raw_data），用于实时数据流
-  //                     逐条展示"刚收到了什么帧"。它是有意义的，不能删。
+  // 原 `/latest-data` 已随 device_data 表一并删除。它当年存在的理由是
+  // "拿最新一条原始记录喂实时数据流"，而这正是它与本页面主诉求冲突的地方：
+  // ASCII 一问一答设备（逆变器）一个轮询周期发 9 条命令、每条各带 2~14 个
+  // 物理量，单条记录只含**最后执行的那条命令**的产物 —— 实测 36 个字段里
+  // 只显示 3 个，其余在库里但界面永远看不到。
   //
-  // 合并顺序：先取全量快照，再用单条记录覆盖同名字段（后者更新）。
-  // latest-values 失败**不阻断**页面 —— 退化为原来的单条行为，而不是白屏。
+  // 实时数据流（realtimeDataItems）**只由 WebSocket 推送填充**：
+  // 它是"刚收到了什么"的流，而快照是"现在每个字段是多少"的点 —— 把快照
+  // 塞进流里等于凭空造一条用户从未见过的"收到记录"。删除端点顺带结束了
+  // 这个语义混装。
   let latestDataSequence = 0
   const fetchLatestData = async (throwOnError = false) => {
     const id = deviceId.value
     if (id === null) return
     const sequence = ++latestDataSequence
     try {
-      // ① 全量传感器快照（跨命令）
-      let aggregated: Record<string, unknown> | null = null
-      try {
-        const values = await edgeDeviceApi.getLatestValues(id)
-        if (sequence !== latestDataSequence || deviceId.value !== id) return
-        if (values.length > 0) {
-          aggregated = {}
-          for (const item of values) {
-            aggregated[item.sensor_name] = item.value
-          }
-        }
-      } catch (error) {
-        logger.error('获取全量传感器快照失败，退化为单条记录', { error: String(error) })
-      }
-
-      if (aggregated) {
-        latestData.value = { ...(latestData.value || {}), ...aggregated }
-      }
-
-      const response = await edgeDeviceApi.getLatestData(id)
+      const values = await edgeDeviceApi.getLatestValues(id)
       if (sequence !== latestDataSequence || deviceId.value !== id) return
-      if (response) {
-        let parsedData = response.data || {}
-        if (response.data_json) {
-          try {
-            const dj = JSON.parse(response.data_json)
-            if (dj.sensors && Array.isArray(dj.sensors)) {
-              parsedData = {}
-              for (const s of dj.sensors) {
-                // StringValue 优先：字符串型读数（如 BMS hardware_version="V19"）的
-                // 真值在 StringValue 里，而 Value 恒为 0 —— 只取 Value 会显示成 0，
-                // 比「—」更糟（0 看起来像真实读数）。口径同 DeviceControlPanel.vue:76。
-                const sv = s?.StringValue
-                parsedData[s.Name] = (typeof sv === 'string' && sv.trim() !== '') ? sv : s.Value
-              }
-            }
-          } catch { /* ignore parse error */ }
-        }
-        // ⚠ **合并**，不是覆盖。
-        //
-        // 这里曾经写的是 `latestData.value = parsedData` —— 单条记录只含
-        // 最后一条命令的物理量（逆变器实测 3/36 个），直接赋值会把上面刚取到的
-        // 全量快照整个抹掉，于是页面又变回"只有 3 个字段"。
-        // 语义：单条记录里的同名字段**更新**（它更新），其余保留。
-        latestData.value = { ...(latestData.value || {}), ...parsedData }
-        // Prepend to realtime data stream as a historical item
-        realtimeDataItems.value = [{
-          id: `latest-${Date.now()}`,
-          timestamp: response.created_at || new Date().toISOString(),
-          data: parsedData,
-          rawData: response.raw_data,
-          isRealtime: false,
-        }, ...realtimeDataItems.value].slice(0, maxItems)
+      if (values.length === 0) return
+      // ⚠ **合并**，不是覆盖。
+      //
+      // 这里曾经写的是 `latestData.value = parsedData` —— 快照里的同名字段
+      // 应**更新**已有值，其余保留：页面可能已经通过 WS 收到了更新的读数，
+      // 而快照是几秒前的。直接赋值会把 WS 的新值抹掉（回退成旧值）。
+      // 只取数值：/latest-values 的契约就是 {sensor_name, value, unit, timestamp}。
+      //
+      // ⚠ 已知的**能力损失**（不是本次引入的 bug）：字符串型读数
+      // （BMS hardware_version="V19" / serial_number）过去只存在
+      // device_data.data_json.str_values 里，随表删除后**没有任何落库位置**
+      // （unified_data 与 telemetry_frame 都没有 StringValue 列）。
+      // 方案 §3.1 实测：生产全库 str_values 0 行 —— 这条路径从未被走过，
+      // 所以这次退役不会丢任何真实数据；但它意味着"将来读 BMS 版本号"
+      // 需要新的存储设计，不能指望接口自动带回来。
+      const aggregated: Record<string, unknown> = {}
+      for (const item of values) {
+        aggregated[item.sensor_name] = item.value
       }
+      latestData.value = { ...(latestData.value || {}), ...aggregated }
     } catch (error: any) {
       logger.error('获取最新数据失败', { error: String(error) })
       if (throwOnError) throw error
