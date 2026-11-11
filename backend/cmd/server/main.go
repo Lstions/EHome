@@ -1181,9 +1181,27 @@ func main() {
 		//   外层 batch 卡住。原注释是对的。这段留在这里是为了记住那次误读。）
 		datalifecycle.SetFrameDecoder(func(ctx context.Context, db *gorm.DB, deviceID uint, from, to time.Time) ([]datalifecycle.FramePoint, error) {
 			window := to.Sub(from)
+			// ============ 帧预算必须用 MaxScanFrames（2026-11-11 生产事故修复）============
+			//
+			// 这里此前传的是 telemetry.MaxDecodeFrames（32768），**错了语义**：
+			// MaxDecodeFrames 是「一次性解码（DecodeRange 单批）」的上限，而
+			// DecodeRangeAnchoredBounded 的第 8 个参数是**扫描预算**（从锚点起最多
+			// 扫多少帧）—— 两者不是一回事，后者的正确取值是 MaxScanFrames（262144）。
+			//
+			// 生产现场（2026-11-11 实测）：device14 的 keyframe 在 2026-11-08 15:57:58，
+			// 下一个在 2026-11-10 05:21:20 —— 中间 32 小时没有关键帧。回填 11-10 的
+			// 每一段（段宽 1h）都要先从 32 小时前的锚点预热 ≈ 118,922 帧：
+			//	  · 预算 32768 ⇒ 只扫到前 27%，FramesTruncated>0 ⇒ 本段报错
+			//	  · 整个单元回填失败 ⇒ MarkRollupCoverage(partial, buckets=0)
+			//	  · 但 rollup_1m 里那一天其实有 1439 个分钟桶（数据是齐的！）
+			//	  ⇒ 读路径 RollupCoverageVerified 只认 complete ⇒ 判定「覆盖未验证」
+			//	  ⇒ 24h/7d/30d 图表全报「超过帧表单次解码上限 6h，且该窗口尚未被分钟聚合覆盖」
+			//
+			// 即：**一个常量选错，让用户可见的图表坏掉，而底层数据完好**。
+			// 262144 @1Hz ≈ 72.8 小时，覆盖 32 小时锚点跨度有 2.3 倍余量。
 			pts, stats, err := telemetry.DecodeRangeAnchoredBounded(
 				ctx, db, telemetryDict, deviceID, from, to, nil,
-				window*2, telemetry.MaxDecodeFrames)
+				window*2, telemetry.MaxScanFrames)
 			if err != nil {
 				return nil, err
 			}
@@ -1198,16 +1216,21 @@ func main() {
 			//
 			// 相比之下，图表少一段是「用户能看见」，这个错了是「用户看不见」。
 			//
-			// ⚠ 当前默认段宽 1h × 1fps = 3,600 帧，远低于上限，**这个分支在生产
-			//   不会触发**。它是防线不是现场 bug —— 触发条件是一台 ≥10 fps 的设备
-			//   （interval_ms=100，合法配置）。加它是因为「触发时无声」，不是因为
-			//   「现在已经在错」。
+			// ⚠ 原注释写「段宽 1h × 1fps = 3,600 帧，远低于上限，这个分支在生产不会触发」
+			//   —— **这个判断是错的，2026-11-11 已在生产触发**。错在只算了「段内帧数」，
+			//   没算「锚点预热段帧数」：预算计的是**从锚点起扫过的全部帧**，而锚点在
+			//   32 小时前时预热就要 11.5 万帧。触发条件不是「高频设备」，而是
+			//   「**关键帧间隔 × 采样率 > 预算**」—— 1 Hz 设备只要 9.1 小时没有关键帧
+			//   就会撞上 32768。
+			//
+			// 保留这个分支仍然正确（截断必须失败，否则不完整统计会被标 complete 永不重试），
+			// 但预算是 MaxScanFrames 之后，正常形态（≤72.8 小时无关键帧）不会被它拦下。
 			if stats.FramesTruncated > 0 {
 				return nil, fmt.Errorf("rollup backfill segment truncated: device=%d [%s,%s) "+
-					"dropped %d oldest frames (seg=%s, limit=%d); 段内帧数超上限 —— "+
-					"继续回填会把不完整统计标成 complete（永不重试）",
+					"dropped %d oldest frames (seg=%s, budget=%d, anchor_span 过大); "+
+					"段内帧数超上限 —— 继续回填会把不完整统计标成 complete（永不重试）",
 					deviceID, from.Format(time.RFC3339), to.Format(time.RFC3339),
-					stats.FramesTruncated, to.Sub(from), telemetry.MaxDecodeFrames)
+					stats.FramesTruncated, to.Sub(from), telemetry.MaxScanFrames)
 			}
 			out := make([]datalifecycle.FramePoint, len(pts))
 			for i := range pts {

@@ -39,14 +39,28 @@ const (
 	// LatestSnapshotLookback 是 LatestSnapshot 无关键帧时的回退窗口。
 	LatestSnapshotLookback = 24 * time.Hour
 
-	// maxScanFrames 是分页解码的**扫描帧数**硬上限：从锚点起最多扫这么多帧。
+	// MaxScanFrames 是分页解码的**扫描帧数**硬上限：从锚点起最多扫这么多帧。
 	//
 	// 为什么是 8 × MaxDecodeFrames = 262144 帧：分页解码去掉了「按请求窗口截断」
 	// 的墙（保留锚点），但仍需要防「锚点远古 + 大窗口」把无界帧拉进内存/CPU。
 	// 262144 帧 @1 Hz ≈ 72.8 小时，覆盖生产最坏形态（37 小时历史无关键帧 + 6 小时
 	// 请求窗口 ≈ 43 小时）仍有 ~1.7 倍余量；10 fps 设备也只多扫 7.3 小时。
 	// 超限**不静默**：剩余未解码帧数记进 DecodeStats.FramesTruncated，调用方据此报错/回落。
-	maxScanFrames = 8 * MaxDecodeFrames
+	//
+	// ============ 为什么导出（2026-11-11）============
+	//
+	// rollup 回填（cmd/server/main.go 的 SetFrameDecoder）需要它。此前那里显式传了
+	// MaxDecodeFrames（32768），把本默认值覆盖掉了 —— 而 32768 是**一次性解码**
+	// （DecodeRange 单批）的上限，语义不是「扫描预算」。
+	//
+	// 后果（生产实测 2026-11-11）：device14 在 2026-11-08 15:57 之后到 11-10 05:21
+	// 之间没有关键帧，回填 11-10 的每一段都要从 32 小时前的锚点预热 ≈ 11.5 万帧，
+	// 超过 32768 ⇒ FramesTruncated>0 ⇒ 该单元标 partial ⇒ 读路径判定「覆盖未验证」
+	// ⇒ 24h/7d/30d 图表全部报「超过帧表单次解码上限」⇒ **用户可见的图表坏掉**。
+	// 导出它，让调用方按语义选对常量（扫描预算 vs 单批上限）。
+	MaxScanFrames = 8 * MaxDecodeFrames
+	// maxScanFrames 是包内别名，保持既有内部调用点不变。
+	maxScanFrames = MaxScanFrames
 	// decodeScanPageSize 是分页解码每页取的帧数（≤ maxScanFrames）。
 	// 8192 帧 @1 Hz ≈ 2.3 小时/页；一页的解码工作 ≈ 几十毫秒，避免单页过大。
 	decodeScanPageSize = 8192
