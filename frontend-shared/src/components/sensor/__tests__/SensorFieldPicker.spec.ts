@@ -291,6 +291,61 @@ describe('change-field：具体字段给对象，族/手输给 null', () => {
   })
 })
 
+/**
+ * 载入后回填：编辑存量规则时用户**没有任何交互** —— 父组件只把字符串写进 modelValue，
+ * 拿不到 unit/precision，阈值控件就只能是一个裸数字（这正是"30 是 °C 还是 %"的由来）。
+ * 因此目录一就绪，组件要主动把「当前值的字段对象」交出去一次。
+ *
+ * 反面同样重要：不能改成 watch(modelValue) 反复 emit —— 用户手输时 onManualInput 已经
+ * emit 过，再叠加一次等于同一份输入收到两次通知，且中间值会被当成一次"选中"。
+ */
+describe('载入后回填 change-field（每次载入一次）', () => {
+  it('目录就绪且 modelValue 命中字段 ⇒ 恰好 emit 一次该字段对象', async () => {
+    const wrapper = await mountReady({ modelValue: 'temperature_1' })
+    const emitted = wrapper.emitted('change-field') ?? []
+    expect(emitted, '目录就绪后没有回填：存量规则的阈值永远拿不到单位/精度').toHaveLength(1)
+    expect(emitted[0][0]).toMatchObject({ name: 'temperature_1', unit: '°C' })
+  })
+
+  it('空值 / 族选择器不主动 emit（没有可回填的单一字段）', async () => {
+    // 新建表单：modelValue 为空，没有任何对象可回填
+    const blank = await mountReady()
+    expect(blank.emitted('change-field')).toBeUndefined()
+
+    // 族选择器（cell_voltage_*:max）：多个成员可能单位不同，没有"一个单位"可给
+    mockedApi.listFields.mockResolvedValue(catalog(CELLS))
+    const family = await mountReady({ modelValue: 'cell_voltage_*:max' })
+    expect(family.emitted('change-field')).toBeUndefined()
+  })
+
+  it('同一 (设备, 字段) 只回填一次：重复 reload / 切模式不重复 emit，换设备后重新回填', async () => {
+    const wrapper = await mountReady({ modelValue: 'temperature_1' })
+    expect(wrapper.emitted('change-field')).toHaveLength(1)
+
+    // ① 父组件手动刷新目录（同设备、同值）：不得再 emit —— 否则父组件每刷新一次就被重写一次单位
+    const vm = wrapper.vm as unknown as { reload: () => Promise<void> }
+    await vm.reload()
+    await flushPromises()
+    expect(wrapper.emitted('change-field')).toHaveLength(1)
+
+    // ② 切「全部」模式、modelValue 未变：同样不重复 emit
+    await wrapper.find('[data-test="sensor-mode-all"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('change-field')).toHaveLength(1)
+
+    // ③ 换设备：同名物理字段在不同设备上单位/精度可能不同 ⇒ 必须重新回填一次
+    mockedApi.listFields.mockResolvedValue(catalog([
+      makeField({ name: 'temperature_1', label_zh: '温度', unit: '℃' }),
+    ]))
+    await wrapper.setProps({ deviceId: 11 })
+    await flushPromises()
+
+    const emitted = wrapper.emitted('change-field') ?? []
+    expect(emitted, '换设备后没有重新回填：阈值会继续显示上一台设备的单位').toHaveLength(2)
+    expect(emitted[1][0]).toMatchObject({ name: 'temperature_1', unit: '℃' })
+  })
+})
+
 describe('语义别名分组（仅 /schema.aliases 非空时渲染）', () => {
   it('空别名表 ⇒ 整块不渲染，也没有 @ 开头的选项', async () => {
     const wrapper = await mountReady()

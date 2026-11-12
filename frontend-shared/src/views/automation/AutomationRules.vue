@@ -349,12 +349,31 @@
               <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
             </el-select>
           </el-form-item>
-          <el-form-item label="传感器" required>
+          <!-- 传感器字段：按数据来源分成两个独立分支，而不是"一个文本框加 disabled"。
+               为什么必须换掉裸文本框（文档 §3.1/§4.1）：后端接受的是**字段选择器契约**
+               （字面量 temperature_1 / 字段族 cell_voltage_*:max / 语义别名 @soc / 派生量），
+               手打物理名拼错一个字母 = 保存成功 + 永不触发 + 界面无痕；而文本框连后两类
+               形态都表达不出来。
+               为什么来源组分支**不放**选择器：字段清单由组的 category 决定，选择器没有
+               设备可查目录，只会显示「请先选择边缘设备」—— 对一个已经选了来源组的用户
+               是纯误导（不是"不可用"，而是"问错了问题"）。 -->
+          <el-form-item v-if="form.source_kind === 'source_group'" label="传感器" required>
             <el-input
               v-model="form.trigger_sensor_name"
-              :disabled="form.source_kind === 'source_group'"
-              :placeholder="form.source_kind === 'source_group' ? '由来源组的数据类别决定' : '如：temperature'"
-              data-test="field-sensor"
+              disabled
+              placeholder="由来源组的数据类别决定"
+              data-test="field-sensor-readonly"
+            />
+            <div class="hint-block" data-test="sensor-source-group-hint">
+              来源组的字段由所选组的数据类别决定（见上方「组语义」），保存时后端按组解析；
+              需要逐字段选择或字段族聚合时，请改用「边缘设备」来源。
+            </div>
+          </el-form-item>
+          <el-form-item v-else label="传感器" required>
+            <SensorFieldPicker
+              v-model="form.trigger_sensor_name"
+              :device-id="form.trigger_edge_device_id"
+              @change-field="onSensorFieldChange"
             />
           </el-form-item>
           <el-form-item label="条件" required>
@@ -362,7 +381,17 @@
               <el-select v-model="form.trigger_comparator" data-test="field-comparator" style="width: 100px">
                 <el-option v-for="c in comparators" :key="c.value" :label="c.label" :value="c.value" />
               </el-select>
-              <el-input-number v-model="form.trigger_threshold" :precision="3" data-test="field-threshold" />
+              <el-input-number
+                v-model="form.trigger_threshold"
+                :precision="thresholdPrecision"
+                data-test="field-threshold"
+              />
+              <!-- 单位只从字段目录取（change-field 给的 SensorField.unit），未知时不渲染。
+                   为什么**不**复用 utils/sensor.ts 的 sensorUnitMap：那张表是第二份词表，
+                   与 /sensor-fields 的 meta 并行存在；后端改单位或新增字段时它不会跟着变，
+                   界面就会显示一个与契约不符的单位（文档 §4.1：字段目录才是权威）。
+                   为什么不写成"单位映射表 + 目录兜底"：两份数据源必然漂移，且漂移是静默的。 -->
+              <span v-if="thresholdUnit" class="hint threshold-unit" data-test="field-threshold-unit">{{ thresholdUnit }}</span>
             </div>
           </el-form-item>
           <el-form-item label="持续时长">
@@ -371,13 +400,46 @@
           </el-form-item>
         </template>
 
-        <!-- time_window 字段组 -->
+        <!-- time_window 字段组：时间窗改用**时间选择器**（文档 §3.5 / §4.5）。
+             为什么这一步能消灭一整类静默失效：后端保存期只校验"非空"，运行期用
+             time.Parse("15:04") 解析，`8:00`（不补零）解析失败时只打一条 warn 就 return
+             —— 规则永久失效、不落审计、不产生事件、界面没有任何痕迹。
+             选择器把「格式合法」变成控件的输出约束，用户选不出 8:00 这种值。
+             为什么是 el-time-picker 而不是 el-time-select：后者按固定步长生成候选
+             （常见 15/30 分钟一档），08:07 这类真实需要的时刻根本选不出来。 -->
         <template v-if="form.trigger_type === 'time_window'">
           <el-form-item label="开始时间" required>
-            <el-input v-model="form.trigger_window_start" placeholder="HH:MM，如 08:00" data-test="field-window-start" />
+            <el-time-picker
+              v-model="form.trigger_window_start"
+              format="HH:mm"
+              value-format="HH:mm"
+              :clearable="false"
+              placeholder="选择开始时间"
+              data-test="field-window-start"
+            />
+            <!-- 存量规则被规范化时必须说出来：改写用户数据却不说，等于让他在别处
+                 看到一个"从没填过"的时间（见 normalizeTimeWindow）。 -->
+            <div v-if="windowStartFixNote" class="hint-block" data-test="window-start-fixed">
+              {{ windowStartFixNote }}
+            </div>
           </el-form-item>
           <el-form-item label="结束时间" required>
-            <el-input v-model="form.trigger_window_end" placeholder="HH:MM，如 18:00" data-test="field-window-end" />
+            <el-time-picker
+              v-model="form.trigger_window_end"
+              format="HH:mm"
+              value-format="HH:mm"
+              :clearable="false"
+              placeholder="选择结束时间"
+              data-test="field-window-end"
+            />
+            <div v-if="windowEndFixNote" class="hint-block" data-test="window-end-fixed">
+              {{ windowEndFixNote }}
+            </div>
+            <!-- start > end 在后端是**受支持的跨日窗口**（22:00 → 次日 06:00），不是错误。
+                 不明确说出来，用户既不敢这么填，也看不懂列表里 "22:00-06:00 进入" 的含义。 -->
+            <div v-if="isOvernightWindow" class="hint-block" data-test="window-overnight">
+              跨越零点：{{ form.trigger_window_start }} 到次日 {{ form.trigger_window_end }}
+            </div>
           </el-form-item>
           <el-form-item label="触发沿" required>
             <el-select v-model="form.trigger_window_edge" data-test="field-window-edge">
@@ -423,7 +485,28 @@
               <div class="sun-location__fields">
                 <el-input v-model="sunLatitudeText" placeholder="纬度，如 31.23" data-test="field-latitude" aria-label="规则级纬度（留空 = 继承节点）" />
                 <el-input v-model="sunLongitudeText" placeholder="经度，如 121.47" data-test="field-longitude" aria-label="规则级经度（留空 = 继承节点）" />
-                <el-input v-model="form.timezone" placeholder="时区，如 Asia/Shanghai" data-test="field-timezone" aria-label="规则级 IANA 时区（留空 = 继承节点）" />
+                <!-- 时区：文本 → 下拉。手输 "Asia/Shangai"（少一个 h）后端按 O-7 fail-closed
+                     拒绝保存，运行期解析失败则规则不触发 —— 而 IANA 全表是**浏览器内置**的
+                     （Intl.supportedValuesOf('timeZone')），没有任何理由让人背拼写。
+                     首项显式给出「继承节点（留空）」：空值是一个有语义的选项，不是"没选"。 -->
+                <el-select
+                  v-model="form.timezone"
+                  filterable
+                  clearable
+                  :allow-create="timezoneAllowCreate"
+                  placeholder="选择时区（留空 = 继承节点）"
+                  aria-label="规则级 IANA 时区（留空 = 继承节点）"
+                  data-test="field-timezone"
+                  @change="onTimezoneChange"
+                >
+                  <el-option label="继承节点（留空）" value="" />
+                  <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
+                </el-select>
+              </div>
+              <!-- 与改造前同一条因果：留空 = 继承节点；节点也没配时后端会拒绝保存。
+                   不让用户以为"留空 = 一个安全的默认值"。 -->
+              <div class="hint-block" data-test="timezone-hint">
+                留空 = 继承节点时区；节点也没有配置时，后端会拒绝保存日出/日落规则（fail-closed）。
               </div>
             </div>
           </el-form-item>
@@ -577,9 +660,60 @@
           <el-switch v-model="form.enabled" data-test="field-enabled" />
         </el-form-item>
       </el-form>
+      <!-- 保存前诊断（§3.3）：位置**紧跟 footer 之上** —— 用户刚点完「保存」，视线就在这里，
+           放在表单中部会被误读成"某个字段的报错"。默认不渲染，只在本轮 precheck
+           返回 blocking_errors / warnings 时出现，且每次 onSave 整体重算（不累积上次残留）。 -->
+      <div
+        v-if="saveBlockingErrors.length || saveWarnings.length"
+        class="save-diagnostics"
+        data-test="save-diagnostics"
+      >
+        <!-- 阻断：硬校验，修正前不允许保存。必须逐条列出全部条目 ——
+             改前是 ElMessage.warning(blocking[0])，多条错误要来回保存 N 次。
+             role="alert" 让读屏器在诊断区出现时立即播报，避免焦点仍在按钮上而漏读。 -->
+        <el-alert
+          v-if="saveBlockingErrors.length"
+          type="error"
+          role="alert"
+          :closable="false"
+          show-icon
+          :title="`保存被拒绝（${saveBlockingErrors.length} 项）`"
+          data-test="save-blocking-errors"
+        >
+          <p class="save-diagnostics__hint">这些是硬校验，修正后才能保存</p>
+          <ul class="save-diagnostics__list">
+            <li v-for="(message, index) in saveBlockingErrors" :key="`blocking-${index}`">{{ message }}</li>
+          </ul>
+        </el-alert>
+        <!-- 风险提示：后端判定"不阻塞保存，但保存后可能永不触发"。第一次点击只展示，
+             主按钮改语义为「我已了解，仍然保存」；第二次点击（同一份内容）才落库。 -->
+        <el-alert
+          v-if="saveWarnings.length"
+          type="warning"
+          role="alert"
+          :closable="false"
+          show-icon
+          :title="`以下问题可能导致规则永不触发（${saveWarnings.length} 项）`"
+          data-test="save-warnings"
+        >
+          <ul class="save-diagnostics__list">
+            <li v-for="(message, index) in saveWarnings" :key="`warning-${index}`">{{ message }}</li>
+          </ul>
+        </el-alert>
+      </div>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" data-test="save-rule" @click="onSave">保存</el-button>
+        <!-- data-acked 是"风险提示已展示过一次"的可测标记（既有测试仍用 data-test="save-rule"，
+             故不换 data-test 值，只加语义属性）。 -->
+        <el-button
+          type="primary"
+          :loading="saving"
+          data-test="save-rule"
+          :data-acked="warningsAcknowledged ? 'true' : 'false'"
+          @click="onSave"
+        >
+          {{ warningsAcknowledged ? '我已了解，仍然保存' : '保存' }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -724,6 +858,10 @@ import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+// 字段选择的全部逻辑（目录请求、类型门禁、字段族/别名、降级链、保存前 resolve 校验）
+// 都在这个共享组件里，本页只负责"接哪台设备""选中的字段对象要不要用来渲染单位"。
+import SensorFieldPicker from '@/components/sensor/SensorFieldPicker.vue'
+import type { SensorField } from '@/api/sensorField'
 import { useResponsive } from '@/composables/useResponsive'
 import { useWebSocketStore } from '@/stores/websocket'
 import { logger } from '@/utils/logger'
@@ -789,7 +927,13 @@ const eventFilterResult = ref<AutomationEventResult | undefined>(EVENT_FILTER_IN
 
 // F-8: 新结果枚举必须在**三处**映射齐全（resultOptions / resultText / resultTagType），
 // 否则新结果码会以英文原串直接显示给用户（"字面量泄漏"）。三处同源维护：
-// 新增枚举时若只改一处，tests 里的 F-8 门禁会红。
+//   ① 本数组加一项中文标签 —— 否则筛选下拉里选不到该类结果（用户无法按它过滤）；
+//   ② resultText 的 map 加同名映射 —— 否则结果列直接渲染英文原码（兜底 return map[r] ?? r）；
+//   ③ resultTagType 给出标签色 —— 否则会落到 info，被当作"正常/已抑制"。
+// 最近一次增量是数据字段解析层的 unresolved_selector / field_resolver_disabled
+// （设计 §10 要求前端枚举同步）：两者都是**规则不工作**（配置错 / 运维开关），
+// 不是执行故障 ⇒ resultTagType 一律 warning（理由见该函数内注释）。
+// 新增枚举时若只改一处，tests 里的 F-8 门禁会红；照上面 ①②③ 三处补齐并补用例即可。
 const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
   { value: 'executed', label: '已执行' },
   { value: 'pending_confirm', label: '待确认' },
@@ -803,6 +947,8 @@ const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
   { value: 'confirmation_required', label: '需确认（未授权）' },
   { value: 'partial_failure', label: '部分失败' },
   { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
+  { value: 'unresolved_selector', label: '选择器解析不到' },
+  { value: 'field_resolver_disabled', label: '字段解析未启用' },
 ]
 
 async function fetchEvents() {
@@ -845,14 +991,82 @@ const dialogVisible = ref(false)
 const saving = ref(false)
 const editingId = ref<number | null>(null)
 
+/**
+ * 比较符：**中文语义 + 符号**并列，符号保留供工程用户快速识别。
+ *
+ * 为什么不再只显示符号：本页的主要用户是现场配置规则的人，不是写 SQL 的人；
+ * 只给 `>`/`≥` 时要在脑内完成"符号 → 中文语义"的翻译，而 `>` 与 `≥` 的差别
+ * 恰好是"触发早一点还是晚一点"，翻错就是规则行为错一个月。
+ *
+ * ⚠️ 这个数组被**三处**复用：① 表单里的比较符下拉 ② 列表/摘要的 triggerSummary()
+ * ③ 移动端规则卡片。改 label 会同时改变列表摘要的文案（例：`temperature 高于 > 30`），
+ * 这是**期望行为** —— 列表与表单必须用同一套措辞，否则用户会在两处读到两种说法。
+ */
 const comparators: Array<{ value: AutomationComparator; label: string }> = [
-  { value: 'gt', label: '>' },
-  { value: 'gte', label: '≥' },
-  { value: 'lt', label: '<' },
-  { value: 'lte', label: '≤' },
-  { value: 'eq', label: '=' },
-  { value: 'neq', label: '≠' },
+  { value: 'gt', label: '高于 >' },
+  { value: 'gte', label: '不低于 ≥' },
+  { value: 'lt', label: '低于 <' },
+  { value: 'lte', label: '不高于 ≤' },
+  { value: 'eq', label: '等于 =' },
+  { value: 'neq', label: '不等于 ≠' },
 ]
+
+// ── 保存前诊断（§3.3：后端 precheck 已经产出 warnings，前端此前全页 0 引用）──
+//
+// 诊断区**默认不渲染**，只在本轮 onSave 拿到后端判定后出现；位置紧跟 footer 上方
+// （用户刚点完保存，视线就在那里），不塞进表单中部 —— 那里会让用户误以为是某字段的报错。
+//
+// 为什么 blocking/warnings 要逐条列全而不是只弹一条 toast（改前行为）：
+//   toast 3 秒消失、只显示 blocking[0]，用户改一条、再保存、再看第二条，往返 N 次；
+//   而警告类（warnings）改前根本没显示 —— 那正是"选择器写错一个字母、保存成功、
+//   规则永不触发、没有任何报错"的静默失效路径。
+
+/** 硬校验清单（blocking_errors）。非空 = 本次保存被拒，诊断区逐条列出。 */
+const saveBlockingErrors = ref<string[]>([])
+
+/** 风险提示（warnings）。非空 = 保存后**可能**永不触发，需要用户二次确认。 */
+const saveWarnings = ref<string[]>([])
+
+/**
+ * 已向用户展示并确认过的 warnings 内容指纹（warnings.join('|')）。null = 尚未确认。
+ *
+ * 为什么用**内容指纹**而不是一个 boolean 开关：
+ * 确认的对象是"这一份警告"，不是"这个页面从此免检"。两次点击之间用户可能改了字段名/
+ * 设备/条件，warnings 随之变化；若用 boolean，第一次确认后随便怎么改都会被静默放行，
+ * 改出一个新的解析不到的选择器也直接保存成功 —— 那恰好是 warnings 要防的那类静默失效。
+ *
+ * 保存成功 / 重新打开对话框 / 切换规则时必须清空（见 resetSaveDiagnostics），
+ * 否则上一份规则的确认会被下一份规则复用。
+ */
+const ackedWarningFingerprint = ref<string | null>(null)
+
+/** 当前展示的 warnings 指纹（与 ackedWarningFingerprint 同源、同算法）。 */
+const saveWarningFingerprint = computed(() => saveWarnings.value.join('|'))
+
+/**
+ * 主按钮是否处于"已确认过这一份 warnings"的语义（文案改为「我已了解，仍然保存」）。
+ *
+ * 判据 = 诊断区正展示 warnings，且该指纹已由**拦截分支**记过确认。诊断区在保存成功 /
+ * 重开对话框时清空，所以它精确对应"用户已看到提示、还没点第二次"这一个状态。
+ *
+ * ⚠ 名字是"已确认"（warningsAcknowledged），不是"需要确认"：为真表示**已经**确认过，
+ * 所以按钮文案才是「我已了解，仍然保存」（再点一次就落库）。旧名 saveWarningsNeedAck
+ * 读起来恰好相反，后维护者照名字写"if (needAck) return"会把逻辑写反。
+ *
+ * 注意：阻断与 warnings 可能同时存在，那一轮走的是 blocking 分支（不写确认），
+ * 因此本值为 false，按钮保持普通「保存」—— 硬校验没修正前，不应诱导用户去点"仍然保存"。
+ */
+const warningsAcknowledged = computed(() =>
+  saveWarnings.value.length > 0
+  && ackedWarningFingerprint.value === saveWarningFingerprint.value,
+)
+
+/** 清空诊断与确认指纹（保存成功 / 重新打开对话框 / 切换规则时调用）。 */
+function resetSaveDiagnostics() {
+  saveBlockingErrors.value = []
+  saveWarnings.value = []
+  ackedWarningFingerprint.value = null
+}
 
 /**
  * 表单模型。
@@ -896,6 +1110,138 @@ function emptyForm() {
 }
 
 const form = reactive(emptyForm())
+
+// ── 传感器字段：阈值单位与小数位的唯一来源（文档 §4.1 / §4.2）──
+
+/**
+ * 当前选中的字段对象；**只有**选择器给出「具体字面量字段」时才有值。
+ *
+ * 族（`cell_voltage_*:max`）、@别名、手输、来源组分支一律 null：它们没有单一单位/小数位
+ * （族是多个字段的聚合，成员单位可能不同），此时阈值旁不显示单位（§4.2「未知时不显示」）。
+ * 编辑存量规则时的回填由组件负责（目录就绪后 emit 一次 change-field），本页不重复拉目录。
+ */
+const sensorField = ref<SensorField | null>(null)
+
+/** 选择器给的字段对象变化：只用于渲染单位/小数位，不参与提交（提交体没有单位字段）。 */
+function onSensorFieldChange(field: SensorField | null) {
+  sensorField.value = field
+}
+
+/** 阈值单位：来自字段目录，空串 = 未知 ⇒ 不渲染（不猜、不用 sensorUnitMap 兜底）。 */
+const thresholdUnit = computed(() => (sensorField.value?.unit ?? '').trim())
+
+/**
+ * 阈值小数位：字段目录的 precision 优先，≤0 回落到 3 位。
+ *
+ * 生产 meta.precision 全为 0（后端尚未回填 ⇒ 0 = 未知），回落 3 与改造前写死的
+ * `:precision="3"` 完全一致 —— 不会因为"这次拿不到精度"就把已有规则的值显示成另一种形态。
+ */
+const thresholdPrecision = computed(() => {
+  const precision = sensorField.value?.precision ?? 0
+  return precision > 0 ? precision : 3
+})
+
+// ── 时间窗：HH:mm 是运行期唯一能解析的形态（文档 §3.5）──
+
+/** 后端运行期 time.Parse("15:04") 要求的形态：两位补零、冒号分隔。 */
+const HHMM_PATTERN = /^\d{2}:\d{2}$/
+
+/** 打开存量规则时改写过时间值留下的修复提示（空串 = 本轮无需修复）。 */
+const windowStartFixNote = ref('')
+const windowEndFixNote = ref('')
+
+/**
+ * 把存量时间窗值规范成 HH:mm。
+ *
+ * 为什么必须改写而不是原样回填：`8:00` 在后端运行期解析失败后只打一条 warn 就 return，
+ * 规则永久不触发且界面无痕 —— 用户打开编辑框看到一个"看起来正常"的 8:00，会以为它是好的。
+ * 改写用户数据必须**可见**，所以同时返回一句提示（渲染在该字段下方）。
+ *
+ * 无法解析时**保留原值**：静默丢弃用户填的东西比留一个坏值更糟；提示里让他重新选择。
+ */
+function normalizeTimeWindow(raw: string): { value: string; note: string } {
+  const text = (raw ?? '').trim()
+  if (!text) return { value: '', note: '' }
+  const matched = /^(\d{1,2}):(\d{1,2})$/.exec(text)
+  const hour = matched ? Number(matched[1]) : NaN
+  const minute = matched ? Number(matched[2]) : NaN
+  if (!matched || hour > 23 || minute > 59) {
+    return {
+      value: text,
+      note: `原值「${text}」无法解析为合法的 HH:mm，已保留原值但运行期不会触发，请重新选择时间。`,
+    }
+  }
+  const fixed = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0')
+  if (fixed === text) return { value: text, note: '' }
+  return {
+    value: fixed,
+    note: `已把原值 ${text} 规范为 ${fixed}（原格式运行期不会触发）。`,
+  }
+}
+
+/**
+ * start > end = 后端支持的**跨零点窗口**（22:00 → 次日 06:00），不是输入错误。
+ *
+ * 只在两端都是合法 HH:mm 时判定：字符串比较对补零的 HH:mm 与"比较时刻"等价，
+ * 而非法值（例如存量 `8:00`）不该冒出一条"跨越零点"把真正的问题掩盖掉。
+ */
+const isOvernightWindow = computed(() => {
+  const start = (form.trigger_window_start ?? '').trim()
+  const end = (form.trigger_window_end ?? '').trim()
+  if (!HHMM_PATTERN.test(start) || !HHMM_PATTERN.test(end)) return false
+  return start > end
+})
+
+// ── 时区：浏览器内置的 IANA 全表（文档 §4.5）──
+
+/**
+ * `Intl.supportedValuesOf('timeZone')` 是现代浏览器的内置 IANA 全表。
+ *
+ * 本仓 tsconfig 的 lib 是 ES2022，可能还没有该方法的类型声明，故按"可选函数"取；
+ * 取不到（老浏览器 / 被策略拦截）时退化到最小候选 + allow-create，功能不消失。
+ */
+const INTL_SUPPORTED_VALUES = Intl as unknown as { supportedValuesOf?: (key: string) => string[] }
+
+/**
+ * 降级候选：**只**在没有全表时使用。
+ *
+ * 故意只给最小集合：有全表时这条分支不生效，避免前端另存一份完整时区词表与
+ * 浏览器/后端各说各话（与"不要复用 sensorUnitMap"是同一条理由）。
+ */
+const TIMEZONE_FALLBACK = ['Asia/Shanghai', 'UTC', 'America/New_York', 'Europe/London']
+
+/** 浏览器给的 IANA 全表；空数组 = 拿不到（此时下拉必须保留手输）。 */
+const timezoneVocabulary = (() => {
+  try {
+    const list = INTL_SUPPORTED_VALUES.supportedValuesOf?.('timeZone')
+    if (Array.isArray(list)) return list.filter(item => typeof item === 'string' && item.length > 0)
+  } catch {
+    // 方法存在但抛错（策略/实现差异）：与"没有该方法"同样处理，只降级、不阻塞表单
+  }
+  return []
+})()
+
+/** 没有全表 ⇒ 允许手输（否则用户只能从 4 条候选里选，比改造前还差）。 */
+const timezoneAllowCreate = timezoneVocabulary.length === 0
+
+const timezoneOptions = computed<string[]>(() => {
+  const base = timezoneVocabulary.length > 0 ? timezoneVocabulary : TIMEZONE_FALLBACK
+  const current = (form.timezone ?? '').trim()
+  // 编辑存量规则：当前值可能不在浏览器的 IANA 表里（历史值 / 浏览器版本差异）。
+  // 不补一条，el-select 就显示空白，用户看不出这条规则绑的是哪个时区。
+  return current && !base.includes(current) ? [current, ...base] : base
+})
+
+/**
+ * 时区下拉变化：统一收敛成字符串。
+ *
+ * 为什么不裸 v-model：el-select 在「清空」时可能 emit undefined/null，而
+ * `form.timezone` 的三态语义是「空串 = 继承节点」（sunLocationState 按 trim 判定）。
+ * 让 undefined 漏进去，"继承"与"未填"会在状态判定里分叉。
+ */
+function onTimezoneChange(value: unknown) {
+  form.timezone = typeof value === 'string' ? value : ''
+}
 
 // ── 来源组（方案 v0.3 §4.3）──
 // 只做为「下拉候选」加载；组语义（active 选择/combine/缺员）由后端 sourceref 负责，前端不重算。
@@ -989,15 +1335,31 @@ function uidSeed(): number {
 function openCreate() {
   editingId.value = null
   editingSourceWasGroup.value = false
+  // 重开对话框 = 新的一次保存流程：清诊断与已确认指纹，避免上一份内容的确认被复用
+  resetSaveDiagnostics()
   Object.assign(form, emptyForm())
   sunLatitudeText.value = ''
   sunLongitudeText.value = ''
+  // 单位/精度与"时间窗已修复"提示都属于**上一条规则**的状态：不清掉就会挂到新表单上
+  // （用户还没选字段就看到一个 °C，或者看到一条与当前内容无关的修复说明）。
+  sensorField.value = null
+  windowStartFixNote.value = ''
+  windowEndFixNote.value = ''
   dialogVisible.value = true
 }
 
 function openEdit(rule: AutomationRule) {
   editingId.value = rule.id
   editingSourceWasGroup.value = rule.source_kind === 'source_group'
+  // 时间窗存量值先规范化（见 normalizeTimeWindow）：`8:00` 这种形态在后端运行期
+  // time.Parse("15:04") 失败后只打一条 warn 就 return —— 规则永久失效且界面无痕，
+  // 而用户在编辑框里看到的仍是"看起来正常"的 8:00。规范化后必须留下可见的修复提示。
+  const windowStart = normalizeTimeWindow(rule.trigger_window_start ?? '')
+  const windowEnd = normalizeTimeWindow(rule.trigger_window_end ?? '')
+  // 传感器字段对象在 openEdit 里**不主动拉目录**：
+  // SensorFieldPicker 在目录就绪后会自己对当前 modelValue 回填一次 change-field
+  // （组件契约，见该组件 refillFieldFromCatalog），这里只需先清空上一份的单位。
+  sensorField.value = null
   Object.assign(form, {
     name: rule.name,
     trigger_type: rule.trigger_type,
@@ -1007,8 +1369,8 @@ function openEdit(rule: AutomationRule) {
     trigger_comparator: rule.trigger_comparator ?? 'gt',
     trigger_threshold: rule.trigger_threshold ?? 0,
     trigger_duration_sec: rule.trigger_duration_sec ?? 0,
-    trigger_window_start: rule.trigger_window_start ?? '',
-    trigger_window_end: rule.trigger_window_end ?? '',
+    trigger_window_start: windowStart.value,
+    trigger_window_end: windowEnd.value,
     trigger_window_edge: rule.trigger_window_edge ?? 'enter',
     trigger_edge_device_id: rule.trigger_edge_device_id ?? undefined,
     source_kind: (rule.source_kind === 'source_group' ? 'source_group' : 'edge_device') as 'edge_device' | 'source_group',
@@ -1035,6 +1397,11 @@ function openEdit(rule: AutomationRule) {
   // 未配置（undefined）保持空串以表达"继承节点"。
   sunLatitudeText.value = typeof rule.latitude === 'number' ? String(rule.latitude) : ''
   sunLongitudeText.value = typeof rule.longitude === 'number' ? String(rule.longitude) : ''
+  // 修复提示跟着这一条规则走：用户改完字段再切回来不该还看到"已把原值…"（那时值已是 08:00）
+  windowStartFixNote.value = windowStart.note
+  windowEndFixNote.value = windowEnd.note
+  // 切换规则 = 另一份内容：上一份规则的 warnings 确认不得带过来
+  resetSaveDiagnostics()
   dialogVisible.value = true
 }
 
@@ -1050,6 +1417,10 @@ function onTriggerTypeChange() {
   } else if (form.trigger_type !== 'sun_event') {
     form.trigger_sun_offset_min = 0
   }
+  // 单位与"已规范化"提示只对刚打开的那条规则有意义：换触发器类型后必然过时。
+  sensorField.value = null
+  windowStartFixNote.value = ''
+  windowEndFixNote.value = ''
 }
 
 // ── 多动作卡片 (R7) ───────────────────────────────────────────────────────
@@ -1182,6 +1553,11 @@ function validate(): string | null {
   } else if (form.trigger_type === 'time_window') {
     if (!form.trigger_window_start.trim()) return '请填写开始时间'
     if (!form.trigger_window_end.trim()) return '请填写结束时间'
+    // 格式兜底（控件之外的入口仍然存在：存量规则、浏览器自动填充、将来的快捷键）。
+    // 后端保存期只校验"非空"，而运行期解析失败只打一条 warn —— 所以这一道必须在**保存前**，
+    // 文案与时间选择器的 value-format 同一口径（HH:mm，两位补零）。
+    if (!HHMM_PATTERN.test(form.trigger_window_start.trim())) return '时间格式必须为 HH:mm'
+    if (!HHMM_PATTERN.test(form.trigger_window_end.trim())) return '时间格式必须为 HH:mm'
   } else if (form.trigger_type === 'sun_event') {
     // V2 的界面侧前置校验：日出/日落必须有 kind，且坐标/时区三项要"全有或全无"。
     // 全无 = 继承节点（后端会按节点值解析，节点也没有则 400）；部分填写是无意义组合，
@@ -1389,6 +1765,10 @@ async function onSave() {
   // 这条判定放在函数入口而不是只靠按钮 disabled：disabled 是 UI 属性，
   // 键盘/程序化触发/未来的快捷键都可能绕过它。
   if (riskDialogVisible.value) return
+  // 诊断区在每次保存时**重新计算**：先清掉上一轮的结果，避免"用户已经改掉的那条"
+  // 继续留在界面上（残留提示比没有提示更误导）。
+  saveBlockingErrors.value = []
+  saveWarnings.value = []
   const err = validate()
   if (err) {
     ElMessage.warning(err)
@@ -1408,9 +1788,33 @@ async function onSave() {
     const precheck = await automationApi.precheckRule(payload)
     if (precheck !== null) {
       const blocking = precheck.blocking_errors ?? []
+      const warnings = precheck.warnings ?? []
+      // 整体覆盖而不是累积：诊断区只反映**本轮**判定。
+      saveBlockingErrors.value = blocking
+      saveWarnings.value = warnings
       if (blocking.length > 0) {
+        // 即时反馈仍是 toast + 首条（既有单测契约），**完整清单**交给诊断区逐条列出：
+        // 改前这里是 `ElMessage.warning(blocking[0]); return`，多条错误要来回保存 N 次。
         ElMessage.warning(blocking[0])
         return
+      }
+      if (warnings.length > 0) {
+        const fingerprint = warnings.join('|')
+        if (ackedWarningFingerprint.value !== fingerprint) {
+          // 第一次点击（同一份内容）：**不保存**，只把风险提示展示出来，主按钮改成
+          // 「我已了解，仍然保存」；用户再点一次（同一份 warnings）才真正落库。
+          //
+          // 为什么 warnings 要二次确认，而不是像 blocking 那样硬拒、也不是直接保存：
+          //   · 硬拒：后端把它判成 warning 就是因为**当前无法证明它错**（选择器语法合法，
+          //     只是此刻解析不到，字段可能稍后才上报），拦死会让合法规则永远存不进去；
+          //   · 直接放行：这是最坏的一种失效 —— 保存成功、规则永不触发、界面没有任何
+          //     痕迹，用户不会有第二次机会看到这句提示。
+          // 因此留一次"已看到并坚持保存"的选择，代价是一次点击，收益是把静默失效变成可见取舍。
+          //
+          // 确认记在**内容指纹**上（不是 boolean）：见 ackedWarningFingerprint 注释。
+          ackedWarningFingerprint.value = fingerprint
+          return
+        }
       }
       const risks = precheck.risk_actions ?? []
       if (risks.length === 0) {
@@ -1519,6 +1923,9 @@ async function submitRule(payload: CreateAutomationRuleRequest) {
     await automationApi.createRule(payload)
     ElMessage.success('规则已创建')
   }
+  // 保存成功 = 本次流程结束：清空诊断与确认指纹。不清的话，下一份规则若恰好产出
+  // 相同的 warnings 文本，会被上一份的确认静默放行（"下一份被静默放行"正是要防的）。
+  resetSaveDiagnostics()
   dialogVisible.value = false
   void fetchRules()
   void fetchEvents()
@@ -1748,6 +2155,9 @@ function resultText(r: AutomationEventResult): string {
     confirmation_required: '需确认（未授权）',
     partial_failure: '部分失败',
     suppressed_no_solar_event: '无日出日落事件',
+    // 字段解析层：配置错（解析不到）与运维开关（解析未启用）分列，处置方式不同
+    unresolved_selector: '选择器解析不到',
+    field_resolver_disabled: '字段解析未启用',
     source_member_changed: '来源成员已变',
     source_stale: '来源数据过期',
     source_degraded: '来源降级',
@@ -1757,6 +2167,15 @@ function resultText(r: AutomationEventResult): string {
 function resultTagType(r: AutomationEventResult): 'success' | 'warning' | 'danger' | 'info' {
   if (r === 'executed' || r === 'notification') return 'success'
   if (r === 'pending_confirm' || r === 'confirmation_required') return 'warning'
+  // 字段解析层两码: unresolved_selector（选择器语法合法但解析不到 ⇒ 规则永不触发，配置错）
+  // 与 field_resolver_disabled（解析层开关关闭 ⇒ 整条规则 fail-closed，运维开关）。
+  // 判断依据: **不工作但不是执行故障** ⇒ warning。
+  //   · 不能归 info: info 在本函数里是兜底档（suppressed_*/condition_changed 这类
+  //     "规则正常工作时的取舍"），归 info 会被用户当成正常，而这两条意味着规则压根没在求值；
+  //   · 也不必用 danger: danger 留给 failed_*/partial_failure/expired 这类**需要立即介入**
+  //     的状态（设备已被改动、下发失败、待确认已超时）；这两条没有任何动作下发、无设备副作用，
+  //     处置是改配置或开开关，属"需要处理但不紧急"。
+  if (r === 'unresolved_selector' || r === 'field_resolver_disabled') return 'warning'
   // partial_failure 是**危险状态**（设备已被改了一半，需人工介入），必须比 failed_* 更显眼，
   // 故与 expired/failed_* 同为 danger。
   if (r.startsWith('failed_') || r === 'expired' || r === 'partial_failure') return 'danger'
@@ -1933,6 +2352,9 @@ onUnmounted(() => {
 .cond-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .cond-row .el-select { flex: 0 0 52px; min-width: 52px; }
 .cond-row .el-input-number { flex: 1 1 auto; min-width: 176px; max-width: 100%; }
+/* 阈值单位：跟在数字框右侧的**文本**，不是输入框后缀（EP 的 suffix 只接受图标/字符串,
+   且会随 precision 抖动）；不参与伸缩、不换行，用户读到的是完整的 "30 °C" 一句话。 */
+.cond-row .threshold-unit { flex: 0 0 auto; margin-left: 4px; white-space: nowrap; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
 .text-muted { color: var(--el-text-color-secondary); }
 .trigger-cell, .action-cell { display: flex; align-items: center; gap: 6px; }
@@ -1971,6 +2393,9 @@ onUnmounted(() => {
    文案本身已说明"必须同时填写"（见 sunLocationText）。 */
 .sun-location__state[data-state="partial"] { color: var(--el-color-warning); font-weight: 600; }
 .sun-location__fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+/* 时区下拉在网格单元里必须撑满（EP 的 .el-select 是 inline-flex，默认按内容宽收缩），
+   否则它与左边两个经纬度输入框不对齐。同 .action-meta dd :deep(.el-select) 的既有口径。 */
+.sun-location__fields :deep(.el-select) { width: 100%; min-width: 0; }
 
 /* ============================================================================
    多动作卡片列表 (设计稿 §5 R7-R8 / §6 D-3 D-6)
@@ -2034,6 +2459,14 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 .params-error { margin: 6px 0 0; font-size: 12px; color: var(--el-color-danger); }
+
+/* ============================================================================
+   保存前诊断区 (§3.3)：只做间距与列表排版，不引入新视觉语言 ——
+   颜色/图标全部沿用 el-alert 的 error/warning 语义（红=硬阻断、黄=风险提示）。
+   ========================================================================== */
+.save-diagnostics { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.save-diagnostics__hint { margin: 0 0 4px; font-size: 12px; line-height: 1.6; }
+.save-diagnostics__list { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 
 /* ============================================================================
    保存前风险清单弹窗 (设计稿 §5 R11 / §6 D-5)

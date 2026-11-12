@@ -93,6 +93,42 @@ vi.mock('element-plus', async importOriginal => {
 })
 
 /**
+ * 传感器字段选择器（components/sensor/SensorFieldPicker.vue）。
+ *
+ * 为什么 Mock 成 stub 而不是用真实组件：
+ *   · 真实组件会发 /sensor-fields、/schema、/resolve 三路请求（本文件不 mock 这层 api，
+ *     会打到真实 axios），而本次要断言的是**页面的接线**（deviceId 传给了谁、
+ *     change-field 有没有被消费成阈值单位），不是控件内部行为；
+ *   · 控件自身行为（目录 / 类型门禁 / 降级链 / 载入后回填）由
+ *     src/components/sensor/__tests__/SensorFieldPicker.spec.ts 直接保护，分工不重叠。
+ * stub 保留 data-test="field-sensor" 与 v-model 通路，使既有 6 处
+ * `find('[data-test="field-sensor"]').setValue(...)` 继续有效（而不是把实现改回文本框）。
+ */
+vi.mock('@/components/sensor/SensorFieldPicker.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'SensorFieldPickerStub',
+      props: {
+        modelValue: { type: String, default: '' },
+        deviceId: { type: Number, default: undefined },
+        disabled: Boolean,
+        placeholder: { type: String, default: '' },
+        allowCreate: { type: Boolean, default: true },
+      },
+      emits: ['update:modelValue', 'change-field'],
+      setup(props, { emit }) {
+        return () => h('input', {
+          'data-test': 'field-sensor',
+          value: props.modelValue,
+          onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+        })
+      },
+    }),
+  }
+})
+
+/**
  * 2026-10-21 第二轮：窄屏改卡片列表后，模板按 useResponsive().isMobile 走结构分支。
  * 这里直接驱动模块级共享 ref（与 AlertRules.spec / FixedColumnOcclusion.spec 同法），
  * 默认 1440/桌面 —— 既有 55 条用例的语义完全不变。
@@ -111,6 +147,56 @@ vi.mock('@/composables/useResponsive', () => ({
     isDesktop: { value: true },
   }),
 }))
+
+/**
+ * el-time-picker 替身。
+ *
+ * 真实 EP 组件在 happy-dom 里依赖 popper/teleport，候选面板无法用 setValue 驱动；
+ * 这里渲染一个可输入的 input，走的仍是同一条 v-model 通路，用于断言两件事：
+ *   ① 时间窗控件**是**时间选择器（value-format=HH:mm ⇒ 提交给后端的仍是 HH:mm）；
+ *   ② 用户选完值后页面的派生提示（跨零点窗口）随之出现。
+ */
+const ElTimePickerStub = defineComponent({
+  name: 'ElTimePicker',
+  props: {
+    modelValue: { type: String, default: '' },
+    format: { type: String, default: 'HH:mm' },
+    valueFormat: { type: String, default: 'HH:mm' },
+    clearable: { type: Boolean, default: true },
+    placeholder: { type: String, default: '' },
+  },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { emit }) {
+    const update = (event: Event) => {
+      const value = (event.target as HTMLInputElement).value
+      emit('update:modelValue', value)
+      emit('change', value)
+    }
+    return () => h('input', {
+      class: 'el-time-picker',
+      'data-value-format': props.valueFormat,
+      value: props.modelValue,
+      onInput: update,
+      onChange: update,
+    })
+  },
+})
+
+/** 注册替身：模板里写的是 kebab-case <el-time-picker>，两种键都给出以免解析歧义。 */
+function timePickerStubs() {
+  return { ElTimePicker: ElTimePickerStub, 'el-time-picker': ElTimePickerStub }
+}
+
+/**
+ * 组件 setup 里的表单模型（`<script setup>` 的顶层 binding 在测试里可经 proxy 读到，
+ * 同文件既有的 `vm.confirmRiskSave()` 用的就是这条通路）。
+ *
+ * 为什么时区断言要读模型而不是读 DOM：<select> 的 value 对 '' 与 undefined 都是空串，
+ * 而"空串 = 继承节点"是这个字段的语义契约，必须精确到 ''（见 onTimezoneChange 注释）。
+ */
+function formState(wrapper: Awaited<ReturnType<typeof mountPage>>): Record<string, unknown> {
+  return (wrapper.vm as unknown as { form: Record<string, unknown> }).form
+}
 
 const mockedAutomationApi = vi.mocked(automationApi)
 const mockedEdgeApi = vi.mocked(edgeDeviceApi)
@@ -192,7 +278,7 @@ beforeEach(() => {
 
 async function mountPage() {
   const wrapper = mount(AutomationRules, {
-    global: { plugins: [createPinia()] },
+    global: { plugins: [createPinia()], components: timePickerStubs() },
   })
   await flushPromises()
   return wrapper
@@ -243,7 +329,7 @@ function slotTable() {
 /** 用执行作用域插槽的表格替身挂载（仅新用例使用）。 */
 async function mountWithSlotTable() {
   const wrapper = mount(AutomationRules, {
-    global: { plugins: [createPinia()], components: slotTable() },
+    global: { plugins: [createPinia()], components: { ...slotTable(), ...timePickerStubs() } },
   })
   await flushPromises()
   return wrapper
@@ -1157,6 +1243,49 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     })
   })
 
+  // ── F-8 续：数据字段解析层两码（设计《数据字段解析层-方案-2026-10-21》§10 审计；
+  //    后端常量 backend/internal/automation/selector.go:44-45）────────────────────
+  //
+  // 缺陷形态：resultText 末尾的 `return map[r] ?? r` 会把未映射的结果码原样渲染成
+  // 英文串（用户看不懂 "unresolved_selector"），且筛选下拉里选不到这两类。
+  // 断言口径与上面的 F-8 一致：读**真实渲染的 DOM**（槽表格替身会执行 #default），
+  // 不读源码字符串。标签色读 ElTag stub 的 data-type（= 组件实际收到的 type prop）。
+  describe('F-8 续 字段解析层结果码（unresolved_selector / field_resolver_disabled）', () => {
+    const RESOLVER_RESULTS = ['unresolved_selector', 'field_resolver_disabled'] as const
+    const RESOLVER_LABELS = ['选择器解析不到', '字段解析未启用'] as const
+
+    it('结果筛选下拉含两码的中文标签，且不出现英文原串', async () => {
+      const wrapper = await mountPage()
+      const labels = wrapper.find('[data-test="filter-result"]').findAll('option').map(o => o.text())
+      for (const label of RESOLVER_LABELS) expect(labels).toContain(label)
+      // 兜底：任何一项都不许把码本身当标签（那等于"没映射"，用户按它筛选时看到英文）
+      expect(labels.join('|')).not.toMatch(/unresolved_selector|field_resolver_disabled/)
+    })
+
+    it('事件表把两码显示为中文（不是英文原串），且标签类型为 warning', async () => {
+      mockedAutomationApi.listEvents.mockResolvedValue(eventPage(
+        RESOLVER_RESULTS.map((result, i) => ({ ...eventFixture, id: 300 + i, result })),
+      ))
+      const wrapper = await mountWithSlotTable()
+      const rows = wrapper.findAll('[data-test="events-table"] tbody tr')
+      expect(rows).toHaveLength(2)
+      const texts = rows.map(r => r.text())
+      // 中文文案（顺序 = 事件数组顺序）：未映射时这里会是英文原码
+      expect(texts[0]).toContain('选择器解析不到')
+      expect(texts[1]).toContain('字段解析未启用')
+      expect(texts.join('|')).not.toMatch(/unresolved_selector|field_resolver_disabled/)
+
+      // 标签类型：结果列是第 3 列（时间 / 规则 / 结果 …）。
+      // 期望 warning —— 规则不工作但不是执行故障（不能 info：会被当正常；
+      // 不必 danger：danger 留给 failed_*/partial_failure/expired 这类需立即介入的状态）。
+      for (const row of rows) {
+        const tag = row.findAll('td')[2].find('.el-tag')
+        expect(tag.exists(), '结果列缺少 el-tag：断言会假绿').toBe(true)
+        expect(tag.attributes('data-type')).toBe('warning')
+      }
+    })
+  })
+
   describe('F-9 订阅 automation_confirmation_required（C5 前端闭环）', () => {
     it('订阅表含新事件名，且收到推送时给出用户可见提示（不只写事件表）', async () => {
       const { useWebSocketStore } = await import('@/stores/websocket')
@@ -1288,7 +1417,9 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const txt = cards[0].text()
       expect(txt, '被修掉的正是「高温…」省略号截断').toContain('高温开窗')
       expect(txt, '触发器类型徽标').toContain('传感器阈值')
-      expect(txt, '触发条件摘要').toContain('temperature > 30')
+      // 比较符已改为「中文语义 + 符号」并列：列表摘要与表单下拉共用同一份 comparators，
+      // 因此这里也必须显示中文（不是退回符号），否则列表与表单会出现两套措辞。
+      expect(txt, '触发条件摘要').toContain('temperature 高于 > 30')
       expect(txt, '冷却/熔断').toContain('300s / 10')
       expect(txt, '确认制').toContain('需确认')
       expect(cards[0].findAll('[data-test="rule-enabled"]').length, '启用开关').toBe(1)
@@ -1323,6 +1454,302 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(source).toMatch(/v-else class="event-cards"/)
       expect(source).toContain('data-test="rules-cards"')
       expect(source).toContain('data-test="events-cards"')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 保存前诊断 §3.3（blocking 全量 + warnings 二次确认）
+  //
+  // 缺陷形态（已核实）：onSave 只读 blocking_errors 与 risk_actions，precheck.warnings
+  // 全页 0 引用 —— 后端产出的"选择器解析不到，保存后可能永不触发"永远到不了用户眼前；
+  // 即便读 blocking，也只 ElMessage.warning(blocking[0]) 弹第一条，多条错误要来回保存 N 次。
+  //
+  // 断言口径：读**真实渲染的 DOM**（诊断区 + 按钮语义）与**API 调用**（是否落库），
+  // 不读源码字符串。下面 4 条分别钉住：全量展示 / 二次确认 / 指纹失效 / 不回归。
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('保存前诊断：blocking 全量展示 + warnings 二次确认', () => {
+    it('blocking_errors 有 2 条时两条都逐条渲染，且不落库', async () => {
+      mockedAutomationApi.precheckRule.mockResolvedValue({
+        risk_actions: [],
+        blocking_errors: ['第 1 个动作：动作 ID 不在设备目录中', '触发阈值必须是数字'],
+        warnings: [],
+      })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '两条阻断')
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const alert = wrapper.find('[data-test="save-blocking-errors"]')
+      expect(alert.exists(), '阻断诊断区未渲染（用户只能看到 3 秒 toast）').toBe(true)
+      // 读屏器必须被主动告知（role="alert"），否则焦点仍在按钮上会漏读整块诊断
+      expect(alert.attributes('role')).toBe('alert')
+      expect(alert.text()).toContain('保存被拒绝（2 项）')
+      expect(alert.text()).toContain('这些是硬校验，修正后才能保存')
+
+      // 关键：**两条都在**（改前只 warning(blocking[0])，用户改一条、再保存、看第二条）
+      const items = alert.findAll('li')
+      expect(items, '阻断项没有逐条列出').toHaveLength(2)
+      expect(items[0].text()).toContain('动作 ID 不在设备目录中')
+      expect(items[1].text()).toContain('触发阈值必须是数字')
+
+      // 阻断不得混进风险提示块
+      expect(wrapper.find('[data-test="save-warnings"]').exists()).toBe(false)
+      expect(mockedAutomationApi.createRule, '阻断命中仍然落库了').not.toHaveBeenCalled()
+
+      // 即时反馈的既有出口必须保留（toast 用第一条；既有契约，删除会让老用例变红）
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('第 1 个动作：动作 ID 不在设备目录中')
+    })
+
+    it('warnings 第一次点击只展示（不落库）且按钮切成「我已了解」；再点一次才 createRule', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 31 })
+      mockedAutomationApi.precheckRule.mockResolvedValue({
+        risk_actions: [],
+        blocking_errors: [],
+        warnings: ['trigger_sensor_name: 选择器 "temperatuer" 当前解析不到（resolution_unbound），保存后可能永不触发'],
+      })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '字段拼错')
+
+      const saveButton = () => wrapper.find('[data-test="save-rule"]')
+      expect(saveButton().attributes('data-acked')).toBe('false')
+
+      await saveButton().trigger('click')
+      await flushPromises()
+
+      const alert = wrapper.find('[data-test="save-warnings"]')
+      expect(alert.exists(), 'warnings 未展示（改前该字段全页 0 引用）').toBe(true)
+      expect(alert.attributes('role')).toBe('alert')
+      expect(alert.text()).toContain('以下问题可能导致规则永不触发（1 项）')
+      expect(alert.findAll('li')).toHaveLength(1)
+      expect(alert.text()).toContain('resolution_unbound')
+      expect(mockedAutomationApi.createRule, '第一次点击就落库了：二次确认被绕过').not.toHaveBeenCalled()
+
+      // 按钮语义切换：文案 + data-acked 双通道（任一可测，二者一致）
+      expect(saveButton().attributes('data-acked')).toBe('true')
+      expect(saveButton().text()).toContain('我已了解，仍然保存')
+
+      // 同一份内容再点一次 ⇒ 才保存
+      await saveButton().trigger('click')
+      await flushPromises()
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+
+      // 保存成功必须清空诊断与确认指纹：重新打开对话框不得继承上一份的确认
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="save-diagnostics"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="save-rule"]').attributes('data-acked')).toBe('false')
+    })
+
+    it('改表单内容后（warnings 指纹变化）再次点击仍需确认，旧确认不得复用', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 32 })
+      mockedAutomationApi.precheckRule
+        .mockResolvedValueOnce({
+          risk_actions: [],
+          blocking_errors: [],
+          warnings: ['trigger_sensor_name: 选择器 "temperatuer" 当前解析不到（resolution_unbound），保存后可能永不触发'],
+        })
+        .mockResolvedValue({
+          risk_actions: [],
+          blocking_errors: [],
+          warnings: ['trigger_sensor_name: 选择器 "temperatuer2" 当前解析不到（resolution_unbound），保存后可能永不触发'],
+        })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '改字段')
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+
+      // 修改内容 ⇒ 下一次 precheck 的 warnings 变了（内容指纹失效）
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperatuer2')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(2)
+      expect(mockedAutomationApi.createRule, '旧指纹的确认被复用：新警告被静默放行').not.toHaveBeenCalled()
+      // 诊断区换成**本轮**结果（不累积上一轮那句，否则用户会同时看到两条矛盾提示）
+      const alert = wrapper.find('[data-test="save-warnings"]')
+      expect(alert.findAll('li')).toHaveLength(1)
+      expect(alert.text()).toContain('temperatuer2')
+      expect(alert.text()).not.toContain('"temperatuer"')
+
+      // 同一份**新**内容再点一次才保存
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+    })
+
+    it('warnings 为空时一次点击即保存（二次确认不得变成所有规则的常态）', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 33 })
+      const wrapper = await mountPage()
+      await openCreateFilled(wrapper, '无警告')
+
+      // 点击前：诊断区默认不渲染、按钮是普通「保存」语义
+      expect(wrapper.find('[data-test="save-diagnostics"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="save-rule"]').attributes('data-acked')).toBe('false')
+      expect(wrapper.find('[data-test="save-rule"]').text()).toContain('保存')
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('[data-test="save-diagnostics"]').exists()).toBe(false)
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 创建对话框：传感器 / 时间窗 / 时区 → "能选就不手输"
+  //
+  // 三个控件原来都是裸文本框，缺陷同形（文档 §3.5 / §4.1 / §4.5）：
+  //   · 传感器名拼错一个字母 ⇒ 保存成功、永不触发（后端只给 warning，界面无痕）；
+  //   · 时间窗 "8:00"（不补零）⇒ 运行期 time.Parse("15:04") 失败，只打一条 warn 就
+  //     return，规则永久失效且界面无痕；
+  //   · 时区 "Asia/Shangai" ⇒ 后端 fail-closed 拒绝保存，或运行期解析失败。
+  // 断言口径与前面一致：读真实渲染的 DOM / 组件收到的 props，不读源码字符串
+  // （字段选择器内部行为由 src/components/sensor 的单测保护，这里只测接线）。
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('创建对话框：传感器 / 时间窗 / 时区改为可选控件', () => {
+    it('选择边缘设备后，字段选择器收到的 deviceId 就是该设备', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      const picker = wrapper.findComponent({ name: 'SensorFieldPickerStub' })
+      expect(picker.exists(), '传感器不是字段选择器（退回文本框 ⇒ 拼错即静默失效）').toBe(true)
+      // 未选设备时不传 id：选择器据此不发任何目录请求（后端的 edge_device_id 是必填 query）
+      expect(picker.props('deviceId')).toBeUndefined()
+
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await flushPromises()
+      // ElSelect stub 会把数字串归一成 number ⇒ 传下去的是 10 而不是 "10"
+      expect(picker.props('deviceId')).toBe(10)
+    })
+
+    it('来源组分支不放字段选择器（组没有设备目录可查），退回只读文本 + 说明', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-source-kind"]').setValue('source_group')
+      await flushPromises()
+
+      // 选择器在没有设备可查时只会显示「请先选择边缘设备」—— 对已选来源组的用户是误导
+      expect(wrapper.findComponent({ name: 'SensorFieldPickerStub' }).exists()).toBe(false)
+      const readonly = wrapper.find('[data-test="field-sensor-readonly"]')
+      expect(readonly.exists()).toBe(true)
+      expect(readonly.attributes('disabled')).toBeDefined()
+      expect(wrapper.find('[data-test="sensor-source-group-hint"]').text()).toContain('数据类别')
+    })
+
+    it('选中字段后阈值旁显示字段目录给的单位；未知单位（族/手输）时不显示', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      const picker = wrapper.findComponent({ name: 'SensorFieldPickerStub' })
+
+      // 单位来自 change-field 给的 SensorField（= 字段目录），不是前端写死的映射表
+      picker.vm.$emit('change-field', { name: 'temperature_1', unit: '°C', precision: 0 })
+      await flushPromises()
+      const unit = wrapper.find('[data-test="field-threshold-unit"]')
+      expect(unit.exists(), '阈值旁没有单位：用户无从判断 30 是 °C 还是 %').toBe(true)
+      expect(unit.text()).toBe('°C')
+
+      // change-field(null) = 族 / 手输 / 别名：没有单一单位 ⇒ 不显示（不猜一个）
+      picker.vm.$emit('change-field', null)
+      await flushPromises()
+      expect(wrapper.find('[data-test="field-threshold-unit"]').exists()).toBe(false)
+    })
+
+    it('时间窗使用时间选择器；start > end 时提示「跨越零点」', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('time_window')
+      await flushPromises()
+
+      const start = wrapper.find('[data-test="field-window-start"]')
+      const end = wrapper.find('[data-test="field-window-end"]')
+      // 换成时间选择器：格式合法由控件保证（value-format=HH:mm 仍是后端运行期的形态）
+      expect(start.attributes('data-value-format'), '时间窗仍是自由文本：8:00 这类值会静默失效').toBe('HH:mm')
+      expect(end.attributes('data-value-format')).toBe('HH:mm')
+
+      // 顺向窗口：不得出现跨零点提示（提示只在 start > end 时才有意义）
+      await start.setValue('08:00')
+      await end.setValue('18:00')
+      await flushPromises()
+      expect(wrapper.find('[data-test="window-overnight"]').exists()).toBe(false)
+
+      // 跨零点（后端支持的跨日窗口）：22:00 → 次日 06:00
+      await start.setValue('22:00')
+      await end.setValue('06:00')
+      await flushPromises()
+      const hint = wrapper.find('[data-test="window-overnight"]')
+      expect(hint.exists(), '跨零点窗口没有提示：用户既不敢这么填，也读不懂列表摘要').toBe(true)
+      expect(hint.text()).toBe('跨越零点：22:00 到次日 06:00')
+    })
+
+    it('validate 兜底：控件之外的非法时间值在保存前被拦（文案与控件同一口径）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('非法时间')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('time_window')
+      await flushPromises()
+      // 绕过控件注入（存量规则 / 自动填充 / 将来可能的快捷键）：后端保存期只校验非空，
+      // 运行期解析失败只打一条 warn —— 这一道必须在前端保存前拦住。
+      await wrapper.find('[data-test="field-window-start"]').setValue('8:00')
+      await wrapper.find('[data-test="field-window-end"]').setValue('18:00')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('时间格式必须为 HH:mm')
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('时区是下拉：首项「继承节点」= 空串，候选来自浏览器 IANA 全表', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+
+      const select = wrapper.find('[data-test="field-timezone"]')
+      expect(select.exists(), '时区仍是文本框：手输 Asia/Shangai 会被后端 fail-closed').toBe(true)
+      const options = select.findAll('option')
+      // 空值必须是**显式的一项**（"继承节点"是有语义的选择，不是"没填"）
+      const inherit = options.filter(option => option.attributes('value') === '' && option.text().includes('继承节点'))
+      expect(inherit.length, '下拉里没有「继承节点」空值项').toBeGreaterThan(0)
+      // 候选是真 IANA 全表（≥2 个带 / 的名字），不是几个写死的近似值
+      expect(options.filter(option => String(option.attributes('value') ?? '').includes('/')).length).toBeGreaterThan(1)
+      // 原有语义必须保留：留空 = 继承节点，节点也没配则后端拒绝保存
+      expect(wrapper.find('[data-test="timezone-hint"]').text()).toContain('留空 = 继承节点')
+
+      await select.setValue('Asia/Shanghai')
+      await flushPromises()
+      expect(formState(wrapper).timezone).toBe('Asia/Shanghai')
+      await select.setValue('')
+      await flushPromises()
+      // clear 可能给 undefined/null，模型必须收敛成空串（继承节点的唯一表达）
+      expect(formState(wrapper).timezone, '选「继承节点」应得到空串（不是 undefined）').toBe('')
+    })
+
+    it('openEdit 把存量 "8:00" 规范为 "08:00" 并留下修复提示', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        trigger_type: 'time_window',
+        trigger_window_start: '8:00',
+        trigger_window_end: '18:00',
+      }])
+      const wrapper = await mountWithSlotTable()
+      const editBtn = wrapper.findAll('button').find(button => button.text() === '编辑')
+      expect(editBtn, '找不到编辑入口，用例前提不成立').toBeTruthy()
+      await editBtn!.trigger('click')
+      await flushPromises()
+
+      // 值被补零（不补零 ⇒ 后端运行期解析失败 ⇒ 规则永久失效）
+      expect((wrapper.find('[data-test="field-window-start"]').element as HTMLInputElement).value).toBe('08:00')
+      // 改写用户数据必须可见：说明"原值长什么样、为什么改、不改会怎样"
+      const note = wrapper.find('[data-test="window-start-fixed"]')
+      expect(note.exists(), '规范化了用户数据却没有提示').toBe(true)
+      expect(note.text()).toContain('已把原值 8:00 规范为 08:00')
+      expect(note.text()).toContain('运行期不会触发')
+      // 结束时间本来就合法 ⇒ 不得多出一条"已修复"（否则用户会以为自己填错了）
+      expect(wrapper.find('[data-test="window-end-fixed"]').exists()).toBe(false)
     })
   })
 })

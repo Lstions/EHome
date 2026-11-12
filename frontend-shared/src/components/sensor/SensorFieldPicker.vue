@@ -219,6 +219,8 @@ const resolveState = ref<ResolveState>({ tone: 'idle', text: '' })
 
 /** 目录/类别请求序号：切设备或再次 reload 时让在途响应失效，避免慢响应覆盖新设备的字段 */
 let loadSeq = 0
+/** 上一次回填 change-field 的 (设备, 字段名) 指纹，见 refillFieldFromCatalog */
+let lastRefill: { deviceId: number | undefined; name: string } | null = null
 /** resolve 请求序号 + 防抖定时器（与目录请求分开计数，互不干扰） */
 let resolveSeq = 0
 let resolveTimer: ReturnType<typeof setTimeout> | null = null
@@ -399,6 +401,33 @@ function onAggregateSelect(raw: unknown): void {
   emit('change-field', null)
 }
 
+/**
+ * 目录就绪后回填「当前值对应的字段对象」（**每次载入一次**，不是 watch modelValue）。
+ *
+ * 为什么必须有这一步：编辑存量规则时用户没有任何交互 —— 父组件只是把字符串写进
+ * modelValue，拿不到 unit/precision，于是阈值控件既没有单位也没有正确的小数位；
+ * 用户必须先随便动一下字段再改回来才能看到单位，这显然不是契约该有的样子。
+ *
+ * 为什么不能改成 watch(modelValue)：那样用户手输时（onSelect / onManualInput 已经 emit）
+ * 会再叠加一次 emit，父组件在同一份输入上收到两次语义不同的通知；而且手输中间值
+ * （例如只敲到 "temperat"）也会被当成一次"选中"。
+ *
+ * 只在"目录刚就绪 / 换了设备"时调一次；族与 @别名照旧给 null（没有单一单位），
+ * 与 onSelect 的语义保持一致。
+ */
+function refillFieldFromCatalog(): void {
+  const value = (props.modelValue ?? '').trim()
+  if (!value || familySelection.value) return
+  const matched = fields.value.find(field => field.name === value)
+  if (!matched) return
+  // 同一 (设备, 字段名) 只回填一次：父组件手动 reload 目录时不该反复收到同一份通知
+  // （它会据此重写阈值单位，重复通知等于每次刷新都抖一下）。
+  // 换设备必须重新回填 —— 同名物理字段在不同设备上单位/精度可能不同。
+  if (lastRefill && lastRefill.deviceId === props.deviceId && lastRefill.name === matched.name) return
+  lastRefill = { deviceId: props.deviceId, name: matched.name }
+  emit('change-field', matched)
+}
+
 /** 降级第三级的手输输入框（此时没有目录可查，一律给 null） */
 function onManualInput(raw: unknown): void {
   const value = typeof raw === 'string' ? raw : (raw == null ? '' : String(raw))
@@ -478,6 +507,8 @@ function resetCatalog(): void {
   truncated.value = false
   catalogState.value = 'idle'
   loading.value = false
+  // 回填指纹一并作废：设备被清空后重新选中同一台设备时，单位仍要能重新回填
+  lastRefill = null
   // 序号自增：让尚未返回的旧响应作废
   loadSeq += 1
 }
@@ -540,7 +571,12 @@ async function reload(): Promise<void> {
       }
     }
   } finally {
-    if (seq === loadSeq) loading.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+      // 三级降级链的任意一级成功都可能让"当前 modelValue"从字符串变成可确认的字段对象，
+      // 故统一在这里回填一次（见 refillFieldFromCatalog 注释）。
+      refillFieldFromCatalog()
+    }
   }
 }
 
