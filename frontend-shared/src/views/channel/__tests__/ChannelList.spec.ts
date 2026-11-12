@@ -3,7 +3,13 @@ import { defineComponent, h } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ChannelList from '@/views/channel/ChannelList.vue'
-import channelListSource from '@/views/channel/ChannelList.vue?raw'
+import channelListPageSource from '@/views/channel/ChannelList.vue?raw'
+// 2026-11-12 纯搬移拆分（列表取数/筛选/分页状态 → views/channel/composables/useChannelList.ts）：
+// 源码结构断言的读取对象 = 页面 + 搬出去的文件。只读页面会让 toContain 真红，
+// 更危险的是让 not.toContain 变成**假绿**（页面里根本没有该字符串了）。
+// ⚠ 纪律：expect 的匹配条件一字未改；页面排在最前，保持「页面文本里必须有 X」一类断言的原始口径。
+import channelListComposableSource from '@/views/channel/composables/useChannelList.ts?raw'
+const channelListSource = [channelListPageSource, channelListComposableSource].join('\n')
 // EmptyState 使用真实实现：它的 props 契约已支持 kind="error"，
 // 失败态用例必须验证真实契约被接线，而不是被 stub 吞掉。
 import RealEmptyState from '@/components/common/EmptyState.vue'
