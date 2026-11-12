@@ -567,6 +567,7 @@ import { canRestoreHistory, useEdgeDeviceHistory } from './composables/useEdgeDe
 import { useEdgeDeviceBatch } from './composables/useEdgeDeviceBatch'
 import { useDeviceListPresentation } from './composables/useDeviceListPresentation'
 import { useEdgeDeviceCreate, type EdgeDeviceCreateDialogCtl } from './composables/useEdgeDeviceCreate'
+import { useDeviceDriverTree } from './composables/useDeviceDriverTree'
 import { deviceTypeOptions } from '@/utils/deviceType'
 import { getHardwareDisplay, getHardwareLabel } from '@/utils/hardwareTag'
 
@@ -607,25 +608,32 @@ const hardwareFilter = ref('')
 const showCreateDialog = ref(false)
 
 // ═══════════════════════════════════════════════════════════════════════
-// 创建 / 编辑设备向导（2026-11-12 第二轮拆分，纯搬移）
-//   状态 / 地址能力判定 / 提交事务 → composables/useEdgeDeviceCreate.ts
-//   模板 + scoped 样式            → components/EdgeDeviceCreateDialog.vue
+// 创建 / 编辑设备向导（2026-11-12 第二轮拆分 + 第三轮子域拆分，纯搬移）
+//   模板 + scoped 样式 → components/EdgeDeviceCreateDialog.vue
+//   向导状态 / 提交事务 / 编排 → composables/useEdgeDeviceCreate.ts
+//   地址能力纯函数   → edgeDeviceAddress.ts
+//   驱动树快照       → composables/useDeviceDriverTree.ts
 // 页面这一层只做三件事：
-//   ① 把页面持有的 showCreateDialog 与列表刷新交给组合式（开关仍只有一份）；
+//   ① 把页面持有的 showCreateDialog、列表刷新与**同一份驱动树快照**交给组合式（都只有一份）；
 //   ② 解构出**仍然必须留在页面 setup 里**的绑定：模板已搬走，但既有门禁 spec 逐字按
 //      vm.<name> 驱动向导（vm.selectedParser = ... / vm.handleCreate() ...），
 //      解构即保留同名 setupState 入口，且与对话框读到的是同一批 ref；
 //   ③ 组一个稳定的 ctl 对象传给对话框子组件（见下方 createDialogCtl）。
 // ═══════════════════════════════════════════════════════════════════════
+
+// 驱动树快照：卡片「从机地址」判定与创建向导的地址能力必须看同一份（见 useDeviceDriverTree.ts）。
+const { driverTree, fetchDriverTreeOnce, resolveModelRequiresTargetAddress } = useDeviceDriverTree()
+
 const createCtl = useEdgeDeviceCreate({
   showCreateDialog,
   // fetchDevices 在本文件稍后声明：只给惰性适配器，setup 期不会调用它（同 useEdgeDeviceBatch）。
   fetchDevices: (force, throwOnError) => fetchDevices(force, throwOnError),
+  // 同一份驱动树快照的取数与判定（不 new 第二份，否则卡片与提交口径会漂移）。
+  fetchDriverTreeOnce,
+  resolveModelRequiresTargetAddress,
 })
 const {
-  // 页面自身仍在用：卡片「从机地址」能力判定 / 挂载期预取 / 行内「编辑」入口
-  driverTree,
-  fetchDriverTreeOnce,
+  // 页面自身仍在用：行内「编辑」入口
   handleEdit,
   // 只为门禁保留的 setupState 入口（页面文本已不再直接引用，子组件经 ctl 消费）
   createStep,
@@ -1061,7 +1069,7 @@ const channelCardLabel = (ch: Channel): string => {
  */
 const createDialogCtl: EdgeDeviceCreateDialogCtl = {
   ...createRest,
-  driverTree, fetchDriverTreeOnce, handleEdit,
+  handleEdit,
   createStep, selectedParser, selectedChannel, channelTab,
   deviceForm, newChannel, deviceFormRef,
   commandIntervalsRef, commandIntervalsError,
