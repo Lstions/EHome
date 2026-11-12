@@ -403,117 +403,26 @@
     </div>
 
     <!-- ══ 历史设备视图（已删除但数据仍保留；固定表格，信息密度优先） ══ -->
-    <template v-if="deviceScope === 'history'">
-      <el-alert type="info" :closable="false" show-icon class="history-notice" data-test="history-notice">
-        <template #title>
-          历史设备 = 已删除但数据仍保留的设备（默认删除不删数据）。「恢复」可重新投入使用
-          （id 不变，历史连续）；「彻底删除」会删除记录与<strong>全部历史数据</strong>，
-          由后台分批清理，<strong>开始后不可恢复</strong>。
-        </template>
-      </el-alert>
-
-      <div class="history-overview" data-test="history-overview">
-        共 <strong>{{ historyTotal }}</strong> 台历史设备
-        <span v-if="historyPurgingCount > 0">（本页 <strong>{{ historyPurgingCount }}</strong> 台已提交/清理中）</span>
-      </div>
-
-      <el-alert v-if="historyError" type="error" :closable="false" show-icon class="history-error" data-test="history-error">
-        <template #title>
-          <span>历史设备加载失败：{{ historyError }}</span>
-          <el-button link type="primary" size="small" data-test="history-retry" @click="fetchHistory">重试</el-button>
-        </template>
-      </el-alert>
-
-      <el-card v-if="!historyError" shadow="hover" data-test="history-card">
-        <div class="mobile-table-wrapper">
-          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
-          <el-table
-            ref="historyTableRef"
-            :data="historyItems"
-            v-loading="historyLoading"
-            row-key="id"
-            stripe
-            data-test="history-table"
-            @selection-change="handleHistorySelectionChange"
-          >
-            <el-table-column type="selection" width="50" />
-            <el-table-column prop="id" label="ID" width="60" />
-            <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
-            <el-table-column label="型号" width="130">
-              <template #default="{ row }">
-                <el-tag size="small">{{ getDeviceTypeLabel(asDeletedDevice(row).device_type) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="原节点·通道" width="180" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ asDeletedDevice(row).node_id || '—' }} / #{{ asDeletedDevice(row).channel_id }}
-              </template>
-            </el-table-column>
-            <el-table-column label="数据量" width="120">
-              <template #default="{ row }">{{ formatHistoryRows(asDeletedDevice(row)) }}</template>
-            </el-table-column>
-            <el-table-column label="最后采集" width="120">
-              <template #default="{ row }">{{ formatRelativeTime(asDeletedDevice(row).last_data_at) }}</template>
-            </el-table-column>
-            <el-table-column label="删除时间" width="170">
-              <template #default="{ row }">{{ formatHistoryDeletedAt(asDeletedDevice(row)) }}</template>
-            </el-table-column>
-            <el-table-column label="清理状态" width="160">
-              <template #default="{ row }">
-                <el-tag :type="historyStatusTagType(asDeletedDevice(row))" size="small" data-test="history-status">
-                  {{ historyStatusLabel(asDeletedDevice(row)) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="170" fixed="right">
-              <template #default="{ row }">
-                <el-button
-                  size="small"
-                  class="touch-target"
-                  :disabled="!canRestoreHistory(asDeletedDevice(row)) || historyDeleting"
-                  :title="restoreDisabledReason(asDeletedDevice(row))"
-                  :aria-label="`恢复 ${asDeletedDevice(row).name}`"
-                  data-test="history-restore"
-                  @click="openRestoreForHistory(asDeletedDevice(row))"
-                >恢复</el-button>
-                <el-button
-                  size="small"
-                  type="danger"
-                  text
-                  class="touch-target"
-                  :disabled="historyDeleting"
-                  :aria-label="`彻底删除 ${asDeletedDevice(row).name}`"
-                  data-test="history-delete"
-                  @click="deleteOneHistory(asDeletedDevice(row))"
-                >彻底删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </div>
-      </el-card>
-
-      <!-- 空态：说明历史设备是什么、怎么产生、如何恢复 -->
-      <div v-if="!historyLoading && !historyError && historyItems.length === 0" class="history-empty" data-test="history-empty">
-        <el-icon :size="32"><RefreshLeft /></el-icon>
-        <h3>暂无历史设备</h3>
-        <p>在役设备被「删除」后会进入这里：记录变为历史设备，<strong>数据默认保留</strong>，可随时恢复。</p>
-        <p>只有删除时勾选「同时删除历史数据」，数据才会在后台清理；清理开始后不可恢复。</p>
-        <p>也可以对历史设备执行「彻底删除」：记录与全部历史数据由后台分批清理，<strong>不可恢复</strong>。</p>
-        <el-button type="primary" size="small" data-test="history-empty-restore" @click="openRestoreDialog">
-          打开「恢复已删除设备」
-        </el-button>
-      </div>
-
-      <div v-if="historyTotal > 0" class="pagination-wrapper" data-test="history-pagination">
-        <el-pagination
-          :current-page="historyPage"
-          :page-size="historyPageSize"
-          :total="historyTotal"
-          layout="total, prev, pager, next"
-          @current-change="handleHistoryPageChange"
-        />
-      </div>
-    </template>
+    <!-- 视图本体在 components/EdgeDeviceHistoryPanel.vue：只吃 props / 抛 emit。
+         el-table 的勾选同步走它的 defineExpose（见 selectAllPage / clearAllSelection）。 -->
+    <EdgeDeviceHistoryPanel
+      v-if="deviceScope === 'history'"
+      ref="historyPanelRef"
+      :items="historyItems"
+      :total="historyTotal"
+      :page="historyPage"
+      :page-size="historyPageSize"
+      :loading="historyLoading"
+      :error="historyError"
+      :purging-count="historyPurgingCount"
+      :deleting="historyDeleting"
+      @retry="fetchHistory"
+      @page-change="handleHistoryPageChange"
+      @selection-change="handleHistorySelectionChange"
+      @restore="openRestoreForHistory"
+      @delete-row="deleteOneHistory"
+      @open-restore="openRestoreDialog"
+    />
 
     <!-- 创建边缘设备对话框 -->
     <el-dialog
@@ -543,77 +452,18 @@
           <span>选择此设备使用的<strong>设备型号</strong>，设备型号决定了原始字节到物理量的解析方式</span>
         </div>
 
-        <!-- 使用配置模板（可选） -->
-        <el-card shadow="never" class="template-quick-pick" v-if="availableTemplates?.length > 0">
-          <div class="template-pick-row">
-            <div class="template-pick-label">
-              <el-icon><Document /></el-icon>
-              <span>使用配置模板（可选）</span>
-            </div>
-            <el-select
-              v-model="selectedTemplateId"
-              placeholder="选一个模板可自动套用设备类型与推荐解析器"
-              clearable
-              filterable
-              style="flex: 1;"
-              @change="onTemplateSelected"
-            >
-              <el-option
-                v-for="t in availableTemplates"
-                :key="t.id"
-                :label="`${t.name}  (${t.device_type} / ${getHardwareLabel(t.hardware_type)})${t.is_default ? ' ⭐' : ''}`"
-                :value="t.id"
-              >
-                <div class="template-option-row">
-                  <span class="tpl-name">{{ t.name }}</span>
-                  <el-tag v-if="t.is_default" type="success" size="small">默认</el-tag>
-                  <el-tag size="small" type="info">{{ getHardwareLabel(t.hardware_type) }}</el-tag>
-                </div>
-              </el-option>
-            </el-select>
-          </div>
-          <el-alert v-if="selectedTemplate" :closable="false" type="success" show-icon style="margin-top: 8px;">
-            已套用模板: <strong>{{ selectedTemplate.name }}</strong>
-            (设备类型 <code>{{ selectedTemplate.device_type }}</code> · 硬件 <code>{{ getHardwareLabel(selectedTemplate.hardware_type) }}</code>)
-          </el-alert>
-        </el-card>
-
-        <!-- 解析器选择卡片 -->
-        <div class="parser-select-list">
-          <!-- I-9 A 类：解析器选择是创建设备向导第 1 步的唯一入口，改前只有 @click
-               （键盘完全不可达，键盘用户无法继续向导）。补 role/tabindex/aria-label +
-               Enter/Space，与同仓 .collector-card、StatCard.vue 是同一范式。
-               :aria-selected 让读屏能报出当前选中的是哪一个。 -->
-          <div
-            v-for="parser in availableParsers"
-            :key="parser.id"
-            class="parser-select-card"
-            :class="{ selected: selectedParser?.id === parser.id }"
-            role="button"
-            tabindex="0"
-            :aria-label="`选择解析器 ${parser.name}`"
-            :aria-pressed="selectedParser?.id === parser.id"
-            @click="selectParser(parser)"
-            @keydown.enter.prevent="selectParser(parser)"
-            @keydown.space.prevent="selectParser(parser)"
-          >
-            <div class="parser-select-icon">
-              <el-icon :size="24"><Cpu /></el-icon>
-            </div>
-            <div class="parser-select-info">
-              <h4>{{ parser.name }}</h4>
-              <p class="parser-vendor">{{ parser.vendor }}</p>
-              <div class="parser-tags">
-                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus)">
-                  {{ getHardwareLabel(bus) }}
-                </el-tag>
-              </div>
-            </div>
-            <div v-if="selectedParser?.id === parser.id" class="parser-selected-badge">
-              <el-icon><Check /></el-icon>
-            </div>
-          </div>
-        </div>
+        <!-- 型号选择步（模板快捷选择 + 解析器卡片）在 components/EdgeDeviceCreateModelStep.vue：
+             它是向导里唯一不碰表单状态的一步；步骤外壳（v-show + .step-tip）留在页面，
+             因为三步共用同一套骨架样式。 -->
+        <EdgeDeviceCreateModelStep
+          v-model:selected-template-id="selectedTemplateId"
+          :templates="availableTemplates"
+          :selected-template="selectedTemplate"
+          :parsers="availableParsers"
+          :selected-parser="selectedParser"
+          @template-change="onTemplateSelected"
+          @select-parser="selectParser"
+        />
       </div>
       
       <!-- Step 1: 选择/创建通道(仅创建模式) -->
@@ -966,7 +816,7 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
   Plus, View, Edit, Delete, InfoFilled, Check, Warning, Connection, DataLine,
-  List, Download, Document, Location, RefreshLeft, FolderAdd, Timer
+  List, Download, Location, RefreshLeft, FolderAdd, Timer
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
@@ -997,11 +847,15 @@ import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog
 import DeviceRestoreDialog from '@/components/device/DeviceRestoreDialog.vue'
 import DeviceMergeHistoryDialog from '@/components/device/DeviceMergeHistoryDialog.vue'
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
-import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon, getDeviceTypeTone } from '@/utils/deviceType'
+import EdgeDeviceHistoryPanel from './components/EdgeDeviceHistoryPanel.vue'
+import EdgeDeviceCreateModelStep from './components/EdgeDeviceCreateModelStep.vue'
+import { canRestoreHistory, useEdgeDeviceHistory } from './composables/useEdgeDeviceHistory'
+import { useEdgeDeviceBatch } from './composables/useEdgeDeviceBatch'
+import { useDeviceListPresentation } from './composables/useDeviceListPresentation'
+import { deviceTypeOptions } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { DEVICE_ADDRESS_DEFAULT, isValidDeviceAddress, parseDeviceAddress } from '@/utils/deviceAddress'
 import { getHardwareDisplay, getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
-import type { TagType } from '@/utils/tagType'
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
 const asDevice = (row: unknown) => row as EdgeDevice
@@ -1014,6 +868,17 @@ const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+
+/**
+ * 展示映射（状态/型号/图标 → 中文与样式，时间 → 可读文本）来自
+ * composables/useDeviceListPresentation.ts：模板里的 statusLabel(...) / formatRelativeTime(...)
+ * 调用形态与搬移前完全一致，页面不再维护第二份映射表。
+ */
+const {
+  getDeviceIcon, getDeviceTone, getDeviceTypeLabel,
+  statusTagType, statusLabel, copyText,
+  formatRelativeTime, formatDeviceData,
+} = useDeviceListPresentation()
 
 // ── m-1（2026-09-22）：型号「是否消费设备地址」的能力来源 ─────────────
 // 唯一数据源就是 /device-configs/tree 的驱动叶子字段 requires_target_address
@@ -1178,102 +1043,83 @@ const handleMerged = async (payload: {
 /** 当前视图：在役（默认）/ 历史（已删除但数据仍保留）。 */
 const deviceScope = ref<'active' | 'history'>('active')
 
-// ── 历史设备视图 ──
-const historyItems = ref<DeletedEdgeDevice[]>([])
-const historyTotal = ref(0)
-const historyPage = ref(1)
-const historyPageSize = ref(20)
-const historyLoading = ref(false)
-const historyLoaded = ref(false)
-const historyError = ref('')
-const historySelection = ref<DeletedEdgeDevice[]>([])
-const historyDeleting = ref(false)
-// @ts-ignore - table ref used in template（历史表格全选/清空需要同步其内部勾选状态）
-const historyTableRef = ref()
-let historyRequestSequence = 0
+// ═══════════════════════════════════════════════════════════════════════
+// 双视图协调层：在役 / 历史共用「批量选择」与「失败明细弹窗」两处状态，
+// 所以这两个跨视图动作留在页面；两个 composable 通过回调参数使用它们，
+// 而不是各自再持有一份（两份选择集会让「清空」只清一半，是最难查的那类缺陷）。
+// ═══════════════════════════════════════════════════════════════════════
 
-/** el-table 作用域槽 row 收窄（与 asDevice 同一范式）。 */
-const asDeletedDevice = (row: unknown) => row as DeletedEdgeDevice
+/** 历史面板（子组件）暴露的命令式入口：el-table 实例只存在于它内部。 */
+const historyPanelRef = ref<{ clearTableSelection: () => void; selectAllRows: () => boolean } | null>(null)
 
-const historyParams = () => {
-  const params: { page: number; page_size: number; search?: string; device_type?: string } = {
-    page: historyPage.value,
-    page_size: historyPageSize.value,
-  }
-  // 与在役视图共用搜索框与类型筛选（服务端过滤，绝不本地筛当前页）
-  if (debouncedKeyword.value.trim()) params.search = debouncedKeyword.value.trim()
-  if (typeFilter.value) params.device_type = typeFilter.value
-  return params
+const clearAllSelection = () => {
+  selectedDevices.value = []
+  historySelection.value = []
+  tableRef.value?.clearSelection?.()
+  historyPanelRef.value?.clearTableSelection?.()
 }
 
-const fetchHistory = async () => {
-  const sequence = ++historyRequestSequence
-  historyLoading.value = true
-  historyError.value = ''
-  try {
-    const res = await edgeDeviceApi.getDeleted(historyParams())
-    if (sequence !== historyRequestSequence) return
-    historyItems.value = res.items
-    historyTotal.value = res.total
-    historyPage.value = res.page
-    historyPageSize.value = res.page_size || historyPageSize.value
-    historyLoaded.value = true
-  } catch (e) {
-    if (sequence !== historyRequestSequence) return
-    historyError.value = e instanceof Error ? e.message : String(e)
-    historyItems.value = []
-    historyTotal.value = 0
-  } finally {
-    if (sequence === historyRequestSequence) historyLoading.value = false
-  }
+/** 批量执行失败明细（部分失败必须逐条展示，而不是只 toast 成功数）。 */
+const failureDialogVisible = ref(false)
+const failureDialogTitle = ref('')
+const failureDetail = ref<Array<{ id: number; error: string }>>([])
+
+/** 两条批量路径（在役批量操作 / 历史彻底删除）的失败明细统一出口。 */
+function reportFailure(title: string, rows: Array<{ id: number; error: string }>) {
+  failureDialogTitle.value = title
+  failureDetail.value = rows
+  failureDialogVisible.value = true
 }
 
-const handleHistorySelectionChange = (rows: DeletedEdgeDevice[]) => {
-  historySelection.value = rows
-}
-const handleHistoryPageChange = (next: number) => {
-  if (next === historyPage.value) return
-  historyPage.value = next
-  void fetchHistory()
-}
-/** 本页已提交/清理中的历史设备数（全量计数接口未提供，文案明确限定「本页」）。 */
-const historyPurgingCount = computed(() =>
-  historyItems.value.filter(row => row.data_purge_requested || row.purge_in_progress).length)
-const formatHistoryRows = (row: DeletedEdgeDevice): string =>
-  typeof row.row_estimate === 'number' ? `约 ${row.row_estimate.toLocaleString('zh-CN')} 行` : '—'
-const formatHistoryDeletedAt = (row: DeletedEdgeDevice): string => {
-  if (!row.deleted_at) return '—'
-  const d = new Date(row.deleted_at)
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
-}
+// ── 历史设备视图：状态与操作在 composables/useEdgeDeviceHistory.ts，
+//    视图在 components/EdgeDeviceHistoryPanel.vue（已删除但数据仍保留的设备）──
+const {
+  historyItems,
+  historyTotal,
+  historyPage,
+  historyPageSize,
+  historyLoading,
+  historyLoaded,
+  historyError,
+  historySelection,
+  historyDeleting,
+  historyPurgingCount,
+  fetchHistory,
+  handleHistorySelectionChange,
+  handleHistoryPageChange,
+  handleHistoryExport,
+  confirmDeleteHistory,
+  deleteOneHistory,
+} = useEdgeDeviceHistory({
+  debouncedKeyword,
+  typeFilter,
+  onClearSelection: clearAllSelection,
+  reportFailure,
+})
 
-/** 清理状态三值：可恢复 / 已提交清理 / 清理中（不可恢复）。 */
-const historyStatusKind = (row: DeletedEdgeDevice): 'recoverable' | 'queued' | 'purging' => {
-  if (row.purge_in_progress) return 'purging'
-  if (row.data_purge_requested) return 'queued'
-  return 'recoverable'
-}
-const historyStatusLabel = (row: DeletedEdgeDevice): string => {
-  switch (historyStatusKind(row)) {
-    case 'purging': return '清理中（不可恢复）'
-    case 'queued': return '已提交清理'
-    default: return '可恢复'
-  }
-}
-const historyStatusTagType = (row: DeletedEdgeDevice): TagType => {
-  switch (historyStatusKind(row)) {
-    case 'purging': return 'danger'
-    case 'queued': return 'warning'
-    default: return 'success'
-  }
-}
-const canRestoreHistory = (row: DeletedEdgeDevice): boolean =>
-  !row.purge_in_progress && !row.data_purge_requested
-const restoreDisabledReason = (row: DeletedEdgeDevice): string => {
-  if (row.purge_in_progress) return '后台正在清理该设备的数据，无法恢复'
-  if (row.data_purge_requested) return '已提交彻底删除（后台清理），恢复入口已关闭'
-  return ''
-}
+// ── 在役批量管理：状态与操作在 composables/useEdgeDeviceBatch.ts，
+//    选择集与 useDeviceDelete 共用同一个 ref（两个入口必须看到同一份选择）──
+const {
+  batchMode,
+  batchSubmitting,
+  batchIntervalDialogVisible,
+  batchIntervalMs,
+  batchIntervalError,
+  batchEnable,
+  batchDisable,
+  openBatchIntervalDialog,
+  confirmBatchInterval,
+  isCardSelected,
+  toggleCardSelection,
+  onCardClick,
+  onCardKeydown,
+} = useEdgeDeviceBatch({
+  selectedDevices,
+  // fetchDevices 在本文件稍后声明：这里只给惰性适配器，composable 在 setup 期不会调用它。
+  fetchDevices: (force, throwOnError) => fetchDevices(force, throwOnError),
+  onClearSelection: clearAllSelection,
+  reportFailure,
+})
 
 /** 历史行「恢复」：打开恢复弹窗并预展开该设备（initialDeviceId）。 */
 const restoreInitialDeviceId = ref<number | undefined>(undefined)
@@ -1287,195 +1133,13 @@ const openRestoreForHistory = (row: DeletedEdgeDevice) => {
   showRestoreDialog.value = true
 }
 
-// ── 在役批量管理 ──
-/** 卡片视图批量选择模式（仅卡片视图显示开关；关闭时清空选择）。 */
-const batchMode = ref(false)
-const batchSubmitting = ref(false)
-const batchIntervalDialogVisible = ref(false)
-const batchIntervalMs = ref(5000)
-const batchIntervalError = ref('')
-
-/** 批量执行失败明细（部分失败必须逐条展示，而不是只 toast 成功数）。 */
-const failureDialogVisible = ref(false)
-const failureDialogTitle = ref('')
-const failureDetail = ref<Array<{ id: number; error: string }>>([])
-
-const selectedIds = (): number[] => selectedDevices.value.map(d => d.id)
-
-const clearAllSelection = () => {
-  selectedDevices.value = []
-  historySelection.value = []
-  tableRef.value?.clearSelection?.()
-  historyTableRef.value?.clearSelection?.()
-}
-
-/** 批量操作结果统一处理：成功 toast + 失败明细 + 刷新 + 清空选择。 */
-const handleBatchResult = async (
-  label: string,
-  res: { succeeded: number; failed: number; results: Array<{ id: number; success: boolean; error?: string }> },
-  refresh: () => Promise<void>,
-) => {
-  const failedRows = res.results
-    .filter(r => !r.success)
-    .map(r => ({ id: r.id, error: r.error || '未知原因' }))
-  if (res.succeeded > 0) ElMessage.success(`已${label} ${res.succeeded} 台设备`)
-  if (failedRows.length > 0) {
-    failureDialogTitle.value = `批量${label}失败明细`
-    failureDetail.value = failedRows
-    failureDialogVisible.value = true
-  }
-  if (res.succeeded === 0 && failedRows.length > 0) {
-    feedback.error(`批量${label}全部失败（${failedRows.length} 台），详见失败明细`)
-  }
-  await refresh()
-  clearAllSelection()
-}
-
-const runBatchUpdate = async (payload: { enabled?: boolean; interval_ms?: number }, label: string) => {
-  const ids = selectedIds()
-  if (ids.length === 0 || batchSubmitting.value) return
-  batchSubmitting.value = true
-  try {
-    const res = await edgeDeviceApi.batchUpdate(ids, payload)
-    await handleBatchResult(label, res, () => fetchDevices(true))
-  } catch (e) {
-    feedback.handleError(e, `批量${label}失败`)
-  } finally {
-    batchSubmitting.value = false
-  }
-}
-
-const batchEnable = () => { void runBatchUpdate({ enabled: true }, '启用') }
-const batchDisable = () => { void runBatchUpdate({ enabled: false }, '停用') }
-
-const openBatchIntervalDialog = () => {
-  const values = selectedDevices.value
-    .map(d => Number(d.config?.interval_ms))
-    .filter(n => Number.isFinite(n))
-  batchIntervalMs.value = values.length > 0 && values.every(v => v === values[0]) ? values[0] : 5000
-  batchIntervalError.value = ''
-  batchIntervalDialogVisible.value = true
-}
-const confirmBatchInterval = async () => {
-  const value = Number(batchIntervalMs.value)
-  if (!Number.isInteger(value) || value < 0 || value > 3600000) {
-    batchIntervalError.value = '采集间隔需为 0–3600000 的整数（0 = 不调度）'
-    return
-  }
-  batchIntervalDialogVisible.value = false
-  await runBatchUpdate({ interval_ms: value }, '设置采集间隔')
-}
-
-// ── 历史设备彻底删除（记录 + 全部数据，后台分批，不可恢复） ──
-const confirmDeleteHistory = async (rows: DeletedEdgeDevice[]) => {
-  const ids = rows.map(r => r.id)
-  if (ids.length === 0 || historyDeleting.value) return
-  const message = ids.length === 1
-    ? `彻底删除历史设备「${rows[0].name || '#' + ids[0]}」？\n记录与全部历史数据将被后台删除，开始后不可恢复。`
-    : `彻底删除选中的 ${ids.length} 台历史设备？\n记录与全部历史数据将被后台删除，开始后不可恢复。`
-  const confirmed = await feedback.confirmDanger(message, {
-    title: '彻底删除历史设备',
-    confirmText: '彻底删除',
-    cancelText: '取消',
-  })
-  if (!confirmed) return
-  historyDeleting.value = true
-  try {
-    const res = await edgeDeviceApi.batchDeleteHistory(ids)
-    // 2026-10-25 运行时复验（task-10）：彻底删除是「入队 + 立即唤醒 purger」，
-    // 小设备可能 <1s 就被硬删 —— 刷新后该行消失属于正常，不能因此报错。
-    // 重复提交已清理的 id：HTTP 200 但该条 success=false / error="设备不存在"，
-    // 语义是「已完成」，不是失败（不计入失败明细）。
-    const isAlreadyGone = (r: { success: boolean; error?: string }): boolean =>
-      !r.success && /设备不存在|不存在/.test(r.error || '')
-    const alreadyGone = res.results.filter(isAlreadyGone)
-    const realFailed = res.results.filter(r => !r.success && !isAlreadyGone(r))
-    if (res.succeeded > 0) ElMessage.success(`已提交后台清理 ${res.succeeded} 台历史设备`)
-    if (alreadyGone.length > 0) ElMessage.info(`另有 ${alreadyGone.length} 台设备已完成清理（记录已不存在）`)
-    if (realFailed.length > 0) {
-      failureDialogTitle.value = '彻底删除失败明细'
-      failureDetail.value = realFailed.map(r => ({ id: r.id, error: r.error || '未知原因' }))
-      failureDialogVisible.value = true
-      if (res.succeeded === 0) {
-        feedback.error(`彻底删除全部失败（${realFailed.length} 台），详见失败明细`)
-      }
-    }
-    // 无论结果如何都刷新：行可能已消失，这是预期现象。
-    await fetchHistory()
-    clearAllSelection()
-  } catch (e) {
-    feedback.handleError(e, '彻底删除历史设备失败')
-  } finally {
-    historyDeleting.value = false
-  }
-}
-const deleteOneHistory = (row: DeletedEdgeDevice) => { void confirmDeleteHistory([row]) }
-
-// ── CSV 导出（前端本地生成，不请求后端） ──
-const downloadCSV = (headers: string[], rows: string[][], filenamePrefix: string) => {
-  const csvContent = [headers, ...rows]
-    .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-    .join('\n')
-  const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.csv`
-  link.click()
-  URL.revokeObjectURL(url)
-  ElMessage.success('导出成功')
-}
-
-const handleHistoryExport = () => {
-  if (historySelection.value.length === 0) return
-  downloadCSV(
-    ['ID', '名称', '型号', '原节点', '原通道', '数据量估算', '最后采集', '删除时间', '清理状态'],
-    historySelection.value.map(row => [
-      String(row.id),
-      row.name || '',
-      getDeviceTypeLabel(row.device_type),
-      String(row.node_id ?? ''),
-      String(row.channel_id ?? ''),
-      typeof row.row_estimate === 'number' ? `约 ${row.row_estimate} 行` : '—',
-      formatRelativeTime(row.last_data_at),
-      row.deleted_at ? new Date(row.deleted_at).toLocaleString('zh-CN', { hour12: false }) : '—',
-      historyStatusLabel(row),
-    ]),
-    'history_devices_export',
-  )
-}
-
-// ── 卡片批量模式 ──
-const isCardSelected = (device: EdgeDevice): boolean => selectedDevices.value.some(d => d.id === device.id)
-const toggleCardSelection = (device: EdgeDevice) => {
-  if (!batchMode.value) return
-  selectedDevices.value = isCardSelected(device)
-    ? selectedDevices.value.filter(d => d.id !== device.id)
-    : [...selectedDevices.value, device]
-}
-/** 点击卡片切换选中；但点内部按钮/输入等交互元素时不切换（否则点「详情」会顺带选中）。 */
-const onCardClick = (device: EdgeDevice, event?: MouseEvent) => {
-  if (!batchMode.value) return
-  const target = event?.target as HTMLElement | null
-  if (target?.closest('button, a, input, label, .el-checkbox, .el-switch')) return
-  toggleCardSelection(device)
-}
-const onCardKeydown = (device: EdgeDevice, event?: KeyboardEvent) => {
-  if (!batchMode.value) return
-  event?.preventDefault?.()
-  toggleCardSelection(device)
-}
-
 /** 全选本页 / 取消选择：表格视图走 el-table API（保持其内部勾选状态同步），卡片视图直接改选择集。 */
 const selectAllPage = () => {
   if (deviceScope.value === 'history') {
-    const table = historyTableRef.value
-    if (!table) {
+    // 历史表格在子组件内：交给它自己 clearSelection + 逐行勾选；拿不到表格实例时退回直接赋值选择集。
+    if (!historyPanelRef.value?.selectAllRows?.()) {
       historySelection.value = [...historyItems.value]
-      return
     }
-    table.clearSelection?.()
-    for (const row of historyItems.value) table.toggleRowSelection?.(row, true)
     return
   }
   if (viewMode.value === 'table') {
@@ -2023,17 +1687,9 @@ const selectChannel = (ch: Channel) => {
   selectedChannel.value = ch
 }
 
-// 设备类型相关
-const getDeviceIcon = (type: string) => {
-  return getDeviceTypeIcon(type)
-}
-
-// 语义色调走全局单源（src/utils/deviceType.ts），本页不再维护第二份 classMap。
-const getDeviceTone = (type: string) => 'tone-' + getDeviceTypeTone(type)
-
-const getDeviceTypeLabel = (type: string) => {
-  return getGlobalDeviceTypeLabel(type)
-}
+// 设备图标 / 语义色调 / 类型标签、状态标签与标签色、时间与原始数据的可读化，
+// 已搬到 composables/useDeviceListPresentation.ts（纯映射、无状态，历史面板与 CSV 导出共用）。
+// 这里只留必须读页面状态的取值口径：读数挑选、从机地址、总线列与通道名。
 
 /** 卡片最新读数（中文语义化，按设备类型挑 3 个关键指标）。 */
 const readingsOf = (device: any) => pickDeviceReadings(device, 3)
@@ -2095,54 +1751,6 @@ const channelCardLabel = (ch: Channel): string => {
   return getHardwareDisplay(ch.hardware_type, ch.hardware_id)
 }
 
-// Health status tag type mapping (Element Plus tag types)
-//
-// 'pending' 必须与 online 区分（2026-10-03 缺陷 5）：设备刚创建、还没采到
-// 任何数据时后端落 pending。此前模型默认 active、前端把 active 渲染成
-// 「在线」，于是新建的空设备看起来已经正常工作了。等待数据是 warning
-// 而非 success —— 它不是成功，也不是故障。
-function statusTagType(status: string): TagType {
-  switch (status) {
-    case 'active': return 'success'
-    case 'online': return 'success'
-    case 'pending':
-    case 'initializing': return 'warning'
-    case 'warning': return 'warning'
-    case 'error': return 'danger'
-    case 'disabled': return 'info'
-    case 'offline': return 'info'
-    default: return 'info'
-  }
-}
-
-// Health status label mapping
-//
-// 'pending' 显示为「等待数据」而不是「在线」或「离线」：它表达的是
-// 「已创建但尚未收到任何数据」这一事实，既不能宣称设备正常，
-// 也不能在设备还在等第一帧时就说它故障。
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'active': return '在线'
-    case 'online': return '在线'
-    case 'pending': return '等待数据'
-    case 'initializing': return '初始化中'
-    case 'warning': return '警告'
-    case 'error': return '故障'
-    case 'disabled': return '已禁用'
-    case 'offline': return '离线'
-    default: return status || '未知'
-  }
-}
-
-// 复制到剪贴板（跟随 FirmwareManage 的复制交互模式）
-const copyText = async (text: string) => {
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('已复制: ' + text)
-  } catch {
-    feedback.error('复制失败，请手动复制: ' + text)
-  }
-}
 
 const handleStatClick = (status: string) => {
   // 只改 ref: 页码重置 + 重新查询由 watch([...filters]) 统一收口 (§3.2.6 MUST)。
@@ -2579,30 +2187,6 @@ const channelConfigObject = (ch: Channel): { device_type?: string; [key: string]
   return ch.config ?? {}
 }
 
-const formatRelativeTime = (time: string | null | undefined) => {
-  if (!time) return UNKNOWN
-  const now = new Date()
-  const date = new Date(time)
-  const diff = now.getTime() - date.getTime()
-  
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes}分钟前`
-  if (minutes < 1440) return `${Math.floor(minutes / 60)}小时前`
-  return `${Math.floor(minutes / 1440)}天前`
-}
-
-// 格式化通用数据为可读字符串
-const formatDeviceData = (data: any): string => {
-  const entries = Object.entries(data).filter(([k]) =>
-    !['timestamp', 'device_id', 'device_type', 'channel_id'].includes(k))
-  if (entries.length === 0) return ''
-  return entries.map(([k, v]) => {
-    const num = Number(v)
-    const val = Number.isFinite(num) ? num.toFixed(2) : v
-    return `${k}: ${val}`
-  }).join(' | ')
-}
 
 // 筛选变化 → 重置页码后重新查询 (§3.2.6 MUST)。
 // 这是"筛选变化"的唯一入口: 模板里的下拉 / 标签关闭 / KPI 钻取都只改 ref,
@@ -2732,41 +2316,6 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 
-/* ── 历史设备视图 ── */
-.history-notice {
-  margin-bottom: 0;
-}
-.history-overview {
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-.history-error {
-  margin-bottom: 0;
-}
-.history-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 32px 16px;
-  text-align: center;
-  border: 1px dashed var(--el-border-color);
-  border-radius: 12px;
-  background: var(--el-fill-color-lighter);
-  color: var(--el-text-color-regular);
-}
-.history-empty h3 {
-  margin: 0;
-  font-size: 16px;
-  color: var(--el-text-color-primary);
-}
-.history-empty p {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.7;
-  max-width: 640px;
-}
-
 /* ── 批量间隔/失败明细 ── */
 .batch-interval-hint {
   margin: 0 0 8px;
@@ -2785,37 +2334,6 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 18px;
   color: var(--el-color-warning);
-}
-
-.template-quick-pick {
-  margin-bottom: 16px;
-  border: 1px dashed var(--border-color);
-  background: var(--bg-color-secondary);
-}
-.template-pick-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.template-pick-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  color: var(--el-text-color-regular);
-  white-space: nowrap;
-}
-.template-option-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-}
-.template-option-row .tpl-name {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* 统计 */
@@ -3083,74 +2601,6 @@ button.card-chip:hover { background: var(--el-fill-color-light); color: var(--el
   margin-bottom: 20px;
 }
 
-.parser-select-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: 360px;
-  overflow-y: auto;
-}
-
-.parser-select-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.parser-select-card:hover {
-  border-color: var(--el-color-primary);
-}
-
-/* I-9 A 类：键盘焦点必须可见（否则加了 tabindex 等于给键盘用户一个隐形停靠点） */
-.parser-select-card:focus-visible {
-  outline: 2px solid var(--el-color-primary);
-  outline-offset: 2px;
-}
-
-.parser-select-card.selected {
-  border-color: var(--el-color-success);
-  background: var(--el-color-success-light-9);
-}
-
-.parser-select-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  background: var(--brand-gradient);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* 白字：底为 --brand-gradient（两端深色系）——暗色下白字最差 4.83:1，不能用 --text-on-fill。 */
-  color: #fff;
-}
-
-.parser-select-info {
-  flex: 1;
-}
-
-.parser-select-info h4 {
-  margin: 0 0 4px;
-  font-size: 14px;
-  color: var(--el-text-color-primary);
-}
-
-.parser-vendor {
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.parser-tags {
-  display: flex;
-  gap: 4px;
-}
-
-.parser-selected-badge,
 .channel-selected-badge {
   width: 24px;
   height: 24px;

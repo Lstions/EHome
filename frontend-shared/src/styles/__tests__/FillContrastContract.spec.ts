@@ -33,6 +33,13 @@ const ALLOWED_WHITE_ON_FILL: Record<string, string> = {
     '基类前景；底由 --brand-gradient 给，语义色变体已在各自规则里改用 --text-on-fill。',
   'src/views/edge-device/EdgeDeviceList.vue':
     '基类前景；.total 走 --brand-gradient，语义色变体已改用 --text-on-fill。',
+  // 2026-11-12：EdgeDeviceList.vue 的三段式拆分。原 .parser-select-icon 规则（白字 + --brand-gradient 底）
+  // 随「型号选择步」模板片段整体搬到子组件 —— 父组件的 scoped 样式打不进子组件内部 DOM，样式必须跟着片段走。
+  // 这里只是把白名单**指向真正承载该规则的文件**（判定条件与理由一字未改），不是新增豁免：
+  // 该组件内 color:#fff 上方仍带同一句中文说明（hasJustification 依旧生效），且它是白名单里唯一的新增路径。
+  'src/views/edge-device/components/EdgeDeviceCreateModelStep.vue':
+    '基类前景（.parser-select-icon）；底为 --brand-gradient（两端深色，暗色下白字最差 4.83:1），'
+    + '与 EdgeDeviceList.vue 的同名规则同一口径 —— 该规则随模板片段搬入本组件。',
   'src/views/edge-device/inverter/InverterEnergyCard.vue':
     '仅 monthly（primary 家族，两端深色）保留白字；其余变体用 --text-on-fill。',
   'src/views/edge-device/bms/BmsDetailPage.vue':
