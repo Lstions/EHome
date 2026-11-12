@@ -107,6 +107,7 @@ declare module 'vue' {
     RouteProgressBar: typeof import('./components/common/RouteProgressBar.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SensorFieldPicker: typeof import('./components/sensor/SensorFieldPicker.vue')['default']
     SkeletonCard: typeof import('./components/common/SkeletonCard.vue')['default']
     StatCard: typeof import('./components/common/StatCard.vue')['default']
     StatusBadge: typeof import('./components/common/StatusBadge.vue')['default']
