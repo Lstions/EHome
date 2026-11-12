@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import nodeListSource from '@/views/node/NodeList.vue?raw'
+// 2026-11-12 列表页纯搬移拆分：「节点卡片」片段搬到 components/NodeGridCard.vue
+//（role/tabindex/aria-label/keydown 与 .collector-card:focus-visible 规则一并搬走），
+// 读取路径随之指向新位置；断言一字未改。
+import nodeGridCardSource from '@/views/node/components/NodeGridCard.vue?raw'
 import nodeOverviewSource from '@/views/node/NodeOverview.vue?raw'
 // 「关联设备」卡已拆到子组件；该用例断言的 .link-btn「查看」入口随卡搬走，读取路径随之指向新位置。
 import nodeDevicesSource from '@/views/node/components/NodeDevicesCard.vue?raw'
@@ -21,7 +24,7 @@ import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
   describe('NodeList.vue — .collector-card 卡片整体可点击进详情', () => {
     it('卡片补了 role="button" / tabindex="0" / aria-label', () => {
-      const card = nodeListSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
+      const card = nodeGridCardSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
       expect(card).not.toBeNull()
       const tag = card![0]
       expect(tag).toContain('role="button"')
@@ -30,20 +33,20 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
     })
 
     it('卡片补了 Enter / Space 键盘激活（与 @click 行为一致）', () => {
-      const card = nodeListSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
+      const card = nodeGridCardSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
       const tag = card![0]
       expect(tag).toContain('@keydown.enter.prevent="goToDetail(node.node_id)"')
       expect(tag).toContain('@keydown.space.prevent="goToDetail(node.node_id)"')
     })
 
     it('保留原有的鼠标 @click 行为', () => {
-      const card = nodeListSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
+      const card = nodeGridCardSource.match(/<el-card[\s\S]*?class="collector-card"[\s\S]*?>/)
       expect(card![0]).toContain('@click="goToDetail(node.node_id)"')
     })
 
     it('焦点可见环用真实布局盒（outline），不用可能被裁剪的 ::after', () => {
-      expect(nodeListSource).toContain('.collector-card:focus-visible')
-      const block = nodeListSource.match(/\.collector-card:focus-visible\s*\{[^}]*\}/)
+      expect(nodeGridCardSource).toContain('.collector-card:focus-visible')
+      const block = nodeGridCardSource.match(/\.collector-card:focus-visible\s*\{[^}]*\}/)
       expect(block).not.toBeNull()
       expect(block![0]).toContain('outline')
       expect(block![0]).not.toContain('::after')

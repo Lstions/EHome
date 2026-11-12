@@ -1,0 +1,42 @@
+/* NodeList 页族共享样式（2026-11-12 纯搬移拆分）。
+ *
+ * 为什么抽出来：以下规则同时作用在卡片视图（NodeGridCard.vue）与列表视图（NodeTable.vue）
+ * 的 DOM 上。子组件的 scoped 样式互不生效，若两边各留一份，任何一次调整都会静默漏掉另一处。
+ *
+ * 引入方必须以 <style scoped src> 放在**最后一个** style 块（与 nodeOverview.shared.css
+ * 同一纪律）：拆分前这些规则位于各片段自有规则之间，但没有任何同名选择器/同特异性规则
+ * 与它们竞争，放末尾不改变层叠结果；作用域仍按组件隔离（各引入方拿一份 scoped 副本），
+ * 不会外溢到全站其它页面。
+ */
+
+.collector-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 前景跟随各状态修饰符（见下两行）：在线/离线的底色在暗色下都会变浅。 */
+  color: var(--text-on-fill);
+}
+
+.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); color: var(--text-on-fill); }
+.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); color: var(--text-on-fill); }
+
+.quality-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  max-width: 120px;
+}
+
+.quality-bar .el-progress {
+  flex: 1;
+}
+
+.quality-value {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  min-width: 32px;
+}

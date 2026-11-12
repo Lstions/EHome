@@ -2,9 +2,23 @@ import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeList from '@/views/node/NodeList.vue'
-import source from '@/views/node/NodeList.vue?raw'
+import pageSource from '@/views/node/NodeList.vue?raw'
+import useNodeListSource from '@/views/node/composables/useNodeList.ts?raw'
+import nodeGridCardSource from '@/views/node/components/NodeGridCard.vue?raw'
+import nodeTableSource from '@/views/node/components/NodeTable.vue?raw'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import type { NodeListParams } from '@/api/node'
+
+/**
+ * 2026-11-12 列表页纯搬移拆分后，**源码结构断言的读取对象 = 页面 + 搬出去的文件**：
+ * 脚本逻辑进了 composables/useNodeList.ts，卡片/宽表两个自包含模板片段进了 components/。
+ * 继续只读页面会让 toContain 直接变红，而 not.toContain 一类会变成**假绿**
+ *（页面里根本没有该字符串了）。
+ *
+ * ⚠ 纪律：expect 的匹配条件一个字符都没改，只把「从哪个文件读」补全。
+ * 页面排在最前，保持「页面模板里必须有 X」一类断言的原始口径不变。
+ */
+const source = [pageSource, useNodeListSource, nodeGridCardSource, nodeTableSource].join('\n')
 
 // 显式标注 mock 签名: 无参 `vi.fn(() => ...)` 会把 `mock.calls` 推成 `[][]`
 // (长度 0 的元组), 之后读 `calls[0][0]` 会报 TS2493。标注后 calls 是
