@@ -313,25 +313,34 @@
             </el-select>
           </el-form-item>
         </template>
+        <!-- 传感器字段：按数据来源分支（文档 §4.6「一致性：与告警规则页共用」）。
+             ① 边缘设备（默认）：全站统一的字段选择器 components/sensor/SensorFieldPicker.vue，
+                中文名 / value_type 门禁 / last_seen / 字段族与自动化规则页只有一种呈现方式；
+                未选目标设备时组件自己提示「请先选择边缘设备」，一个请求都不发。
+             ② 来源组：后端按 rule.SensorName 在组内成员上求值
+                （backend/internal/alert/source.go:255-265），与目标设备的字段目录无关，
+                故保持既有语义：可搜索 + 允许手输（组类别由 onSourceGroupChange 自动带入）。
+             data-test 锚点只有一处：两个分支互斥渲染，既有用例的
+             find('[data-test="field-sensor"]') 仍能定位到唯一的输入控件。 -->
         <el-form-item label="传感器" required>
-          <!-- G2：候选项来自目标设备已上报的类别；allow-create 保留手输（未上报时不阻塞建规则）。 -->
-          <el-select
-            v-model="form.sensor_name"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            :loading="sensorCategoriesLoading"
-            :placeholder="form.target_id ? '选择或输入传感器名' : '请先选择目标设备'"
-            data-test="field-sensor"
-          >
-            <el-option
-              v-for="c in sensorCategories"
-              :key="c.code"
-              :label="c.unit ? `${c.code}（${c.unit}）` : c.code"
-              :value="c.code"
+          <div class="sensor-field-item">
+            <SensorFieldPicker
+              v-if="form.source_kind !== 'source_group'"
+              v-model="form.sensor_name"
+              :device-id="form.target_id"
+              data-test="field-sensor"
             />
-          </el-select>
+            <el-select
+              v-else
+              v-model="form.sensor_name"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="选择或输入传感器名"
+              data-test="field-sensor"
+            />
+          </div>
         </el-form-item>
         <el-form-item label="条件" required>
           <div class="cond-row">
@@ -373,30 +382,14 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import SensorFieldPicker from '@/components/sensor/SensorFieldPicker.vue'
 import { useAlertStore } from '@/stores/alert'
 import { useResponsive } from '@/composables/useResponsive'
 import { feedback } from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
-import client from '@/api/client'
-import { logger } from '@/utils/logger'
 import { sourceGroupApi, type SourceGroup } from '@/api/sourceGroup'
 import type { AlertRule, AlertComparator, AlertLevel, CreateAlertRuleRequest, UpdateAlertRuleRequest } from '@/api/alert'
-
-/** 后端已上报的测量类别（`GET /api/v1/unified-data/categories`）。 */
-interface MeasurementCategory {
-  code: string
-  unit: string
-}
-
-/** 与 DataPanel.vue 同一解包口径（后端可能回裸数组或 envelope.data）。 */
-function unwrapList<T>(res: unknown): T[] {
-  if (Array.isArray(res)) return res as T[]
-  if (res && typeof res === 'object' && Array.isArray((res as { data?: unknown }).data)) {
-    return (res as { data: T[] }).data
-  }
-  return []
-}
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
 const asRule = (row: unknown) => row as AlertRule
@@ -404,53 +397,17 @@ const asRule = (row: unknown) => row as AlertRule
 const store = useAlertStore()
 const devices = ref<EdgeDevice[]>([])
 
-// ── G2：传感器名下拉（改前是手输 el-input） ──
+// ── 传感器字段（文档 §4.6 一致性）──
 //
-// 改前 placeholder 写着「如：cell_voltage_1」，用户拼错时规则**永不触发**且没有任何反馈
-// —— 这是最典型的一类静默失效：规则列表显示"已启用"，但条件永远不成立。
-// 现改为按目标设备拉取后端**已上报**的类别作为候选项，同时保留 allow-create
-// （设备尚未上报该类别时仍可手填，不阻塞建规则）。
+// 边缘设备路径改用全站统一的字段选择器：候选（中文名 / 单位 / value_type / last_seen /
+// 字段族 / 语义别名）、类型门禁与三级降级链（/sensor-fields → /unified-data/categories
+// → 手输）都在 components/sensor/SensorFieldPicker.vue 内部，本页不再自己拉
+// /unified-data/categories —— 那条请求只有 code+unit（没有中文名），并且会让
+// protection_status(bitmask) 这类非数值字段被选进 "> 45"：后端 fieldNumeric=false
+// ⇒ 规则永不触发且界面毫无痕迹（文档 §3.2）。
 //
-// 端点是 `GET /api/v1/unified-data/categories?device_pk=<id>`，与 DataPanel.vue:577 同一
-// 生产用法（**带 `/api/v1` 前缀**）。
-//
-// 历史教训（2026-11-08）：曾有一个 `api/unifiedData.ts` 的封装把这批端点写成
-// 裸相对路径 `/unified-data/*`（缺 `/api/v1`），同源部署下必然打不中后端。
-// 那个文件已整体删除（5 个方法都指向不存在的路由，生产零调用方）。
-// 结论不变：**调数据接口一律用绝对 `/api/v1/...` 路径**，别指望 baseURL 补版本段。
-const sensorCategories = ref<MeasurementCategory[]>([])
-const sensorCategoriesLoading = ref(false)
-/** 已拉取过类别的设备 id，避免同一设备反复请求。 */
-let loadedCategoryDeviceId: number | null = null
-
-async function fetchSensorCategories(deviceId: number) {
-  if (!deviceId || deviceId === loadedCategoryDeviceId) return
-  sensorCategoriesLoading.value = true
-  try {
-    const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', {
-      params: { device_pk: deviceId },
-    })
-    sensorCategories.value = unwrapList<MeasurementCategory>(response)
-    loadedCategoryDeviceId = deviceId
-  } catch (err: unknown) {
-    // 有意不弹错、不阻塞表单：拿不到候选就退化为「只能手输」（allow-create 仍在），
-    // 若在此弹错误会打断用户填写。但也不空吞——留一条 warn 便于排查。
-    sensorCategories.value = []
-    loadedCategoryDeviceId = null
-    logger.warn('告警规则：传感器候选类别加载失败，退化为手工输入', { error: String(err), deviceId })
-  } finally {
-    sensorCategoriesLoading.value = false
-  }
-}
-
-/** 目标设备变化 ⇒ 换一份候选类别；清掉不再适用的旧值避免"设备 A 的传感器 + 设备 B"错配。 */
-function watchTargetDeviceForCategories() {
-  watch(() => form.target_id, (id) => {
-    sensorCategories.value = []
-    loadedCategoryDeviceId = null
-    if (id) void fetchSensorCategories(Number(id))
-  })
-}
+// 来源组路径保持既有语义（后端按 rule.SensorName 在组内成员上求值，
+// backend/internal/alert/source.go:255-265），见模板里的分支注释。
 
 // isMobile（<768px）用于窄屏取消「操作」列的固定（F29），断点与 theme.css 一致。
 // 事件表 5 列无 fixed 列，不涉及；只有规则表的「操作」列需要翻转。
@@ -519,10 +476,6 @@ const emptyForm = () => ({
 })
 const form = reactive(emptyForm())
 
-// G2：必须在 `form` 声明**之后**注册 —— 否则 watch 的 getter 会命中 TDZ
-// （实测：放在 form 之前会在挂载时抛 "Cannot access 'form' before initialization"）。
-watchTargetDeviceForCategories()
-
 // ── 来源组（方案 v0.3 §4.3）──
 // 前端只负责选择与展示；active/combine/缺员语义由后端 sourceref 求值，前端不重算。
 const sourceGroups = ref<SourceGroup[]>([])
@@ -574,9 +527,6 @@ function openCreate() {
   editingId.value = null
   editingSourceWasGroup.value = false
   Object.assign(form, emptyForm())
-  // G2：清掉上一轮候选（watch 只在 target_id **变化**时触发，新建时 id 可能恰好同值）。
-  sensorCategories.value = []
-  loadedCategoryDeviceId = null
   dialogVisible.value = true
 }
 function openEdit(rule: AlertRule) {
@@ -596,10 +546,8 @@ function openEdit(rule: AlertRule) {
     level: rule.level,
     enabled: rule.enabled,
   })
-  // G2：编辑已有规则时也要有候选（watch 不会触发：target_id 赋值前已是同值或被 Object.assign 一次性写入）。
-  sensorCategories.value = []
-  loadedCategoryDeviceId = null
-  if (rule.target_id) void fetchSensorCategories(Number(rule.target_id))
+  // sensor_name 一并回填（picker 会自动把「当前值」回显出来；来源组规则回填的是组类别，
+  // 由 onSourceGroupChange 维护）。这里不重置它，否则编辑存量规则会丢掉字段绑定。
   dialogVisible.value = true
 }
 
@@ -806,6 +754,15 @@ onMounted(async () => {
 .cond-row .el-select { flex: 0 0 52px; min-width: 52px; }
 .cond-row .el-input-number { flex: 1 1 auto; min-width: 176px; max-width: 100%; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
+/* 传感器字段行（picker 分支）：弹窗宽 520px，移动端由 theme.css 的
+   `.el-dialog { max-width: 92vw }` 收敛到约 92vw。
+   320px 视口下 form-item 内容宽 ≈ 294(92vw) − 2×16(弹窗内边距) − 90(label) ≈ 172px；
+   选择器「数值 N / 全部 M」两枚按钮各约 70px + 6px 间距 ≈ 146px，本就不挤压。
+   这里只做两件事，不改组件文案、不换图标：
+     ① 包一层 div 后保持满宽（width:100% + min-width:0），el-select 的满宽行为逐像素不变；
+     ② 允许两枚模式按钮换行 —— 字段数到四位数（"数值 1024"）时也不会横向溢出。 */
+.sensor-field-item { width: 100%; min-width: 0; }
+.sensor-field-item :deep(.sf-modes) { flex-wrap: wrap; }
 /* 事件筛选条 (G1): 窄容器下允许换行 (与 AutomationRules.vue 的 .event-filters 同范式)。 */
 .event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 /* 分页器与表格留出间距; 窄容器下允许换行 (与 AutomationRules.vue 同范式)。 */

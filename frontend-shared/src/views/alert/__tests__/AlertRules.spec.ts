@@ -26,14 +26,26 @@ vi.mock('@/api/edgeDevice', () => ({
     getList: vi.fn(),
   },
 }))
-// G2：传感器候选改为按设备拉取 `/api/v1/unified-data/categories`。
-// 不 mock 会真发 HTTP（该 spec 原先不涉及 client），这里给出与后端同形的候选，
-// 让「选已有类别」与「手输类别」两条路径都可测。
-const { mockClientGet } = vi.hoisted(() => ({
-  mockClientGet: vi.fn(() => Promise.resolve({ data: [{ code: 'temperature', unit: '°C' }] })),
-}))
-vi.mock('@/api/client', () => ({
-  default: { get: mockClientGet },
+// 传感器字段选择器（文档 §4.6）：告警页与自动化规则页共用同一组件。
+// 组件自身的行为（类型门禁 / 字段族 / 三级降级链 / resolve 校验）由
+// components/sensor/__tests__/SensorFieldPicker.spec.ts 覆盖，本文件只需要一个最小替身：
+//   ① 保留既有 find('[data-test="field-sensor"]').setValue(...) 的定位方式（原生 input）；
+//   ② 把 deviceId 暴露成 prop，用来断言本页确实把 target_id 透传下去（不漏传/不传错）。
+vi.mock('@/components/sensor/SensorFieldPicker.vue', async () => {
+  const { defineComponent } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'SensorFieldPicker',
+      props: ['modelValue', 'deviceId'],
+      emits: ['update:modelValue', 'change-field'],
+      template: `<input data-test="field-sensor" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
+    }),
+  }
+})
+// 来源组目录：页面挂载即拉取（loadSourceGroups），不 mock 会经 axios 真发 HTTP。
+// 本文件不测来源组选择，只保证用例不偷偷打网络（与 FixedColumnOcclusion.spec 同法）。
+vi.mock('@/api/sourceGroup', () => ({
+  sourceGroupApi: { list: vi.fn().mockResolvedValue({ items: [] }) },
 }))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
@@ -329,13 +341,12 @@ describe('AlertRules.vue', () => {
   it('创建成功后调用 store 并关闭对话框', async () => {
     const created = { ...ruleFixture, id: 2, name: '新规则' }
     mockedAlertApi.createRule.mockResolvedValue(created)
-    mockClientGet.mockResolvedValue({ data: [{ code: 'temperature', unit: '°C' }] })
     const wrapper = await mountPage()
     await wrapper.find('[data-test="create-rule"]').trigger('click')
     // 填表 (ElInput/ElSelect stub 将 data-test 直接渲染在控件自身上)
     await wrapper.find('[data-test="field-name"]').setValue('新规则')
     await wrapper.find('[data-test="field-target-id"]').setValue('10')
-    // G2：传感器已是 el-select。选定目标设备会去拉候选类别，故先 flush 再选。
+    // G2：传感器字段是字段选择器（本文件里是 stub input）。先选目标设备让它拿到 deviceId，再填字段。
     await flushPromises()
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
     await wrapper.find('[data-test="save-rule"]').trigger('click')
@@ -541,50 +552,71 @@ describe('AlertRules.vue', () => {
     expect(params.page).toBe(2)
   })
 
-  // ── G2：传感器名由手输改为「按设备候选 + 允许自建」的下拉 ──
+  // ── G2：传感器字段由「按设备类别的弱下拉」改为全站统一字段选择器 ──
   //
-  // 改前是 el-input，placeholder「如：cell_voltage_1」——拼错时规则**永不触发**
-  // 且没有任何反馈（规则列表仍显示"已启用"）。这是最典型的静默失效，故必须
-  // 让候选项来自后端**已上报**的类别。
-  describe('G2 传感器候选下拉', () => {
-    it('选定目标设备后按该设备拉取候选类别（带 /api/v1 前缀，与生产一致）', async () => {
-      mockClientGet.mockResolvedValue({ data: [{ code: 'cell_voltage_1', unit: 'V' }] })
+  // 改前候选来自 `GET /api/v1/unified-data/categories`：只有 code+unit —— 没有中文名，
+  // 也没有 value_type ⇒ protection_status(bitmask) 能被选进 "> 45"，后端 fieldNumeric=false
+  // ⇒ 规则永不触发且界面毫无反馈（文档 §3.2）。现已交给
+  // components/sensor/SensorFieldPicker.vue（本文件顶部已 mock，理由见那里的注释）。
+  describe('G2 传感器字段选择器', () => {
+    it('选择目标设备后，picker 收到的 deviceId 等于该 target_id（不漏传 / 不传错字段）', async () => {
+      // 两台设备：证明 deviceId 跟着选择走，而不是只取挂载时的初值。
+      mockedEdgeApi.getList.mockResolvedValue({
+        total: 2,
+        items: [{ id: 10, name: 'BMS-01' } as never, { id: 11, name: 'BMS-02' } as never],
+      })
       const wrapper = await mountPage()
-      mockClientGet.mockClear()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
-      await wrapper.find('[data-test="field-target-id"]').setValue('10')
+      const picker = () => wrapper.findComponent({ name: 'SensorFieldPicker' })
+
+      expect(picker().exists(), '边缘设备分支未渲染字段选择器').toBe(true)
+      // 未选设备：picker 仍应存在（组件自己提示「请先选择边缘设备」），且不带任何 deviceId
+      expect(picker().props('deviceId')).toBeUndefined()
+
+      const targetId = wrapper.find('[data-test="field-target-id"]')
+      await targetId.setValue('10')
       await flushPromises()
-      expect(mockClientGet).toHaveBeenCalledWith(
-        '/api/v1/unified-data/categories',
-        expect.objectContaining({ params: { device_pk: 10 } }),
-      )
+      // 必须是 form.target_id 本身（number 10）：传 target_type、传来源组 id、
+      // 传成字符串 '10' 都会在这里红 —— 传错的后果是拿别的设备字段目录建规则。
+      expect(picker().props('deviceId')).toBe(10)
+
+      await targetId.setValue('11')
+      await flushPromises()
+      expect(picker().props('deviceId'), 'deviceId 未跟随目标设备变化').toBe(11)
     })
 
-    it('候选渲染为可选项，且仍是可搜索 + 允许自建的下拉', async () => {
-      mockClientGet.mockResolvedValue({ data: [{ code: 'cell_voltage_1', unit: 'V' }] })
+    it('编辑存量规则：sensor_name 回填（picker 回显当前值），deviceId 仍是该规则的目标设备', async () => {
+      const wrapper = await mountWithSlotTable()
+      const editBtn = wrapper.findAll('button').find(b => b.text() === '编辑')
+      expect(editBtn, '缺少编辑按钮，用例前提不成立').toBeTruthy()
+      await editBtn!.trigger('click')
+      await flushPromises()
+
+      const picker = wrapper.findComponent({ name: 'SensorFieldPicker' })
+      expect(picker.exists()).toBe(true)
+      expect(picker.props('modelValue'), '编辑时未回填 rule.sensor_name').toBe('cell_voltage_1')
+      expect(picker.props('deviceId')).toBe(10)
+      // 回填必须真的落到控件上（picker 的 v-model 已接 form.sensor_name）
+      expect((wrapper.find('[data-test="field-sensor"]').element as HTMLInputElement).value).toBe('cell_voltage_1')
+    })
+
+    it('来源组分支不改语义：仍是可搜索 + 允许手输的下拉，不换成 picker', async () => {
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
-      await wrapper.find('[data-test="field-target-id"]').setValue('10')
+      await wrapper.find('[data-test="field-source-kind"]').setValue('source_group')
       await flushPromises()
+
+      // 来源组规则的后端求值读 rule.SensorName（backend/internal/alert/source.go:255-265），
+      // 与「目标设备的字段目录」无关 —— 这条路径本次不改。
+      expect(wrapper.findComponent({ name: 'SensorFieldPicker' }).exists(), '来源组分支误用了字段选择器').toBe(false)
       const sensor = wrapper.find('[data-test="field-sensor"]')
-      // stub 是原生 <select>：候选项以 <option> 形式落地
+      expect(sensor.exists(), '来源组分支缺少传感器输入').toBe(true)
+      // el-select 替身渲染为原生 <select>：该分支仍是下拉（组类别带入 + 可手输）
       expect(sensor.element.tagName.toLowerCase()).toBe('select')
-      expect(sensor.html()).toContain('cell_voltage_1')
-      // allow-create（允许手输）在 stub 上不体现为 DOM 属性，故对源码断言：
-      // 否则设备未上报类别时用户无法建规则（会把"候选为空"变成硬阻塞）。
+      // allow-create / filterable 在原生 <select> 上不体现为 DOM 属性，故对源码断言：
+      // 组类别之外仍必须能手输，不能把来源组这条路径变成硬阻塞。
       expect(alertRulesSource).toContain('allow-create')
       expect(alertRulesSource).toContain('filterable')
-    })
-
-    it('候选接口失败时退化为手输，不阻塞建规则（不得弹错打断）', async () => {
-      mockClientGet.mockRejectedValue(new Error('boom'))
-      const wrapper = await mountPage()
-      await wrapper.find('[data-test="create-rule"]').trigger('click')
-      await wrapper.find('[data-test="field-target-id"]').setValue('10')
-      await flushPromises()
-      // 表单仍在、仍可提交（不因候选加载失败而卡死）
-      expect(wrapper.find('[data-test="save-rule"]').exists()).toBe(true)
-      expect(mockedAlertApi.createRule).not.toHaveBeenCalled()
     })
   })
 
