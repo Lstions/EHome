@@ -2,7 +2,15 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import nodeOverviewSource from '../NodeOverview.vue?raw'
+/**
+ * 纯搬移式拆分后，OTA 状态映射随「OTA 历史」卡搬进子组件；页面级 --no-* token 仍在
+ * 页面文件里。门禁要同时看到「映射表」与「它引用的 token 作用域」，故读取范围 =
+ * 页面 + OTA 子组件，断言本身一字未改。
+ */
+const nodeOverviewSource = [
+  'src/views/node/NodeOverview.vue',
+  'src/views/node/components/NodeOtaHistoryCard.vue',
+].map(file => readFileSync(resolve(process.cwd(), file), 'utf8')).join('\n')
 
 /**
  * OTA 状态机一致性门禁（真源 = backend/internal/ota/ota.go 的 Status* 常量）。

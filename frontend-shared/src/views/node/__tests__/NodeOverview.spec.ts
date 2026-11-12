@@ -5,8 +5,38 @@ import { reactive } from 'vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import NodeOverview from '../NodeOverview.vue'
-import source from '../NodeOverview.vue?raw'
+
 import type { Node } from '@/api/node'
+
+/**
+ * 纯搬移式拆分（2026-11-12）后，源码门禁的「页面源码」= 页面 + 拆分产物。
+ *
+ * 断言本身一字未改：只是把读取范围机械地扩到新的存放位置（子组件 / composable /
+ * 共享样式表），顺序固定（页面 → 子组件 → 共享样式 → composable），
+ * 因为个别断言按「先出现」定位（如 .chan-row 的第一处是页面里的通道健康卡）。
+ */
+const NODE_OVERVIEW_SOURCE_FILES = [
+  'src/views/node/NodeOverview.vue',
+  'src/views/node/components/BusConfigPanel.vue',
+  'src/views/node/components/BusCreatedChannelsCard.vue',
+  'src/views/node/components/DmaChannelsCard.vue',
+  'src/views/node/components/NodeDevicesCard.vue',
+  'src/views/node/components/NodeOtaHistoryCard.vue',
+  'src/views/node/components/nodeOverview.shared.css',
+  'src/views/node/composables/channelDisplay.ts',
+  'src/views/node/composables/busResourceHelpers.ts',
+  'src/views/node/composables/useNodeOverviewData.ts',
+  'src/views/node/composables/useBusResources.ts',
+  'src/views/node/composables/useBusConfig.ts',
+  'src/views/node/composables/useBaudReconfigure.ts',
+  'src/views/node/composables/useNodeTabs.ts',
+  'src/views/node/composables/useNodeHeaderActions.ts',
+  'src/views/node/composables/useNodeDeviceOps.ts',
+  'src/views/node/composables/usePeripheralAck.ts',
+] as const
+const source = NODE_OVERVIEW_SOURCE_FILES
+  .map(file => readFileSync(resolve(process.cwd(), file), 'utf8'))
+  .join('\n')
 
 /**
  * 每个用例结束后**自动卸载**组件实例。

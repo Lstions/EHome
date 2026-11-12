@@ -1,0 +1,228 @@
+/* 页面族公共基座与窄屏层。
+ *
+ * 为什么这些规则不留在页面文件里：四个页签内容拆成子组件后，父组件的 scoped 样式
+ * **不会作用到子组件内部 DOM**。卡片基座、按钮、标签、通道行、资源表这些基元在
+ * 页面与子组件里都要生效，故收进这份"页面族"样式表，由页面与各子组件分别以
+ * <style scoped src> 引入 —— 作用域仍按组件隔离（引入方各拿一份 scoped 副本），
+ * 不会外溢到全站其它页面。
+ *
+ * 窄屏（768px）规则只出现在这里：本仓门禁把「同条件 @media 块只允许一处」钉死在
+ * 页面源码上；拆分子组件后若每块各带一个 768 块，会被数成重复块。各引入方按自己的
+ * 作用域生效，视觉结果与拆分前一致。
+ *
+ * 引入方必须把本文件放在**最后一个** style 块：原单文件里这些基础规则与业务规则的
+ * 先后关系会改变层叠结果（例：.link-btn 在 .link-btn-danger 之后、.bus-table 列宽
+ * 在 .ota-table 列宽之后）。放在最后才能保持拆分前的计算结果。
+ */
+
+/* 卡片基座 */
+.card {
+  background: var(--card-bg, #fff);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+}
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot-green { background: var(--no-success); }
+.dot-gray { background: var(--no-dot-off); }
+.btn {
+  height: 36px; padding: 0 16px; border-radius: 6px; font-size: 13px; font-weight: 500; line-height: 20px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; transition: all .15s;
+  background: none; font-family: inherit;
+}
+.btn:disabled { opacity: .6; cursor: not-allowed; }
+.btn-plain { background: var(--card-bg, #fff); border-color: var(--no-border); color: var(--no-text-secondary); }
+.btn-plain:hover:not(:disabled) { color: var(--no-primary); border-color: var(--no-primary); }
+/* 前景用 --text-on-fill：--no-primary 亮 #2E6BFF / 暗 #4D7FFF，
+   白字在暗色下只有 3.62（低于 4.5），而它同时还要当**文字色**用（链接/选项卡），
+   不能为了当底而调暗 ⇒ 按主题切换前景（亮白 4.50 / 暗深 4.80）。 */
+.btn-primary { background: var(--no-primary); color: var(--text-on-fill); }
+.btn-primary:hover:not(:disabled) { background: var(--no-primary-hover); }
+.spin { animation: no-spin 1s linear infinite; }
+@keyframes no-spin { to { transform: rotate(360deg); } }
+.btn-sm { height: 28px; padding: 0 11px; font-size: 12px; line-height: 18px; }
+.bus-resource-name, .link-btn { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--no-primary); font-family: inherit; font-size: 13px; font-weight: 500; line-height: 20px; cursor: pointer; }
+.bus-resource-name:hover, .link-btn:hover:not(:disabled) { color: var(--no-primary-hover); }
+.link-btn:disabled { color: var(--no-text-faint); cursor: not-allowed; }
+.bus-pins, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bus-tag { display: inline-flex; align-items: center; min-height: 20px; padding: 0 7px; margin-right: 4px; border-radius: 4px; font-size: 12px; font-weight: 500; line-height: 18px; }
+.bus-tag-blue { color: var(--no-primary); background: var(--no-bg-active); }
+.bus-tag-green { color: var(--no-success-text); background: var(--no-success-bg); }
+.bus-tag-gray { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px 12px; border-bottom: 1px solid var(--no-border-light);
+}
+.card-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }
+.card-link { border: 0; background: transparent; padding: 0; font-family: inherit; color: var(--no-primary); font-size: 13px; font-weight: 500; line-height: 20px; cursor: pointer; }
+.card-link:hover { text-decoration: underline; }
+.card-link:focus-visible { outline: 2px solid var(--no-primary); outline-offset: 2px; border-radius: 4px; }
+.card-loading { padding: 12px 20px; }
+.card-empty { padding: 32px 20px; text-align: center; color: var(--no-text-secondary); font-size: 13px; line-height: 20px; }
+.chan-list { padding: 0 20px 12px; }
+.chan-row {
+  display: flex; align-items: center; height: 44px; gap: 10px; cursor: pointer;
+  border-bottom: 1px solid var(--no-border-light); padding: 0 4px; transition: background .15s;
+}
+.chan-row:last-child { border-bottom: none; }
+.chan-row:hover { background: var(--no-bg-hover); }
+.chan-row:focus-visible { outline: 2px solid var(--no-primary); outline-offset: -2px; border-radius: 6px; }
+.chan-icon {
+  width: 28px; height: 28px; border-radius: 6px; background: var(--no-bg-active); color: var(--no-primary);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.chan-name { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chan-badge { font-size: 12px; height: 22px; line-height: 22px; padding: 0 10px; border-radius: 11px; }
+.cb-ok { color: var(--no-success-text); background: var(--no-success-bg); }
+.cb-warn { color: var(--no-warning-text); background: var(--no-warning-bg); }
+.cb-off { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
+.bus-table-wrap { overflow-x: auto; }
+.bus-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 13px; line-height: 20px; }
+.bus-table th { height: 42px; padding: 0 6px; color: var(--no-text-secondary); text-align: left; font-size: 12px; font-weight: 500; line-height: 18px; white-space: nowrap; border-bottom: 1px solid var(--no-border); }
+/* 2026-10-02：表体原先用 --no-border-light(#F0F2F5) 画行分隔线，在白底卡片上几乎看不见，
+   整块表格读起来是"一片白"。表头加浅底色带 + 正文改用 --no-border，让"表头/表行/行间"
+   三层结构各自可辨（--no-border-light 仍用于卡片内其它更轻的分隔，不动它）。 */
+.bus-resource-card .bus-table thead th { background: var(--no-bg-subtle, #FAFBFC); }
+.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px; border-bottom: 1px solid var(--no-border); white-space: nowrap; }
+/* 最后一行不再画线：线由卡片底部承担，避免出现"半截线" */
+.bus-table tbody tr:last-child td { border-bottom: 0; }
+/* 「关键参数」列放的是长度不定的标签（"1MHz" / "5000000 baud" / "SDA8 / SCL9"…）。
+   单元格默认 white-space:nowrap，标签一超标就**溢出到相邻列** —— 实测 92px 标签挤进
+   89px 单元格（2026-10-02 在 UART TAB 复现）。改为允许在此列内换行：宽度不再依赖
+   对"最长文案"的猜测，任何长度的参数都不会越界。 */
+.bus-table td:nth-child(4) { white-space: normal; }
+.bus-table td:nth-child(4) .bus-tag { margin: 2px 3px 2px 0; }
+.bus-table th:nth-child(1), .bus-table td:nth-child(1) { width: 28px; }
+/* 2026-10-02 重新配比：把宽度让给真正需要空间的列。
+   「DMA 绑定」要放一条选择器、「操作」要放"查看 + 建通道"两个入口，
+   而「引脚」「状态」内容很短（SDA8 / SCL9、可用），不需要原来的份额。 */
+.bus-table th:nth-child(2), .bus-table td:nth-child(2) { width: 9%; }
+.bus-table th:nth-child(3), .bus-table td:nth-child(3) { width: 13%; }
+.bus-table th:nth-child(4), .bus-table td:nth-child(4) { width: 12%; }
+.bus-table th:nth-child(5), .bus-table td:nth-child(5) { width: 8%; }
+.bus-table th:nth-child(6), .bus-table td:nth-child(6) { width: 9%; }
+.bus-table th:nth-child(7), .bus-table td:nth-child(7) { width: 17%; }
+.bus-table th:nth-child(8), .bus-table td:nth-child(8) { width: 21%; }
+
+@media (max-width: 768px) {
+  /* ── UI-2（2026-10-15）：DMA 详情行的轻量编辑入口在窄屏占满可用宽度。
+     桌面端它贴着右对齐的值、上限 150px（见 .bus-detail-list .bus-detail-edit）；
+     窄屏详情行改纵向堆叠后，横向空间足够，占满反而更好点按（§4.4.5 触控目标）。 */
+  .bus-detail-list .bus-detail-edit { max-width: none; width: 100%; }
+  .bus-detail-list .bus-detail-edit .dma-select { width: 100%; max-width: none; }
+  /* 只保留「上一级 / 当前」两段：根级「首页」在 390px 下信息价值最低，优先裁掉 */
+  /* 当前实体名可长可短：允许它收缩并省略，避免把胶囊标签撑成逐字竖排（§4.2.5） */
+  /* 上一级是真实链接（:to）：它就是移动端唯一的「退回上一层」入口，
+     必须满足 §4.4.5 的 44px 触控热区。改前这里写的是 min-height:20px —— 注释声称
+     44px、实测 getBoundingClientRect().height 只有 20px（390px 实测 48x20），
+     是「注释与实现相矛盾」的假达标。改为 44px 后热区由 flex 居中撑开，
+     面包屑自身高度 20px→44px，仍在 390px 的预算内（docOverflowX 保持 0）。 */
+  .page-header { flex-direction: column; gap: 12px; }
+  .ph-title-row { gap: 8px; }
+  .ph-title { font-size: 18px; line-height: 26px; }
+  .ph-actions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .ph-actions > span { min-width: 0; }
+  .ph-actions .btn { width: 100%; min-width: 0; justify-content: center; padding: 0 8px; }
+  .stat-item { flex: 1 1 45%; }
+  .tab-bar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; gap: 20px; padding: 0 12px; }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  /* A-nodes P2（2026-10-21）：393px 下 8 个页签只有前 3 个完整可见，且无任何横滑提示。
+     不改结构，用 mask-image 在"还有内容的一侧"做渐隐（状态类见 updateTabScrollState）。
+     桌面 .tab-bar 1192/1192 不溢出 ⇒ tab-overflow=false ⇒ 本组规则不命中，零变化。 */
+  .tab-bar.tab-overflow:not(.tab-at-end) {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .tab-bar.tab-overflow:not(.tab-at-start) {
+    -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent);
+  }
+  .tab-bar.tab-overflow:not(.tab-at-start):not(.tab-at-end) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  }
+  .tab-item { flex: 0 0 auto; }
+  /* 移动端无悬停，统计值允许换行显示完整时间戳（默认 nowrap+ellipsis 在窄列截断） */
+  .stat-value { white-space: normal; overflow: visible; text-overflow: unset; font-size: 13px; }
+  .bus-alert { align-items: flex-start; padding: 10px 12px; }
+  .bus-alert-refresh { margin-top: 0; }
+  .bus-stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 8px; }
+  .bus-table { min-width: 680px; table-layout: auto; }
+  .bus-table-wrap { margin: 0 -16px; padding: 0 16px; }
+  .bus-tool-layout, .bus-tool-cards { grid-template-columns: 1fr; }
+  .bus-uart-tools .bus-tool-card { height: auto; }
+  .bus-create-field-grid { grid-template-columns: 1fr; }
+  .bus-create-actions { flex-wrap: wrap; }
+  .bus-create-actions .btn { flex: 1; justify-content: center; }
+  /* 新 TAB 移动端：DMA 单列；设备行纵向紧凑；宽表容器内滚动不溢出页面 */
+  .dma-grid { grid-template-columns: 1fr; }
+  .device-row { flex-wrap: wrap; height: auto; min-height: 44px; padding: 8px 4px; gap: 6px 10px; }
+  .device-row .chan-name { flex: 1 1 100%; }
+  .device-row .chan-sub { flex: 1 1 40%; }
+  .device-card-actions { flex-wrap: wrap; }
+  .ota-table-wrap { margin: 0 -16px; padding: 0 16px; }
+
+  /* M2：通道健康卡的「编辑/删除」在 390px 实测 42x20px（.link-btn 基样式
+     padding:0 + line-height:20px），两个维度都不满足 §4.4.5 的 44x44px 可点区域。
+     只改移动端：桌面 1440px 实测同样是 42x20，但那是 §4.2.3 有意保留的紧凑密度（鼠标精度高），
+     故桌面必须保持原样，规则不得外溢到 1440 块。
+     为何两个维度都要抬：规范说的是**实际可点击区域** 44x44，只加 min-height 仍不达标。
+     justify-content: center 让文字在加宽后保持居中（否则会靠左、看起来像坏了）。
+     为何不会撑破行：.chan-row 是 height:44px 固定行高，本规则只把**行内子元素**抬到 44px
+     （与行高相等，不产生纵向溢出）。
+     横向预算（Lead 独立实测，2026-09-24，390×844）：
+       .chan-row 可用宽 302px；行内子项 icon28 + 名称71 + 徽章44 + 编辑44 + 删除44 + 箭头13 = 244
+       加 5 个 gap×10 = 50 ⇒ 合计 **294px ≤ 302px**，余 8px，故 rowScrollW == clientW == 302 无溢出。
+       （注：名称列实测 71px 会随通道名长短浮动；余量仅 8px，若将来行内再增子项需重新核算。）
+     chan-del 未设 flex-shrink（chan-edit 有），故一并显式声明，避免两键互相挤压。 */
+  .chan-row .link-btn.chan-edit,
+  .chan-row .link-btn.chan-del {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* ── A-nodes P1（2026-10-21）：可点目标过小 ──
+     审计实测：.ph-edit 16×16、.copy-icon 13×13、.mini-edit 12×12、.card-link 52×20、
+     总线/OTA 行的 .link-btn 高 18~20 —— 都远低于 §4.4.5 的 36/44px 热区。
+     做法：视觉尺寸**不动**（保持设计稿密度），用内边距把**真实布局盒**撑到 ≥36×36，
+     再用等量负外边距抵消布局占位 ⇒ 行高/间距/换行完全不变。
+     不用 ::after 伪元素：实测它在 el-table 单元格内会被裁剪，elementFromPoint 也点不到；
+     这里增大的是真实可点的 border-box（getBoundingClientRect 直接可测）。 */
+  /* 页头两个图标动作是**主操作**（重命名 / 复制 ID），按 44×44 做（审计给的对照档）；
+     卡片内 mini-edit 与总线/OTA 行内 link-btn 属高密度列表，按 36×36 档（§4.4.5 下限），
+     避免 44 的负边距在 20px 行距的行间互相重叠、造成误点。 */
+  .ph-edit { padding: 14px; margin: -14px; min-width: 44px; min-height: 44px; justify-content: center; }
+  .copy-icon { padding: 15.5px; margin: -15.5px; min-width: 44px; min-height: 44px; justify-content: center; }
+  .mini-edit { padding: 12px; margin: -12px; min-width: 36px; min-height: 36px; justify-content: center; }
+  .card-link { display: inline-flex; align-items: center; min-height: 44px; padding: 12px 0; margin: -12px 0; }
+  .link-btn { min-height: 36px; min-width: 36px; padding: 8px 0; margin: -8px 0; justify-content: center; }
+  /* 热区用负外边距展开后，纵向相邻入口的间距必须补回来，否则两个 36px 热区会互相重叠
+     （实测总线配置：配置/改波特率 垂直间距仅 2px，展开后重叠 14px；「在通道管理中查看」
+     与下方首行配置按钮重叠 11px）。只加窄屏间距，桌面密度不变。 */
+  .bus-channel-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 16px 8px;
+    margin-left: auto;
+  }
+  /* 按钮不收缩：改波特率在窄列里会被压成两行（内容 40px ⇒ 展开热区 56px），
+     放开宽度后单行 20px，展开后 36px，行高也随之回落。 */
+  .bus-channel-actions .link-btn { flex: 0 0 auto; white-space: nowrap; }
+  .bus-channels-list { padding-top: 20px; }
+  /* 通道条目之间也要给热区留间距：相邻两条的「改波特率/配置」热区在 1px 行距下会重叠 15px */
+  .bus-channel-item { padding: 8px 0; }
+
+  /* ── A-nodes P2（2026-10-21）：「关联设备」最近数据预览被切 ──
+     审计实测 393px：内容 339px / 可见 144px，ellipsis 且无展开入口（cell_voltage_10… 被吃掉）。
+     窄屏（行本来就是 flex-wrap + 高自适应）把预览独占一行并允许换行 ⇒ 全量可读；
+     桌面保持单行省略（鼠标可悬停 title 看全量，紧凑表格密度不破坏桌面回归）。 */
+  .device-row .device-last-data {
+    flex: 1 1 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}

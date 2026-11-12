@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import nodeListSource from '@/views/node/NodeList.vue?raw'
 import nodeOverviewSource from '@/views/node/NodeOverview.vue?raw'
+// 「关联设备」卡已拆到子组件；该用例断言的 .link-btn「查看」入口随卡搬走，读取路径随之指向新位置。
+import nodeDevicesSource from '@/views/node/components/NodeDevicesCard.vue?raw'
 import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
 // ── 本文件覆盖：页内可点击非原生容器补语义（规范 §3.1.3 MUST）──
@@ -128,7 +130,7 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
       // 该文件删除后改钉**存活页面**的等价入口，守卫意图不变：
       // **查看设备这个动作必须有一个原生 <button> 承载**（键盘可达），
       // 不能只有鼠标可点的裸 <div @click>。
-      const tag = nodeOverviewSource.match(/<button[^>]*class="link-btn"[^>]*@click="viewDevice\(row\)"[^>]*>/)
+      const tag = nodeDevicesSource.match(/<button[^>]*class="link-btn"[^>]*@click="viewDevice\(row\)"[^>]*>/)
       expect(tag, '未找到承载「查看设备」的 <button>').not.toBeNull()
       expect(tag![0]).toContain('type="button"')
 
@@ -136,7 +138,7 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
       // **确实**没有 role/tabindex —— 即卡片视图内查看设备是鼠标专属路径。
       // 列表视图（:651）提供了 <button> 等价入口，故能力未丢失；
       // 此处显式断言"列表视图的按钮仍在"，防止连这唯一键盘路径也被移除。
-      const hasKeyboardPath = /<button[^>]*@click="viewDevice\(row\)"/.test(nodeOverviewSource)
+      const hasKeyboardPath = /<button[^>]*@click="viewDevice\(row\)"/.test(nodeDevicesSource)
       expect(hasKeyboardPath, '列表视图的键盘可达「查看」入口被移除').toBe(true)
     })
   })

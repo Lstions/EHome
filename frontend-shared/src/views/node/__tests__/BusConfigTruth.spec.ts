@@ -4,7 +4,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeOverview from '../NodeOverview.vue'
-import source from '../NodeOverview.vue?raw'
+
+/**
+ * 纯搬移式拆分后，总线配置的实现分散在 2 个子组件 + 2 个 composable 里；
+ * 源码级断言（掩码常量、DMA 选择器、已创建通道入口）读取范围随之指向这些新位置，
+ * 断言本身一字未改。
+ */
+const BUS_SOURCE_FILES = [
+  'src/views/node/components/BusConfigPanel.vue',
+  'src/views/node/components/BusCreatedChannelsCard.vue',
+  'src/views/node/composables/useBusConfig.ts',
+  'src/views/node/composables/busResourceHelpers.ts',
+] as const
+const source = BUS_SOURCE_FILES
+  .map(file => readFileSync(resolve(process.cwd(), file), 'utf8'))
+  .join('\n')
 
 /**
  * 总线配置页门禁（A: 已创建通道列表 / B: DMA 资源可选 / B2: 掩码口径真源）

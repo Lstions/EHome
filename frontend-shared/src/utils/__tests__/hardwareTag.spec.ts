@@ -8,7 +8,7 @@ import {
 } from '@/utils/hardwareTag'
 import channelListSource from '@/views/channel/ChannelList.vue?raw'
 import channelTerminalSource from '@/components/channel/ChannelTerminal.vue?raw'
-import nodeOverviewSource from '@/views/node/NodeOverview.vue?raw'
+import nodeOverviewSource from '@/views/node/composables/channelDisplay.ts?raw'
 
 // 同一实体（通道的总线类型）曾在前端有 5 套写法：'UART' / 'uart' / '串行' /
 // '串口 (UART)' / "UART UART0"。本文件锁死共享源的归一与展示规则，

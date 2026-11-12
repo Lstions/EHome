@@ -295,8 +295,12 @@ const REGISTERED_EXCEPTIONS = new Map<string, string>([
   // 原例外理由写的是「目标即当前路由」—— 那句话本身就是缺陷描述（点通道行推当前页 = 原地打转），
   // 登记成例外等于把缺陷合法化，还让修复者因为条目变 stale 而报红。
   // 现该入口为带四件套的 goToNodeChannels（跳 /channel?node=<序列号>），**不得再登记为例外**。
-  ['src/views/node/NodeOverview.vue::selectedResourceId = resource.id', '#18 D：行内「资源名」「查看」两个原生 button'],
-  ['src/views/node/NodeOverview.vue::viewDevice(row)', '#19 D：视图切「列表」后每行原生「查看」button'],
+  // 2026-11-12 纯搬移拆分：同一个 <tr>（资源表行点击选中，无四件套）随总线配置页签
+  // 搬进子组件，@click 表达式改为调用同名动作 selectResource(...)；登记位置随之更新，
+  // 判据与例外理由未变（同一元素、同一处鼠标快捷方式）。
+  ['src/views/node/components/BusConfigPanel.vue::selectResource(resource.id)', '#18 D：行内「资源名」「查看」两个原生 button'],
+  // 2026-11-12 纯搬移拆分：卡片视图的 .device-tile 随「关联设备」卡搬进子组件。
+  ['src/views/node/components/NodeDevicesCard.vue::viewDevice(row)', '#19 D：视图切「列表」后每行原生「查看」button'],
   // 2026-10-25 批量管理（task-9 D 类）：「点卡片切换选中」是**批量模式下**的鼠标快捷方式；
   // 键盘等价入口是每张卡片头部的原生 checkbox（checkbox 本身就是可聚焦控件，Enter/Space 可切换），
   // 加上批量条的原生按钮「全选本页 / 取消选择」。卡片在非批量模式下 @click 不做任何事。
