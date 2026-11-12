@@ -512,14 +512,126 @@
           </el-form-item>
         </template>
 
-        <el-form-item label="附加条件">
-          <el-input
-            v-model="form.conditions_json"
-            type="textarea"
-            :rows="2"
-            placeholder='JSON 数组，如 [{"sensor":"humidity","comparator":"lt","threshold":30}]'
-            data-test="field-conditions"
-          />
+        <!-- 附加条件（文档 §4.3）：JSON 文本域 → 结构化条件行。
+             为什么条件行必须复用**同一个** SensorFieldPicker（而不是给条件另设一个普通下拉/文本框）：
+             后端 conditionsSatisfied 逐条走的也是 evalSelector（evaluator.go:1018-1033）——
+             与上面的触发字段是**同一个 selector 契约**（字面量 / 字段族 cell_voltage_*:max / @别名）。
+             条件行若退回手打物理名，同一张表单里就会出现两套"字段是什么"的答案，其中一套
+             拼错一个字母 = 保存成功 + 条件永不满足 + 规则静默不触发（文档 §3.1 整类缺陷）。
+             为什么只在 sensor_threshold 下渲染：conditionsSatisfied 只在传感器阈值路径被调用
+             （evalRule / evalRuleWithSource / evalCompositeRule），time_window / sun_event 的
+             conditions_json 是**惰性数据**。给它编辑入口等于向用户承诺"日出规则也有附加条件"，
+             而它永远不会被求值。但存量值仍**保留**并说明（见下方 v-else 分支）——
+             清空别人的数据比多显示一句解释糟得多。 -->
+        <el-form-item v-if="form.trigger_type === 'sensor_threshold'" label="附加条件">
+          <div class="conditions" data-test="conditions-editor">
+            <div class="conditions__head">
+              <span class="hint-block conditions__hint">全部满足才触发（后端逐条 AND 求值，任一不满足即不触发）</span>
+              <!-- 源码模式默认关闭（文档 §4.3）：JSON 是迁移期/排障入口，不是日常录入方式 -->
+              <el-button
+                link
+                type="primary"
+                size="small"
+                data-test="conditions-raw-toggle"
+                @click="toggleConditionsRaw"
+              >
+                {{ conditionsRawMode ? '切回条件行编辑' : 'JSON 源码' }}
+              </el-button>
+            </div>
+
+            <!-- 非法存量数据（历史手写 / 被别的工具改坏）：原文原样保留，并说清为什么改不动它。
+                 为什么不是"解析失败就清空"：那是**丢用户数据**，而且丢得没有任何痕迹 ——
+                 用户下次打开看到的是一张干净的空表单，会以为这些条件本来就不存在。 -->
+            <div
+              v-if="conditionsRawMode && conditionsRawInvalid"
+              class="hint-block conditions__warn"
+              data-test="conditions-raw-invalid"
+            >
+              现有内容无法解析为条件数组，已保留原文；修正后才能切回条件行编辑
+            </div>
+
+            <el-input
+              v-if="conditionsRawMode"
+              v-model="form.conditions_json"
+              type="textarea"
+              :rows="2"
+              placeholder='JSON 数组，如 [{"sensor_name":"humidity","comparator":"lt","threshold":30}]'
+              data-test="field-conditions"
+            />
+            <template v-else>
+              <ul v-if="conditionRows.length" class="condition-list" data-test="condition-list">
+                <li
+                  v-for="(row, index) in conditionRows"
+                  :key="row.uid"
+                  class="condition-row"
+                  data-test="condition-row"
+                >
+                  <span class="condition-row__index" aria-hidden="true">{{ index + 1 }}</span>
+                  <!-- 来源组（source_kind=source_group）没有设备字段目录可查：选择器在这种情形只会
+                       显示「请先选择边缘设备」，对已选组的用户是答非所问。故改用物理名输入框，
+                       并在下方说明求值口径（组内成员按同一物理名求值）。 -->
+                  <el-input
+                    v-if="form.source_kind === 'source_group'"
+                    v-model="row.selector"
+                    class="condition-row__field"
+                    placeholder="物理字段名，如 temperature_2"
+                    :aria-label="`第 ${index + 1} 个条件的字段物理名`"
+                    data-test="condition-selector-input"
+                  />
+                  <SensorFieldPicker
+                    v-else
+                    v-model="row.selector"
+                    class="condition-row__field"
+                    :device-id="form.trigger_edge_device_id"
+                  />
+                  <el-select
+                    v-model="row.comparator"
+                    class="condition-row__cmp"
+                    :aria-label="`第 ${index + 1} 个条件的比较符`"
+                    :data-test="`condition-comparator-${index}`"
+                  >
+                    <el-option v-for="c in comparators" :key="c.value" :label="c.label" :value="c.value" />
+                  </el-select>
+                  <el-input-number
+                    v-model="row.threshold"
+                    class="condition-row__threshold"
+                    :aria-label="`第 ${index + 1} 个条件的阈值`"
+                    :data-test="`condition-threshold-${index}`"
+                  />
+                  <el-button
+                    link
+                    type="danger"
+                    size="small"
+                    class="condition-row__remove"
+                    :aria-label="`删除第 ${index + 1} 个条件`"
+                    :data-test="`remove-condition-${index}`"
+                    @click="removeCondition(row.uid)"
+                  >✕</el-button>
+                </li>
+              </ul>
+              <p v-else class="hint-block" data-test="conditions-empty">
+                暂无附加条件：规则只按上方的触发条件判定。
+              </p>
+              <div class="conditions__foot">
+                <el-button link type="primary" size="small" data-test="add-condition" @click="addCondition">+ 添加条件</el-button>
+                <span
+                  v-if="form.source_kind === 'source_group'"
+                  class="hint"
+                  data-test="conditions-source-group-hint"
+                >
+                  来源组没有设备字段目录：组内成员按同一物理名求值。
+                </span>
+              </div>
+            </template>
+          </div>
+        </el-form-item>
+        <!-- 非传感器阈值触发 + 存量带条件：说明它不会被求值，但**不清空**（清空是丢数据）。
+             为什么保留而不是隐藏：用户编辑这条规则时看不到任何相关控件，却在保存后
+             仍带着一段他看不见的配置 —— 说一句比"看不见"安全。 -->
+        <el-form-item v-else-if="form.conditions_json.trim()" label="附加条件">
+          <span class="hint-block" data-test="conditions-inactive-hint">
+            该规则存有附加条件，但只有「传感器阈值」触发会使用它们（当前触发类型不会求值，保存时按原值保留）。
+          </span>
         </el-form-item>
 
         <!-- R7: 动作区由「单动作字段组」升级为**多动作卡片列表**。
@@ -648,13 +760,51 @@
           （后端按规则级授权放行，授权在动作集合变化后自动失效并需重新确认）。
         </div>
 
+        <!-- 冷却 / 每日上限（文档 §4.5「数字框旁加快捷 chips」）。
+             chips 只是把值写回 v-model（不改控件类型）：现场最常用的就是这几个档位，
+             手敲 300/1800 时要先换算，换算错就是"冷却比想象中短/长一个量级"。
+             为什么不换成下拉：0-86400 的连续值域里，任何枚举都会缺档，数字框才是兜底。 -->
         <el-form-item label="冷却时间">
-          <el-input-number v-model="form.cooldown_sec" :min="0" :max="86400" :step="60" data-test="field-cooldown" />
-          <span class="hint">秒，0-86400</span>
+          <div class="number-field">
+            <div class="number-field__main">
+              <el-input-number v-model="form.cooldown_sec" :min="0" :max="86400" :step="60" data-test="field-cooldown" />
+              <span class="hint">秒，0-86400</span>
+            </div>
+            <div class="chip-row" data-test="cooldown-chips">
+              <button
+                v-for="chip in COOLDOWN_CHIPS"
+                :key="chip.value"
+                type="button"
+                class="chip"
+                :class="{ 'is-active': form.cooldown_sec === chip.value }"
+                :aria-pressed="form.cooldown_sec === chip.value ? 'true' : 'false'"
+                :aria-label="`冷却时间设为 ${chip.text}`"
+                :data-test="`cooldown-chip-${chip.value}`"
+                @click="form.cooldown_sec = chip.value"
+              >{{ chip.label }}</button>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="每日上限">
-          <el-input-number v-model="form.max_daily_exec" :min="0" :max="1000" data-test="field-max-daily" />
-          <span class="hint">0 = 不限，最大 1000</span>
+          <div class="number-field">
+            <div class="number-field__main">
+              <el-input-number v-model="form.max_daily_exec" :min="0" :max="1000" data-test="field-max-daily" />
+              <span class="hint">0 = 不限，最大 1000</span>
+            </div>
+            <div class="chip-row" data-test="daily-limit-chips">
+              <button
+                v-for="chip in DAILY_LIMIT_CHIPS"
+                :key="chip.value"
+                type="button"
+                class="chip"
+                :class="{ 'is-active': form.max_daily_exec === chip.value }"
+                :aria-pressed="form.max_daily_exec === chip.value ? 'true' : 'false'"
+                :aria-label="`每日上限设为 ${chip.text}`"
+                :data-test="`daily-limit-chip-${chip.value}`"
+                @click="form.max_daily_exec = chip.value"
+              >{{ chip.label }}</button>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="form.enabled" data-test="field-enabled" />
@@ -852,7 +1002,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
@@ -1009,6 +1159,34 @@ const comparators: Array<{ value: AutomationComparator; label: string }> = [
   { value: 'lte', label: '不高于 ≤' },
   { value: 'eq', label: '等于 =' },
   { value: 'neq', label: '不等于 ≠' },
+]
+
+/**
+ * 冷却 / 每日上限的快捷值（文档 §4.5）。
+ *
+ * 只是把值写回 v-model（`form.cooldown_sec = chip.value`），**不改控件类型** ——
+ * 数字框仍在，0-86400 的连续值域里任何枚举都会缺档，chips 只覆盖现场最常用的几档。
+ * 单位在 label 里用人类可读的写法（5s/1m/1h），写回的一律是**秒**（后端契约字段名就是 _sec）。
+ *
+ * text 只用于 aria-label：读屏用户听到的是"冷却时间设为 5 分钟"，不是 "5m"。
+ */
+const COOLDOWN_CHIPS: Array<{ value: number; label: string; text: string }> = [
+  { value: 0, label: '0', text: '0 秒（不冷却）' },
+  { value: 5, label: '5s', text: '5 秒' },
+  { value: 30, label: '30s', text: '30 秒' },
+  { value: 60, label: '1m', text: '1 分钟' },
+  { value: 300, label: '5m', text: '5 分钟' },
+  { value: 1800, label: '30m', text: '30 分钟' },
+  { value: 3600, label: '1h', text: '1 小时' },
+]
+
+/** 每日上限快捷值：0 = 不限（后端语义），其余为"每天最多 N 次"。 */
+const DAILY_LIMIT_CHIPS: Array<{ value: number; label: string; text: string }> = [
+  { value: 0, label: '0', text: '0 次（不限）' },
+  { value: 1, label: '1', text: '1 次' },
+  { value: 3, label: '3', text: '3 次' },
+  { value: 10, label: '10', text: '10 次' },
+  { value: 50, label: '50', text: '50 次' },
 ]
 
 // ── 保存前诊断（§3.3：后端 precheck 已经产出 warnings，前端此前全页 0 引用）──
@@ -1328,6 +1506,153 @@ function syncCoordinates() {
   form.longitude = parseCoordinate(sunLongitudeText.value)
 }
 
+// ── 附加条件：结构化条件行（文档 §4.3）────────────────────────────────────────
+//
+// 序列化键与后端 models.AutomationCondition **逐字段同名**
+// （backend/internal/models/automation.go:141-145）：
+//   {"sensor_name":"temperature_2","comparator":"gt","threshold":45}
+// 后端 conditionsSatisfied 对每条走同一个 evalSelector，全部满足才触发
+//（任一不满足 / 无法判定 ⇒ 不触发，evaluator.go:1018-1033）。
+// 因此界面顺序 = 提交数组顺序 = 求值顺序，二者必须一致（见 serializeConditionRows）。
+//
+// 与动作卡片同思路：v-for 的 key 用 uid 而不是下标。下标作 key 时删掉中间一行，
+// 后面所有行的组件实例会被错位复用 —— 值"跳"到别的行、输入焦点跑掉，
+// 而这一行的值还可能被写进另一行的 uid 上。
+
+/** 条件行草稿。字段名直接沿用后端口径，不额外造一层 selector/threshold 的翻译表。 */
+interface ConditionRow {
+  /** v-for key（同 ActionDraft.uid） */
+  uid: number
+  /** 字段选择器原文，原样落到后端 sensor_name（与触发字段同一个 selector 契约） */
+  selector: string
+  comparator: AutomationComparator
+  threshold: number
+}
+
+const conditionRows = ref<ConditionRow[]>([])
+
+/**
+ * 源码模式：默认关闭。只有两种情况打开 ——
+ *   ① 用户手动点「JSON 源码」（迁移期录入 / 排障）；
+ *   ② 存量 conditions_json 无法解析成条件数组（见 parseConditionRows），自动打开。
+ * 打开时 textarea 绑定的是 form.conditions_json **原文**，本页一个字符都不改写它。
+ */
+const conditionsRawMode = ref(false)
+
+const COMPARATOR_SET = new Set<string>(comparators.map(c => c.value))
+
+/**
+ * conditions_json → 条件行。返回 null = **无法安全还原**，调用方必须原样保留原文。
+ *
+ * 为什么校验这么严（缺键 / 未知比较符 / 字符串阈值一律判非法）：
+ *   · 放宽 = 打开编辑框时静默改写用户数据的语义。例：历史手写的
+ *     `{"sensor":"humidity"}`（旧 placeholder 的示例就是这种键名）会被读成
+ *     sensor_name=""，用户什么都没动、保存一次，条件就从"湿度<30"变成"永不满足"；
+ *   · 而"读不懂"是可逆的：切到源码模式，用户自己看得见、改得动、也能原样交回后端。
+ */
+function parseConditionRows(raw: string): ConditionRow[] | null {
+  const text = (raw ?? '').trim()
+  if (!text) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed)) return null
+  const rows: ConditionRow[] = []
+  for (const [index, item] of parsed.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const record = item as Record<string, unknown>
+    const sensorName = record.sensor_name
+    const comparator = record.comparator
+    const threshold = record.threshold
+    if (typeof sensorName !== 'string') return null
+    if (typeof comparator !== 'string' || !COMPARATOR_SET.has(comparator)) return null
+    if (typeof threshold !== 'number' || !Number.isFinite(threshold)) return null
+    // uid = 下标+1：还原出来的行是一次性快照，后续新增行走 uidSeed()，两者不会撞号。
+    rows.push({ uid: index + 1, selector: sensorName, comparator: comparator as AutomationComparator, threshold })
+  }
+  return rows
+}
+
+/**
+ * 条件行 → conditions_json 原文。
+ *
+ * 零行 ⇒ 空串：后端 ParseConditions 把 "" 与 "[]" 都当"无条件"，空串是本仓既有口径
+ * （buildPayload 的 `trim() || undefined` 依赖它）。
+ * selector 统一 trim：后端按字面量比对字段名，尾部多一个空格就是一个"看起来对、
+ * 永远不满足"的条件 —— 而它不会报错。
+ */
+function serializeConditionRows(rows: ConditionRow[]): string {
+  if (rows.length === 0) return ''
+  return JSON.stringify(rows.map(row => ({
+    sensor_name: row.selector.trim(),
+    comparator: row.comparator,
+    threshold: row.threshold,
+  })))
+}
+
+/**
+ * 行 → form.conditions_json 的**唯一**出口。
+ * 源码模式下不写：那时 textarea 里的原文才是唯一真相，行只是上一次的残影。
+ */
+function syncConditionsJson() {
+  if (conditionsRawMode.value) return
+  // 只有 sensor_threshold 会求值附加条件：其它触发类型的 conditions_json 是**惰性数据**，
+  // 本页连"顺手规范化空格"都不做 —— 用户看不见的配置不该在他保存别的内容时被悄悄改写。
+  if (form.trigger_type !== 'sensor_threshold') return
+  form.conditions_json = serializeConditionRows(conditionRows.value)
+}
+
+// 任何行变化（新增 / 删除 / 改字段 / 改比较符 / 改阈值）都同步回提交体。
+// 为什么用 deep watch 而不是在每个 @change 里手写同步：漏一处就是"界面改了、提交体没改"，
+// 而这种不一致在保存前完全不可见（用户以为条件已经生效，实际提交的是旧条件）。
+watch(conditionRows, syncConditionsJson, { deep: true })
+
+/**
+ * 源码模式下的原文是否**不可还原**（实时判定，而不是只记"打开那一刻是坏的"）。
+ * 为什么实时：用户在源码里改到一半（比如删了个逗号）时，界面要立刻说明"现在切不回去"，
+ * 而不是等他点了按钮才弹一句、还不知道是哪里不对。
+ */
+const conditionsRawInvalid = computed(() =>
+  conditionsRawMode.value
+  && form.conditions_json.trim() !== ''
+  && parseConditionRows(form.conditions_json) === null,
+)
+
+/** 新增一行空条件：默认 gt / 0（与上方触发条件的默认值同口径）。空行由 validate() 拦。 */
+function addCondition() {
+  conditionRows.value.push({ uid: uidSeed(), selector: '', comparator: 'gt', threshold: 0 })
+}
+
+function removeCondition(uid: number) {
+  conditionRows.value = conditionRows.value.filter(row => row.uid !== uid)
+}
+
+/**
+ * 「JSON 源码」开关。
+ *
+ * 行 → 源码：行是唯一真相，conditions_json 已由上面的 watch 持续保持同步，直接切即可。
+ * 源码 → 行：重新解析；**解析失败就拒绝关闭**并提示。关闭的同时把用户刚输入的内容换掉，
+ * 比"停在源码模式"严重得多 —— 前者是数据丢失，后者只是多一个步骤。
+ */
+function toggleConditionsRaw() {
+  if (!conditionsRawMode.value) {
+    conditionsRawMode.value = true
+    return
+  }
+  const rows = parseConditionRows(form.conditions_json)
+  if (!rows) {
+    ElMessage.warning('现有内容无法解析为条件数组，已保留原文；修正后才能切回条件行编辑')
+    return
+  }
+  // 先落行、再退出源码模式：watch 回调排在本段同步代码之后，那时 conditionsRawMode
+  // 已是 false，会顺手把（可能带空格/换行的）原文规范成与提交体同款的 JSON。
+  conditionRows.value = rows
+  conditionsRawMode.value = false
+}
+
 function uidSeed(): number {
   return Date.now() + Math.floor(Math.random() * 1000)
 }
@@ -1345,6 +1670,10 @@ function openCreate() {
   sensorField.value = null
   windowStartFixNote.value = ''
   windowEndFixNote.value = ''
+  // 条件行与源码模式同样属于**上一条规则**的状态：不清就是新表单上挂着旧条件。
+  // 先退出源码模式再清行：watch 会在本段同步代码之后跑，那时写回的是空串（零行 ⇒ ""）。
+  conditionsRawMode.value = false
+  conditionRows.value = []
   dialogVisible.value = true
 }
 
@@ -1397,6 +1726,13 @@ function openEdit(rule: AutomationRule) {
   // 未配置（undefined）保持空串以表达"继承节点"。
   sunLatitudeText.value = typeof rule.latitude === 'number' ? String(rule.latitude) : ''
   sunLongitudeText.value = typeof rule.longitude === 'number' ? String(rule.longitude) : ''
+  // 附加条件：合法数组 ⇒ 还原成条件行；**读不懂就自动进源码模式并保留原文**
+  //（历史手写 / 被别的工具改坏的数据不能被"解析失败"吞掉，见 parseConditionRows）。
+  // 顺序有讲究：先定模式再落行 —— 源码模式下 syncConditionsJson 会直接返回，
+  // 原文一个字符都不会被行数据覆盖。
+  const parsedConditions = parseConditionRows(rule.conditions_json ?? '')
+  conditionsRawMode.value = parsedConditions === null
+  conditionRows.value = parsedConditions ?? []
   // 修复提示跟着这一条规则走：用户改完字段再切回来不该还看到"已把原值…"（那时值已是 08:00）
   windowStartFixNote.value = windowStart.note
   windowEndFixNote.value = windowEnd.note
@@ -1585,13 +1921,31 @@ function validate(): string | null {
       return `${where}：请选择通知级别`
     }
   }
-  // JSON 校验
-  if (form.conditions_json.trim()) {
-    try {
-      const parsed = JSON.parse(form.conditions_json)
-      if (!Array.isArray(parsed)) return '附加条件必须是 JSON 数组'
-    } catch {
-      return '附加条件 JSON 格式错误'
+  // 附加条件：只有 sensor_threshold 会求值（后端 conditionsSatisfied 只在这条路径上被调用），
+  // 所以也只有它需要在这里校验 —— 对一条日出规则拦下"它自己不会读的字段"，用户
+  // 既不知道为什么要改、也只能先切触发器类型才能改。
+  if (form.trigger_type === 'sensor_threshold') {
+    if (!conditionsRawMode.value) {
+      // 行模式：逐行校验，**空行必须报错**。
+      // 为什么不静默丢弃："点了 + 没填完"与"我配了 3 个条件"在界面上一模一样（行还在），
+      // 丢弃后保存成功、用户以为 3 个条件都生效，实际只有 2 个 —— 这是最难发现的配置错。
+      for (const [index, row] of conditionRows.value.entries()) {
+        const where = `第 ${index + 1} 个条件`
+        if (!row.selector.trim()) return `${where}：请选择字段`
+        // el-input-number 被清空时给 null/undefined（不是 NaN），两者都必须算"没填"。
+        if (typeof row.threshold !== 'number' || !Number.isFinite(row.threshold)) {
+          return `${where}：请填写阈值`
+        }
+      }
+    } else if (form.conditions_json.trim()) {
+      // 源码模式：保持改造前的校验口径（非法 JSON / 非数组在保存前拦下）。
+      // 这段原文可能是用户手写的历史数据，"格式对不对"只能在这里判断。
+      try {
+        const parsed = JSON.parse(form.conditions_json)
+        if (!Array.isArray(parsed)) return '附加条件必须是 JSON 数组'
+      } catch {
+        return '附加条件 JSON 格式错误'
+      }
     }
   }
   if (form.cooldown_sec < 0 || form.cooldown_sec > 86400) return '冷却时间必须在 0-86400 秒之间'
@@ -1609,6 +1963,9 @@ function validate(): string | null {
  */
 function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
   syncCoordinates()
+  // 行模式下提交前再同步一次（防御）：任何绕过 deep watch 的写入都不该让提交体与界面脱节。
+  // 源码模式下本函数是空操作（syncConditionsJson 自己 guard），原文原样提交。
+  syncConditionsJson()
   const payload: CreateAutomationRuleRequest = {
     name: form.name.trim(),
     trigger_type: form.trigger_type,
@@ -2398,6 +2755,55 @@ onUnmounted(() => {
 .sun-location__fields :deep(.el-select) { width: 100%; min-width: 0; }
 
 /* ============================================================================
+   附加条件：条件行（文档 §4.3）
+   —— 一行放：序号 + 字段选择器（弹性） + 比较符（定宽） + 阈值（定宽） + 删除。
+   640px 弹窗里 label 占 110px、内容区约 500px：定宽三件套 104+120+32 与 3 个 8px
+   间距共约 280px，选择器仍有 ~190px 可用（与 .cond-row 的比较符定宽同口径，不另立一套）。
+   ========================================================================== */
+.conditions { width: 100%; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.conditions__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.conditions__hint { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+/* 无法解析的存量原文是**警告**而不是错误：值本身还在，只是暂时改不动（不是数据坏了要删） */
+.conditions__warn { color: var(--el-color-warning); }
+.condition-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.condition-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.condition-row__index {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  font-size: 12px; font-weight: 600;
+}
+/* 选择器列必须能收缩：SensorFieldPicker 根是 width:100% 的纵向 flex，
+   少了 min-width:0 它会把比较符/阈值挤出弹窗右侧。 */
+.condition-row__field { flex: 1 1 auto; min-width: 0; }
+.condition-row__field :deep(.el-select) { width: 100%; }
+.condition-row__cmp { flex: 0 0 104px; }
+.condition-row__threshold { flex: 0 0 120px; }
+.condition-row__remove { flex: 0 0 auto; }
+.conditions__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ============================================================================
+   冷却 / 每日上限快捷 chips（文档 §4.5）
+   —— 视觉沿用页面既有的"浅描边 + 圆角"语言，不引入新的圆角/色板变量。
+   ========================================================================== */
+.number-field { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+.number-field__main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 26px; padding: 0 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 13px;
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font-size: 12px; line-height: 1;
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
+.chip:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
+.chip.is-active { border-color: var(--el-color-primary); color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+
+/* ============================================================================
    多动作卡片列表 (设计稿 §5 R7-R8 / §6 D-3 D-6)
    ========================================================================== */
 .action-toolbar {
@@ -2498,6 +2904,16 @@ onUnmounted(() => {
   .action-meta { grid-template-columns: 1fr; }
   .sun-location__fields { grid-template-columns: 1fr; }
   .ack-hint { margin-left: 0; }
+
+  /* 条件行：窄屏换行/纵向堆叠，不新增断点（与页面既有 768px 同源）。
+     行内四件套在 640px 弹窗里刚好放得下，但在 390px 视口下只剩 ~230px 内容宽，
+     继续并排会把字段选择器压成一条竖线（与 .cond-row 的 flex-wrap 同口径处理）。 */
+  .condition-row { flex-wrap: wrap; align-items: stretch; }
+  .condition-row__field { flex: 1 1 100%; }
+  .condition-row__cmp, .condition-row__threshold { flex: 1 1 96px; }
+  .condition-row__remove { min-height: 36px; }
+  /* 触控目标高度：chips 在粗指针设备上同样要够 36px（theme.css 的触控档） */
+  .chip { min-height: 36px; padding: 0 12px; }
 
   /* ---- 窄屏卡片列表（2026-10-21 第二轮：393 宽表只剩 2 列 + 名称被省略号截断）----
      卡片长度不受列宽限制：名称/详情/命令 ID 一律换行全显，不用 ellipsis 隐藏数据。

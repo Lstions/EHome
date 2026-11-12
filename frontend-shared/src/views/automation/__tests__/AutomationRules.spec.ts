@@ -1752,5 +1752,275 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="window-end-fixed"]').exists()).toBe(false)
     })
   })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 附加条件：裸 JSON 文本域 → 结构化条件行（文档 §4.3）
+  //
+  // 改造前 conditions_json 是整张表单里**唯一**要求用户懂 JSON 的地方，而它恰好是
+  // "复合条件"这个高级能力的入口 —— 手写 JSON 把门槛抬到只有开发者能用；
+  // 写错键名（旧 placeholder 就是 `sensor` 而不是 `sensor_name`）还能保存成功、
+  // 条件永不满足、界面无痕。
+  //
+  // 断言口径：条件行的 JSON 提交体读**组件模型**（formState(wrapper).conditions_json），
+  // 不读 DOM —— 要钉的是"键名与后端 models.AutomationCondition 逐字段同名"，
+  // 而 textarea 在行模式下根本不渲染。
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('附加条件：结构化条件行', () => {
+    /** 两条合法条件（后端契约形态）：温度 > 45 且 湿度 < 30。 */
+    const twoConditions = '[{"sensor_name":"temperature_2","comparator":"gt","threshold":45},{"sensor_name":"humidity","comparator":"lt","threshold":30}]'
+
+    /** 点列表里的「编辑」打开第一条规则（el-table 的 slot 不执行 ⇒ 必须用 slot 表格替身）。 */
+    async function openEditFirstRule() {
+      const wrapper = await mountWithSlotTable()
+      const editBtn = wrapper.findAll('button').find(button => button.text() === '编辑')
+      expect(editBtn, '找不到编辑入口，用例前提不成立').toBeTruthy()
+      await editBtn!.trigger('click')
+      await flushPromises()
+      return wrapper
+    }
+
+    /** 条件行的 DOM 包装（每行带 data-test="condition-row"，按界面顺序）。 */
+    const conditionRowsOf = (wrapper: Awaited<ReturnType<typeof mountPage>>) =>
+      wrapper.findAll('[data-test="condition-row"]')
+
+    it('编辑既有规则：conditions_json 两条还原成两行，字段 / 比较符 / 阈值都对', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{ ...ruleFixture, conditions_json: twoConditions }])
+      const wrapper = await openEditFirstRule()
+
+      const rows = conditionRowsOf(wrapper)
+      expect(rows, '两条条件没有还原成两行').toHaveLength(2)
+
+      // 第 1 个 picker 是触发字段，后两个才是条件行 —— 条件行**复用同一个选择器组件**
+      // （同一个 selector 契约；给条件另设文本框就是又开一条"手打物理名"的静默失效路径）
+      const pickers = wrapper.findAllComponents({ name: 'SensorFieldPickerStub' })
+      expect(pickers).toHaveLength(3)
+      expect(pickers[1].props('modelValue')).toBe('temperature_2')
+      expect(pickers[1].props('deviceId'), '条件行没有跟着触发设备查目录').toBe(10)
+      expect(pickers[2].props('modelValue')).toBe('humidity')
+
+      // 比较符下拉复用 comparators（中文语义 + 符号），值回填正确
+      const firstComparator = rows[0].find('[data-test="condition-comparator-0"]')
+      expect((firstComparator.element as HTMLSelectElement).value).toBe('gt')
+      expect(firstComparator.findAll('option').map(option => option.text())).toContain('高于 >')
+      expect((rows[1].find('[data-test="condition-comparator-1"]').element as HTMLSelectElement).value).toBe('lt')
+
+      // 阈值回填
+      expect((rows[0].find('[data-test="condition-threshold-0"]').element as HTMLInputElement).value).toBe('45')
+      expect((rows[1].find('[data-test="condition-threshold-1"]').element as HTMLInputElement).value).toBe('30')
+
+      // 默认不是源码模式：原 textarea 不渲染（JSON 不再是日常录入方式）
+      expect(wrapper.find('[data-test="field-conditions"]').exists()).toBe(false)
+    })
+
+    it('+ 添加条件并选中字段后，conditions_json 就是后端契约的 JSON（键名逐字段同名）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      // 新建：零行 ⇒ 空串（后端把 "" 当"无条件"）
+      expect(formState(wrapper).conditions_json).toBe('')
+      expect(wrapper.find('[data-test="conditions-empty"]').exists()).toBe(true)
+
+      await wrapper.find('[data-test="add-condition"]').trigger('click')
+      await flushPromises()
+      expect(conditionRowsOf(wrapper)).toHaveLength(1)
+
+      // 通过选择器 stub 的输入通路选字段（与真实组件同一条 v-model）
+      await wrapper.find('[data-test="condition-row"] input[data-test="field-sensor"]').setValue('temperature_2')
+      await wrapper.find('[data-test="condition-comparator-0"]').setValue('lt')
+      await wrapper.find('[data-test="condition-threshold-0"]').setValue('45')
+      await flushPromises()
+
+      // 键名必须是 sensor_name / comparator / threshold（旧 placeholder 的 `sensor` 键后端读不到）
+      expect(formState(wrapper).conditions_json)
+        .toBe('[{"sensor_name":"temperature_2","comparator":"lt","threshold":45}]')
+    })
+
+    it('删除一行 ⇒ conditions_json 同步去掉该条（顺序 = 界面顺序）', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{ ...ruleFixture, conditions_json: twoConditions }])
+      const wrapper = await openEditFirstRule()
+      expect(conditionRowsOf(wrapper)).toHaveLength(2)
+
+      await wrapper.find('[data-test="remove-condition-0"]').trigger('click')
+      await flushPromises()
+
+      expect(conditionRowsOf(wrapper)).toHaveLength(1)
+      // 剩下的是原来的第 2 条：删中间的不能让后面的值"跳行"（uid 作 key 的意义）
+      expect(formState(wrapper).conditions_json)
+        .toBe('[{"sensor_name":"humidity","comparator":"lt","threshold":30}]')
+    })
+
+    it('非法存量 JSON：自动切源码模式 + 保留原文提示，保存时原文逐字符不变', async () => {
+      // 历史手写形态：键是 `sensor`（旧 placeholder 的示例），后端按 sensor_name 读不到
+      const legacy = '[{"sensor":"humidity","comparator":"lt","threshold":30}]'
+      mockedAutomationApi.listRules.mockResolvedValue([{ ...ruleFixture, conditions_json: legacy }])
+      mockedAutomationApi.updateRule.mockResolvedValue({ ...ruleFixture, conditions_json: legacy })
+      const wrapper = await openEditFirstRule()
+
+      // 不得丢、不得崩：原文进 textarea，条件行不渲染
+      const raw = wrapper.find('[data-test="field-conditions"]')
+      expect(raw.exists(), '无法解析的存量条件没有切到源码模式（会被当空表单丢掉）').toBe(true)
+      expect((raw.element as HTMLTextAreaElement).value).toBe(legacy)
+      expect(conditionRowsOf(wrapper)).toHaveLength(0)
+
+      const warn = wrapper.find('[data-test="conditions-raw-invalid"]')
+      expect(warn.exists(), '保留了原文却没有说明为什么改不动它').toBe(true)
+      expect(warn.text()).toContain('现有内容无法解析为条件数组，已保留原文')
+      expect(warn.text()).toContain('修正后才能切回条件行编辑')
+
+      // 保存：提交的仍是那段原文（本页不改写它，后端会拦）
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+      expect(formState(wrapper).conditions_json).toBe(legacy)
+      expect(mockedAutomationApi.updateRule).toHaveBeenCalledTimes(1)
+      expect(mockedAutomationApi.updateRule.mock.calls[0][1]).toEqual(expect.objectContaining({ conditions_json: legacy }))
+    })
+
+    it('条件行有空字段时保存被拦：空行报错而不是静默丢弃', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('空条件')
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      // 点了 + 但没填：这一行与"已配好的行"在界面上长得一样
+      await wrapper.find('[data-test="add-condition"]').trigger('click')
+      await flushPromises()
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('第 1 个条件：请选择字段')
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+      // 连预检都没走到：校验在提交之前
+      expect(mockedAutomationApi.precheckRule).not.toHaveBeenCalled()
+    })
+
+    it('非传感器阈值：不渲染条件编辑器；存量条件仍说明且原样保留', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        trigger_type: 'time_window' as const,
+        trigger_window_start: '08:00',
+        trigger_window_end: '18:00',
+        conditions_json: twoConditions,
+      }])
+      const wrapper = await openEditFirstRule()
+
+      // 只有传感器阈值路径会求值 conditions（evaluator.go:1018-1033），
+      // 给时间窗规则一个条件编辑器 = 承诺一件永远不会发生的事
+      expect(wrapper.find('[data-test="conditions-editor"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="field-conditions"]').exists()).toBe(false)
+
+      const hint = wrapper.find('[data-test="conditions-inactive-hint"]')
+      expect(hint.exists(), '存量条件被悄悄藏起来了').toBe(true)
+      expect(hint.text()).toContain('只有「传感器阈值」触发会使用它们')
+      // 保留原值（清空是丢数据）
+      expect(formState(wrapper).conditions_json).toBe(twoConditions)
+    })
+
+    it('冷却 / 每日上限快捷值：点 chip 直接写回秒数 / 次数（控件类型不变）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+
+      // 数字框仍在（chips 只是写值，不是枚举化控件）
+      expect(wrapper.find('[data-test="field-cooldown"]').exists()).toBe(true)
+      expect(wrapper.findAll('[data-test="cooldown-chips"] .chip')).toHaveLength(7)
+
+      await wrapper.find('[data-test="cooldown-chip-0"]').trigger('click')
+      expect(formState(wrapper).cooldown_sec).toBe(0)
+      await wrapper.find('[data-test="cooldown-chip-300"]').trigger('click')
+      expect(formState(wrapper).cooldown_sec).toBe(300)
+      await wrapper.find('[data-test="cooldown-chip-3600"]').trigger('click')
+      expect(formState(wrapper).cooldown_sec).toBe(3600)
+
+      // aria-label 给读屏的是完整语义（"1 分钟"），不是 chip 上的缩写 "1m"
+      expect(wrapper.find('[data-test="cooldown-chip-60"]').attributes('aria-label')).toBe('冷却时间设为 1 分钟')
+
+      await wrapper.find('[data-test="daily-limit-chip-10"]').trigger('click')
+      expect(formState(wrapper).max_daily_exec).toBe(10)
+      await wrapper.find('[data-test="daily-limit-chip-0"]').trigger('click')
+      expect(formState(wrapper).max_daily_exec).toBe(0)
+      expect(wrapper.find('[data-test="daily-limit-chip-0"]').attributes('aria-label')).toBe('每日上限设为 0 次（不限）')
+    })
+
+    it('来源组场景：条件行改用物理名输入框，并说明组内成员按同一物理名求值', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-source-kind"]').setValue('source_group')
+      await flushPromises()
+      await wrapper.find('[data-test="add-condition"]').trigger('click')
+      await flushPromises()
+
+      const row = wrapper.find('[data-test="condition-row"]')
+      // 组没有设备字段目录可查：选择器只会显示「请先选择边缘设备」，对已选组的用户是答非所问
+      expect(row.find('input[data-test="condition-selector-input"]').exists()).toBe(true)
+      expect(wrapper.findAllComponents({ name: 'SensorFieldPickerStub' })).toHaveLength(0)
+      expect(wrapper.find('[data-test="conditions-source-group-hint"]').text()).toContain('组内成员按同一物理名求值')
+
+      await row.find('input[data-test="condition-selector-input"]').setValue('temperature_2')
+      await flushPromises()
+      expect(formState(wrapper).conditions_json)
+        .toBe('[{"sensor_name":"temperature_2","comparator":"gt","threshold":0}]')
+    })
+
+    it('「JSON 源码」开关可往返：打开是原文，关闭重新解析回条件行', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{ ...ruleFixture, conditions_json: twoConditions }])
+      const wrapper = await openEditFirstRule()
+      const toggle = wrapper.find('[data-test="conditions-raw-toggle"]')
+      expect(toggle.text()).toContain('JSON 源码')
+
+      await toggle.trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="field-conditions"]').exists()).toBe(true)
+      expect(conditionRowsOf(wrapper)).toHaveLength(0)
+      expect(wrapper.find('[data-test="conditions-raw-toggle"]').text()).toContain('切回条件行编辑')
+      // 合法原文不出现"无法解析"警告
+      expect(wrapper.find('[data-test="conditions-raw-invalid"]').exists()).toBe(false)
+
+      // 源码里改阈值 ⇒ 关闭时解析回行，并规范化成提交体同款 JSON
+      await wrapper.find('[data-test="field-conditions"]').setValue('[{"sensor_name":"temperature_2","comparator":"gt","threshold":50}]')
+      await wrapper.find('[data-test="conditions-raw-toggle"]').trigger('click')
+      await flushPromises()
+
+      expect(conditionRowsOf(wrapper)).toHaveLength(1)
+      expect(formState(wrapper).conditions_json)
+        .toBe('[{"sensor_name":"temperature_2","comparator":"gt","threshold":50}]')
+    })
+
+    it('源码里写坏了就拒绝切回条件行：提示 + 原文保留（关闭不吞内容）', async () => {
+      mockedAutomationApi.listRules.mockResolvedValue([{ ...ruleFixture, conditions_json: twoConditions }])
+      const wrapper = await openEditFirstRule()
+      await wrapper.find('[data-test="conditions-raw-toggle"]').trigger('click')
+      await flushPromises()
+
+      await wrapper.find('[data-test="field-conditions"]').setValue('[{broken')
+      await flushPromises()
+      // 实时提示：改到一半就已经说清"现在切不回去"
+      expect(wrapper.find('[data-test="conditions-raw-invalid"]').exists()).toBe(true)
+
+      const { ElMessage } = await import('element-plus')
+      await wrapper.find('[data-test="conditions-raw-toggle"]').trigger('click')
+      await flushPromises()
+
+      expect(ElMessage.warning).toHaveBeenCalledWith('现有内容无法解析为条件数组，已保留原文；修正后才能切回条件行编辑')
+      // 仍在源码模式，原文一个字都没少
+      expect(wrapper.find('[data-test="field-conditions"]').exists()).toBe(true)
+      expect((wrapper.find('[data-test="field-conditions"]').element as HTMLTextAreaElement).value).toBe('[{broken')
+      expect(formState(wrapper).conditions_json).toBe('[{broken')
+    })
+
+    it('窄屏（<768px）条件行换行堆叠，且不引入新的断点数值', async () => {
+      // happy-dom 无布局引擎（getComputedStyle 不评估 @media），故这里按**源码契约**断言
+      // "换行发生在页面既有的 768px 档内"，与上面「分页控件窄屏换行」同一口径；
+      // 像素级几何由真浏览器验收。
+      const raw = source
+      const mobileBlock = raw.slice(raw.indexOf('@media (max-width: 768px)'))
+      expect(mobileBlock, '条件行在窄屏没有换行：四件套会横向溢出').toContain('.condition-row { flex-wrap: wrap; align-items: stretch; }')
+      expect(mobileBlock).toContain('.condition-row__field { flex: 1 1 100%; }')
+      // 全页断点仍只有既有的 768 / 480 两档（不新增一套并行断点体系）
+      const breakpoints = [...new Set((raw.match(/max-width:\s*\d+px/g) ?? []).map(item => item.replace(/\s+/g, '')))]
+      expect(breakpoints).toEqual(['max-width:768px', 'max-width:480px'])
+    })
+  })
 })
 
