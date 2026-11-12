@@ -705,7 +705,9 @@
                 <div v-if="action.action_type === 'device_action'">
                   <dt>目标设备</dt>
                   <dd>
-                    <el-select v-model="action.action_device_id" filterable size="small" :aria-label="`第 ${index + 1} 个动作的目标设备`" :data-test="`action-device-${index}`" @change="onCardDeviceChange">
+                    <!-- 传整张卡片（而不只是 id）：切换设备后要判定"已选动作在新目录里还在不在"，
+                         并可能清空它（见 onCardDeviceChange） -->
+                    <el-select v-model="action.action_device_id" filterable size="small" :aria-label="`第 ${index + 1} 个动作的目标设备`" :data-test="`action-device-${index}`" @change="onCardDeviceChange(action)">
                       <el-option v-for="d in devices" :key="d.id" :label="d.name" :value="d.id" />
                     </el-select>
                   </dd>
@@ -723,12 +725,76 @@
                 <div v-if="action.action_type === 'device_action'">
                   <dt>动作 ID</dt>
                   <dd>
-                    <el-input v-model="action.action_id" size="small" placeholder="如 gpio_set" :aria-label="`第 ${index + 1} 个动作的 ID`" :data-test="`action-id-${index}`" />
+                    <!-- 动作 ID：从**裸输入框**升级为「目录下拉 + 允许手输」。
+                         为什么这是缺陷而不是特色：动作目录（actionCatalog）早就为了渲染风险徽标
+                         加载在内存里了，却让用户凭记忆背 action_id —— 填一个目录里不存在的动作
+                         要等到保存时被后端 400 才知道，而界面从头到尾没告诉过他有哪些可选。
+                         为什么仍保留 allow-create 手输：目录可能取不到（设备离线 / 驱动未声明）
+                         或设备换型，此时阻断建规则比让用户先填一个"待后端校验"的 ID 更糟
+                         （与既有降级口径一致：目录拿不到不阻断建规则）。 -->
+                    <el-select
+                      v-model="action.action_id"
+                      filterable
+                      allow-create
+                      default-first-option
+                      size="small"
+                      :placeholder="actionIdPlaceholder(action)"
+                      :aria-label="`第 ${index + 1} 个动作的 ID`"
+                      :data-test="`action-id-select-${index}`"
+                      @change="onCardActionIdChange(action)"
+                    >
+                      <el-option
+                        v-for="option in actionOptions(action)"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                    <!-- 目录提示：三种互斥状态各自说清，绝不把"没取到"说成"没有"。
+                         ① 空态（取回失败或确实没有动作）：仍可手输，明说可能是设备离线/驱动未声明；
+                         ② 全部不可用：目录**有**动作但一台都下发不了 —— 与①分开，否则用户会去查驱动；
+                         ③ 不在目录中（存量规则/设备换型）：只提示，**不清空**用户已有的动作与参数。 -->
+                    <p
+                      v-if="catalogEmpty(action)"
+                      class="hint-block"
+                      :data-test="`action-id-empty-hint-${index}`"
+                    >
+                      该设备暂无可用动作（可能是设备离线或驱动未声明）
+                    </p>
+                    <p
+                      v-else-if="catalogAllUnavailable(action)"
+                      class="hint-block"
+                      :data-test="`action-id-unavailable-hint-${index}`"
+                    >
+                      该设备的 {{ actionOptions(action).length }} 个动作当前均不可用，可先配置，执行结果由后端判定
+                    </p>
+                    <p
+                      v-else-if="catalogMissing(action)"
+                      class="hint-block action-card__hint--warn"
+                      :data-test="`action-id-missing-hint-${index}`"
+                    >
+                      动作不在当前设备目录中（存量规则或设备换型）：保留原值，保存时由后端校验
+                    </p>
                   </dd>
                 </div>
                 <div class="span2">
                   <dt>参数</dt>
-                  <dd class="mono" data-test="action-params-summary">{{ paramsSummary(action.action_params_json) }}</dd>
+                  <dd>
+                    <span class="mono" data-test="action-params-summary">{{ paramsSummary(action.action_params_json) }}</span>
+                    <!-- 表单之外的「高级」出口：schema 之外的方言键在表单里没有位置，
+                         而且表单在不完整时禁提交，用户有时就是要改原文里的一个字符。
+                         只在**确实有 schema**（默认走表单）时出现，否则「编辑参数」本身就是 JSON。 -->
+                    <el-button
+                      v-if="hasParamSchema(action)"
+                      link
+                      type="primary"
+                      size="small"
+                      class="action-card__json-link"
+                      :data-test="`action-params-form-link-${index}`"
+                      :aria-label="`第 ${index + 1} 个动作改用 JSON 编辑参数`"
+                      @click="openJsonParams(action)"
+                    >手写 JSON</el-button>
+                  </dd>
                 </div>
               </dl>
               <!-- 风险原因块：与徽标并存的第二条非颜色通道。后端 risk_reason 尚未实现
@@ -867,9 +933,11 @@
       </template>
     </el-dialog>
 
-    <!-- R8: 动作参数编辑（沿用既有"参数 JSON 文本域"形态，只改承载位置：卡片 → 叠层弹窗）。
-         为什么保留文本域而不是按 input_schema 生成表单：参数 schema 由后端 Catalog 驱动，
-         改造前就是这个形态；本次只换承载位置，不顺手改参数录入形态（不过度设计）。 -->
+    <!-- R8: 动作参数编辑（JSON 文本域 = 「高级」入口）。
+         为什么还要保留它：有 input_schema 的动作默认走表单，但 ① 没有 schema 的动作
+         （老驱动 / 方言参数）根本没有可生成的字段，JSON 是唯一形态；② 即使有 schema，
+         表单项不完整时会禁用提交，用户有时需要直接改原文。两者互转见卡片上的「手写 JSON」
+         与下面的「改用表单」。 -->
     <el-dialog
       v-model="paramsDialogVisible"
       title="编辑动作参数"
@@ -878,6 +946,17 @@
     >
       <p class="hint-block">
         目标动作：<span class="mono">{{ editingParamsActionId || '-' }}</span>
+        <!-- JSON → 表单：把当前文本里**能读出**的对象作为 prefill 带过去（不丢用户刚写的内容），
+             不写回模型 —— 用户还没点「完成」，切换编辑器不该悄悄改数据。 -->
+        <el-button
+          v-if="paramsEditingSchema"
+          link
+          type="primary"
+          size="small"
+          :data-test="`action-params-json-link-${paramsEditingIndex}`"
+          :aria-label="`第 ${paramsEditingIndex + 1} 个动作改用表单编辑参数`"
+          @click="switchParamsToForm"
+        >改用表单</el-button>
       </p>
       <el-input
         v-model="paramsDraft"
@@ -894,6 +973,17 @@
         <el-button type="primary" :disabled="!!paramsDraftError" data-test="params-done" @click="applyParams">完成</el-button>
       </template>
     </el-dialog>
+
+    <!-- 参数表单（schema 驱动）：与 BMS 页 / 设备控制面板同一个组件、同一份 definition。
+         prefill 传"已存的参数对象"（编辑既有动作时把值带出来）；提交回来的是一个对象，
+         写回 action_params_json 仍然保持 JSON **字符串**（全仓既有的落库形态）。 -->
+    <ActionForm
+      :visible="paramsFormVisible"
+      :definition="paramsFormDefinition"
+      :prefill="paramsFormPrefill"
+      @update:visible="paramsFormVisible = $event"
+      @submit="applyFormParams"
+    />
 
     <!-- R11: 保存前风险清单二次确认（用户裁决 O-2 = 逐规则显式授权 + 保存时强确认）。
          为什么逐项勾选而不是一次总确认（设计 D-5）：一次总确认在 3 个以上风险动作时会
@@ -1011,6 +1101,10 @@ import PageHeader from '@/components/common/PageHeader.vue'
 // 字段选择的全部逻辑（目录请求、类型门禁、字段族/别名、降级链、保存前 resolve 校验）
 // 都在这个共享组件里，本页只负责"接哪台设备""选中的字段对象要不要用来渲染单位"。
 import SensorFieldPicker from '@/components/sensor/SensorFieldPicker.vue'
+// 参数表单与设备控制面板/BMS 页是**同一个组件**：字段/类型/枚举/范围/必填全部来自后端
+// definition.input_schema。本页不另写一套 —— 第二份实现必然漂移
+//（设备页能提交的参数在自动化页被拦，或反之），而这正是本次要修掉的"同一系统两套录入"。
+import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
 import type { SensorField } from '@/api/sensorField'
 import { useResponsive } from '@/composables/useResponsive'
 import { useWebSocketStore } from '@/stores/websocket'
@@ -1792,9 +1886,18 @@ function onCardTypeChange(action: ActionDraft) {
   }
 }
 
-/** 卡片标题：动作 ID 优先（用户填的），通知类回落到级别文案。 */
+/**
+ * 卡片标题：目录里的**动作名**优先，目录里没有才回落动作 ID。
+ *
+ * 为什么改：用户认的是「设置充放电 MOS 软件策略」，不是 set_mos_policy —— 目录本来就
+ * 加载在内存里（风险徽标一直在用它），标题却还拿裸 ID 显示，等于让用户对照 ID 读界面。
+ * 列表摘要 actionSummary 仍显示 action_id：摘要列宽有限，且要能一眼对上后端日志/事件记录，
+ * 把长中文名塞进去会把"动作是什么"与"动作叫什么"搅成两套说法（见 actionSummary 注释）。
+ */
 function actionTitle(action: ActionDraft): string {
   if (action.action_type !== 'device_action') return '通知'
+  const def = catalogDefinition(action)
+  if (def?.name) return def.name
   return action.action_id.trim() || '未命名动作'
 }
 
@@ -1825,9 +1928,14 @@ function cardRiskState(action: ActionDraft) {
   return riskPresentation(catalogDefinition(action))
 }
 
-/** 在已加载的设备目录里找该动作的定义（找不到返回 null，徽标不渲染：不猜风险）。 */
-function catalogDefinition(action: ActionDraft) {
-  if (action.action_type !== 'device_action' || !action.action_device_id || !action.action_id) return null
+/**
+ * 在已加载的设备目录里找该动作的定义（找不到返回 null，徽标不渲染：不猜风险）。
+ *
+ * 入参放宽到 null：参数弹窗/表单在"当前没有选中卡片"时也要能问一句"这个动作有没有 schema"，
+ * 让调用方每次都先判空只会到处多一层 if（判定逻辑本身一个字没动）。
+ */
+function catalogDefinition(action: ActionDraft | null | undefined) {
+  if (!action || action.action_type !== 'device_action' || !action.action_device_id || !action.action_id) return null
   const entry = actionCatalog.value.get(`${action.action_device_id}:${action.action_id}`)
   return entry ?? null
 }
@@ -1910,13 +2018,24 @@ function validate(): string | null {
     if (action.action_type === 'device_action') {
       if (!action.action_device_id) return `${where}：请选择目标设备`
       if (!action.action_id.trim()) return `${where}：请填写动作 ID`
+      let paramsObject: Record<string, unknown> = {}
       if (action.action_params_json.trim()) {
         try {
-          JSON.parse(action.action_params_json)
+          const parsed = JSON.parse(action.action_params_json) as unknown
+          // 只把**对象**交给必填校验：数组/标量原本就能过这一关（校验口径不变），
+          // 到后端 CanonicalizeParams 才会被拒 —— 本次不顺手改这条既有判定。
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            paramsObject = parsed as Record<string, unknown>
+          }
         } catch {
           return `${where}：动作参数 JSON 格式错误`
         }
       }
+      // 有 input_schema 时补一道 required：表单路径由 ActionForm 的"不完整即禁提交"兜住，
+      // 但**手写 JSON**（卡片上的高级入口 / 存量规则 / 别的工具写入）可以整段删掉必填字段。
+      // 缺字段后端必 400，这道校验是用户保存前能看到"到底缺哪个参数"的最后机会。
+      const missingParams = requiredMissingText(paramsObject, catalogDefinition(action))
+      if (missingParams) return `${where}：${missingParams}`
     } else if (!action.action_level) {
       return `${where}：请选择通知级别`
     }
@@ -2417,46 +2536,152 @@ function operationStatusText(status: string): string {
   return map[status] ?? status
 }
 
-// ── 动作参数编辑弹窗 (R8) ──
+// ── 动作参数编辑 (R8)：schema 表单为主，JSON 文本域为「高级」 ──
 const paramsDialogVisible = ref(false)
+const paramsFormVisible = ref(false)
 const paramsEditingUid = ref<number | null>(null)
 const paramsDraft = ref('')
 const paramsDraftError = ref('')
-const editingParamsActionId = computed(
-  () => form.actions.find(a => a.uid === paramsEditingUid.value)?.action_id ?? '',
+/** 表单初值：已存的参数对象（读不出/非法 JSON ⇒ null，表单从空白开始）。 */
+const paramsFormPrefill = ref<Record<string, unknown> | null>(null)
+const editingParamsAction = computed(
+  () => form.actions.find(a => a.uid === paramsEditingUid.value) ?? null,
 )
+const editingParamsActionId = computed(() => editingParamsAction.value?.action_id ?? '')
+/** 当前编辑的是第几张卡片（1 起用于文案；-1 = 动作已被删除，此时不出任何入口）。 */
+const paramsEditingIndex = computed(
+  () => form.actions.findIndex(a => a.uid === paramsEditingUid.value),
+)
+const paramsFormDefinition = computed(() => catalogDefinition(editingParamsAction.value))
+/** JSON 弹窗里能否切回表单：只有目录真的给了字段（properties 非空）才有表单可开。 */
+const paramsEditingSchema = computed(() => definitionHasSchema(paramsFormDefinition.value))
 
+/**
+ * 「编辑参数」按钮的唯一入口：按**有无 schema** 分流。
+ *
+ * 为什么默认走表单：后端 definition.input_schema 已经声明了字段/类型/枚举/范围，
+ * 同一个系统里设备页能"选动作→填表单"，自动化页却要"背 JSON" —— 参数填错要等到保存
+ * 甚至执行时才发现。JSON 只在没有 schema 时才是唯一形态（有 schema 时降级为「高级」）。
+ */
 function openParams(uid: number) {
   const action = form.actions.find(a => a.uid === uid)
   if (!action) return
-  paramsEditingUid.value = uid
+  const def = catalogDefinition(action)
+  if (definitionHasSchema(def)) openParamsForm(action, parsedParams(action.action_params_json))
+  else openJsonParams(action)
+}
+
+/** 打开 JSON 文本域（无 schema 时的唯一入口 / 有 schema 时的高级入口）。 */
+function openJsonParams(action: ActionDraft) {
+  paramsEditingUid.value = action.uid
   paramsDraft.value = action.action_params_json
-  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+  // 当场就校验一遍：存量参数可能已经缺必填字段（别的工具写坏 / schema 后来加了字段）
+  paramsDraftError.value = validateParamsJson(paramsDraft.value, catalogDefinition(action))
   paramsDialogVisible.value = true
 }
 
-/** 空值 = 无参数（合法）；非空必须是 JSON **对象**（数组/标量过不了后端 CanonicalizeParams）。 */
-function validateParamsJson(text: string): string {
-  if (!text.trim()) return ''
+/** 打开 schema 表单（prefill = 已存参数对象）。 */
+function openParamsForm(action: ActionDraft, prefill: Record<string, unknown> | null) {
+  paramsEditingUid.value = action.uid
+  paramsFormPrefill.value = prefill
+  paramsFormVisible.value = true
+}
+
+/** 参数 JSON 文本 → 对象（非法 JSON / 非对象 ⇒ null：调用方按"没有可回填的值"处理）。 */
+function parsedParams(text: string): Record<string, unknown> | null {
+  if (!text.trim()) return null
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 空值 = 无参数（合法）；非空必须是 JSON **对象**（数组/标量过不了后端 CanonicalizeParams）。
+ *
+ * 有 schema 时**额外**校验 required：ActionForm 会禁用不完整表单，但 JSON 路径（本弹窗 /
+ * 存量规则）可以整段删掉必填字段 —— 缺字段后端必 400，必须在保存前就说清缺什么。
+ */
+function validateParamsJson(text: string, def: ActionDefinition | null): string {
+  if (!text.trim()) return requiredMissingText({}, def)
   try {
     const parsed = JSON.parse(text) as unknown
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '动作参数必须是 JSON 对象'
-    return ''
+    return requiredMissingText(parsed as Record<string, unknown>, def)
   } catch {
     return '动作参数 JSON 格式错误'
   }
 }
 
+/**
+ * 缺了哪些**必填**参数（空数组 = 齐了）。
+ *
+ * 判定口径与 ActionForm 的 complete 完全对齐（undefined 与 '' 都算没填），否则会出现
+ * "表单说齐了、保存又说不齐"两套答案。null 不算缺（ActionForm 也放行），因为方言参数里
+ * null 可能是有意义的"清空该字段"。
+ */
+function requiredMissingText(params: Record<string, unknown>, def: ActionDefinition | null): string {
+  const required = def?.input_schema?.required ?? []
+  const missing = required.filter(name => params[name] === undefined || params[name] === '')
+  return missing.length ? `缺少参数 ${missing.join('、')}` : ''
+}
+
+/** definition 是否声明了可生成的表单字段（空壳 schema 不算：打开一张空表单等于废掉 JSON 入口）。 */
+function definitionHasSchema(def: ActionDefinition | null): boolean {
+  const properties = def?.input_schema?.properties
+  return !!properties && Object.keys(properties).length > 0
+}
+
+/** 该卡片是否有可生成的参数表单（见 definitionHasSchema）。 */
+function hasParamSchema(action: ActionDraft): boolean {
+  return definitionHasSchema(catalogDefinition(action))
+}
+
+/** 表单提交的参数对象 → 落库的 JSON 串（空对象写空串，与"无参数"的既有表示一致）。 */
+function paramsToJson(params: Record<string, unknown>): string {
+  const clean: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(params)) {
+    // ActionForm 不会给 undefined，但这里是数据边界：undefined 序列化后会变成 null
+    if (value !== undefined) clean[key] = value
+  }
+  return Object.keys(clean).length ? JSON.stringify(clean) : ''
+}
+
 function onParamsDraftChange() {
-  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+  paramsDraftError.value = validateParamsJson(paramsDraft.value, paramsFormDefinition.value)
 }
 
 function applyParams() {
-  paramsDraftError.value = validateParamsJson(paramsDraft.value)
+  paramsDraftError.value = validateParamsJson(paramsDraft.value, paramsFormDefinition.value)
   if (paramsDraftError.value) return
-  const action = form.actions.find(a => a.uid === paramsEditingUid.value)
+  const action = editingParamsAction.value
   if (action) action.action_params_json = paramsDraft.value.trim()
   paramsDialogVisible.value = false
+}
+
+/**
+ * 表单提交 → 写回 JSON 串。
+ *
+ * 为什么写回字符串而不是把模型改成对象：action_params_json 是全仓既有的落库形态
+ * （后端 CanonicalizeParams 校验的也是"一个 JSON 对象串"）；改成对象会波及提交体、
+ * 列表摘要 paramsSummary、预检参数摘要三处，属于本次改造之外的扩散。
+ */
+function applyFormParams(params: Record<string, unknown>) {
+  const action = editingParamsAction.value
+  if (action) action.action_params_json = paramsToJson(params)
+  paramsFormVisible.value = false
+}
+
+/** JSON 弹窗 → 表单（「改用表单」）：把文本里能读出的对象作为 prefill 带过去。 */
+function switchParamsToForm() {
+  const action = editingParamsAction.value
+  if (!action) return
+  const prefill = parsedParams(paramsDraft.value)
+  paramsDialogVisible.value = false
+  openParamsForm(action, prefill)
 }
 
 // ── 显示辅助 ──
@@ -2558,8 +2783,33 @@ function formatTime(t?: string | null): string {
  * 仍会把风险动作拦下来，故不会漏确认。
  */
 const actionCatalog = ref(new Map<string, ActionDefinition>())
-/** 已请求过的设备 ID（含失败）：避免同一设备重复打接口。 */
-const catalogRequested = ref(new Set<number>())
+
+/**
+ * 目录条目的可用性（后端 EffectiveAction.available / reason）。
+ *
+ * 为什么单独一张表、而不塞进 actionCatalog 的值里：actionCatalog 是**风险徽标的输入**
+ * （catalogDefinition → riskPresentation）。改它的值类型等于改风险判定的输入 —— 本次
+ * 一个字都不动风险逻辑；可用性只服务下拉选项的「当前不可用」标注与空态提示文案。
+ */
+const actionAvailability = ref(new Map<string, { available: boolean; reason?: string }>())
+
+/**
+ * 设备目录的加载态。
+ *
+ * 为什么必须是三态而不是一个"请求过没"的 Set：空态提示只能说"没取到/没有动作"，
+ * 不能把**请求失败**或**还在加载**说成"该设备没有动作"；而"动作不在目录中"
+ * （存量规则提示）只在 ready 时才成立 —— failed 时无从判断，说了就是猜。
+ */
+type CatalogLoadState = 'loading' | 'ready' | 'failed'
+const catalogState = ref(new Map<number, CatalogLoadState>())
+/**
+ * 进行中的目录请求（按设备）。
+ *
+ * 为什么除了"状态"还要留 Promise：卡片切换目标设备时要判定"已选动作还在不在新目录里"，
+ * 而这个判定只有等目录**落定**才有依据。若新设备的目录恰好正在请求（例如页面挂载时
+ * 已经在拉），只凭状态会走"拿不到就不断言"的保守分支，清空提示就被悄悄跳过了。
+ */
+const catalogInflight = new Map<number, Promise<void>>()
 
 /**
  * 取一批设备的受控操作目录并建索引（幂等：已请求过的设备跳过）。
@@ -2569,29 +2819,175 @@ const catalogRequested = ref(new Set<number>())
  * 风险动作会**没有徽标**（看起来像普通动作）—— 这是安全信息缺失，不是视觉问题。
  */
 async function ensureActionCatalog(deviceIds: Iterable<number>) {
-  const pending = [...new Set(deviceIds)].filter(id => id > 0 && !catalogRequested.value.has(id))
-  if (pending.length === 0) return
-  const requested = new Set(catalogRequested.value)
-  for (const id of pending) requested.add(id)
-  catalogRequested.value = requested
+  const ids = [...new Set(deviceIds)].filter(id => id > 0)
+  const pending = ids.filter(id => !catalogState.value.has(id))
+  // 别的调用已经发起、还没落定的请求：等它，别重复打接口，也别在"加载中"下断言
+  const inflight = ids
+    .map(id => catalogInflight.get(id))
+    .filter((request): request is Promise<void> => request !== undefined)
+  if (pending.length === 0) {
+    await Promise.all(inflight)
+    return
+  }
+  const states = new Map(catalogState.value)
+  for (const id of pending) states.set(id, 'loading')
+  catalogState.value = states
   const next = new Map(actionCatalog.value)
-  await Promise.all(pending.map(async (id) => {
-    try {
-      const items = await deviceOperationApi.actions(id)
-      for (const item of items) {
-        const def = item.definition
-        next.set(`${id}:${def.id}`, def)
+  const availability = new Map(actionAvailability.value)
+  for (const id of pending) {
+    const request = (async () => {
+      try {
+        const items = await deviceOperationApi.actions(id)
+        for (const item of items) {
+          const def = item.definition
+          const key = `${id}:${def.id}`
+          next.set(key, def)
+          // available 缺省按"可用"处理（后端字段是 bool，老响应可能没有它）：
+          // 没有依据时不要把动作标成不可用，否则用户会以为设备坏了。
+          availability.set(key, { available: item.available !== false, reason: item.reason ?? def.availability_reason })
+        }
+        states.set(id, 'ready')
+      } catch {
+        /* 单个设备目录失败不阻塞页面：该卡片不渲染风险徽标，保存前的预检仍会拦风险动作。
+           记为 failed 而不是 ready —— 否则空态提示会声称"该设备没有动作"，而事实是"没取到"。 */
+        states.set(id, 'failed')
       }
-    } catch {
-      /* 单个设备目录失败不阻塞页面：该卡片不渲染风险徽标，保存前的预检仍会拦风险动作 */
-    }
-  }))
+    })()
+    catalogInflight.set(id, request)
+  }
+  await Promise.all([...pending.map(id => catalogInflight.get(id)!), ...inflight])
+  for (const id of pending) catalogInflight.delete(id)
   actionCatalog.value = next
+  actionAvailability.value = availability
+  // 重新赋值一份新 Map：Promise.all 里改的是同一个对象，不换引用不会触发依赖它的渲染
+  catalogState.value = new Map(states)
 }
 
-/** 卡片切换目标设备时按需加载该设备的目录（否则风险徽标会缺失）。 */
-function onCardDeviceChange(deviceId: number) {
-  void ensureActionCatalog([deviceId])
+/** 该卡片目标设备的目录加载态（未请求过 ⇒ unknown：按"还没准备好"处理，不下任何断言）。 */
+function cardCatalogState(action: ActionDraft): CatalogLoadState | 'unknown' {
+  const deviceId = action.action_device_id
+  if (!deviceId) return 'unknown'
+  return catalogState.value.get(deviceId) ?? 'unknown'
+}
+
+/** 动作下拉的一个候选（value = 动作 ID）。 */
+interface ActionOption {
+  value: string
+  label: string
+  available: boolean
+  reason?: string
+}
+
+/**
+ * 当前卡片目标设备下的动作候选。
+ *
+ * 为什么按设备过滤：action_id 由**该设备的驱动**声明，一台 BMS 与一台 ESP32 的动作集合
+ * 不相交（键就是 <deviceId>:<actionId>）。把全设备的动作都列出来，只是给用户换一种方式填错。
+ * 目录为空/未加载时返回空数组：下拉退化成 allow-create 手输，不阻断建规则（既有降级口径）。
+ */
+function actionOptions(action: ActionDraft): ActionOption[] {
+  const deviceId = action.action_device_id
+  if (!deviceId) return []
+  const prefix = `${deviceId}:`
+  const options: ActionOption[] = []
+  for (const [key, def] of actionCatalog.value) {
+    if (!key.startsWith(prefix)) continue
+    const availability = actionAvailability.value.get(key)
+    const available = availability ? availability.available : true
+    const parts = [def.name || def.id, def.id]
+    // 风险文字只是**选项文案**（让用户知道这个动作危险），真正判定仍是后端下发的
+    // requires_confirmation（riskBadgeOf / 保存前预检）。这里绝不参与任何风险判定。
+    const badge = riskBadge(def)
+    if (badge) parts.push(`${badge.icon} ${badge.label}`)
+    // 不可用的动作**照样列出**、只加后缀，不隐藏：动作确实存在，只是此刻下发不了
+    // （电池未接入/驱动未就绪）。隐藏会让下拉看起来"这个动作不存在"，用户转而去查
+    // 驱动声明；而是否可用是**运行期**状态，配置期不据此阻断（执行结果由后端判定）。
+    if (!available) parts.push('当前不可用')
+    options.push({ value: def.id, label: parts.join(' · '), available, reason: availability?.reason })
+  }
+  // 按显示名排序（数字感知："动作 2" 排在 "动作 10" 前面）：候选多时用户按名字找，不按 ID 找
+  options.sort((a, b) => a.label.localeCompare(b.label, 'zh-Hans-CN', { numeric: true }))
+  return options
+}
+
+/** 下拉 placeholder：有候选时提示可选可输，没有候选时只剩手输（不假装有目录）。 */
+function actionIdPlaceholder(action: ActionDraft): string {
+  return actionOptions(action).length ? '选择或输入动作 ID' : '输入动作 ID（如 gpio_set）'
+}
+
+/** 空态：目录确实取回（或明确失败）而该设备一个动作都没有 —— 明说"没有"，仍允许手输。 */
+function catalogEmpty(action: ActionDraft): boolean {
+  const state = cardCatalogState(action)
+  return (state === 'ready' || state === 'failed') && actionOptions(action).length === 0
+}
+
+/**
+ * 目录里**有**动作但全部 unavailable（电池未接入 / 驱动未就绪 / 设备离线）。
+ *
+ * 为什么单独一条提示而不是复用空态：把"有 3 个动作但都下发不了"说成"没有动作"，
+ * 会让用户去查驱动声明，而实际该查的是设备连接状态。选择仍然放行（见 allow-create 注释）。
+ */
+function catalogAllUnavailable(action: ActionDraft): boolean {
+  const options = actionOptions(action)
+  return cardCatalogState(action) === 'ready' && options.length > 0 && options.every(o => !o.available)
+}
+
+/**
+ * 存量规则 / 设备换型：目录已取回，但里面没有当前选中的动作。
+ *
+ * **不清空**用户的 action_id 与参数（清空就是静默丢数据），只给一行黄字提示，
+ * 保存仍走既有后端校验 —— 与"目录拿不到不阻断建规则"的口径一致。
+ */
+function catalogMissing(action: ActionDraft): boolean {
+  const deviceId = action.action_device_id
+  if (!deviceId || cardCatalogState(action) !== 'ready') return false
+  if (!action.action_id.trim()) return false
+  return !actionCatalog.value.has(`${deviceId}:${action.action_id}`)
+}
+
+/**
+ * 卡片切换目标设备。
+ *
+ * 目录按设备隔离：旧动作在新设备上可能根本不存在（action_id 是设备驱动声明的），
+ * 继续带着它保存 = 一条到死都执行不了、用户还看不出原因的规则。故**目录就绪之后**
+ * 再判定：不在新目录里就清空并说明一次（用户看得见变化，而不是被静默换掉）。
+ * 目录没取到（设备离线 / 请求失败）时**不清空**：拿不到目录不等于动作不存在。
+ */
+async function onCardDeviceChange(action: ActionDraft) {
+  const deviceId = action.action_device_id
+  if (!deviceId) return
+  await ensureActionCatalog([deviceId])
+  // 等待期间用户可能又换了设备/动作：只在"仍然是这台设备"时判定
+  if (action.action_device_id !== deviceId) return
+  if (catalogState.value.get(deviceId) !== 'ready') return
+  if (!action.action_id.trim()) return
+  if (actionCatalog.value.has(`${deviceId}:${action.action_id}`)) return
+  action.action_id = ''
+  action.action_params_json = ''
+  ElMessage.info('该动作不在新设备的动作目录中，已清空动作 ID 与参数，请重新选择')
+}
+
+/**
+ * 动作 ID 变化（下拉选中 / allow-create 手输）。
+ *
+ * 为什么"选中就弹表单"：后端 definition.input_schema 已经声明了字段/类型/枚举/范围，
+ * 却让用户去别处背 JSON，是同一系统里两套录入方式。有 schema 就当场进表单，用户不必
+ * 先记住"这个动作有参数"再去找入口。
+ * 为什么手输（目录里没有该 ID）时什么都不做：目录不可用是**已知降级**（设备离线/驱动
+ * 未声明），此时没有 schema 可驱动，保留用户原样输入与既有参数，交给保存期后端校验。
+ */
+function onCardActionIdChange(action: ActionDraft) {
+  const def = catalogDefinition(action)
+  if (!def) return
+  if (definitionHasSchema(def)) {
+    // 不把旧参数带进来：它们属于上一个动作，字段名对不上时只会变成干扰（ActionForm
+    // 只认自己 schema 里的字段，提交时也会把它们丢掉）。取消则原样保留旧参数。
+    openParamsForm(action, null)
+    return
+  }
+  // 无参数动作：schema 明说没有可填字段 ⇒ 清掉上一个动作留下的参数。
+  // 不清的话后端会拿旧键去解析新动作（轻则忽略，重则 400），而界面上"参数"还显示着旧值。
+  action.action_params_json = ''
 }
 
 async function loadActionCatalog() {
@@ -2845,6 +3241,11 @@ onUnmounted(() => {
 .action-meta dt { flex: 0 0 auto; color: var(--el-text-color-secondary); font-size: 12px; }
 .action-meta dd { margin: 0; font-size: 12px; color: var(--el-text-color-regular); overflow-wrap: anywhere; flex: 1; min-width: 0; }
 .action-meta dd :deep(.el-select) { width: 100%; }
+/* 参数行：「手写 JSON」是表单之外的高级出口，与摘要同排但不抢主按钮的位置 */
+.action-card__json-link { margin-left: 8px; }
+/* 兼容态提示（存量规则 / 设备换型：动作不在当前目录里）。警告色小字 = 只是提示，
+   不阻断保存 —— 判定权在后端，前端替它拦下来只会让合法规则存不进去。 */
+.action-card__hint--warn { color: var(--el-color-warning); }
 /* 风险原因块：第二条非颜色通道（与徽标并存的文本块）。 */
 .risk-reason {
   display: flex; gap: 8px; align-items: flex-start; margin-top: 10px;

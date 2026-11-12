@@ -93,6 +93,54 @@ vi.mock('element-plus', async importOriginal => {
 })
 
 /**
+ * ActionForm（参数 schema 表单）替身。
+ *
+ * 为什么 stub 而不是挂真实组件：真实 ActionForm 是 el-dialog + el-input-number 组合，
+ * happy-dom 里只能证明"它渲染了"；而本页要断言的是**接线**（选中带 schema 的动作后是否
+ * 自动开表单、definition/prefill 有没有传对、提交回来的对象有没有原样写回 JSON 串）。
+ * 表单自身行为由 src/views/edge-device/shared/__tests__/ActionForm.spec.ts 保护，分工不重叠。
+ * stub 保留 visible / definition / prefill 三个入参与 submit / update:visible 两个出口。
+ */
+vi.mock('@/views/edge-device/shared/ActionForm.vue', async () => {
+  const { defineComponent, h, ref } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'ActionForm',
+      props: {
+        visible: { type: Boolean, default: false },
+        definition: { type: Object, default: null },
+        canRead: { type: Boolean, default: false },
+        reading: { type: Boolean, default: false },
+        prefill: { type: Object, default: null },
+      },
+      emits: ['update:visible', 'submit', 'read'],
+      setup(props, { emit }) {
+        const draft = ref('{}')
+        return () => (props.visible ? h('div', {
+          'data-test': 'action-form-stub',
+          'data-definition': (props.definition as { id?: string } | null)?.id ?? '',
+          'data-prefill': JSON.stringify(props.prefill ?? null),
+        }, [
+          h('input', {
+            'data-test': 'action-form-payload',
+            value: draft.value,
+            onInput: (event: Event) => { draft.value = (event.target as HTMLInputElement).value },
+          }),
+          h('button', {
+            'data-test': 'action-form-submit',
+            onClick: () => emit('submit', JSON.parse(draft.value) as Record<string, unknown>),
+          }),
+          h('button', {
+            'data-test': 'action-form-cancel',
+            onClick: () => emit('update:visible', false),
+          }),
+        ]) : null)
+      },
+    }),
+  }
+})
+
+/**
  * 传感器字段选择器（components/sensor/SensorFieldPicker.vue）。
  *
  * 为什么 Mock 成 stub 而不是用真实组件：
@@ -196,6 +244,39 @@ function timePickerStubs() {
  */
 function formState(wrapper: Awaited<ReturnType<typeof mountPage>>): Record<string, unknown> {
   return (wrapper.vm as unknown as { form: Record<string, unknown> }).form
+}
+
+/** 卡片上的动作草稿（写入 action_id / 读回 action_params_json 用）。 */
+type ActionDraftLike = { action_id: string; action_params_json: string }
+function actionDrafts(wrapper: Awaited<ReturnType<typeof mountPage>>): ActionDraftLike[] {
+  return formState(wrapper).actions as ActionDraftLike[]
+}
+
+/**
+ * 驱动第 index 张卡片的「动作 ID」。
+ *
+ * 为什么有两条路径：动作 ID 已从裸输入框改成**目录下拉**（el-select + allow-create），
+ * 而测试环境的 el-select 替身是原生 <select>：
+ *   · 目录里有的动作 → setValue 选中真实 option，走的是用户的点选通路（含 change 副作用，
+ *     例如"选中带 schema 的动作会自动打开表单"）；
+ *   · 目录里没有的动作（存量规则 / 手输）→ 原生 select 表达不了 allow-create 的自由输入，
+ *     直接写表单模型（真实浏览器里这一步由 el-select 的 allow-create 完成）。
+ */
+async function setActionId(
+  wrapper: Awaited<ReturnType<typeof mountPage>>,
+  index: number,
+  actionId: string,
+) {
+  const select = wrapper.find(`[data-test="action-id-select-${index}"]`)
+  expect(select.exists(), `找不到第 ${index + 1} 个动作的动作下拉`).toBe(true)
+  const inCatalog = select.findAll('option').some(option => option.attributes('value') === actionId)
+  if (inCatalog) {
+    await select.setValue(actionId)
+    await flushPromises()
+    return
+  }
+  actionDrafts(wrapper)[index].action_id = actionId
+  await flushPromises()
 }
 
 const mockedAutomationApi = vi.mocked(automationApi)
@@ -404,7 +485,7 @@ describe('AutomationRules.vue', () => {
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
     // 单动作字段组已升级为卡片列表：目标是第一张卡片（下标 0）
     await wrapper.find('[data-test="action-device-0"]').setValue('10')
-    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+    await setActionId(wrapper, 0, 'read_basic_info')
     await wrapper.find('[data-test="save-rule"]').trigger('click')
     await flushPromises()
     expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
@@ -424,7 +505,7 @@ describe('AutomationRules.vue', () => {
     await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
     await wrapper.find('[data-test="action-device-0"]').setValue('10')
-    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+    await setActionId(wrapper, 0, 'read_basic_info')
     await wrapper.find('[data-test="save-rule"]').trigger('click')
     await flushPromises()
 
@@ -875,7 +956,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
     await wrapper.find('[data-test="action-device-0"]').setValue('10')
-    await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+    await setActionId(wrapper, 0, 'read_basic_info')
   }
 
   /** 预检返回一个风险动作（含后端给的设备名/标签/原因/参数摘要）。 */
@@ -930,7 +1011,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await flushPromises()
       await wrapper.find('[data-test="field-sun-offset"]').setValue('-30')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await setActionId(wrapper, 0, 'read_basic_info')
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
 
@@ -961,11 +1042,11 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
 
       // 填三个动作（第 1 个用普通动作，避免触发风险清单）
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await setActionId(wrapper, 0, 'read_basic_info')
       await wrapper.find('[data-test="action-device-1"]').setValue('10')
-      await wrapper.find('[data-test="action-id-1"]').setValue('act_b')
+      await setActionId(wrapper, 1, 'act_b')
       await wrapper.find('[data-test="action-device-2"]').setValue('10')
-      await wrapper.find('[data-test="action-id-2"]').setValue('act_c')
+      await setActionId(wrapper, 2, 'act_c')
 
       // 首行「上移」disabled；第 3 张上移后成为第 2 张
       const ups = wrapper.findAll('[data-test="move-up"]')
@@ -1006,7 +1087,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await setActionId(wrapper, 0, 'set_mos_policy')
       await flushPromises()
 
       const badge = wrapper.find('[data-test="risk-badge"]')
@@ -1023,7 +1104,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('some_unlisted_action')
+      await setActionId(wrapper, 0, 'some_unlisted_action')
       await flushPromises()
 
       expect(wrapper.find('[data-test="unknown-badge"]').text()).toContain('等级未知')
@@ -1035,7 +1116,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await setActionId(wrapper, 0, 'read_basic_info')
       await flushPromises()
 
       expect(wrapper.find('[data-test="normal-badge"]').text()).toContain('普通')
@@ -1165,7 +1246,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
       await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await setActionId(wrapper, 0, 'set_mos_policy')
       await flushPromises()
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
@@ -1188,7 +1269,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
       await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('set_mos_policy')
+      await setActionId(wrapper, 0, 'set_mos_policy')
       await flushPromises()
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
@@ -1881,7 +1962,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
       await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
-      await wrapper.find('[data-test="action-id-0"]').setValue('read_basic_info')
+      await setActionId(wrapper, 0, 'read_basic_info')
       // 点了 + 但没填：这一行与"已配好的行"在界面上长得一样
       await wrapper.find('[data-test="add-condition"]').trigger('click')
       await flushPromises()
@@ -2020,6 +2101,281 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       // 全页断点仍只有既有的 768 / 480 两档（不新增一套并行断点体系）
       const breakpoints = [...new Set((raw.match(/max-width:\s*\d+px/g) ?? []).map(item => item.replace(/\s+/g, '')))]
       expect(breakpoints).toEqual(['max-width:768px', 'max-width:480px'])
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 动作卡片：动作 ID 从目录选 + 参数由 input_schema 生成表单（文档 §2 #21/#22、§4.5）
+  //
+  // 改前：动作 ID 是裸输入框（placeholder "如 gpio_set"），参数是手写 JSON 弹窗 ——
+  // 而动作目录（actionCatalog）早已为风险徽标加载在内存里、后端 definition.input_schema
+  // 也早已声明了字段/类型/枚举/范围。同一系统里设备页"选动作→填表单"，自动化页"背 JSON"。
+  // 本组用例钉住的契约：候选来自该设备目录（不是全设备混在一起）、选中带 schema 的动作
+  // 自动进表单且提交对象原样序列化、无参数动作清空旧参数、切换设备时失效动作被清空并提示、
+  // 目录缺失**不清空**存量、required 在手写路径再兜一道、两种编辑器可互转且内容不丢、
+  // "有动作但全部不可用"与"没有动作"分开提示。
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('动作 ID 目录下拉 + schema 参数表单（§2 #21/#22）', () => {
+    /** 带 input_schema 的动作：pin / value 均为必填。 */
+    const gpioDefinition = {
+      id: 'gpio_set',
+      name: '设置 GPIO',
+      description: '设置指定引脚电平',
+      risk_level: 'normal',
+      requires_confirmation: false,
+      input_schema: {
+        properties: {
+          pin: { type: 'integer', minimum: 0, maximum: 39 },
+          value: { type: 'integer', minimum: 0, maximum: 1 },
+        },
+        required: ['pin', 'value'],
+      },
+    }
+    /** 无参数动作（有名字、没有 input_schema）—— 选中它不应弹表单。 */
+    const readDefinition = {
+      id: 'read_basic_info',
+      name: '读取基本信息',
+      description: '读取总压/电流',
+      risk_level: 'normal',
+      requires_confirmation: false,
+    }
+    const schemaCatalog = [
+      { definition: gpioDefinition, available: true },
+      { definition: readDefinition, available: true },
+    ]
+    /** 设备 11 的目录：没有 gpio_set（用于"切换设备后动作失效"）。 */
+    const otherDeviceCatalog = [{ definition: readDefinition, available: true }]
+
+    /**
+     * 等动作目录落定。
+     *
+     * 为什么需要：onMounted 里目录请求排在 source-groups 之后（既有顺序；本文件没有 mock
+     * sourceGroupApi，那一层会真打 axios 并失败），单靠 flushPromises 只能跑到"目录还在
+     * 加载"的中间态 —— 此时下拉只有 placeholder，断言会假红（或更糟：假绿）。
+     * 这里轮询到候选出现为止，最多 1s，超时直接失败（不静默跳过）。
+     */
+    async function waitForActionOptions(wrapper: Awaited<ReturnType<typeof mountPage>>, index = 0) {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (wrapper.find(`[data-test="action-id-select-${index}"]`).findAll('option').length > 1) return
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      throw new Error(`第 ${index + 1} 个动作的下拉在 1s 内没有出现任何目录候选`)
+    }
+
+    /** 编辑第一条规则（el-table 的 slot 不执行 ⇒ 必须用 slot 表格替身找「编辑」入口）。 */
+    async function openEditFirstRule() {
+      const wrapper = await mountWithSlotTable()
+      const editBtn = wrapper.findAll('button').find(button => button.text() === '编辑')
+      expect(editBtn, '找不到编辑入口，用例前提不成立').toBeTruthy()
+      await editBtn!.trigger('click')
+      await flushPromises()
+      // 目录请求排在 onMounted 的 source-groups 之后（既有顺序），等它落定再断言卡片状态
+      await waitForActionOptions(wrapper)
+      return wrapper
+    }
+
+    it('选中设备后动作下拉列出该设备目录的动作（动作名 + ID + 风险文字），选中即写入 action_id', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+
+      const select = wrapper.find('[data-test="action-id-select-0"]')
+      expect(select.exists()).toBe(true)
+      const labels = select.findAll('option').map(option => option.text())
+      // 三样信息都要在：动作名（用户认的）+ 动作 ID（真正落库的字符串）+ 风险文字（仅展示）
+      expect(labels).toContain('设置充放电 MOS 软件策略 · set_mos_policy · ⚠ 风险')
+      expect(labels).toContain('读取基本信息 · read_basic_info')
+
+      await select.setValue('read_basic_info')
+      await flushPromises()
+      expect(actionDrafts(wrapper)[0].action_id).toBe('read_basic_info')
+
+      // 两条**降级通路**是契约的一部分，不能在后续改动里被顺手删掉：
+      //   · filterable —— 动作多的设备（如 30+ 项内阻类动作）必须能按名字过滤；
+      //   · allow-create —— 目录取不到（设备离线/驱动未声明）时仍要能手输，不得阻断建规则。
+      // 这两点在 el-select 替身上不可见（stub 不渲染内部结构），故按源码契约断言。
+      expect(source).toContain('allow-create')
+      expect(source).toContain('filterable')
+    })
+
+    it('选中带 input_schema 的动作 ⇒ 自动打开参数表单，提交对象写回精确的 JSON 串', async () => {
+      mockedOperationApi.actions.mockResolvedValue(schemaCatalog as never)
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+
+      await wrapper.find('[data-test="action-id-select-0"]').setValue('gpio_set')
+      await flushPromises()
+
+      const form = wrapper.find('[data-test="action-form-stub"]')
+      expect(form.exists(), '选中带 schema 的动作后没有自动打开参数表单').toBe(true)
+      expect(form.attributes('data-definition')).toBe('gpio_set')
+
+      await wrapper.find('[data-test="action-form-payload"]').setValue('{"pin":12,"value":1}')
+      await wrapper.find('[data-test="action-form-submit"]').trigger('click')
+      await flushPromises()
+
+      // 精确相等（不是 toContain）：落库形态就是这一个 JSON 串，键序/空格都算契约
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('{"pin":12,"value":1}')
+      expect(wrapper.find('[data-test="action-form-stub"]').exists()).toBe(false)
+    })
+
+    it('选中无参数动作：参数被清空且不弹表单（旧参数不得跟着新动作走）', async () => {
+      mockedOperationApi.actions.mockResolvedValue(schemaCatalog as never)
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'gpio_set', action_params_json: '{"pin":12,"value":1}' }],
+      }])
+      const wrapper = await openEditFirstRule()
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('{"pin":12,"value":1}')
+
+      await wrapper.find('[data-test="action-id-select-0"]').setValue('read_basic_info')
+      await flushPromises()
+
+      expect(actionDrafts(wrapper)[0].action_id).toBe('read_basic_info')
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('')
+      expect(wrapper.find('[data-test="action-form-stub"]').exists()).toBe(false)
+    })
+
+    it('切换目标设备：旧动作不在新设备目录 ⇒ 清空动作与参数并提示一次', async () => {
+      mockedEdgeApi.getList.mockResolvedValue({
+        total: 2,
+        items: [{ id: 10, name: 'ESP32-01' }, { id: 11, name: 'ESP32-02' }],
+      } as never)
+      mockedOperationApi.actions.mockImplementation(
+        (async (id: number) => (id === 10 ? schemaCatalog : otherDeviceCatalog)) as never,
+      )
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+      await wrapper.find('[data-test="action-id-select-0"]').setValue('gpio_set')
+      await flushPromises()
+      await wrapper.find('[data-test="action-form-payload"]').setValue('{"pin":12,"value":1}')
+      await wrapper.find('[data-test="action-form-submit"]').trigger('click')
+      await flushPromises()
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('{"pin":12,"value":1}')
+
+      const { ElMessage } = await import('element-plus')
+      await wrapper.find('[data-test="action-device-0"]').setValue('11')
+      await flushPromises()
+
+      expect(actionDrafts(wrapper)[0].action_id).toBe('')
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('')
+      expect(ElMessage.info).toHaveBeenCalledTimes(1)
+      expect(ElMessage.info).toHaveBeenCalledWith('该动作不在新设备的动作目录中，已清空动作 ID 与参数，请重新选择')
+    })
+
+    it('存量动作不在目录里：不清空 action_id/参数，只显示「不在当前设备目录中」', async () => {
+      // 目录里没有 gpio_set（设备换型 / 驱动降级后的常见形态）。清空 = 静默丢数据。
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'gpio_set', action_params_json: '{"pin":12,"value":1}' }],
+      }])
+      const wrapper = await openEditFirstRule()
+
+      const hint = wrapper.find('[data-test="action-id-missing-hint-0"]')
+      expect(hint.exists(), '动作不在目录里时卡片没有任何提示').toBe(true)
+      expect(hint.text()).toContain('动作不在当前设备目录中')
+      expect(actionDrafts(wrapper)[0].action_id).toBe('gpio_set')
+      expect(actionDrafts(wrapper)[0].action_params_json).toBe('{"pin":12,"value":1}')
+    })
+
+    it('手写 JSON 缺 required 字段 ⇒ 保存被拦，文案点名缺少的参数', async () => {
+      mockedOperationApi.actions.mockResolvedValue(schemaCatalog as never)
+      // 存量参数缺 value（别的工具写坏 / schema 后来才加字段）：手写路径绕过了表单禁提交
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'gpio_set', action_params_json: '{"pin":12}' }],
+      }])
+      const wrapper = await openEditFirstRule()
+
+      const { ElMessage } = await import('element-plus')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.updateRule).not.toHaveBeenCalled()
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+      expect(ElMessage.warning).toHaveBeenCalledWith('第 1 个动作：缺少参数 value')
+    })
+
+    it('手写 JSON 弹窗当场标出缺少的必填参数，并禁用「完成」', async () => {
+      mockedOperationApi.actions.mockResolvedValue(schemaCatalog as never)
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'gpio_set', action_params_json: '{"pin":12,"value":1}' }],
+      }])
+      const wrapper = await openEditFirstRule()
+
+      // 「编辑参数」按有无 schema 分流：gpio_set 有 schema ⇒ 直接是表单，且带出已存参数
+      await wrapper.find('[data-test="edit-action-params"]').trigger('click')
+      await flushPromises()
+      const form = wrapper.find('[data-test="action-form-stub"]')
+      expect(form.exists()).toBe(true)
+      expect(form.attributes('data-prefill')).toBe('{"pin":12,"value":1}')
+
+      // 关掉表单 → 卡片上的「手写 JSON」是另一个入口
+      await wrapper.find('[data-test="action-form-cancel"]').trigger('click')
+      await flushPromises()
+      await wrapper.find('[data-test="action-params-form-link-0"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="edit-params-dialog"]').exists()).toBe(true)
+
+      await wrapper.find('[data-test="params-json"]').setValue('{"pin":12}')
+      expect(wrapper.find('[data-test="params-error"]').text()).toBe('缺少参数 value')
+      expect(wrapper.find('[data-test="params-done"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('两种编辑器互转：卡片「手写 JSON」带出已存参数，弹窗「改用表单」把它作为 prefill 带回', async () => {
+      mockedOperationApi.actions.mockResolvedValue(schemaCatalog as never)
+      mockedAutomationApi.listRules.mockResolvedValue([{
+        ...ruleFixture,
+        actions: [{ seq: 1, action_type: 'device_action', action_device_id: 10, action_id: 'gpio_set', action_params_json: '{"pin":12,"value":1}' }],
+      }])
+      const wrapper = await openEditFirstRule()
+
+      await wrapper.find('[data-test="action-params-form-link-0"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="edit-params-dialog"]').exists()).toBe(true)
+      // 表单→JSON：当前参数已经是序列化文本，原文带过去
+      expect((wrapper.find('[data-test="params-json"]').element as HTMLTextAreaElement).value)
+        .toBe('{"pin":12,"value":1}')
+
+      // JSON→表单：改一段再切回，prefill 必须带上刚写的内容（不丢用户输入）
+      await wrapper.find('[data-test="params-json"]').setValue('{"pin":7,"value":0}')
+      await wrapper.find('[data-test="action-params-json-link-0"]').trigger('click')
+      await flushPromises()
+      const form = wrapper.find('[data-test="action-form-stub"]')
+      expect(form.exists()).toBe(true)
+      expect(form.attributes('data-prefill')).toBe('{"pin":7,"value":0}')
+    })
+
+    it('目录里有动作但全部不可用：仍可选中，提示与「暂无动作」区分开', async () => {
+      mockedOperationApi.actions.mockResolvedValue([
+        { definition: readDefinition, available: false, reason: '电池未接入' },
+        { definition: gpioDefinition, available: false, reason: '驱动未就绪' },
+      ] as never)
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+
+      const select = wrapper.find('[data-test="action-id-select-0"]')
+      expect(select.findAll('option').map(option => option.text()).some(label => label.includes('当前不可用'))).toBe(true)
+      // "有 3 个动作但都下发不了" 不能说成 "没有动作"（否则用户会去查驱动声明而不是设备状态）
+      expect(wrapper.find('[data-test="action-id-empty-hint-0"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="action-id-unavailable-hint-0"]').text()).toContain('当前均不可用')
+
+      // 不阻断：仍可先配规则，执行结果由后端判定
+      await select.setValue('read_basic_info')
+      await flushPromises()
+      expect(actionDrafts(wrapper)[0].action_id).toBe('read_basic_info')
     })
   })
 })
