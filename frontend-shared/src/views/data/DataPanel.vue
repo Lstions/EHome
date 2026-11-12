@@ -257,78 +257,19 @@
             data-testid="data-pagination-top"
             @current-change="handlePageChange"
           />
-          <!-- key 用 id（后端稳定合成）；WS 实时行 id 为 0 ⇒ 回落行号 -->
-          <div v-for="(row, rowIndex) in historyData" :key="row.id || rowIndex" class="data-card">
-            <div class="data-card-head">
-              <span class="data-card-time">{{ rowTimeText(row) }}</span>
-            </div>
-            <div class="data-card-metrics">
-              <span v-for="metric in summarizeRow(row)" :key="metric.key" class="data-card-metric">
-                <span class="metric-label">{{ metric.label }}</span>
-                <span class="metric-value">{{ metric.value }}<i v-if="metric.unit" class="metric-unit">{{ metric.unit }}</i></span>
-              </span>
-              <span v-if="summarizeRow(row).length === 0" class="data-card-metric muted">无可解析数值</span>
-            </div>
-            <div class="data-card-foot">
-              <el-button
-                link
-                type="primary"
-                size="small"
-                data-testid="row-expand"
-                @click="openRowDetail(row)"
-              >
-                查看完整数据
-              </el-button>
-            </div>
-          </div>
+          <HistoryRowCards
+            :rows="historyData"
+            :categories="availableCategories"
+            @expand="openRowDetail"
+          />
         </div>
 
-        <!-- data-page / data-total 是**可观测的翻页状态**：
-             分页改成前端切片后，"当前在第几页"不再体现在请求参数里，
-             而 el-table 的行在单测替身里不渲染插槽 —— 没有这两个属性就
-             无法从外部验证"换条件后回到第 1 页"这条 MUST（§3.2.6）。 -->
-        <div
+        <HistoryDataTable
           v-else
-          class="mobile-table-wrapper"
-          data-testid="history-table"
-          :data-page="currentPage"
-          :data-total="total"
-        >
-          <p class="mobile-table-hint">左右滑动查看完整历史数据</p>
-          <el-table :data="historyData" stripe>
-            <el-table-column prop="created_at" label="采集时间" width="180">
-              <template #default="{ row }">
-                <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
-              </template>
-            </el-table-column>
-            <!-- 经 parseRowData(row) 这**唯一**入口取数：
-                 行里的指标在 data 下（历史行由 aggregateHistoryRows 产出、实时行由
-                 WS payload 构造）。解析不出来返回 null ⇒ 显示「—」，
-                 与"值真的是 0"区分开。 -->
-            <el-table-column prop="data" label="数据">
-              <template #default="{ row }">
-                <!-- 判据是 .values 而不是整个返回对象：后者恒为真对象，
-                     会让"解析不出来"也能匹配 v-if 分支（只有 formatData 兜住才没露馅）。 -->
-                <span v-if="parseRowData(row).values" data-testid="row-values">{{ formatData(parseRowData(row).values) }}</span>
-                <span v-else style="color: var(--el-text-color-placeholder);" data-testid="values-unknown">{{ UNKNOWN }}</span>
-              </template>
-            </el-table-column>
-            <!--
-              2026-11-11 原始数据退役，本表删除两列：
-
-              · 「原始数据」列（原渲染 data_json.raw_hex）：device_data 整表删除，
-                原始帧字节不再有 REST 数据源。帧表的 raw 列只对**关键帧**填充
-                （internal/telemetry/dualwrite.go 的 appendEncoded 显式判
-                FrameKind==Key），且没有对外接口 —— 不能拿来当列数据源，
-                否则绝大多数行会是「—」，比删列更误导。
-              · 「状态/错误码」列（原渲染 row.error_code）：这是**既有 bug** 的清理 ——
-                /edge-devices/:id/data 的响应从来没有 error_code 字段
-                （实测键：created_at, data_json, device_id, id, node_id, timestamp），
-                该列恒为 undefined ⇒ 恒显示「正常」。删端点时顺手删掉它，
-                不是本次改造引入的问题（方案 §1.5 已记录）。
-            -->
-          </el-table>
-        </div>
+          :rows="historyData"
+          :page="currentPage"
+          :total="total"
+        />
 
         <el-pagination
           v-model:current-page="currentPage"
@@ -344,190 +285,56 @@
     </el-card>
 
     <!-- 移动端「查看完整数据」弹层：完整 K/V 全量展示，不丢任何指标（P0 配套）。 -->
-    <el-dialog
+    <RowDetailDialog
       v-model="rowDetailVisible"
-      title="单条数据完整内容"
-      align-center
-      width="92%"
-      data-testid="row-detail-dialog"
-    >
-      <div class="row-detail">
-        <div class="row-detail-meta">
-          <span>采集时间：{{ rowTimeText(rowDetailRow) }}</span>
-        </div>
-        <!-- F8：弹层内 4 列表最小宽 400px > 393 弹窗可视宽，必须自带横滚容器 + 提示。 -->
-        <div class="mobile-table-wrapper">
-          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
-          <el-table :data="rowDetailEntries(rowDetailRow)" size="small" max-height="420" data-testid="row-detail-table">
-            <el-table-column prop="label" label="指标" min-width="110" show-overflow-tooltip />
-            <el-table-column prop="key" label="标识" min-width="110" show-overflow-tooltip />
-            <el-table-column prop="value" label="值" width="110" align="right" />
-            <el-table-column prop="unit" label="单位" width="70" align="center" />
-          </el-table>
-        </div>
-        <p v-if="rowDetailEntries(rowDetailRow).length === 0" class="row-detail-empty">
-          该条数据无法解析出指标。
-        </p>
-      </div>
-      <template #footer>
-        <el-button type="primary" @click="rowDetailVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
+      :row="rowDetailRow"
+      :categories="availableCategories"
+    />
   </div>
 </template>
 
 <script lang="ts">
 /**
- * 行数据解析（纯函数，**本页唯一**的取数入口）。
+ * 行数据解析已搬到 ./rowData.ts（纯函数、无 Vue 依赖）。
  *
- * 为什么单独开一个非 setup 的 script 块：模板、统计卡（dynamicStats）、趋势兜底、CSV 导出、
- * 实时条目都要取同一份数据，散落多处必然再次漂移（历史缺陷正是"表格读 parsed_data、接口只给
- * data_json"）。函数放在模块作用域后，script setup 块内可直接调用、模板也能解析 ——
- * 已用本仓 @vue/compiler-sfc 3.5.40 实测确认（两块共享作用域，导出照常生成）。
+ * 为什么这里还要具名再导出：DataPanelRowData.spec.ts 的读取路径是
+ * `import DataPanel, { parseRowData } from '@/views/data/DataPanel.vue'` ——
+ * 门禁断言文本一字未改，搬迁只改实现位置，不改对外读取路径。
  *
- * 为什么不用"把函数 defineExpose 出去、让测试调它"的既有范式：缺陷的回归点是
- * **表格列恒显示 —**，只暴露函数等于不守渲染路径；测试必须打到真实渲染出的单元格。
- *
- * 契约（规范 §3.2.5 不得以本地默认值伪造事实）：
- *   · 取不到 / 形状不认识 ⇒ values = null ⇒ 界面显示「—」；
- *   · 值是 0 ⇒ values = { rainfall: 0 } ⇒ 界面显示「rainfall: 0.00」。
- *   二者绝不互相顶替，尤其**不得**把解析失败落成 0。
- *
- * 行形状的**唯一真源**见 ./historyRows.ts —— 历史行的聚合规则写在那里。
+ * 为什么用 `export { … } from` 而不是"先 import 再 export"：<script setup> 里也要
+ * import 同一个名字（CSV 导出用），两块合并成一个模块后重复 import 会重复声明。
  */
-
-/** parseRowData 的返回：数值指标。 */
-export interface RowData {
-  /**
-   * 指标名 → **展示值**（数值或字符串）；解析不出来时为 null
-   * （不是空对象 —— 空对象会与"真的没有指标"混淆）。
-   *
-   * 允许字符串是因为部分传感器的真值本就是字符串：后端 SensorData 有
-   * `StringValue` 字段（drivers/registry.go:13），此时 `Value` 恒为 0 而真值在
-   * StringValue 里 —— 典型是 BMS 的 hardware_version（"V19"）与 serial_number。
-   * 只取 Value 会把它显示成 **0**，比「—」更糟：0 看起来像真实读数。
-   *
-   * ⚠ 2026-11-11 原始数据退役后，**本页已不可能收到字符串读数**：
-   * 唯一承载 StringValue 的 device_data.data_json.str_values 随表删除，
-   * 而 /devices/:id/history 只返回 float64 的 value。类型保留字符串分支，
-   * 是因为实时 WS 推送（handleDataUpdate）仍可能带上字符串字段，
-   * 且行解析不该对"值是不是数字"做两次不同的假设。
-   */
-  values: Record<string, number | string> | null
-  /**
-   * 指标名 → **纯数值**，供统计卡 / 趋势图 / 数值专用消费者使用。
-   *
-   * 单独给出是为了不让字符串读数污染数值计算：若把 "V19" 混进趋势，
-   * 它会被当成 0 ⇒ 拉低均值并在图上画出掉到 0 的假线。
-   */
-  numbers: Record<string, number> | null
-}
-
-/**
- * 表格行的形状。
- *
- * 两个来源，**形状已经统一**（无需再按响应格式分支）：
- *   · 历史行  —— aggregateHistoryRows() 的产物（一次采集一行，指标在 data 里）；
- *   · 实时行  —— handleDataUpdate() 由 WS payload 构造，同样把指标放进 data。
- */
-interface DataRow {
-  data?: unknown
-}
-
-/**
- * 只认 number（并兼容既有的 { value } 包装）。刻意**不**做 Number(str)：
- * "0.5" / "abc" 这类字符串被静默转成 0.5 / NaN 都属于"以本地推断伪造事实"。
- */
-const asNumber = (value: unknown): number | null => {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (value && typeof value === 'object' && 'value' in value) {
-    return asNumber((value as { value?: unknown }).value)
-  }
-  return null
-}
-
-/**
- * 行内单个字段的展示值。
- *
- * 口径与本仓既有正确范式一致（views/edge-device/shared/DeviceControlPanel.vue:76
- * 的 `value.string_value || value.value`）：**字符串非空时优先**，否则取数值。
- *
- * 为什么保留字符串分支：实时 WS 推送的 payload 可能带字符串型读数
- * （device_data 时代是 StringValue；退役后仍有设备上报非数值文本字段）。
- * 只认数字会把真实文本读数丢掉，显示成「—」。
- * 刻意**不**做 Number(str)：把 "0.5" 静默转成数字属于以本地推断伪造事实。
- * 返回 null 表示"这个字段没有可信值"，与"值是 0"区分。
- */
-const asDisplayRowValue = (value: unknown): number | string | null => {
-  if (typeof value === 'string') return value.trim() !== '' ? value : null
-  return asNumber(value)
-}
-
-/**
- * 非指标字段。扁平兜底分支必须排除它们，否则会把 id / device_id 这类
- * **元数据数字**当成传感器读数渲染出来（实测真实行就带这两个数字键 ——
- * 本文件新增用例抓到过）。
- *
- * 2026-10-23（逻辑设备移除）：原来这里还有一个 logical_device_id，
- * 后端已删除该列（契约 §2），故从排除表里一并去掉 —— 保留它等于给一个
- * 不可能再出现的键留位。
- *
- * 2026-11-11（原始数据退役）：raw_data / raw_hex / data_json / parsed_data
- * 一并从排除表里删掉。它们原本是 device_data 行上的字段，现在行来自
- * /devices/:id/history（一字段一行）或 WS 推送，都不再有这些键；
- * 留着一串永不出现的名字只会让后来者以为还存在那种形状。
- */
-const NON_METRIC_KEYS = new Set([
-  'id', 'device_id', 'node_id', 'channel_id',
-  'timestamp', 'created_at', 'collected_at', 'updated_at',
-])
-
-/**
- * 行数据解析（**本页唯一**的取数入口）。
- *
- * 契约（规范 §3.2.5 不得以本地默认值伪造事实）：
- *   · 取不到 / 形状不认识 ⇒ values = null ⇒ 界面显示「—」；
- *   · 值是 0 ⇒ values = { rainfall: 0 } ⇒ 界面显示「rainfall: 0.00」。
- *   二者绝不互相顶替，尤其**不得**把解析失败落成 0。
- *
- * 2026-11-11 原始数据退役后**大幅简化**：原来有两条分支（解析 data_json 的
- * sensors / 扁平兜底），现在历史行与实时行的形状已经统一 —— 指标都直接放在
- * `data` 里（历史行由 aggregateHistoryRows 产出，实时行由 WS payload 构造）。
- * data_json 分支随 device_data 表一起删除，坏 JSON 的处理也就没有了对象。
- */
-export function parseRowData(row: unknown): RowData {
-  if (!row || typeof row !== 'object') return { values: null, numbers: null }
-  const r = row as DataRow
-
-  let values: Record<string, number | string> | null = null
-
-  // ① 首选 { data: {...} }（历史行与实时行都是这个形状）
-  // ② 兼容扁平 {...}（既有用例的 fixture 走这里）
-  const flat = r.data && typeof r.data === 'object' && !Array.isArray(r.data)
-    ? r.data as Record<string, unknown>
-    : r
-  const entries = Object.entries(flat)
-    .filter(([key]) => !NON_METRIC_KEYS.has(key))
-    .map(([key, value]) => [key, asDisplayRowValue(value)] as const)
-    .filter((entry): entry is readonly [string, number | string] => entry[1] !== null)
-  if (entries.length > 0) values = Object.fromEntries(entries)
-
-  return { values, numbers: numericOnly(values) }
-}
-
-/** 从展示值里挑出纯数值子集（统计卡 / 趋势图专用），字符串读数不得进入。 */
-function numericOnly(values: Record<string, number | string> | null): Record<string, number> | null {
-  if (!values) return null
-  const out: Record<string, number> = {}
-  for (const [key, value] of Object.entries(values)) {
-    if (typeof value === 'number') out[key] = value
-  }
-  return Object.keys(out).length > 0 ? out : null
-}
+export { parseRowData } from './rowData'
+export type { RowData } from './rowData'
 </script>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+/**
+ * 数据面板（/data）：设备 + 时间范围 → 统计卡 / 趋势图 / 历史表 / 实时流 / 多设备对比。
+ *
+ * ============ 2026-11-12 纯搬移式拆分（行为零变化）============
+ * 本文件只保留**页面级约定**，其余按"状态从属"搬进 composables/、按"自包含渲染单元"
+ * 搬进 components/：
+ *   · ./rowData.ts             行数据解析（纯函数，唯一取数入口）
+ *   · ./rowDisplay.ts          行展示口径（时间/指标名/单位/摘要），三个子组件共用
+ *   · ./types.ts ./envelope.ts 共享响应类型与 envelope 解包
+ *   · composables/useDataPanelStats.ts     统计概览卡（两种范围口径）
+ *   · composables/useDataPanelChart.ts     趋势序列 + 三个异步状态位 + 移动端单指标
+ *   · composables/useDataPanelCompare.ts   多设备对比（独立取数链 + 两个 watch）
+ *   · composables/useDataPanelRealtime.ts  WS 订阅 / 防抖重算 / 图表增量 + 生命周期清理
+ *   · components/HistoryDataTable.vue      桌面表格（含 .mobile-table-wrapper 壳）
+ *   · components/HistoryRowCards.vue       移动端摘要卡片
+ *   · components/RowDetailDialog.vue       单条数据完整内容弹层
+ *
+ * 页面**必须**保留的（门禁/契约判据，删了就变红或退出分母）：
+ *   · PageHeader（listPageConventions 规则③）；
+ *   · 两个 <el-pagination> 的 :total + current-page 绑定（规则①/②，页面靠它们留在分母里）；
+ *   · 本地切片 applyPage()（EXEMPT_LOCAL_SLICE 登记的就是这一行，切片搬走豁免即"腐烂"）；
+ *   · fetchDevices() 里的 edgeDeviceStore.getCachedList(params)（DataPanel.spec 源码断言）；
+ *   · 统计卡的 .stat-* 与移动端 @media 段（DataPanel.spec 的 §4.2.5/§4.3 源码断言）；
+ *   · 路由参数解析（?device= / ?range=）与页面级取数入口 handleQuery/fetchData。
+ */
+import { computed, onMounted, reactive, ref } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -540,11 +347,19 @@ import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import client from '@/api/client'
 import { aggregateHistoryRows, looksDownsampled, type CollectedRow } from './historyRows'
-import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
-import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
-import { UNKNOWN } from '@/utils/format'
+import { parseRowData } from './rowData'
+import { formatTime } from './rowDisplay'
+import { unwrapList } from './envelope'
+import type { MeasurementCategory } from './types'
+import HistoryDataTable from './components/HistoryDataTable.vue'
+import HistoryRowCards from './components/HistoryRowCards.vue'
+import RowDetailDialog from './components/RowDetailDialog.vue'
+import { useDataPanelStats } from './composables/useDataPanelStats'
+import { useDataPanelChart } from './composables/useDataPanelChart'
+import { useDataPanelCompare } from './composables/useDataPanelCompare'
+import { useDataPanelRealtime } from './composables/useDataPanelRealtime'
 
 const router = useRouter()
 const route = useRoute()
@@ -552,16 +367,11 @@ const route = useRoute()
 /**
  * 窄屏（<768px）分支：历史数据表 → 「摘要 + 查看完整数据」卡片；趋势图 → 单指标 + 紧凑高度。
  * 断点与 theme.css 一致（useResponsive 的 isMobile = width < 768）。
+ *
+ * 这里只调一次并向下传：useResponsive 每次调用都会注册一对 window resize 监听，
+ * 子组件/composable 再各自调一次就是重复监听。
  */
 const { isMobile } = useResponsive()
-
-// ── 趋势图异步态（P0：historical-batch 生产实测挂起 38s+，超时回退还需 10–30s）──
-const chartLoading = ref(false)
-const chartFailed = ref(false)
-/** 只允许最后一次构建写回状态（快速连续查询时防旧请求回写）。 */
-let chartLoadToken = 0
-/** 移动端趋势图当前查看的指标（单指标，避免 4 轴 + 20 图例挤在 303px 画布里）。 */
-const mobileMetric = ref('')
 
 // ── 移动端「查看完整数据」详情弹层 ──
 const rowDetailVisible = ref(false)
@@ -580,7 +390,6 @@ const deviceList = ref<EdgeDevice[]>([])
 const historyData = ref<CollectedRow[]>([])
 /** 当前查询窗口内的**全部**采集行（分页从它切片，historyData 是它的一页）。 */
 const allHistoryRows = ref<CollectedRow[]>([])
-const chartSeries = ref<any[]>([])
 const loading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
@@ -607,40 +416,7 @@ const HISTORY_MAX_POINTS = 2000
  */
 const historyDownsampled = ref(false)
 
-// 实时数据
-const realtimeEnabled = ref(false)
-const realtimeCount = ref(0)
-const realtimeData = ref<any[]>([])
-
-// 多设备对比
-const compareMode = ref(false)
-const compareDevices = ref<number[]>([])
-const compareSeries = ref<any[]>([])
-interface MeasurementCategory {
-  code: string
-  unit: string
-}
-interface MeasurementPoint {
-  timestamp?: string
-  created_at?: string
-  value: number
-}
-interface MeasurementBatch {
-  category: string
-  data: MeasurementPoint[]
-}
-interface RealtimeDataPayload {
-  edge_device_id?: number
-  collected_at?: string
-  data?: Record<string, unknown>
-  sensors?: Record<string, unknown>
-  // ⚠ 不再声明 raw_hex / raw_data：WS 帧仍可能带这两个字段（stores/websocket.ts
-  // 的 payload 契约由 ChannelTerminal 消费），但**本页已不消费它们** ——
-  // 「原始数据」列随 device_data 退役已删除。声明一个从不读取的可选字段
-  // 只会让后来者以为页面上还存在那种展示。
-}
 const availableCategories = ref<MeasurementCategory[]>([])
-const compareCategories = ref<MeasurementCategory[]>([])
 
 /**
  * 统计卡范围词（规范 §4.3 统计卡 MUST）。
@@ -649,97 +425,12 @@ const compareCategories = ref<MeasurementCategory[]>([])
  * 验收时要能机械地数出"每个统计值都带了范围词"，字面量散落则无法审计。
  *   · SCOPE_PAGE     —— 值只由当前页 historyData（pageSize 条）算出
  *   · SCOPE_FILTERED —— 值由服务端按「设备 + 时间范围」筛出的全量得出
+ *
+ * 刻意不搬进 useDataPanelStats：范围词是**渲染契约**（DataPanel.spec 的 DOM 断言
+ * 与 §4.3 门禁都按文本判定），藏在 composable 里就不可文本审计了。
  */
 const SCOPE_PAGE = '本页'
 const SCOPE_FILTERED = '当前筛选'
-
-// 统计概览数据
-const latestStats = reactive({
-  totalPoints: 0,
-  duration: UNKNOWN
-})
-
-/** 后端 envelope 解包：数组统一从 data 取（兼容裸数组返回） */
-function unwrapList<T>(res: unknown): T[] {
-  if (Array.isArray(res)) return res as T[]
-  if (res && typeof res === 'object' && Array.isArray((res as { data?: unknown }).data)) {
-    return (res as { data: T[] }).data
-  }
-  return []
-}
-
-/**
- * 「最新」统计卡的指标优先级：改前取 availableCategories 的**字母序前 3**（BMS 上是
- * cell_voltage_1/10/11，三张卡都是 3.27V，等于没有信息量）。这里按业务优先级排序后取前 3。
- */
-const STAT_METRIC_PRIORITY = [
-  'total_voltage', 'current', 'rsoc', 'remaining_capacity', 'temperature_1',
-  'power', 'cell_voltage_max', 'cell_voltage_min', 'total_power', 'frequency',
-]
-function statRank(code: string): number {
-  const index = STAT_METRIC_PRIORITY.indexOf(code)
-  return index < 0 ? STAT_METRIC_PRIORITY.length : index
-}
-
-const dynamicStats = computed(() => {
-  const latest = [...historyData.value]
-    .sort((a, b) => String(b.timestamp || b.created_at || b.collected_at || '').localeCompare(String(a.timestamp || a.created_at || a.collected_at || '')))[0]
-  // 与表格列共用 parseRowData：改前读 latest.parsed_data || latest.data，
-  // 而接口只给 data_json ⇒ source 恒 {} ⇒ 统计卡恒不渲染（数据非空却一张卡都没有）。
-  // 统计卡是**数值指标**视图：用 numbers（纯数值）而不是 values（可能含字符串），
-  // 否则 hardware_version="V19" 会被当成 0 计入并污染统计。
-  const source = parseRowData(latest).numbers ?? {}
-  return [...availableCategories.value]
-    // 业务优先级排序（稳定排序：未列出的指标保持后端原顺序），不再按字母序取前 3。
-    .sort((a, b) => statRank(a.code) - statRank(b.code))
-    .map((category) => {
-      const value = source[category.code] ?? null
-      if (value === null) return null
-      return {
-        code: category.code,
-        label: `最新${sensorNameMap[category.code] || category.code}`,
-        unit: category.unit || sensorUnitMap[category.code] || '',
-        value: Number.isInteger(value) ? value : Number(value.toFixed(2)),
-      }
-    })
-    .filter((stat): stat is { code: string; label: string; unit: string; value: number } => stat !== null)
-    .slice(0, 3)
-})
-
-const calculateStats = () => {
-  const items = historyData.value
-  latestStats.totalPoints = total.value
-  if (!items || items.length === 0) {
-    // 空数组是「本页没有数据」，不是「时长为 0」；用统一未知占位符而非 '--'
-    // （'--' 是第三种占位写法，规范 §3.4.5 要求未知值统一为 '—'）。
-    latestStats.duration = UNKNOWN
-    return
-  }
-
-  const times = items
-    .map(item => item.timestamp || item.created_at || item.collected_at)
-    .filter((t): t is string => typeof t === 'string' && t !== '')
-    .map(t => new Date(t).getTime())
-    .filter(t => !Number.isNaN(t))
-    .sort((a, b) => a - b)
-  if (times.length < 2) {
-    latestStats.duration = '< 1分钟'
-    return
-  }
-
-  const diffMin = Math.floor((times[times.length - 1] - times[0]) / 60000)
-  // P2（审计实测：本页 20 条跨 19s 却显示「0分钟」，像没采到数据）：
-  // 不足 1 分钟统一走本页已有的「< 1分钟」写法，不显示 0。
-  if (diffMin < 1) {
-    latestStats.duration = '< 1分钟'
-  } else if (diffMin < 60) {
-    latestStats.duration = `${diffMin}分钟`
-  } else if (diffMin < 1440) {
-    latestStats.duration = `${Math.floor(diffMin / 60)}小时${diffMin % 60}分钟`
-  } else {
-    latestStats.duration = `${Math.floor(diffMin / 1440)}天${Math.floor((diffMin % 1440) / 60)}小时`
-  }
-}
 
 const queryForm = reactive({
   deviceId: null as number | null,
@@ -749,9 +440,80 @@ const queryForm = reactive({
 
 const canExport = computed(() => !!queryForm.deviceId && historyData.value.length > 0)
 
-const wsStore = useWebSocketStore()
 const edgeDeviceStore = useEdgeDeviceStore()
-let unsubscribeData: (() => void) | null = null
+
+// ── 四块状态各自成套：统计卡 / 趋势图 / 多设备对比 / 实时流 ──
+// 依赖方向单向：composable 只知道「设备 + 时间范围 + 整窗行 + 指标类别」，
+// 不反向 import 页面（避免循环依赖，也便于单测）。
+const { latestStats, dynamicStats, calculateStats } = useDataPanelStats(historyData, total, availableCategories)
+
+const {
+  chartSeries,
+  chartLoading,
+  chartFailed,
+  mobileMetric,
+  chartMetricOptions,
+  visibleChartSeries,
+  chartHeight,
+  buildChartSeries,
+  retryChart,
+} = useDataPanelChart({
+  deviceId: () => queryForm.deviceId,
+  timeRange: () => queryForm.timeRange,
+  categories: availableCategories,
+  rows: allHistoryRows,
+  isMobile,
+})
+
+const { compareMode, compareDevices, compareSeries, compareCategories } = useDataPanelCompare({
+  deviceList,
+  queryForm,
+})
+
+/**
+ * 分页**改成本地**：/devices/:id/history 没有 page/page_size 参数。
+ *
+ * 这不是"偷懒不接服务端分页"——该端点根本没有分页能力（它按时间窗一次性
+ * 解码返回，见 backend/internal/api/handler_data.go 的 /devices/:id/history）。
+ * 要在前端保持"翻页可用"，只能整窗取回后切片。
+ *
+ * 代价（已权衡）：一次取 max_points=2000 行，约 10~20 次采集的量级；
+ * 对表格一页 20 条而言足够翻好几页。若不做降采样上限，24h × 29 字段 ≈ 246 万行
+ * 会把浏览器拖死 —— 所以 max_points 是这条路的**必要**参数，不是优化。
+ *
+ * ⚠ 这个 .slice(start, start + pageSize) **必须留在页面文件**：listPageConventions
+ * 门禁的 EXEMPT_LOCAL_SLICE 按文件登记"已知误报"，切片搬进 composable 后页面
+ * 就不再有对应 finding，豁免表会被判定为"腐烂"（登记了却没有事可免）。
+ */
+function applyPage() {
+  const start = (currentPage.value - 1) * pageSize.value
+  historyData.value = allHistoryRows.value.slice(start, start + pageSize.value)
+  calculateStats()
+}
+
+/**
+ * 翻页 / 改每页条数的入口 —— **只重排当前页，不重新请求**。
+ *
+ * 改造前这两个事件直连 fetchData()：那时靠服务端分页，翻页必须发请求。
+ * 现在数据已经整窗在手（前端切片），再发请求是纯浪费 —— 而 /devices/:id/history
+ * 每次都要解码整个时间窗，代价远高于一次数组切片。
+ */
+function handlePageChange() {
+  // size 变化后当前页可能越界（第 7 页 + 每页 100 条 ⇒ 只剩 2 页）：夹回有效范围，
+  // 否则会显示空表却没有任何解释。
+  const maxPage = Math.max(1, Math.ceil(allHistoryRows.value.length / pageSize.value))
+  if (currentPage.value > maxPage) currentPage.value = maxPage
+  applyPage()
+}
+
+const { realtimeEnabled, realtimeCount, toggleRealtime } = useDataPanelRealtime({
+  deviceId: () => queryForm.deviceId,
+  rows: allHistoryRows,
+  total,
+  applyPage,
+  calculateStats,
+  chartSeries,
+})
 
 const loadDeviceCategories = async () => {
   if (!queryForm.deviceId) {
@@ -768,30 +530,6 @@ const loadDeviceCategories = async () => {
   } catch (error) {
     logger.warn('获取设备指标类别失败', { error: String(error) })
     availableCategories.value = []
-  }
-}
-
-const loadCompareCategories = async () => {
-  if (compareDevices.value.length < 2) {
-    compareCategories.value = []
-    return
-  }
-  try {
-    const categoryLists = await Promise.all(compareDevices.value.map(async (deviceId) => {
-      const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', { params: { device_pk: deviceId } })
-      return unwrapList<MeasurementCategory>(response)
-    }))
-    const [first, ...rest] = categoryLists
-    compareCategories.value = (first || []).filter((candidate: MeasurementCategory) =>
-      rest.every(list => list.some((item: MeasurementCategory) => item.code === candidate.code && item.unit === candidate.unit)),
-    )
-    if (!compareCategories.value.some(category => category.code === queryForm.compareCategory)) {
-      queryForm.compareCategory = compareCategories.value[0]?.code || ''
-    }
-  } catch (error) {
-    logger.warn('获取可比较指标失败', { error: String(error) })
-    compareCategories.value = []
-    queryForm.compareCategory = ''
   }
 }
 
@@ -822,6 +560,15 @@ const handleQuery = () => {
   void fetchData()
 }
 
+/**
+ * 页面级取数入口（**留在页面**，不搬进 composable）。
+ *
+ * 它把四件事串成一次事务：整窗取回 → 本地切片（total / applyPage）→ 统计重算 →
+ * 趋势重建。四步共享同一个 loading 与同一个「413 走缩小时间范围」分支；拆进
+ * composable 就要把 total / applyPage / calculateStats / buildChartSeries 四个
+ * 回调再传回去，边界反而更模糊。时间窗 switch 与 buildChartSeries 里的那份
+ * 逐字相同，是既有实现（两处都必须按"查询时刻"取 now），本次搬移不合并。
+ */
 const fetchData = async () => {
   if (!queryForm.deviceId) {
     ElMessage.warning('请先选择设备')
@@ -889,443 +636,11 @@ const fetchData = async () => {
   }
 }
 
-/**
- * 分页**改成本地**：/devices/:id/history 没有 page/page_size 参数。
- *
- * 这不是"偷懒不接服务端分页"——该端点根本没有分页能力（它按时间窗一次性
- * 解码返回，见 backend/internal/api/handler_data.go 的 /devices/:id/history）。
- * 要在前端保持"翻页可用"，只能整窗取回后切片。
- *
- * 代价（已权衡）：一次取 max_points=2000 行，约 10~20 次采集的量级；
- * 对表格一页 20 条而言足够翻好几页。若不做降采样上限，24h × 29 字段 ≈ 246 万行
- * 会把浏览器拖死 —— 所以 max_points 是这条路的**必要**参数，不是优化。
- */
-function applyPage() {
-  const start = (currentPage.value - 1) * pageSize.value
-  historyData.value = allHistoryRows.value.slice(start, start + pageSize.value)
-  calculateStats()
-}
-
-/**
- * 翻页 / 改每页条数的入口 —— **只重排当前页，不重新请求**。
- *
- * 改造前这两个事件直连 fetchData()：那时靠服务端分页，翻页必须发请求。
- * 现在数据已经整窗在手（前端切片），再发请求是纯浪费 —— 而 /devices/:id/history
- * 每次都要解码整个时间窗，代价远高于一次数组切片。
- */
-function handlePageChange() {
-  // size 变化后当前页可能越界（第 7 页 + 每页 100 条 ⇒ 只剩 2 页）：夹回有效范围，
-  // 否则会显示空表却没有任何解释。
-  const maxPage = Math.max(1, Math.ceil(allHistoryRows.value.length / pageSize.value))
-  if (currentPage.value > maxPage) currentPage.value = maxPage
-  applyPage()
-}
-
 /** 是否 413（后端内存护栏拒绝）。axios 把它包成 ApiError，status 挂在 error.status。 */
 function isPayloadTooLarge(error: unknown): boolean {
   const status = (error as { status?: unknown; response?: { status?: unknown } } | null)?.status
   if (status === 413) return true
   return (error as { response?: { status?: unknown } } | null)?.response?.status === 413
-}
-
-/**
- * 小工具：把并发压到 limit（趋势图回退请求专用，见下方注释）。
- * 不用 p-limit 之类新依赖，保持零新增包。
- */
-async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length)
-  let cursor = 0
-  const run = async () => {
-    while (cursor < items.length) {
-      const index = cursor
-      cursor += 1
-      results[index] = await worker(items[index])
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()))
-  return results
-}
-
-const buildChartSeries = async () => {
-  // P0：趋势序列是**异步**构建的。改前 chartSeries 未就绪就渲染 el-empty「暂无趋势数据」，
-  // 而生产实测 historical-batch 挂起 38s+、超时回退还要 10–30s ⇒ 有数据却报"暂无"。
-  // 这里显式建模 chartLoading / chartFailed，并用请求令牌防止旧构建写回。
-  const token = ++chartLoadToken
-  chartLoading.value = true
-  chartFailed.value = false
-  /** 逐个类别回退时统计"请求本身失败"的条数：全失败且无序列 ⇒ 真失败（错误态）。 */
-  let fallbackFailures = 0
-  // 判据用 allHistoryRows（整窗）而不是 historyData（当前页）：
-  // 趋势图画的是整个时间范围，用当前页判断"有没有数据"会让"第 2 页为空但
-  // 第 1 页有数据"的窗口把整张图判成无数据。
-  if (allHistoryRows.value.length === 0) {
-    chartSeries.value = []
-    chartLoading.value = false
-    syncMobileMetric()
-    return
-  }
-
-  // 尝试从 unified_data API 获取解析后的数值数据
-  try {
-    const endTime = new Date()
-    const startTime = new Date()
-    switch (queryForm.timeRange) {
-      case '1h':
-        startTime.setHours(startTime.getHours() - 1)
-        break
-      case '24h':
-        startTime.setHours(startTime.getHours() - 24)
-        break
-      case '7d':
-        startTime.setDate(startTime.getDate() - 7)
-        break
-      case '30d':
-        startTime.setDate(startTime.getDate() - 30)
-        break
-    }
-
-    const categoryNames = availableCategories.value.map(category => category.code)
-    if (categoryNames.length === 0) {
-      chartSeries.value = []
-      return
-    }
-
-    const series: any[] = []
-
-    // 批量请求：1 个请求替代 19 个并行请求，服务端降采样 max_points=500
-    const batchParams = {
-      device_pk: queryForm.deviceId,
-      categories: categoryNames.join(','),
-      start_time: startTime.toISOString(),
-      end_time: endTime.toISOString(),
-      max_points: 500
-    }
-
-    try {
-      const batchRes = await client.get<unknown, MeasurementBatch[]>('/api/v1/unified-data/historical-batch', {
-        params: batchParams,
-        // 生产实测该端点会挂起（>38s 无响应）：给独立短超时，尽快转入逐个回退，
-        // 避免整页趋势图长时间停在骨架（P0 配套；不影响全局 axios timeout）。
-        timeout: 8000,
-      })
-      // 批量 API 返回格式: [{category: "temperature", data: [{...}]}, ...]
-      const batchResults = unwrapList<MeasurementBatch>(batchRes)
-      if (batchResults.length > 0) {
-        for (const result of batchResults) {
-          const cat = result.category
-          if (!cat) continue
-          const items = (result.data || []).filter((item) => {
-            const t = item.timestamp || item.created_at
-            return t && !t.startsWith('0001-01-01')
-          })
-          if (items.length > 0) {
-            const catName = sensorNameMap[cat] || cat
-            const catUnit = sensorUnitMap[cat] || ''
-            series.push({
-              name: catName,
-              unit: catUnit,
-              category: cat,
-              data: items.map((item) => ({
-                time: item.timestamp || item.created_at,
-                value: item.value
-              }))
-            })
-          }
-        }
-      }
-
-      // 如果批量 API 未返回任何数据，尝试 fallback 逐个请求
-      if (series.length === 0) {
-        throw new Error('batch API returned no data, falling back')
-      }
-    } catch {
-      // Fallback: 批量 API 失败时逐个请求 + max_points=500。
-      // ⚠ 并发必须限流：浏览器同域只有 ~6 条 HTTP/1.1 连接，31 个回退请求全并行时，
-      //   挂起的那几条会吃满连接池 ⇒ 用户点翻页发出的 /edge-devices/:id/data 请求被排队，
-      //   实测点击分页后 8s 内一个请求都没发出去（页面一直骨架）。限 4 并发给交互请求留 2 条。
-      const fallbackResults = await mapWithConcurrency(categoryNames, 4, async (cat) => {
-        try {
-          const res = await client.get<unknown, MeasurementPoint[]>('/api/v1/unified-data/historical', {
-            params: {
-              device_pk: queryForm.deviceId,
-              category: cat,
-              start_time: startTime.toISOString(),
-              end_time: endTime.toISOString(),
-              max_points: 500
-            }
-          })
-          return { cat, data: unwrapList<MeasurementPoint>(res) }
-        } catch {
-          fallbackFailures += 1
-          return { cat, data: [] as MeasurementPoint[] }
-        }
-      })
-      for (const r of fallbackResults) {
-        if (r.data && r.data.length > 0) {
-          const filteredData = r.data
-            .filter((item) => {
-              const t = item.timestamp || item.created_at
-              return t && !t.startsWith('0001-01-01')
-            })
-          if (filteredData.length > 0) {
-            const catName = sensorNameMap[r.cat] || r.cat
-            const catUnit = sensorUnitMap[r.cat] || ''
-            series.push({
-              name: catName,
-              unit: catUnit,
-              category: r.cat,
-              data: filteredData.map((item) => ({
-                time: item.timestamp || item.created_at,
-                value: item.value
-              }))
-            })
-          }
-        }
-      }
-    }
-
-    chartSeries.value = series
-    // 所有类别请求都失败且没有任何序列 ⇒ 真失败；若请求成功但数据为空 ⇒ 真空数据（非错误）。
-    chartFailed.value = series.length === 0
-      && categoryNames.length > 0
-      && fallbackFailures === categoryNames.length
-  } catch (error) {
-    logger.error('获取趋势数据失败', { error: String(error) })
-    // Fallback: 直接用已聚合的历史行里出现过的数值字段建序列
-    // （与表格/统计卡同一解析入口）。趋势是数值图：同样只看 numbers，
-    // 字符串读数不能进（否则画出掉到 0 的假线）。
-    const numericKeys = Object.keys(parseRowData(allHistoryRows.value[0]).numbers ?? {})
-
-    if (numericKeys.length > 0) {
-      chartSeries.value = numericKeys.map(key => ({
-        name: key,
-        unit: '',
-        category: key,
-        data: allHistoryRows.value
-          .filter((item) => {
-            const t = item.timestamp || item.collected_at || item.created_at
-            return t && !t.startsWith('0001-01-01')
-          })
-          // 该行没这个指标 ⇒ null，**不是 0**：折线应当断开，而不是伪造一个落零点
-          .map(item => ({
-            time: item.timestamp || item.collected_at || item.created_at,
-            value: parseRowData(item).numbers?.[key] ?? null,
-          }))
-      }))
-      chartFailed.value = false
-    } else {
-      chartSeries.value = []
-      chartFailed.value = true
-    }
-  } finally {
-    if (token === chartLoadToken) {
-      chartLoading.value = false
-      syncMobileMetric()
-    }
-  }
-}
-
-// ── 移动端趋势图：单指标 + 紧凑高度 ──
-// P1（B-data 审计）：393 的 303px 画布里 4 根 Y 轴 + 20 条图例不可读（轴标签重叠、
-// 图例被折叠成 1/20）；移动端改为单指标 + height 220（LineChart 的紧凑模式阈值 ≤220）。
-const CHART_METRIC_PRIORITY = [
-  'total_voltage', 'current', 'rsoc', 'remaining_capacity', 'temperature_1',
-  'power', 'cell_voltage_max', 'cell_voltage_min',
-]
-
-const chartMetricOptions = computed(() => {
-  const rank = (code: string) => {
-    const index = CHART_METRIC_PRIORITY.indexOf(code)
-    return index < 0 ? CHART_METRIC_PRIORITY.length : index
-  }
-  // 关键指标排前面（否则下拉第一屏全是 cell_voltage_1/10/11… 字母序噪声）。
-  return [...chartSeries.value]
-    .sort((a, b) => rank(String(a.category)) - rank(String(b.category)))
-    .map((item) => ({
-      code: String(item.category || ''),
-      label: item.unit ? `${item.name} (${item.unit})` : String(item.name || item.category || ''),
-    }))
-})
-
-const visibleChartSeries = computed(() => {
-  if (!isMobile.value) return chartSeries.value
-  const chosen = chartSeries.value.find(item => String(item.category) === mobileMetric.value)
-  return chosen ? [chosen] : []
-})
-
-const chartHeight = computed(() => (isMobile.value ? '220px' : '350px'))
-
-function pickDefaultMetric(series: Array<{ category?: unknown }>): string {
-  for (const code of CHART_METRIC_PRIORITY) {
-    if (series.some(item => String(item.category) === code)) return code
-  }
-  const first = series[0]
-  return first ? String(first.category ?? '') : ''
-}
-
-/** 让移动端选中项始终落在当前 series 上（换设备/时间范围后自动回到优先指标）。 */
-function syncMobileMetric() {
-  if (mobileMetric.value && chartSeries.value.some(item => String(item.category) === mobileMetric.value)) return
-  mobileMetric.value = pickDefaultMetric(chartSeries.value)
-}
-
-function retryChart() {
-  void buildChartSeries()
-}
-
-// ── 移动端历史数据「摘要 3~4 个关键指标 + 查看完整数据」──
-// P0（B-data 审计）：393 下「数据」列 80px 装 638 字符 ⇒ 单行 2041px、整页 42689px。
-// 摘要只挑业务优先级高的指标；完整 K/V 全量（不 ellipsis 丢数据）放进详情弹层。
-const SUMMARY_METRIC_PRIORITY = CHART_METRIC_PRIORITY
-
-function metricUnit(code: string): string {
-  const category = availableCategories.value.find(item => item.code === code)
-  return category?.unit || sensorUnitMap[code] || ''
-}
-
-function formatMetricValue(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2)
-}
-
-interface RowSummaryMetric { key: string; label: string; value: string; unit: string }
-function summarizeRow(row: Record<string, any>): RowSummaryMetric[] {
-  const numbers = parseRowData(row).numbers
-  if (!numbers) return []
-  const rank = (code: string) => {
-    const index = SUMMARY_METRIC_PRIORITY.indexOf(code)
-    return index < 0 ? SUMMARY_METRIC_PRIORITY.length : index
-  }
-  return Object.keys(numbers)
-    .sort((a, b) => rank(a) - rank(b))
-    .slice(0, 4)
-    .map(code => ({
-      key: code,
-      label: sensorNameMap[code] || code,
-      value: formatMetricValue(numbers[code]),
-      unit: metricUnit(code),
-    }))
-}
-
-function rowTimeText(row: Record<string, any> | null): string {
-  if (!row) return UNKNOWN
-  const time = row.timestamp || row.created_at || row.collected_at
-  return time ? formatTime(time) : UNKNOWN
-}
-
-interface RowDetailEntry { key: string; label: string; value: string; unit: string }
-function rowDetailEntries(row: Record<string, any> | null): RowDetailEntry[] {
-  const values = row ? parseRowData(row).values : null
-  if (!values) return []
-  return Object.entries(values).map(([key, raw]) => ({
-    key,
-    label: sensorNameMap[key] || key,
-    value: String(raw ?? UNKNOWN),
-    unit: metricUnit(key),
-  }))
-}
-
-function openRowDetail(row: Record<string, any>) {
-  rowDetailRow.value = row
-  rowDetailVisible.value = true
-}
-
-// 实时数据处理
-// 性能优化：防抖 calculateStats，避免每条WS消息都触发重计算
-let statsDirty = false
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
-const DEBOUNCE_MS = 2000  // 2秒内多条消息只触发一次重算
-
-const flushDebounced = () => {
-  if (statsDirty) {
-    statsDirty = false
-    calculateStats()
-  }
-}
-
-const scheduleDebounced = () => {
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(flushDebounced, DEBOUNCE_MS)
-}
-
-const handleDataUpdate = (message: WebSocketMessage) => {
-  const payload = message.payload as RealtimeDataPayload | undefined
-  if (!payload || payload.edge_device_id !== queryForm.deviceId) return
-
-  realtimeCount.value++
-  // 形状必须与表格期望一致：一次采集一行、指标在 data 里。
-  //
-  // 2026-11-11 原始数据退役：不再往行上挂 raw_hex / error_code ——
-  // 「原始数据」「错误码」两列已删除（前者无数据源，后者一直是 undefined）。
-  const timestamp = payload.collected_at || new Date().toISOString()
-  const newItem: CollectedRow = {
-    // WS 行没有后端合成 id，用时间戳当 key：同一时间戳的两次推送本就该合并
-    id: 0,
-    timestamp,
-    created_at: timestamp,
-    data: (payload.data || payload.sensors || {}) as Record<string, number>,
-    collected_at: timestamp,
-  }
-
-  // 添加到实时数据列表（页面上的「共 N 条」计数用）
-  realtimeData.value.unshift(newItem)
-  if (realtimeData.value.length > 50) {
-    realtimeData.value = realtimeData.value.slice(0, 50)
-  }
-
-  // 同时插入表格数据源（顶部），并整体重排当前页：
-  // 直接改 historyData 会把"当前页切片"这个不变量破坏掉（第 2 页会跟着变），
-  // 所以改 allHistoryRows 再 applyPage()。
-  allHistoryRows.value.unshift(newItem)
-  total.value++
-  applyPage()
-
-  // 标记stats为脏（统计计算），但不标记chartDirty
-  statsDirty = true
-  scheduleDebounced()
-
-  // 增量更新图表 — 直接append到现有series
-  appendRealtimeData(payload)
-}
-
-// 新增函数: 增量更新图表series
-const appendRealtimeData = (payload: RealtimeDataPayload) => {
-  if (chartSeries.value.length === 0) return
-  const data = payload.data || payload.sensors
-  if (!data || typeof data !== 'object') return
-  const time = payload.collected_at || new Date().toISOString()
-
-  let updated = false
-  for (const series of chartSeries.value) {
-    const key = series.category
-    if (key && data[key] !== undefined && typeof data[key] === 'number') {
-      series.data.push({ time, value: data[key] })
-      // 限制长度
-      if (series.data.length > 500) {
-        series.data = series.data.slice(-500)
-      }
-      updated = true
-    }
-  }
-  // 触发响应式更新 — 重新赋值引用
-  if (updated) {
-    chartSeries.value = [...chartSeries.value]
-  }
-}
-
-const toggleRealtime = (enabled: string | number | boolean) => {
-  if (enabled) {
-    // 订阅实时数据
-    unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
-    realtimeCount.value = 0
-    realtimeData.value = []
-    ElMessage.success('已开启实时数据接收')
-  } else {
-    if (unsubscribeData) {
-      unsubscribeData()
-      unsubscribeData = null
-    }
-    ElMessage.info('已关闭实时数据接收')
-  }
 }
 
 // 导出 CSV
@@ -1362,100 +677,10 @@ const handleExport = () => {
   ElMessage.success('导出成功')
 }
 
-// 获取多设备对比数据
-const fetchCompareData = async () => {
-  if (compareDevices.value.length < 2) return
-
-  compareSeries.value = []
-  const endTime = new Date()
-  const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000) // 固定 24h
-
-  try {
-    const promises = compareDevices.value.map(async (deviceId) => {
-      const response = await client.get<unknown, MeasurementPoint[]>(`/api/v1/unified-data/historical`, {
-        params: {
-          device_pk: deviceId,
-          category: queryForm.compareCategory,
-          start_time: startTime.toISOString(),
-          end_time: endTime.toISOString(),
-          max_points: 500
-        }
-      })
-      return {
-        deviceId,
-        deviceName: deviceList.value.find(d => d.id === deviceId)?.name || String(deviceId),
-        data: unwrapList<MeasurementPoint>(response)
-      }
-    })
-
-    const results = await Promise.all(promises)
-
-    compareSeries.value = results.map(r => ({
-      name: r.deviceName,
-      unit: '',
-      data: r.data
-        .filter((item) => {
-          const t = item.timestamp || item.created_at
-          return t && !t.startsWith('0001-01-01')
-        })
-        .map((item) => ({
-          time: item.timestamp || item.created_at,
-          value: item.value
-        }))
-    }))
-  } catch (error) {
-    logger.error('获取对比数据失败', { error: String(error) })
-  }
+function openRowDetail(row: Record<string, any>) {
+  rowDetailRow.value = row
+  rowDetailVisible.value = true
 }
-
-const formatTime = (time: string) => {
-  return time ? new Date(time).toLocaleString('zh-CN') : UNKNOWN
-}
-
-const formatData = (data: Record<string, unknown> | null | undefined) => {
-  // typeof + 键数双保险：null / undefined / 空对象 / 空数组 / 字符串一律「—」。
-  // formatData 是显示层最后一道闸：即便上游把 values 传成空对象（"没有可信数值"），
-  // 也会落回「—」而不是渲染成 "0" 或空白。
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return UNKNOWN
-
-  const entries = Object.entries(data)
-  if (entries.length === 0) return UNKNOWN
-
-  return entries
-    .map(([key, value]) => {
-      // 支持 {value, unit} 格式
-      if (typeof value === 'object' && value !== null && 'value' in value) {
-        const entry = value as { value: unknown; unit?: unknown }
-        const val = entry.value
-        const unit = typeof entry.unit === 'string' ? entry.unit : ''
-        if (typeof val === 'number') {
-          return `${key}: ${val.toFixed(2)} ${unit}`.trim()
-        }
-        return `${key}: ${val} ${unit}`.trim()
-      }
-      if (typeof value === 'number') {
-        return `${key}: ${value.toFixed(2)}`
-      }
-      return `${key}: ${value}`
-    })
-    .join(', ')
-}
-
-// 2026-11-11 原始数据退役：原 formatRawData()（把 raw_hex 渲染成 "7B hex"）
-// 随「原始数据」列一并删除 —— 没有数据源了，留着它就是死代码。
-
-watch(compareDevices, async () => {
-  if (compareMode.value && compareDevices.value.length >= 2) {
-    await loadCompareCategories()
-    if (queryForm.compareCategory) await fetchCompareData()
-  }
-})
-
-watch(() => queryForm.compareCategory, () => {
-  if (compareMode.value && compareDevices.value.length >= 2) {
-    fetchCompareData()
-  }
-})
 
 onMounted(() => {
   void (async () => {
@@ -1499,15 +724,7 @@ function applyQueryPrefill() {
   if (applied && queryForm.deviceId) handleQuery()
 }
 
-onUnmounted(() => {
-  if (unsubscribeData) {
-    unsubscribeData()
-  }
-  if (debounceTimer) {
-    clearTimeout(debounceTimer)
-    debounceTimer = null
-  }
-})
+// 订阅解绑与防抖清理在 useDataPanelRealtime 内部的 onUnmounted 完成（同一生命周期）。
 </script>
 
 <style scoped>
@@ -1697,104 +914,5 @@ onUnmounted(() => {
   display: flex;
   justify-content: center;
   margin-bottom: 4px;
-}
-
-.data-card {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  padding: 12px;
-  background: var(--el-bg-color);
-}
-
-.data-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
-
-.data-card-time {
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-
-.data-card-ok {
-  color: var(--el-color-success);
-  font-size: 12px;
-}
-
-.data-card-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 10px;
-  margin-top: 10px;
-}
-
-.data-card-metric {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 6px;
-  min-width: 0;
-  font-size: 13px;
-}
-
-.metric-label {
-  color: var(--el-text-color-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric-value {
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-
-.metric-unit {
-  margin-left: 2px;
-  font-style: normal;
-  font-weight: 400;
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
-}
-
-.data-card-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--el-border-color-lighter);
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.data-card-raw {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.data-card-list .muted {
-  color: var(--el-text-color-placeholder);
-}
-
-.row-detail-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 16px;
-  margin-bottom: 12px;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
-
-.row-detail-empty {
-  margin: 12px 0 0;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
 }
 </style>
