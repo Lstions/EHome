@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     ChannelManager: typeof import('./components/channel/ChannelManager.vue')['default']
+    ChannelParamFields: typeof import('./components/channel/ChannelParamFields.vue')['default']
     ChannelTerminal: typeof import('./components/channel/ChannelTerminal.vue')['default']
     CountUp: typeof import('./components/common/CountUp.vue')['default']
     CreateWizardCommandIntervals: typeof import('./components/device/CreateWizardCommandIntervals.vue')['default']
