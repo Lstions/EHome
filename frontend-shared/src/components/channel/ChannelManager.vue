@@ -56,153 +56,14 @@
         </el-form-item>
 
         <!-- ====== 能力驱动的配置参数 ====== -->
-
-        <!-- UART 参数 -->
-        <template v-if="form.hardware_type === 'uart' && currentCaps">
-          <el-form-item label="波特率">
-            <el-input-number
-              v-model="form.config.baud_rate"
-              :min="currentCaps.baud_rate_min || 1200"
-              :max="currentCaps.baud_rate_max || 921600"
-              :step="computeBaudStep()"
-              style="width: 100%;"
-            />
-            <div class="cap-hint" v-if="currentCaps.baud_rate_min">
-              范围: {{ currentCaps.baud_rate_min }} ~ {{ currentCaps.baud_rate_max }}
-            </div>
-          </el-form-item>
-          <el-form-item label="数据位" v-if="currentCaps.data_bits_options?.length">
-            <el-radio-group v-model="form.config.data_bits">
-              <el-radio-button v-for="b in currentCaps.data_bits_options" :key="b" :value="b">{{ b }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="停止位" v-if="currentCaps.stop_bits_options?.length">
-            <el-radio-group v-model="form.config.stop_bits">
-              <el-radio-button v-for="b in currentCaps.stop_bits_options" :key="b" :value="b">{{ b }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="校验" v-if="currentCaps.parity_options?.length">
-            <el-select v-model="form.config.parity" style="width: 100%;">
-              <el-option v-for="p in currentCaps.parity_options" :key="p" :label="parityLabel(p)" :value="p" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="流控" v-if="currentCaps.flow_control_options?.length">
-            <el-select v-model="form.config.flow_control" style="width: 100%;">
-              <el-option v-for="f in currentCaps.flow_control_options" :key="f" :label="flowControlLabel(f)" :value="f" />
-            </el-select>
-          </el-form-item>
-        </template>
-
-        <!-- UART 无能力数据时的保守编辑兜底：保持已有配置可修改，
-             不将能力暂缺误判为不可编辑。资源约束仍由后端 manifest 校验。 -->
-        <template v-if="form.hardware_type === 'uart' && !currentCaps">
-          <el-form-item label="波特率">
-            <el-input-number v-model="form.config.baud_rate" :min="1200" :max="921600" :step="1200" style="width: 100%;" />
-          </el-form-item>
-          <el-form-item label="数据位">
-            <el-radio-group v-model="form.config.data_bits">
-              <el-radio-button v-for="bit in [5, 6, 7, 8]" :key="bit" :value="bit">{{ bit }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="停止位">
-            <el-radio-group v-model="form.config.stop_bits">
-              <el-radio-button v-for="bit in [1, 2]" :key="bit" :value="bit">{{ bit }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="校验">
-            <el-select v-model="form.config.parity" style="width: 100%;">
-              <el-option label="无" value="none" />
-              <el-option label="奇校验" value="odd" />
-              <el-option label="偶校验" value="even" />
-            </el-select>
-          </el-form-item>
-        </template>
-
-        <!-- I2C 参数 -->
-        <template v-if="form.hardware_type === 'i2c' && currentCaps">
-          <el-form-item label="从机地址" prop="address">
-            <el-input v-model="form.address" placeholder="如: 0x40 或 64">
-              <template #append>
-                <el-button @click="scanI2C" :loading="scanning" :disabled="!form.hardware_id">
-                  <el-icon><Search /></el-icon> 扫描
-                </el-button>
-              </template>
-            </el-input>
-            <div class="cap-hint" v-if="currentCaps.address_min !== undefined">
-              范围: 0x{{ currentCaps.address_min.toString(16).toUpperCase() }} ~ 0x{{ currentCaps.address_max.toString(16).toUpperCase() }}
-              <span v-if="currentCaps.supports_10bit"> (支持10位地址)</span>
-              <span v-if="currentCaps.supports_scan"> | 支持自动扫描</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="时钟频率 (Hz)">
-            <el-input-number
-              v-model="form.config.freq_hz"
-              :min="currentCaps.freq_hz_min || 10000"
-              :max="currentCaps.freq_hz_max || 1000000"
-              :step="10000"
-              style="width: 100%;"
-            />
-            <div class="cap-hint" v-if="currentCaps.freq_hz_min">
-              范围: {{ currentCaps.freq_hz_min }} ~ {{ currentCaps.freq_hz_max }} Hz
-            </div>
-          </el-form-item>
-        </template>
-
-        <!-- I2C 无能力数据时的地址输入（兜底） -->
-        <el-form-item v-if="form.hardware_type === 'i2c' && !currentCaps" label="从机地址" prop="address">
-          <el-input v-model="form.address" placeholder="如: 0x40 或 64" />
-          <div class="form-tip">支持十六进制 (0x40) 或十进制 (64) 格式</div>
-        </el-form-item>
-
-        <!-- SPI 参数 -->
-        <template v-if="form.hardware_type === 'spi' && currentCaps">
-          <el-form-item label="CS 引脚">
-            <el-select v-model="form.config.cs_pin" style="width: 100%;" v-if="currentCaps.cs_pins?.length">
-              <el-option v-for="p in currentCaps.cs_pins" :key="p" :label="`CS${p} (GPIO${p})`" :value="p" />
-            </el-select>
-            <el-input-number v-else v-model="form.config.cs_pin" :min="0" :max="48" style="width: 100%;" />
-          </el-form-item>
-          <el-form-item label="时钟频率 (Hz)">
-            <el-input-number
-              v-model="form.config.freq_hz"
-              :min="currentCaps.freq_hz_min || 100000"
-              :max="currentCaps.freq_hz_max || 40000000"
-              :step="100000"
-              style="width: 100%;"
-            />
-            <div class="cap-hint" v-if="currentCaps.freq_hz_min">
-              范围: {{ currentCaps.freq_hz_min }} ~ {{ currentCaps.freq_hz_max }} Hz
-            </div>
-          </el-form-item>
-          <el-form-item label="SPI 模式" v-if="currentCaps.mode_options?.length">
-            <el-radio-group v-model="form.config.spi_mode">
-              <el-radio-button v-for="m in currentCaps.mode_options" :key="m" :value="m">Mode {{ m }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-        </template>
-
-        <!-- SPI 无能力数据时的兜底 -->
-        <template v-if="form.hardware_type === 'spi' && !currentCaps">
-          <el-form-item label="CS 引脚">
-            <el-input-number v-model="form.config.cs_pin" :min="0" :max="48" style="width: 100%;" />
-          </el-form-item>
-        </template>
-
-        <!-- ADC 参数 -->
-        <template v-if="form.hardware_type === 'adc' && currentCaps">
-          <el-form-item label="衰减" v-if="currentCaps.attenuation_options?.length">
-            <el-radio-group v-model="form.config.attenuation">
-              <el-radio-button v-for="a in currentCaps.attenuation_options" :key="a" :value="a">
-                {{ attenuationLabel(a) }}
-              </el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="位宽" v-if="currentCaps.bit_width_options?.length">
-            <el-radio-group v-model="form.config.bit_width">
-              <el-radio-button v-for="b in currentCaps.bit_width_options" :key="b" :value="b">{{ b }}bit</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-        </template>
+        <!-- 自包含模板片段按域下沉：字段组见 ChannelParamFields.vue（字段顺序/文案/class 原样）。
+             扫描请求通过 scan 事件回抛，提交与事务仍由本组件负责。 -->
+        <ChannelParamFields
+          :form="form"
+          :caps="currentCaps"
+          :scanning="scanning"
+          @scan="scanI2C"
+        />
 
         <!-- 通道名称 -->
         <el-form-item label="通道名称">
@@ -230,15 +91,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onUnmounted } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
-import { Search } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { type Channel } from '@/api/channel'
 import { nodeApi } from '@/api/node'
 import { useChannelStore } from '@/stores/channel'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { getHardwareLabel } from '@/utils/hardwareTag'
+import ChannelParamFields from './ChannelParamFields.vue'
+import { HW_TYPES, type HardwareResource } from './channelFormModel'
+import { useChannelManager } from './composables/useChannelManager'
+import { buildChannelSubmitBusPayload } from './channelBusConfig'
 
 interface Props {
   collectorId: string | number
@@ -281,6 +145,28 @@ const readonly = computed(() => props.readonly ?? false)
 const formRef = ref<FormInstance>()
 let transactionGeneration = 0
 
+// UART 默认波特率 9600（见 useChannelManager 的 initConfigDefaults 说明：本仓现场设备是 2400/4800/9600）。
+// 抽成常量是为了让「表单默认值」与「提交兜底值」不可能再各自漂移成不同数字。
+// 定义必须留在本组件：源码门禁 ChannelManagerBusConfigGuard.spec.ts 断言本文件包含该标识；
+// 同一常量同时注入表单组合式函数与提交载荷编码，仍然只有一个数字来源。
+const DEFAULT_UART_BAUD_RATE = 9600
+
+// 表单状态 / 能力投影 / 编辑态回填 / 预选硬件来自组合式函数（与调用方事务无关的部分）。
+// 提交链路（store 写入、会话代际校验、collectorId 绑定）仍留在本组件：
+// 它是调用方契约，且 4 个源码门禁断言要求这些标识出现在本文件文本中。
+const {
+  form,
+  rules,
+  currentCaps,
+  availableHardwareList,
+  initConfigDefaults,
+  onHardwareTypeChange,
+  onHardwareIdChange,
+  resetForm,
+  hydrateForm,
+  applyPreset,
+} = useChannelManager(props, { defaultUartBaudRate: DEFAULT_UART_BAUD_RATE })
+
 const handleDialogClose = (done: () => void) => {
   if (submitting.value) return
   done()
@@ -292,125 +178,6 @@ const assertTransaction = (transaction: number, collectorId: string | number, se
     throw new Error('通道事务已取消')
   }
 }
-
-const form = reactive({
-  name: '',
-  hardware_type: 'i2c' as HardwareBusType,
-  hardware_id: '',
-  address: '',
-  enabled: true,
-  config: {} as Record<string, any>
-})
-
-const rules = {
-  hardware_type: [{ required: true, message: '请选择硬件类型', trigger: 'change' }],
-  hardware_id: [{ required: true, message: '请选择硬件资源', trigger: 'change' }]
-}
-
-// ====== 能力数据 ======
-
-/** 前端建模的总线类型（与后端 Channel.hardware_type 的小写形态对齐）。 */
-const HW_TYPES = ['uart', 'i2c', 'spi', 'adc'] as const
-type HardwareBusType = (typeof HW_TYPES)[number]
-
-/** 运行时收窄：后端可能回大写或未知类型，统一转小写，非法值回退 i2c（原默认值）。 */
-const toBusType = (value: unknown): HardwareBusType => {
-  const lower = typeof value === 'string' ? value.toLowerCase() : ''
-  return (HW_TYPES as readonly string[]).includes(lower) ? (lower as HardwareBusType) : 'i2c'
-}
-
-// UART 默认波特率 9600（见 initConfigDefaults 的说明：本仓现场设备是 2400/4800/9600）。
-// 抽成常量是为了让「表单默认值」与「提交兜底值」不可能再各自漂移成不同数字。
-const DEFAULT_UART_BAUD_RATE = 9600
-
-// 这些总线的 bus_config 承载引脚/速率，是后续参数修改（改波特率、重配引脚）的唯一数据源；
-// 落空会让后续修改永久失败，故提交前必须能确定对应硬件资源。
-const BUS_TYPES_REQUIRING_CONFIG = ['uart', 'i2c', 'spi'] as const
-const needsBusConfig = (type: string) => (BUS_TYPES_REQUIRING_CONFIG as readonly string[]).includes(type)
-
-// 获取当前选中硬件的能力数据。能力上报尚未到达时提供安全兜底，
-// 以确保既有通道在编辑时仍可修改其已保存的参数。
-const currentCaps = computed(() => {
-  const hardwareType = form.hardware_type.toLowerCase()
-  if (!hardwareType) return null
-  const hwList = props.capabilities?.buses?.[hardwareType] || []
-  const hw = hwList.find((h: any) => String(h.id) === form.hardware_id)
-
-  // 1) 尝试嵌套结构: hw.Capabilities.UartCaps (Go protobuf JSON)
-  const capsWrapper = hw?.Capabilities || hw?.capabilities
-  if (capsWrapper) {
-    const capsKeyMap: Record<string, string> = {
-      uart: 'UartCaps',
-      i2c: 'I2CCaps',
-      spi: 'SpiCaps',
-      adc: 'AdcCaps'
-    }
-    const capsKey = capsKeyMap[hardwareType]
-    const nested = capsWrapper[capsKey] || capsWrapper[capsKey?.toLowerCase()]
-    if (nested) return nested
-  }
-
-  // 2) 能力尚不可用时使用通用安全范围；保存的通道配置仍可编辑。
-  switch (hardwareType) {
-    case 'uart':
-      return {
-        baud_rate_max: hw?.max_baud || 921600,
-        baud_rate_min: hw?.min_baud || 1200,
-        data_bits_options: hw?.data_bits_options || [5, 6, 7, 8],
-        stop_bits_options: hw?.stop_bits_options || [1, 1.5, 2],
-        parity_options: hw?.parity_options || ['none', 'odd', 'even'],
-        flow_control_options: hw?.flow_control_options || ['none', 'rts_cts', 'xon_xoff']
-      }
-    case 'i2c':
-      return {
-        freq_hz_max: hw?.max_freq_hz || 1000000,
-        freq_hz_min: hw?.min_freq_hz || 10000,
-        address_min: hw?.address_min ?? 8,
-        address_max: hw?.address_max ?? 119,
-        supports_scan: hw?.supports_scan ?? false,
-        supports_10bit: hw?.supports_10bit || false
-      }
-    case 'spi':
-      return {
-        freq_hz_max: hw?.max_freq_hz || 40000000,
-        freq_hz_min: hw?.min_freq_hz || 100000,
-        mode_options: hw?.mode_options || [0, 1, 2, 3],
-        cs_pins: hw?.cs_pins || (hw?.default_cs_pin != null ? [hw.default_cs_pin] : [])
-      }
-    case 'gpio':
-      return { direction_options: hw?.direction_options || ['INPUT', 'OUTPUT', 'INPUT_PULLUP', 'INPUT_PULLDOWN'] }
-    case 'adc':
-      return {
-        attenuation_options: hw?.attenuation_options || [0, 1, 2, 3],
-        bit_width_options: hw?.bit_width_options || [9, 10, 11, 12]
-      }
-    default:
-      return null
-  }
-})
-
-// 获取指定类型的硬件列表（完整对象）
-/** 能力上报里的硬件资源条目（字段随总线类型变化，只声明实际读取的字段）。 */
-interface HardwareResource {
-  id: string | number
-  name?: string
-  pins?: Array<{ pin?: number; label?: string }>
-  default_tx_pin?: number
-  default_rx_pin?: number
-  default_sda_pin?: number
-  default_scl_pin?: number
-  default_cs_pin?: number
-  default_mosi?: number
-  default_miso?: number
-  default_sclk?: number
-  max_freq_hz?: number
-  [key: string]: unknown
-}
-
-const availableHardwareList = computed<HardwareResource[]>(() => {
-  if (!props.capabilities?.buses?.[form.hardware_type]) return []
-  return props.capabilities.buses[form.hardware_type] || []
-})
 
 // 占用集：大小写不敏感（能力里的 id 是 "UART1"，历史数据里出现过 "uart1"）。
 const occupiedHardwareSet = computed(() => {
@@ -427,6 +194,10 @@ const occupiedHardwareSet = computed(() => {
  *
  * 编辑态下要排除**自己**：否则打开一条 UART1 通道的编辑框，
  * UART1 会被标成"已占用"，用户连原样保存都做不到。
+ *
+ * 这段判定必须留在本组件（不随表单下沉）：源码门禁
+ * ChannelManagerOccupiedResource.spec.ts 断言本文件包含
+ * props.initialData?.hardware_id 且模板对选项应用 :disabled="isOccupiedResource(hw)"。
  */
 function isOccupiedResource(hw: HardwareResource): boolean {
   const key = String(hw?.id ?? '').trim().toUpperCase()
@@ -436,10 +207,6 @@ function isOccupiedResource(hw: HardwareResource): boolean {
 }
 
 // ====== 标签/格式化辅助 ======
-
-const parityLabel = (p: string) => ({ none: '无', odd: '奇校验', even: '偶校验', mark: 'Mark', space: 'Space' }[p] || p)
-const flowControlLabel = (f: string) => ({ none: '无', rts_cts: 'RTS/CTS', xon_xoff: 'XON/XOFF' }[f] || f)
-const attenuationLabel = (a: number) => ({ 0: '0dB', 1: '2.5dB', 2: '6dB', 3: '11dB' }[a] || `${a}`)
 
 const formatPinsBrief = (pins: any[]) => {
   if (!pins?.length) return ''
@@ -452,62 +219,10 @@ const formatPinsBrief = (pins: any[]) => {
     .join(' ')
 }
 
-const computeBaudStep = () => {
-  if (!currentCaps.value) return 1200
-  const { baud_rate_min = 1200, baud_rate_max = 921600 } = currentCaps.value
-  const range = baud_rate_max - baud_rate_min
-  if (range > 1000000) return 115200
-  if (range > 100000) return 9600
-  return 1200
-}
-
-// ====== 事件处理 ======
-
-const onHardwareTypeChange = () => {
-  form.hardware_id = ''
-  form.address = ''
-  form.config = {}
-  initConfigDefaults()
-}
-
-const onHardwareIdChange = () => {
-  form.address = ''
-  form.config = {}
-  initConfigDefaults()
-}
-
-// 根据能力数据设置默认值
-const initConfigDefaults = () => {
-  const caps = currentCaps.value
-  if (!caps) return
-
-  if (form.hardware_type === 'uart') {
-    // 默认 9600，不用 115200（2026-10-03 缺陷 4）：本仓现场 UART 设备是
-    // 2400(逆变器)/4800(SN-3001、部分 BMS)/9600(多数 BMS)，没有一台用 115200。
-    // 拿设备不支持的速率当默认值，用户建完通道仍连不上，必须回头改波特率 ——
-    // 而旧代码在"资源能力未上报"时又会落空 bus_config，于是直接卡死。
-    // 与后端 defaultUARTBaudrate 保持一致；超出能力范围时夹到能力边界。
-    const maxBaud = Number(caps.baud_rate_max) || 0
-    const minBaud = Number(caps.baud_rate_min) || 0
-    let baud = DEFAULT_UART_BAUD_RATE
-    if (maxBaud > 0 && baud > maxBaud) baud = maxBaud
-    if (minBaud > 0 && baud < minBaud) baud = minBaud
-    form.config.baud_rate = baud
-    form.config.data_bits = caps.data_bits_options?.includes(8) ? 8 : (caps.data_bits_options?.[0] || 8)
-    form.config.stop_bits = caps.stop_bits_options?.includes(1) ? 1 : (caps.stop_bits_options?.[0] || 1)
-    form.config.parity = caps.parity_options?.includes('none') ? 'none' : (caps.parity_options?.[0] || 'none')
-    form.config.flow_control = caps.flow_control_options?.includes('none') ? 'none' : (caps.flow_control_options?.[0] || 'none')
-  } else if (form.hardware_type === 'i2c') {
-    form.config.freq_hz = caps.freq_hz_max || 400000
-  } else if (form.hardware_type === 'spi') {
-    form.config.freq_hz = caps.freq_hz_max || 1000000
-    form.config.cs_pin = caps.cs_pins?.[0] ?? 0
-    form.config.spi_mode = caps.mode_options?.includes(0) ? 0 : (caps.mode_options?.[0] ?? 0)
-  } else if (form.hardware_type === 'adc') {
-    form.config.attenuation = caps.attenuation_options?.includes(3) ? 3 : (caps.attenuation_options?.[0] ?? 3)
-    form.config.bit_width = caps.bit_width_options?.includes(12) ? 12 : (caps.bit_width_options?.[0] ?? 12)
-  }
-}
+// 这些总线的 bus_config 承载引脚/速率，是后续参数修改（改波特率、重配引脚）的唯一数据源；
+// 落空会让后续修改永久失败，故提交前必须能确定对应硬件资源。
+const BUS_TYPES_REQUIRING_CONFIG = ['uart', 'i2c', 'spi'] as const
+const needsBusConfig = (type: string) => (BUS_TYPES_REQUIRING_CONFIG as readonly string[]).includes(type)
 
 // I2C 扫描
 const scanI2C = async () => {
@@ -546,17 +261,6 @@ const handleSubmit = async () => {
     assertTransaction(transaction, collectorId, sessionGeneration)
     submitting.value = true
 
-    // 处理地址
-    let address = form.address
-    if (form.hardware_type === 'spi') {
-      address = String(form.config.cs_pin ?? 0)
-    }
-
-    // 组装 config
-    const config: Record<string, any> = { ...form.config }
-
-    // 组装 bus_config (硬件总线配置的hex字节数组)
-    let busConfig = ''
     const hw = availableHardwareList.value.find(h => String(h.id) === form.hardware_id)
     // 资源能力缺失时**不再静默产出空 bus_config**（2026-10-03 缺陷 4）。
     // 旧行为：`&& hw` 不成立就跳过整个分支，busConfig 保持空串并成功提交，
@@ -577,8 +281,8 @@ const handleSubmit = async () => {
     //
     // 编辑态的 bus_config 是**已存在的**：只要不清空，就不会制造
     // "改不了波特率"的通道。提交时 data.bus_config 仅在能组装出合法值时才带值
-    // （见下方 uart/i2c/spi 分支），拿不到时保持 undefined ⇒ PUT 不带该字段
-    // ⇒ 后端保留原值。真正的兜底仍在后端 ensureUARTBusConfig（校验并补齐）。
+    // （见 channelBusConfig.ts 的 uart/i2c/spi 分支），拿不到时保持 undefined
+    // ⇒ PUT 不带该字段 ⇒ 后端保留原值。真正的兜底仍在后端 ensureUARTBusConfig。
     //
     // 因此：**只在新建时**要求资源能力可解析。
     const isEditingExistingChannel = Boolean(editingChannel.value?.id)
@@ -592,72 +296,10 @@ const handleSubmit = async () => {
       submitting.value = false
       return
     }
-    if (form.hardware_type === 'uart' && hw) {
-      const tx_pin = form.config.tx_pin || hw.default_tx_pin
-      const rx_pin = form.config.rx_pin || hw.default_rx_pin
-      // 兜底同样是 9600 而非 115200（见 initConfigDefaults 的说明）。
-      const baud = form.config.baud_rate || DEFAULT_UART_BAUD_RATE
-      // 帧格式参数不再进 bus_config（见上面的布局说明）：固件把 UART 硬编码为
-      // 8N1，byte 7..9 从不读。它们只写进 config JSON 供人阅读与回显。
-      const data_bits = form.config.data_bits || 8
-      const stop_bits = form.config.stop_bits || 1
-      // bus_config 布局（7 字节）——与固件权威定义和 backend
-      // channel_reconfigure.go 的 buildUARTBusConfig 逐字节一致：
-      //   [0]=tx_pin [1]=rx_pin [2-5]=baud(BE) [6]=DMA flags（bit0=使能）
-      //
-      // 为什么不再是 10 字节 [6]=data_bits：固件 bus_dma.h 把 UART 的 bus_config[6]
-      // 读作 DMA flags（& 0x01），而 uart_config_t 的帧格式是硬编码 8N1（bus_dma.c），
-      // byte 7..9 根本不读。旧写法把 data_bits=8 写进 byte 6 ⇒ 0x08 & 0x01 == 0
-      // ⇒ 静默关闭 DMA。帧格式仍进 config JSON（下面几行），只是不编进 bus_config。
-       const buf = new Uint8Array(7)
-      buf[0] = tx_pin
-      buf[1] = rx_pin
-      buf[2] = (baud >> 24) & 0xFF
-      buf[3] = (baud >> 16) & 0xFF
-      buf[4] = (baud >> 8) & 0xFF
-      buf[5] = baud & 0xFF
-      // ⚠⚠ 2026-10-09（用户明确要求）：**DMA 默认都不开，由用户手动配置。**
-      //   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
-      //           "修改原则：DMA默认都不开，由用户手动配置"
-      //
-      // 原为 0x01（默认开）。在 S3/C6 上必然出事：两个型号的 UART 同时只有
-      // 1 条能用 DMA（S3 也只有一条 UHCI）；建 2 条 UART 通道就都带着"要 DMA"
-      // 的意愿 ⇒ 第 2 条抢不到 ⇒ 设备侧资源计划拒绝整份 manifest
-      // （§211 的 C6 现场事故：2818 次 config failed、设备 ch=0 永远 syncing）。
-      // ⇒ 改为 0x00。用户要开 DMA 时走 DMA 开关（uartDMAFlagsByte 是唯一构造点）。
-      buf[6] = 0x00
-       busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
-       // Also store in config JSON for readability
-       config.baud_rate = baud
-       config.data_bits = data_bits
-       config.stop_bits = stop_bits
-       config.parity = form.config.parity || 'none'
-       config.flow_control = form.config.flow_control || 'none'
-       } else if (form.hardware_type === 'i2c' && hw) {
-      const sda = form.config.sda_pin || hw.default_sda_pin
-      const scl = form.config.scl_pin || hw.default_scl_pin
-      const addr = parseInt(form.address, 16) || 0
-      const freq = form.config.freq_hz || hw.max_freq_hz || 400000
-      const buf = new Uint8Array(7)
-      buf[0] = sda; buf[1] = scl; buf[2] = addr & 0xFF
-      buf[3] = (freq >> 24) & 0xFF; buf[4] = (freq >> 16) & 0xFF
-      buf[5] = (freq >> 8) & 0xFF; buf[6] = freq & 0xFF
-      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
-    } else if (form.hardware_type === 'spi' && hw) {
-      const cs = form.config.cs_pin || hw.default_cs_pin || 5
-      const mode = form.config.spi_mode || 0
-      const freq = form.config.freq_hz || hw.max_freq_hz || 1000000
-      const mosi = form.config.mosi_pin || hw.default_mosi || -1
-      const miso = form.config.miso_pin || hw.default_miso || -1
-      const sclk = form.config.sclk_pin || hw.default_sclk || -1
-      // bus_config: [cs(1B)][mode(1B)][freq(4B BE)][mosi(1B)][miso(1B)][sclk(1B)]
-      const buf = new Uint8Array(9)
-      buf[0] = cs; buf[1] = mode
-      buf[2] = (freq >> 24) & 0xFF; buf[3] = (freq >> 16) & 0xFF
-      buf[4] = (freq >> 8) & 0xFF; buf[5] = freq & 0xFF
-      buf[6] = mosi; buf[7] = miso; buf[8] = sclk
-      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
-    }
+
+    // 地址归一 / config 合并 / bus_config 字节编码按域下沉到 channelBusConfig.ts；
+    // 默认 UART 波特率由本组件显式传入，保证「表单默认值」与「提交兜底值」同源。
+    const { address, config, busConfig } = buildChannelSubmitBusPayload(form, hw, DEFAULT_UART_BAUD_RATE)
 
     // 后端存储约定为**大写**（实测 channels.hardware_type 只有 'UART'/'I2C'…），
     // 而本表单用的小写（'uart'）。**两个字段必须同约定** —— 此前只把 bus_type 转大写，
@@ -668,7 +310,7 @@ const handleSubmit = async () => {
     // （handler_device.go:687/755/774）⇒ 必须在这里统一。
     // toUpperCase() 的静态类型是宽 string，而 Channel.hardware_type 只接受枚举联合
     // （'uart' | 'UART' | …）。这里显式收窄为**大写成员**，不是 as any：
-    // 值域本就来自同文件的 HW_TYPES（小写四值），大写后必然落在联合的大写半边。
+    // 值域本就来自 channelFormModel.ts 的 HW_TYPES（小写四值），大写后必然落在联合的大写半边。
     const hardwareType = form.hardware_type.toUpperCase() as Channel['hardware_type']
     const data: Partial<Channel> = {
       node_id: String(collectorId),
@@ -729,15 +371,6 @@ const handleSubmit = async () => {
   }
 }
 
-const resetForm = () => {
-  form.name = ''
-  form.hardware_type = 'i2c'
-  form.hardware_id = ''
-  form.address = ''
-  form.enabled = true
-  form.config = {}
-}
-
 // ====== 初始化：预选硬件 ======
 
 watch(showDialog, (open) => {
@@ -749,51 +382,12 @@ watch(showDialog, (open) => {
   }
 
   if (editingChannel.value) {
-    // 编辑模式：从通道数据填充
-    form.hardware_type = toBusType(editingChannel.value.hardware_type)
-    form.hardware_id = editingChannel.value.hardware_id || ''
-    form.address = editingChannel.value.address || ''
-    form.name = editingChannel.value.name || ''
-    form.enabled = editingChannel.value.enabled !== false  // enabled is bool, not status string
-    // config may be JSON string (from API) or object — normalize to object
-    let rawConfig = editingChannel.value.config || {}
-    if (typeof rawConfig === 'string') {
-      try { rawConfig = JSON.parse(rawConfig) } catch { rawConfig = {} }
-    }
-    form.config = { ...rawConfig }
-    // Also parse bus_config hex for UART to extract params not in config JSON
-      if (form.hardware_type === 'uart' && editingChannel.value.bus_config && typeof editingChannel.value.bus_config === 'string') {
-        const hex = editingChannel.value.bus_config
-        if (!hex.startsWith('{') && hex.length >= 6) {
-          // bus_config hex: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)][...optional extended fields]
-          try {
-            const tx = parseInt(hex.substring(0, 2), 16)
-            const rx = parseInt(hex.substring(2, 4), 16)
-            if (!form.config.tx_pin) form.config.tx_pin = tx
-            if (!form.config.rx_pin) form.config.rx_pin = rx
-            if (hex.length >= 12) {
-              const baud = parseInt(hex.substring(4, 12), 16)
-              if (!form.config.baud_rate) form.config.baud_rate = baud
-            }
-          } catch { /* ignore decode errors */ }
-        }
-      }
-      // Fill defaults for UART fields not covered by bus_config
-      if (form.hardware_type === 'uart') {
-        if (!form.config.data_bits) form.config.data_bits = 8
-        if (!form.config.stop_bits) form.config.stop_bits = 1
-        if (!form.config.parity) form.config.parity = 'none'
-        if (!form.config.flow_control) form.config.flow_control = 'none'
-      }
+    // 编辑模式：从通道数据填充（config 归一与 UART bus_config 解码见 useChannelManager.hydrateForm）
+    hydrateForm(editingChannel.value)
   } else {
     resetForm()
     // 应用预选硬件类型和ID（从硬件卡片点击"创建通道"时传入）
-    if (props.presetHardwareType) {
-      form.hardware_type = toBusType(props.presetHardwareType)
-    }
-    if (props.presetHardwareId) {
-      form.hardware_id = props.presetHardwareId
-    }
+    applyPreset()
     // 延迟初始化默认值（等 currentCaps 计算完成）
     setTimeout(() => initConfigDefaults(), 50)
   }
@@ -817,24 +411,7 @@ onUnmounted(() => {
   padding: 0;
 }
 
-.form-tip {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-top: 4px;
-}
-
-.cap-hint {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-top: 4px;
-  line-height: 1.5;
-}
-
-.cap-hint span {
-  color: var(--el-color-success);
-}
-
-/* 预选硬件时只读字段的视觉提示 */
+/* 预选硬件时只读字段的视觉提示（对子组件内的 select 同样生效：:deep 从子组件根节点向下匹配） */
 :deep(.el-select.is-disabled .el-input__inner) {
   color: var(--text-color-primary);
   -webkit-text-fill-color: var(--text-color-primary);
