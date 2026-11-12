@@ -197,8 +197,29 @@ function isUnfixed(fixed: unknown): boolean {
   return fixed === false
 }
 
+/**
+ * 2026-11-12 列表侧拆分（纯搬移）：/automation 的两张表分别搬到
+ * src/views/automation/components/RuleListSection.vue（规则表，180px 响应式操作列）与
+ * EventHistorySection.vue（事件表，100px 静态 fixed 操作列）。
+ *
+ * 本文件的判定以「一个页面源码 = 一个 SFC 的 <template>」为单位，故读取路径改为
+ * **把两个 section 的 template 拼成一份合成源码** —— 这样「需要响应式取消固定的列」
+ * 与「豁免列必须仍是静态 fixed=right」两条断言仍然同时有对象；下面一个字符都没改。
+ * 只读其中一个文件会让另一条断言的分母变成 0（门禁失去对象）。
+ */
+function sectionTemplate(rel: string): string {
+  const raw = readFileSync(resolve(process.cwd(), rel), 'utf8')
+  const { descriptor, errors } = parse(raw, { filename: rel })
+  expect(errors, rel + ' SFC 解析失败: ' + JSON.stringify(errors)).toEqual([])
+  return descriptor.template?.content ?? ''
+}
+
 const SRC: Record<string, string> = {
-  'AutomationRules.vue': readFileSync(resolve(process.cwd(), 'src/views/automation/AutomationRules.vue'), 'utf8'),
+  'RuleListSection.vue + EventHistorySection.vue':
+    '<template>'
+    + sectionTemplate('src/views/automation/components/RuleListSection.vue')
+    + sectionTemplate('src/views/automation/components/EventHistorySection.vue')
+    + '</template>',
   // 2026-10-23：DataSourceList.vue 已删除（逻辑设备维度），换成路由上真实存在的
   // 来源组表格 —— 同样是「宽操作列 + 响应式 fixed」的页面。
   'SourceGroupList.vue': readFileSync(resolve(process.cwd(), 'src/views/source-group/SourceGroupList.vue'), 'utf8'),

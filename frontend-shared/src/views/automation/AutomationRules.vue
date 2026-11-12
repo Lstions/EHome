@@ -5,297 +5,59 @@
       subtitle="传感器数据、时间窗口或日出日落触发设备动作或通知"
     />
 
-    <!-- 规则表格 -->
-    <section class="card rules-card">
-      <div class="card-head">
-        <span class="card-title">规则<el-tag v-if="rules.length" size="small" class="count-tag">{{ rules.length }}</el-tag></span>
-        <el-button type="primary" :icon="Plus" data-test="create-rule" @click="openCreate">创建规则</el-button>
-      </div>
-      <!--
-        2026-10-21 第二轮截图精读（P1 信息损失）：393 下这张 7 列表格自然宽 970px，
-        视口内只剩「名称 + 触发器」两列，且名称被 show-overflow-tooltip 截成
-        「客厅高温自动开…」—— 触屏没有 hover，tooltip 不可达，横滑也只是多看一列。
-        修法：窄屏（≤768px）改**卡片列表**（名称全显示 + 触发器类型徽标 + 触发条件/动作摘要
-        + 冷却/熔断 + 启用开关 + 操作按钮，顶部虚线之外无信息损失）；桌面（>768px）表格
-        与固定列逐像素不变。
-      -->
-      <!-- 桌面：宽表（结构 / 固定列 / 横滑提示与改前一致） -->
-      <div v-if="!isMobile" class="mobile-table-wrapper">
-        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
-      <el-table :data="rules" v-loading="rulesLoading" data-test="rules-table">
-        <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
-        <el-table-column label="触发器" min-width="180">
-          <template #default="{ row }">
-            <div class="trigger-cell">
-              <el-tag size="small" class="trigger-type-tag">{{ triggerTypeText(row.trigger_type) }}</el-tag>
-              <span class="mono trigger-summary">{{ triggerSummary(asRule(row)) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <!-- R2: 动作列由"单动作摘要"改为"多动作摘要 + 风险计数"。风险计数让用户在
-             列表页就能发现风险规则，不必逐条打开编辑器。计数读的是后端下发的
-             requires_confirmation（唯一判定点），前端不自己算风险等级。 -->
-        <el-table-column label="动作" min-width="180">
-          <template #default="{ row }">
-            <div class="action-cell">
-              <el-tag size="small" :type="row.action_type === 'device_action' ? 'warning' : 'info'">
-                {{ row.action_type === 'device_action' ? '设备动作' : '通知' }} ×{{ ruleActions(asRule(row)).length }}
-              </el-tag>
-              <el-tag v-if="ruleRiskCount(asRule(row))" type="danger" size="small" data-test="rule-risk-count">
-                <span aria-hidden="true">⚠</span> 含 {{ ruleRiskCount(asRule(row)) }} 个风险动作
-              </el-tag>
-              <span class="mono action-summary">{{ actionSummary(asRule(row)) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="冷却/熔断" width="120">
-          <template #default="{ row }">
-            <span class="mono">{{ row.cooldown_sec }}s / {{ row.max_daily_exec === 0 ? '不限' : row.max_daily_exec }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="确认制" width="90">
-          <template #default="{ row }">
-            <el-tag v-if="row.require_confirmed" type="warning" size="small">需确认</el-tag>
-            <span v-else class="text-muted">-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="启用" width="80">
-          <template #default="{ row }">
-            <!-- 可访问名带**规则名**：表格里每行都有一个一模一样的开关，
-                 没有名字时屏幕阅读器只读「开关」，用户无法分辨改的是哪条规则。 -->
-            <el-switch
-              :model-value="row.enabled"
-              :aria-label="`${asRule(row).name} 启用`"
-              data-test="rule-enabled"
-              @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
-            />
-          </template>
-        </el-table-column>
-        <!-- F26 裁决 D2：该列在窄屏**取消固定**（原 width="180" fixed="right"）。
-             实测（390px，48 点 elementFromPoint 网格）：固定列 180px 压在「启用」列上，
-             行内 el-switch 命中自身 0/48、命中固定列 48/48 —— 开关 100% 不可点；
-             桌面 1440px 命中 48/48（完全正常）。根因是粘性列的绘制顺序恒在普通列之上
-             （见 theme.css「固定列」小节），与列宽无关，故不适用收窄列宽那条路：
-             若按 EdgeDeviceList 范式改成图标按钮，桌面操作列会从 180px 降到 96px，
-             直接改变本页桌面视觉密度（任务书禁止）。
-             改法：宽度与内容不变，只在窄屏（<768px，与 useResponsive 的 BREAKPOINTS.md
-             同源）把 fixed 置 false。EP 的 table-column 对 fixed 注册了 watch 并触发
-             scheduleLayout（element-plus/es/components/table/src/table-column/watcher-helper.mjs），
-             运行期翻转会重算固定列集合；组件挂载时 isMobile 已是正确值，
-             桌面渲染路径与改前逐字节等价。 -->
-        <el-table-column label="操作" width="180" :fixed="isMobile ? false : 'right'">
-          <template #default="{ row }">
-            <el-button link type="warning" size="small" :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
-            <el-button link type="primary" size="small" @click="openEdit(asRule(row))">编辑</el-button>
-            <el-button link type="danger" size="small" @click="onDelete(asRule(row))">删除</el-button>
-          </template>
-        </el-table-column>
-        <template #empty>暂无规则，点击右上角创建</template>
-      </el-table>
-      </div>
-      <!-- 窄屏：规则卡片列表（每张卡承载桌面 7 列的全部信息，无省略号截断） -->
-      <div v-else class="rule-cards" data-test="rules-cards">
-        <p v-if="rulesLoading" class="cards-empty">正在加载规则…</p>
-        <template v-else>
-        <article v-for="row in rules" :key="row.id" class="rule-card" data-test="rule-card">
-          <div class="rule-card__head">
-            <h3 class="rule-card__name">{{ asRule(row).name }}</h3>
-            <el-switch
-              :model-value="row.enabled"
-              :aria-label="`${asRule(row).name} 启用`"
-              data-test="rule-enabled"
-              @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
-            />
-          </div>
-          <div class="rule-card__badges">
-            <el-tag size="small" class="trigger-type-tag">{{ triggerTypeText(row.trigger_type) }}</el-tag>
-            <el-tag size="small" :type="row.action_type === 'device_action' ? 'warning' : 'info'">
-              {{ row.action_type === 'device_action' ? '设备动作' : '通知' }} ×{{ ruleActions(asRule(row)).length }}
-            </el-tag>
-            <el-tag v-if="ruleRiskCount(asRule(row))" type="danger" size="small" data-test="rule-risk-count">
-              <span aria-hidden="true">⚠</span> 含 {{ ruleRiskCount(asRule(row)) }} 个风险动作
-            </el-tag>
-            <el-tag v-if="row.require_confirmed" type="warning" size="small">需确认</el-tag>
-          </div>
-          <dl class="rule-card__meta">
-            <div>
-              <dt>触发条件</dt>
-              <dd class="mono">{{ triggerSummary(asRule(row)) }}</dd>
-            </div>
-            <div>
-              <dt>动作</dt>
-              <dd class="mono">{{ actionSummary(asRule(row)) }}</dd>
-            </div>
-            <div>
-              <dt>冷却/熔断</dt>
-              <dd class="mono">{{ row.cooldown_sec }}s / {{ row.max_daily_exec === 0 ? '不限' : row.max_daily_exec }}</dd>
-            </div>
-          </dl>
-          <div class="rule-card__ops">
-            <el-button type="warning" size="small" plain :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
-            <el-button type="primary" size="small" plain @click="openEdit(asRule(row))">编辑</el-button>
-            <el-button type="danger" size="small" plain @click="onDelete(asRule(row))">删除</el-button>
-          </div>
-        </article>
-        <p v-if="rules.length === 0" class="cards-empty">暂无规则，点击右上角创建</p>
-        </template>
-      </div>
-    </section>
+    <!-- 规则列表（桌面 7 列宽表 / 窄屏卡片）：片段已搬到 components/RuleListSection.vue。
+         数据加载与动作（fetchRules / onToggle / onDelete / onTrigger）仍留在本页，
+         子组件只接 props + 抛语义化事件（create / edit / delete / toggle / trigger）。 -->
+    <RuleListSection
+      :rules="rules"
+      :loading="rulesLoading"
+      :is-mobile="isMobile"
+      :triggering-id="triggeringId"
+      @create="openCreate"
+      @edit="openEdit"
+      @delete="onDelete"
+      @toggle="onToggle"
+      @trigger="onTrigger"
+    />
 
-    <!-- 触发历史 -->
-    <section class="card events-card">
-      <div class="card-head">
-        <span class="card-title">触发历史<el-tag v-if="events.length" size="small" class="count-tag">{{ events.length }}</el-tag></span>
-        <div class="event-filters">
-          <el-select v-model="eventFilterRuleId" placeholder="按规则过滤" clearable size="small" style="width: 140px" data-test="filter-rule" @change="fetchEvents">
-            <el-option v-for="r in rules" :key="r.id" :label="r.name" :value="r.id" />
-          </el-select>
-          <el-select v-model="eventFilterResult" placeholder="按结果过滤" clearable size="small" style="width: 140px" data-test="filter-result" @change="fetchEvents">
-            <el-option v-for="opt in resultOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-          </el-select>
-          <el-button link size="small" data-test="refresh-events" @click="fetchEvents">刷新</el-button>
-        </div>
-      </div>
-      <!--
-        2026-10-21 第二轮截图精读（P1 遮挡）：393 下 910px 自然宽的 8 列表格里，右侧
-        fixed="right" 的「操作」列（100px，占视口 31%）压住「规则」列文字
-        （实测 td 192~312 被固定列覆盖 59px、「结果」覆盖 41px）；上一轮无数据时把它判为
-        待确认 P2，本轮用注入数据复测确认确有遮挡 + 横滑信息损失。
-        修法：窄屏（≤768px）改**卡片列表**（时间 + 规则名 + 结果 + 触发值/来源/命令 ID/详情 +
-        待确认操作），不再渲染表格、不再存在固定列；桌面（>768px）表格与 fixed 逐像素不变。
-      -->
-      <!-- 桌面：宽表（结构 / fixed 操作列 / 横滑提示与改前一致） -->
-      <div v-if="!isMobile" class="mobile-table-wrapper">
-        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
-      <el-table :data="events" v-loading="eventsLoading" data-test="events-table">
-        <el-table-column label="时间" min-width="160">
-          <template #default="{ row }">{{ formatTime(row.triggered_at) }}</template>
-        </el-table-column>
-        <el-table-column label="规则" width="120">
-          <template #default="{ row }">
-            <span class="mono" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="结果" width="110">
-          <template #default="{ row }">
-            <el-tag :type="resultTagType(row.result)" size="small">{{ resultText(row.result) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="触发值" width="100">
-          <template #default="{ row }">
-            <span v-if="row.trigger_value !== undefined" class="mono">{{ formatValue(row.trigger_value) }}</span>
-            <span v-else class="text-muted">-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="来源" width="70">
-          <template #default="{ row }">
-            <el-tag v-if="row.trigger_source === 'manual'" type="warning" size="small">手动</el-tag>
-            <span v-else class="text-muted">自动</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="命令 ID" width="110">
-          <template #default="{ row }">
-            <el-button v-if="row.command_id" link type="primary" size="small" @click="goCommand(row.command_id)">
-              {{ row.command_id }}
-            </el-button>
-            <span v-else class="text-muted">-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="detail" label="详情" min-width="140" show-overflow-tooltip />
-        <!-- 2026-10-21 审计复核结论：本列 width=100 < 窄屏表格盒（280~310px），
-             F26 契约与实测探针都判定**不遮挡**（48/48 命中自身），故保持 fixed="right"。
-             C-ops 审计曾把它标为「待确认 P2」（当时无数据、只看到白色条带），
-             本轮按 F26 既有裁决回退 —— 不用未验证的猜测改动已通过的契约。 -->
-        <el-table-column label="操作" width="100" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="row.result === 'pending_confirm'"
-              link
-              type="warning"
-              size="small"
-              data-test="confirm-event"
-              @click="onConfirmEvent(asEvent(row))"
-            >
-              确认执行
-            </el-button>
-          </template>
-        </el-table-column>
-        <!-- F3：区分"没配策略"与"策略没触发/被抑制" —— 后者常见成因是 cooldown 或日熔断，
-             只说「暂无触发事件」会让用户以为页面坏了（审计 R2-C2 口径）。 -->
-        <template #empty>
-          <div class="table-empty">
-            <p>{{ rules.length === 0 ? '尚未创建自动化策略' : '暂无触发事件' }}</p>
-            <p class="table-empty-hint">
-              {{ rules.length === 0
-                ? '在上方「自动化策略」中创建规则后，命中的事件会出现在这里。'
-                : '策略已就绪但尚未产生事件：确认条件可达，并留意冷却期（cooldown）与日熔断会抑制触发。' }}
-            </p>
-          </div>
-        </template>
-      </el-table>
-      </div>
-      <!-- 窄屏：触发事件卡片列表（时间 / 规则名 / 结果 / 触发值 / 来源 / 命令 ID / 详情 / 待确认操作） -->
-      <div v-else class="event-cards" data-test="events-cards">
-        <p v-if="eventsLoading" class="cards-empty">正在加载触发事件…</p>
-        <template v-else>
-          <article v-for="row in events" :key="row.id" class="event-card" data-test="event-card">
-            <div class="event-card__head">
-              <el-tag :type="resultTagType(row.result)" size="small">{{ resultText(row.result) }}</el-tag>
-              <span class="mono event-card__time">{{ formatTime(row.triggered_at) }}</span>
-              <el-tag v-if="row.trigger_source === 'manual'" type="warning" size="small">手动</el-tag>
-              <span v-else class="event-card__source">自动</span>
-            </div>
-            <p class="event-card__rule" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</p>
-            <dl class="event-card__meta">
-              <div>
-                <dt>触发值</dt>
-                <dd class="mono">{{ row.trigger_value !== undefined ? formatValue(row.trigger_value) : '-' }}</dd>
-              </div>
-              <div v-if="row.command_id">
-                <dt>命令 ID</dt>
-                <dd class="mono event-card__cmd">
-                  <span class="event-card__cmd-id">{{ row.command_id }}</span>
-                  <el-button link type="primary" size="small" @click="goCommand(row.command_id)">查看</el-button>
-                </dd>
-              </div>
-              <div v-if="row.detail">
-                <dt>详情</dt>
-                <dd>{{ row.detail }}</dd>
-              </div>
-            </dl>
-            <div v-if="row.result === 'pending_confirm'" class="event-card__ops">
-              <el-button type="warning" size="small" plain data-test="confirm-event" @click="onConfirmEvent(asEvent(row))">确认执行</el-button>
-            </div>
-          </article>
-          <!-- F3：卡片列表沿用与表格 #empty 完全相同的"没配策略 / 没触发"区分口径 -->
-          <div v-if="events.length === 0" class="cards-empty">
-            <p>{{ rules.length === 0 ? '尚未创建自动化策略' : '暂无触发事件' }}</p>
-            <p class="cards-empty__hint">
-              {{ rules.length === 0
-                ? '在上方「自动化策略」中创建规则后，命中的事件会出现在这里。'
-                : '策略已就绪但尚未产生事件：确认条件可达，并留意冷却期（cooldown）与日熔断会抑制触发。' }}
-            </p>
-          </div>
-        </template>
-      </div>
+    <!-- 触发历史（筛选条 / 桌面 8 列宽表 / 窄屏卡片 / 空态）：片段已搬到 components/EventHistorySection.vue。
+         数据加载、筛选值、页码与 fetchEvents 仍留在本页。
+         ⚠ 分页控件**故意留在页面**（经 #pagination 插槽注入到 section 内部）：
+         listPageConventions 门禁按「路由级页面的模板里有 <el-pagination>」判定列表页，
+         把控件搬进子组件会让本页退出该门禁的分母（门禁失去对象）。插槽位置与搬走前一致，
+         最终 DOM 不变；.events-pagination 样式也因此留在本页。 -->
+    <EventHistorySection
+      :events="events"
+      :loading="eventsLoading"
+      :is-mobile="isMobile"
+      :rules="rules"
+      v-model:filter-rule-id="eventFilterRuleId"
+      v-model:filter-result="eventFilterResult"
+      @refresh="fetchEvents"
+      @filter-change="fetchEvents"
+      @confirm-event="onConfirmEvent"
+      @go-command="goCommand"
+    >
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表一次性渲染后端 Limit(500) 的全部行 (实测 502 行/11902 节点,
            真实事件 >1006 条被静默截断), fixed 列为每行各注入一份 inline style。 -->
       <!-- 2026-10-21 审计 C-ops P2：total=0 时分页器仍渲染（实测 321×76「共 0 条 / 20条/页 / 1」），
            空列表被两个空控件（空态 + 分页）拉长。total>0 才渲染。 -->
-      <div v-if="eventsTotal > 0" class="events-pagination">
-        <el-pagination
-          v-model:current-page="eventsPage"
-          v-model:page-size="eventsPageSize"
-          :total="eventsTotal"
-          :page-sizes="[20, 50, 100]"
-          layout="total, sizes, prev, pager, next, jumper"
-          data-test="events-pagination"
-          @current-change="() => fetchEvents()"
-          @size-change="onEventsPageSizeChange"
-        />
-      </div>
-    </section>
+      <template #pagination>
+        <div v-if="eventsTotal > 0" class="events-pagination">
+          <el-pagination
+            v-model:current-page="eventsPage"
+            v-model:page-size="eventsPageSize"
+            :total="eventsTotal"
+            :page-sizes="[20, 50, 100]"
+            layout="total, sizes, prev, pager, next, jumper"
+            data-test="events-pagination"
+            @current-change="() => fetchEvents()"
+            @size-change="onEventsPageSizeChange"
+          />
+        </div>
+      </template>
+    </EventHistorySection>
 
     <!-- 创建/编辑对话框 -->
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑规则' : '创建规则'" width="640px" data-test="rule-dialog">
@@ -1085,42 +847,13 @@
 
     <!-- 命令执行详情（F18：命令 ID 此前点了没反应）。
          只读：展示该次执行的终态与（若有）失败原因/人工裁决，不提供任何写操作
-         —— 审计入口的职责是"看清楚"，写操作在设备页的命令面板里。 -->
-    <el-dialog
+         —— 审计入口的职责是"看清楚"，写操作在设备页的命令面板里。
+         模板已搬到 components/CommandDetailDialog.vue：本页只保留查询（goCommand）与三份状态。 -->
+    <CommandDetailDialog
       v-model="commandDetailOpen"
-      title="命令执行详情"
-      width="min(560px, 92vw)"
-      data-test="command-detail-dialog"
-    >
-      <div v-if="commandDetailLoading" aria-busy="true"><el-skeleton :rows="4" animated /></div>
-      <el-descriptions v-else-if="commandDetail" :column="1" border size="small">
-        <el-descriptions-item label="命令 ID">
-          <span class="mono">{{ commandDetail.command_id }}</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="执行状态">
-          <el-tag size="small" :type="commandDetail.status === 'SUCCEEDED' ? 'success' : commandDetail.status === 'FAILED' ? 'danger' : 'info'">
-            {{ operationStatusText(commandDetail.status) }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="动作">
-          {{ commandDetail.action_id }} <span class="text-muted">v{{ commandDetail.action_version }}</span>
-        </el-descriptions-item>
-        <el-descriptions-item label="设备">
-          #{{ commandDetail.edge_device_id }} <span class="text-muted">({{ commandDetail.node_id }})</span>
-        </el-descriptions-item>
-        <el-descriptions-item v-if="commandDetail.final_reason" label="失败原因">
-          {{ commandDetail.final_reason }}
-        </el-descriptions-item>
-        <el-descriptions-item v-if="commandDetail.manual_resolution" label="人工裁决">
-          {{ commandDetail.manual_resolution.outcome }}：{{ commandDetail.manual_resolution.reason }}
-        </el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ commandDetail.created_at }}</el-descriptions-item>
-        <el-descriptions-item v-if="commandDetail.completed_at" label="完成时间">{{ commandDetail.completed_at }}</el-descriptions-item>
-      </el-descriptions>
-      <template #footer>
-        <el-button type="primary" @click="commandDetailOpen = false">关闭</el-button>
-      </template>
-    </el-dialog>
+      :loading="commandDetailLoading"
+      :detail="commandDetail"
+    />
   </div>
 </template>
 
@@ -1128,8 +861,6 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
-import { UNKNOWN } from '@/utils/format'
-import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 // 字段选择的全部逻辑（目录请求、类型门禁、字段族/别名、降级链、保存前 resolve 校验）
 // 都在这个共享组件里，本页只负责"接哪台设备""选中的字段对象要不要用来渲染单位"。
@@ -1166,10 +897,17 @@ import {
 import {
   NORMAL_BADGE, emptyAction, moveAction, toSequencedActions, paramsSummary, riskBadge, riskPresentation, type ActionDraft,
 } from './actionList'
-
-/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
-const asRule = (row: unknown) => row as AutomationRule
-const asEvent = (row: unknown) => row as AutomationEvent
+// ── 列表侧拆分（2026-11-12 第一轮，纯搬移）────────────────────────────────────
+//   · ./automationFormat：触发器/动作/结果/时间等**纯展示函数**，本页与两个 section 共用；
+//     comparators 与 resultText/ruleActions 在本页仍有消费方（表单下拉、手动触发结果提示、
+//     编辑回填与动作目录），其余只被 section 消费。
+//   · ./components/*：规则区、触发历史区、命令执行详情。数据加载与动作（fetchRules /
+//     fetchEvents / onToggle / onDelete / onTrigger / onConfirmEvent / goCommand / WS 订阅）
+//     全部留在本页，子组件只接 props + 抛语义化事件。
+import { comparators, resultText, ruleActions } from './automationFormat'
+import RuleListSection from './components/RuleListSection.vue'
+import EventHistorySection from './components/EventHistorySection.vue'
+import CommandDetailDialog from './components/CommandDetailDialog.vue'
 
 /** 窄屏（<768px，与 theme.css 的 @media (max-width:768px) 同断点）用于取消粘性操作列（F26）。 */
 const { isMobile } = useResponsive()
@@ -1202,32 +940,6 @@ const EVENT_FILTER_INITIAL = { ruleId: undefined as number | undefined, result: 
 const lastEventFilter = ref({ ...EVENT_FILTER_INITIAL })
 const eventFilterRuleId = ref<number | undefined>(EVENT_FILTER_INITIAL.ruleId)
 const eventFilterResult = ref<AutomationEventResult | undefined>(EVENT_FILTER_INITIAL.result)
-
-// F-8: 新结果枚举必须在**三处**映射齐全（resultOptions / resultText / resultTagType），
-// 否则新结果码会以英文原串直接显示给用户（"字面量泄漏"）。三处同源维护：
-//   ① 本数组加一项中文标签 —— 否则筛选下拉里选不到该类结果（用户无法按它过滤）；
-//   ② resultText 的 map 加同名映射 —— 否则结果列直接渲染英文原码（兜底 return map[r] ?? r）；
-//   ③ resultTagType 给出标签色 —— 否则会落到 info，被当作"正常/已抑制"。
-// 最近一次增量是数据字段解析层的 unresolved_selector / field_resolver_disabled
-// （设计 §10 要求前端枚举同步）：两者都是**规则不工作**（配置错 / 运维开关），
-// 不是执行故障 ⇒ resultTagType 一律 warning（理由见该函数内注释）。
-// 新增枚举时若只改一处，tests 里的 F-8 门禁会红；照上面 ①②③ 三处补齐并补用例即可。
-const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
-  { value: 'executed', label: '已执行' },
-  { value: 'pending_confirm', label: '待确认' },
-  { value: 'suppressed_cooldown', label: '冷却抑制' },
-  { value: 'suppressed_daily_limit', label: '达每日上限' },
-  { value: 'condition_changed', label: '条件已变' },
-  { value: 'failed_gate', label: '门禁失败' },
-  { value: 'failed_dispatch', label: '下发失败' },
-  { value: 'notification', label: '已通知' },
-  { value: 'expired', label: '已过期' },
-  { value: 'confirmation_required', label: '需确认（未授权）' },
-  { value: 'partial_failure', label: '部分失败' },
-  { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
-  { value: 'unresolved_selector', label: '选择器解析不到' },
-  { value: 'field_resolver_disabled', label: '字段解析未启用' },
-]
 
 async function fetchEvents() {
   // §3.2.6 MUST: 会改变查询范围的输入 (rule_id/result 筛选) 变化时必须重置分页派生状态。
@@ -1268,26 +980,6 @@ function onEventsPageSizeChange() {
 const dialogVisible = ref(false)
 const saving = ref(false)
 const editingId = ref<number | null>(null)
-
-/**
- * 比较符：**中文语义 + 符号**并列，符号保留供工程用户快速识别。
- *
- * 为什么不再只显示符号：本页的主要用户是现场配置规则的人，不是写 SQL 的人；
- * 只给 `>`/`≥` 时要在脑内完成"符号 → 中文语义"的翻译，而 `>` 与 `≥` 的差别
- * 恰好是"触发早一点还是晚一点"，翻错就是规则行为错一个月。
- *
- * ⚠️ 这个数组被**三处**复用：① 表单里的比较符下拉 ② 列表/摘要的 triggerSummary()
- * ③ 移动端规则卡片。改 label 会同时改变列表摘要的文案（例：`temperature 高于 > 30`），
- * 这是**期望行为** —— 列表与表单必须用同一套措辞，否则用户会在两处读到两种说法。
- */
-const comparators: Array<{ value: AutomationComparator; label: string }> = [
-  { value: 'gt', label: '高于 >' },
-  { value: 'gte', label: '不低于 ≥' },
-  { value: 'lt', label: '低于 <' },
-  { value: 'lte', label: '不高于 ≤' },
-  { value: 'eq', label: '等于 =' },
-  { value: 'neq', label: '不等于 ≠' },
-]
 
 /**
  * 冷却 / 每日上限的快捷值（文档 §4.5）。
@@ -2228,24 +1920,6 @@ function riskReasonOf(action: ActionDraft): string {
   return '后端未下发风险原因文案，请自行确认该动作对目标设备的影响'
 }
 
-/** 规则动作的显示辅助（列表页与编辑回填共用）。 */
-function ruleActions(rule: AutomationRule) {
-  if (rule.actions && rule.actions.length > 0) return rule.actions
-  // 兼容期回落：后端尚未回填 actions 子表时用单动作镜像列合成 seq=1。
-  if (rule.action_type === 'device_action' && rule.action_id) {
-    return [{ seq: 1, action_type: rule.action_type, action_id: rule.action_id, action_device_id: rule.action_device_id }]
-  }
-  if (rule.action_type === 'notification') {
-    return [{ seq: 1, action_type: rule.action_type, action_level: rule.action_level }]
-  }
-  return []
-}
-
-/** 列表页「含 N 个风险动作」计数：读后端下发的 requires_confirmation。 */
-function ruleRiskCount(rule: AutomationRule): number {
-  return ruleActions(rule).filter(a => riskBadge(a)).length
-}
-
 /**
  * 编辑中的风险动作卡片。
  *
@@ -2792,21 +2466,6 @@ async function goCommand(commandId: string) {
   }
 }
 
-/** 执行状态 → 中文（与后端 OperationStatus 枚举一一对应，不给未定义的兜底文案）。 */
-function operationStatusText(status: string): string {
-  const map: Record<string, string> = {
-    QUEUED: '排队中',
-    DISPATCHED: '已下发',
-    DEVICE_ACCEPTED: '设备已受理',
-    VERIFYING: '核验中',
-    SUCCEEDED: '成功',
-    FAILED: '失败',
-    CANCELLED: '已取消',
-    UNKNOWN: '结果未知',
-  }
-  return map[status] ?? status
-}
-
 // ── 动作参数编辑 (R8)：schema 表单为主，JSON 文本域为「高级」 ──
 const paramsDialogVisible = ref(false)
 const paramsFormVisible = ref(false)
@@ -2953,93 +2612,6 @@ function switchParamsToForm() {
   const prefill = parsedParams(paramsDraft.value)
   paramsDialogVisible.value = false
   openParamsForm(action, prefill)
-}
-
-// ── 显示辅助 ──
-/** 事件只持久化 rule_id：回链规则名展示，规则已被删除时回退 #id（不留空白）。 */
-function ruleName(ruleId: number): string {
-  const hit = rules.value.find(r => r.id === ruleId)
-  return hit ? hit.name : `#${ruleId}`
-}
-function triggerTypeText(t: AutomationTriggerType): string {
-  if (t === 'sensor_threshold') return '传感器阈值'
-  if (t === 'time_window') return '时间窗口'
-  if (t === 'sun_event') return '日出/日落'
-  return '事件驱动'
-}
-/** 触发器摘要：日出/日落与表单里的实时文案**同源**（sunOffsetText），避免两套措辞。 */
-function triggerSummary(rule: AutomationRule): string {
-  if (rule.trigger_type === 'sensor_threshold') {
-    const cmp = comparators.find(c => c.value === rule.trigger_comparator)?.label ?? rule.trigger_comparator
-    const base = `${rule.trigger_sensor_name} ${cmp} ${rule.trigger_threshold}`
-    // 来源组规则：在触发摘要里显式标注来源组，避免用户把它误读成"某台设备"。
-    return rule.source_kind === 'source_group' ? `来源组 #${rule.source_group_id} · ${base}` : base
-  }
-  if (rule.trigger_type === 'time_window') {
-    const edge = rule.trigger_window_edge === 'enter' ? '进入' : rule.trigger_window_edge === 'exit' ? '离开' : '持续'
-    return `${rule.trigger_window_start}-${rule.trigger_window_end} ${edge}`
-  }
-  if (rule.trigger_type === 'sun_event') {
-    return sunOffsetText(rule.trigger_sun_kind, rule.trigger_sun_offset_min)
-  }
-  return UNKNOWN
-}
-/** 动作列摘要：多动作下把所有动作 ID 串起来（单值摘要已无法表达）。 */
-function actionSummary(rule: AutomationRule): string {
-  const actions = ruleActions(rule)
-  if (actions.length === 0) return UNKNOWN
-  return actions
-    .map(a => a.action_type === 'notification'
-      ? `通知(${a.action_level === 'critical' ? '严重' : a.action_level === 'warning' ? '警告' : '信息'})`
-      : (a.action_id ?? UNKNOWN))
-    .join(', ')
-}
-function resultText(r: AutomationEventResult): string {
-  const map: Record<AutomationEventResult, string> = {
-    executed: '已执行',
-    pending_confirm: '待确认',
-    suppressed_cooldown: '冷却抑制',
-    suppressed_daily_limit: '达每日上限',
-    condition_changed: '条件已变',
-    failed_gate: '门禁失败',
-    failed_dispatch: '下发失败',
-    notification: '已通知',
-    expired: '已过期',
-    confirmation_required: '需确认（未授权）',
-    partial_failure: '部分失败',
-    suppressed_no_solar_event: '无日出日落事件',
-    // 字段解析层：配置错（解析不到）与运维开关（解析未启用）分列，处置方式不同
-    unresolved_selector: '选择器解析不到',
-    field_resolver_disabled: '字段解析未启用',
-    source_member_changed: '来源成员已变',
-    source_stale: '来源数据过期',
-    source_degraded: '来源降级',
-  }
-  return map[r] ?? r
-}
-function resultTagType(r: AutomationEventResult): 'success' | 'warning' | 'danger' | 'info' {
-  if (r === 'executed' || r === 'notification') return 'success'
-  if (r === 'pending_confirm' || r === 'confirmation_required') return 'warning'
-  // 字段解析层两码: unresolved_selector（选择器语法合法但解析不到 ⇒ 规则永不触发，配置错）
-  // 与 field_resolver_disabled（解析层开关关闭 ⇒ 整条规则 fail-closed，运维开关）。
-  // 判断依据: **不工作但不是执行故障** ⇒ warning。
-  //   · 不能归 info: info 在本函数里是兜底档（suppressed_*/condition_changed 这类
-  //     "规则正常工作时的取舍"），归 info 会被用户当成正常，而这两条意味着规则压根没在求值；
-  //   · 也不必用 danger: danger 留给 failed_*/partial_failure/expired 这类**需要立即介入**
-  //     的状态（设备已被改动、下发失败、待确认已超时）；这两条没有任何动作下发、无设备副作用，
-  //     处置是改配置或开开关，属"需要处理但不紧急"。
-  if (r === 'unresolved_selector' || r === 'field_resolver_disabled') return 'warning'
-  // partial_failure 是**危险状态**（设备已被改了一半，需人工介入），必须比 failed_* 更显眼，
-  // 故与 expired/failed_* 同为 danger。
-  if (r.startsWith('failed_') || r === 'expired' || r === 'partial_failure') return 'danger'
-  return 'info'
-}
-function formatValue(v: number): string {
-  return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : UNKNOWN
-}
-function formatTime(t?: string | null): string {
-  if (!t) return UNKNOWN
-  return new Date(t).toLocaleString()
 }
 
 /**
@@ -3361,13 +2933,6 @@ onUnmounted(() => {
 
 <style scoped>
 .automation-rules-page { display: flex; flex-direction: column; gap: 16px; }
-.card { background: var(--el-bg-color); border-radius: 8px; padding: 16px; }
-/* 2026-10-21 审计 C-ops P1：「触发历史」卡片头改前不可换行 —— 标题被右侧 332px 的
-   筛选条挤到 15×84（逐字竖排），筛选条右界还溢出卡片 14px（卡片右 365 / 筛选右 379）。
-   修复：卡片头允许换行（筛选条整体落到第二行）、标题单行不压缩、筛选条自身也换行。 */
-.card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: 8px; margin-bottom: 12px; }
-.card-title { font-size: 15px; font-weight: 600; white-space: nowrap; flex: 0 0 auto; }
-.count-tag { margin-left: 8px; }
 .mono { font-family: monospace; }
 /* 2026-10-21 审计 C-ops P2：「条件」行无宽度约束 ⇒ 393 弹窗 .el-dialog__body
    scrollWidth 368 > clientWidth 361（横向溢出 7px），＋按钮贴到弹窗右内边。
@@ -3388,10 +2953,6 @@ onUnmounted(() => {
 .preview-result--warning { color: var(--el-color-warning); }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
 .text-muted { color: var(--el-text-color-secondary); }
-.trigger-cell, .action-cell { display: flex; align-items: center; gap: 6px; }
-.trigger-type-tag { flex-shrink: 0; }
-.trigger-summary, .action-summary { font-size: 12px; }
-.event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
 /* 分页控件换行（窄屏真实裁切修复，与 notification/NotificationChannels.vue 同根因；
    原参照页 LogicalDeviceList.vue 已于 2026-10-23 随逻辑设备概念移除）。
@@ -3401,10 +2962,6 @@ onUnmounted(() => {
    祖先链 scrollWidth === clientWidth（不可回滚）⇒ 真实裁切。
    同仓范式：firmware/FirmwareManage.vue 的 .firmware-manage :deep(.el-pagination)。 */
 .events-pagination :deep(.el-pagination) { flex-wrap: wrap; }
-/* F3：表格内的空态（说明原因 + 下一步），与全页 EmptyState 保持同一种信息密度。 */
-.table-empty { color: var(--el-text-color-secondary); }
-.table-empty p { margin: 0; }
-.table-empty-hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
 
 /* ============================================================================
    日出/日落字段组 (设计稿 §5 R6 / §6 D-2)
@@ -3594,65 +3151,6 @@ onUnmounted(() => {
   /* 触控目标高度：chips 在粗指针设备上同样要够 36px（theme.css 的触控档） */
   .chip { min-height: 36px; padding: 0 12px; }
 
-  /* ---- 窄屏卡片列表（2026-10-21 第二轮：393 宽表只剩 2 列 + 名称被省略号截断）----
-     卡片长度不受列宽限制：名称/详情/命令 ID 一律换行全显，不用 ellipsis 隐藏数据。
-     视觉语言沿用 Dashboard .latest-card / DataPanel .data-card（浅描边 + 8px 圆角 + 双列 meta）。 */
-  .rule-cards, .event-cards { display: flex; flex-direction: column; gap: 10px; }
-  .rule-card, .event-card {
-    border: 1px solid var(--el-border-color-lighter);
-    border-radius: var(--radius-md, 8px);
-    padding: 10px 12px;
-    background: var(--el-bg-color);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-width: 0;
-  }
-  .rule-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-  /* 卡片标题：完整名称换行显示（被修掉的正是「客厅高温自动开…」这类省略号截断） */
-  .rule-card__name {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    line-height: 1.4;
-    color: var(--el-text-color-primary);
-    overflow-wrap: anywhere;
-    min-width: 0;
-  }
-  .rule-card__head :deep(.el-switch) { flex: 0 0 auto; min-height: 44px; }
-  .rule-card__badges { display: flex; flex-wrap: wrap; gap: 6px; }
-  .rule-card__meta, .event-card__meta { display: flex; flex-direction: column; gap: 4px; margin: 0; min-width: 0; }
-  .rule-card__meta > div, .event-card__meta > div { display: flex; gap: 8px; font-size: 13px; line-height: 1.5; min-width: 0; }
-  .rule-card__meta dt, .event-card__meta dt { flex: 0 0 auto; color: var(--el-text-color-secondary); }
-  .rule-card__meta dd, .event-card__meta dd { margin: 0; min-width: 0; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
-  .rule-card__ops, .event-card__ops { display: flex; flex-wrap: wrap; gap: 8px; }
-  .rule-card__ops :deep(.el-button), .event-card__ops :deep(.el-button) { margin-left: 0; min-height: 44px; padding-left: 14px; padding-right: 14px; }
-  .event-card__head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .event-card__time { font-size: 13px; color: var(--el-text-color-regular); }
-  .event-card__source { font-size: 12px; color: var(--el-text-color-secondary); }
-  .event-card__rule {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    line-height: 1.4;
-    color: var(--el-text-color-primary);
-    overflow-wrap: anywhere;
-  }
-  .event-card__meta dd:last-child, .event-card__cmd { overflow-wrap: anywhere; }
-  .event-card__cmd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .event-card__cmd-id { word-break: break-all; }
-  .event-card__cmd :deep(.el-button) { margin-left: 0; min-height: 44px; }
-  /* 空态/加载态必须可见且有解释（卡片列表下不渲染表格 #empty 插槽） */
-  .cards-empty {
-    margin: 0;
-    padding: 16px 8px;
-    text-align: center;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--el-text-color-secondary);
-  }
-  .cards-empty p { margin: 0; }
-  .cards-empty__hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
 }
 
 /* ============================================================================
@@ -3662,6 +3160,9 @@ onUnmounted(() => {
    （风险动作越多越长），全屏抽屉能让内容区独立滚动且 footer 常驻可达。
    ========================================================================== */
 @media (max-width: 480px) {
+  /* 列表两张卡片（RuleListSection / EventHistorySection 的根节点）在窄屏收紧内边距。
+     子组件根节点会继承本页的 scope id（data-v-xxx），故这条规则仍然是活的命中，
+     不是孤儿选择器 —— 挪进子组件反而会丢掉"页面级密度"这层语义。 */
   .card { padding: 12px; }
   /* 动作卡操作区换行到第二行、右对齐，并补足触控高度（theme.css 的 36px/44px 口径）。 */
   .action-card__head { align-items: flex-start; }

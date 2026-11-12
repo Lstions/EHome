@@ -184,7 +184,11 @@ describe('F8 移动端宽表横滚合同 — 口径基线与豁免白名单', ()
     // 换成仍在路由上的 data-source 侧表格 SourceGroupList.vue（数据来源页「来源组」Tab 的
     // 实际表格），保证这条「关键业务页确实被判为已包裹」的用例分母不缩水。
     for (const f of [
-      'src/views/automation/AutomationRules.vue',
+      // 2026-11-12 列表侧拆分（纯搬移）：规则表与事件表（连 .mobile-table-wrapper 与
+      // .mobile-table-hint）搬到两个 section 文件，读取路径机械改指向新文件；
+      // 断言（每张表都必须包裹、hint 必须是 wrapper 的直接子节点）一字未改。
+      'src/views/automation/components/RuleListSection.vue',
+      'src/views/automation/components/EventHistorySection.vue',
       'src/views/source-group/SourceGroupList.vue',
       'src/views/dashboard/Dashboard.vue',
       'src/views/firmware/FirmwareManage.vue',

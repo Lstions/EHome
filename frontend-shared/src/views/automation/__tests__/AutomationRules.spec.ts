@@ -4,13 +4,44 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { compileStyleAsync, parse } from '@vue/compiler-sfc'
 import AutomationRules from '../AutomationRules.vue'
-import source from '../AutomationRules.vue?raw'
+import pageSource from '../AutomationRules.vue?raw'
+import ruleListSectionSource from '../components/RuleListSection.vue?raw'
+import eventHistorySectionSource from '../components/EventHistorySection.vue?raw'
+import commandDetailDialogSource from '../components/CommandDetailDialog.vue?raw'
+import automationFormatSource from '../automationFormat.ts?raw'
+
 import { automationApi, type AutomationEvent, type AutomationEventPage, type PrecheckResponse } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { deviceOperationApi } from '@/api/deviceOperation'
 import { sensorFieldApi, type SensorFieldPreview } from '@/api/sensorField'
 import { sourceGroupApi } from '@/api/sourceGroup'
 import { ApiError } from '@/api/client'
+
+/**
+ * 2026-11-12「列表侧纯搬移」拆分后，**源码结构断言的读取对象 = 页面 + 搬出去的文件**。
+ *
+ * 为什么必须这样改（且这是唯一的改动方式）：本文件有 8 处断言直接读
+ * AutomationRules.vue 的源码字符串来判断结构事实（窄屏卡片分支在 v-else 里、
+ * 事件表 100px 操作列保持 fixed、确认入口 data-test 存在、结果枚举三处映射齐全…）。
+ * 搬移后这些标记跟着片段去了子组件，继续只读页面会让 toContain 直接变红、
+ * 而 not.toMatch 一类会变成**假绿**（页面里根本没有该字符串了）。
+ *
+ * ⚠ 纪律：断言（expect 的匹配条件）一个字符都没改，只把「从哪个文件读」指向了新文件；
+ * 需要跨文件的结构事实用拼接后的源码（页面在前，保证 @media 断点顺序等断言口径不变）。
+ */
+const source = [
+  pageSource,
+  ruleListSectionSource,
+  eventHistorySectionSource,
+  commandDetailDialogSource,
+  automationFormatSource,
+].join('\n')
+
+/**
+ * 样式契约要的样式块：.card-head / .card-title / .event-filters 随片段搬进了两个 section，
+ * scoped 样式不会跨组件生效，故按同一 scope id 把三份 <style> 编译到一张表里再断言。
+ */
+const styleSources = [pageSource, ruleListSectionSource, eventHistorySectionSource]
 
 /**
  * 样式契约辅助：用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的
@@ -30,6 +61,18 @@ async function compiledScopedCss(raw: string, filename: string): Promise<string>
     expect(res.errors, JSON.stringify(res.errors)).toEqual([])
     chunks.push(res.code)
   }
+  return chunks.join('\n')
+}
+
+/**
+ * 跨文件样式契约（2026-11-12 列表侧拆分后）：按给定顺序把多个 SFC 的 <style> 块用**同一个**
+ * scope id 编译到一张 CSS 里。为什么需要它：.card-head / .card-title / .event-filters 随片段
+ * 搬进了 RuleListSection / EventHistorySection，scoped 样式不会跨组件生效，只看页面会假红。
+ * 判定内容（选择器 + 声明）与拆分前完全一致，只是把「样式来自哪个文件」补全。
+ */
+async function compiledScopedCssAll(raws: string[], filename: string): Promise<string> {
+  const chunks: string[] = []
+  for (const raw of raws) chunks.push(await compiledScopedCss(raw, filename))
   return chunks.join('\n')
 }
 
@@ -481,7 +524,8 @@ describe('AutomationRules.vue', () => {
     await mountPage()
     // ElTable stub 不渲染 slot 模板，确认按钮在 slot 内不可见。
     // 改为验证源码中 pending_confirm 行有确认按钮逻辑（?raw 断言）。
-    const source = await import('../AutomationRules.vue?raw')
+    // 2026-11-12 列表侧拆分：确认入口随触发历史区搬到 EventHistorySection.vue，读取路径跟着改。
+    const source = await import('../components/EventHistorySection.vue?raw')
     expect(source.default).toContain('pending_confirm')
     expect(source.default).toContain('confirm-event')
     expect(source.default).toContain('确认执行')
@@ -543,7 +587,8 @@ describe('AutomationRules.vue', () => {
     await mountPage()
     // ElTable stub 不渲染 slot 模板，el-switch 在 slot 内不可见。
     // 改为验证源码中启用列有 el-switch 绑定 onToggle。
-    const source = await import('../AutomationRules.vue?raw')
+    // 2026-11-12 列表侧拆分：启用列随规则区搬到 RuleListSection.vue，读取路径跟着改。
+    const source = await import('../components/RuleListSection.vue?raw')
     expect(source.default).toContain('rule-enabled')
     expect(source.default).toContain('onToggle')
   })
@@ -663,7 +708,8 @@ describe('AutomationRules.vue', () => {
     await mountPage()
     // ElTable stub 不渲染 slot 模板，确认按钮在 slot 内不可见。
     // 改为验证源码中 confirmEvent 绑定存在。
-    const source = await import('../AutomationRules.vue?raw')
+    // 2026-11-12 列表侧拆分：确认按钮在 EventHistorySection.vue，接口调用（confirmEvent）仍在页面，两处一起读。
+    const source = { default: [pageSource, eventHistorySectionSource].join('\n') }
     expect(source.default).toContain('confirm-event')
     expect(source.default).toContain('confirmEvent')
   })
@@ -673,7 +719,8 @@ describe('AutomationRules.vue', () => {
     await mountPage()
     // ElTable stub 不渲染 slot 模板，触发按钮在 slot 内不可见。
     // 改为验证源码中 trigger-rule 按钮 + onTrigger 绑定存在。
-    const source = await import('../AutomationRules.vue?raw')
+    // 2026-11-12 列表侧拆分：按钮在 RuleListSection.vue、事件处理与 API 调用仍在本页，故两处一起读。
+    const source = { default: [pageSource, ruleListSectionSource].join('\n') }
     expect(source.default).toContain('trigger-rule')
     expect(source.default).toContain('onTrigger')
     expect(source.default).toContain('triggerRule')
@@ -752,7 +799,8 @@ describe('AutomationRules.vue', () => {
 
   it('手动触发结果显示区分', async () => {
     // 验证 resultText 覆盖手动触发可能返回的所有结果
-    const source = await import('../AutomationRules.vue?raw')
+    // 2026-11-12 列表侧拆分：resultText / resultOptions 搬到 automationFormat.ts。
+    const source = await import('../automationFormat.ts?raw')
     for (const r of ['executed', 'notification', 'suppressed_cooldown', 'suppressed_daily_limit', 'failed_gate', 'failed_dispatch']) {
       expect(source.default).toContain(r)
     }
@@ -853,7 +901,7 @@ describe('AutomationRules.vue', () => {
   // 单测只能用样式契约：happy-dom 无布局引擎（详见本文件顶部辅助函数注释）。
   describe('分页控件窄屏换行（样式契约，happy-dom 无布局引擎的例外）', () => {
     it('内层 .el-pagination 自身声明 flex-wrap，过宽时才会拆行', async () => {
-      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      const css = await compiledScopedCss(pageSource, 'AutomationRules.vue')
       const rule = css.match(/\.events-pagination\[data-v-[a-z0-9]+\]\s+\.el-pagination\s*\{[^}]*\}/)
       expect(rule, 'AutomationRules.vue 缺少 .events-pagination :deep(.el-pagination) 编译产物').not.toBeNull()
       expect(rule![0]).toContain('flex-wrap: wrap')
@@ -1426,7 +1474,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
 
   describe('F-10 窄屏 ≤480px 断点', () => {
     it('样式含 480px 断点，且动作卡操作区与弹窗 footer 在该断点下换行/撑满', async () => {
-      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      const css = await compiledScopedCss(pageSource, 'AutomationRules.vue')
       // 按**花括号配对**取媒体块，而不是 \n} 这种格式假设 —— 编译产物的缩进/换行
       // 不是契约，用格式去匹配会让门禁在无关的格式变化下假红。
       function mediaBlock(maxWidth: number): string | null {
@@ -1473,7 +1521,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     })
 
     it('触发历史卡片头可换行、标题单行不压缩、筛选条自身可换行（编译产物级）', async () => {
-      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      const css = await compiledScopedCssAll(styleSources, 'AutomationRules.vue')
       expect(css, '.card-head 缺 flex-wrap：标题会被筛选条挤成逐字竖排').toMatch(/\.card-head\[data-v-[a-z0-9]+\] \{[^}]*flex-wrap: wrap/)
       expect(css, '.card-title 缺 white-space: nowrap').toMatch(/\.card-title\[data-v-[a-z0-9]+\] \{[^}]*white-space: nowrap/)
       expect(css, '.event-filters 缺 flex-wrap：筛选条会溢出卡片').toMatch(/\.event-filters\[data-v-[a-z0-9]+\] \{[^}]*flex-wrap: wrap/)
@@ -1501,7 +1549,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       // 实测（393）：只归零 .el-dialog 的 margin 时，外层 .el-overlay-dialog 是
       // display:block ⇒ 92vh 弹窗顶对齐，dialog y=0/bottom=783，底部留 68px 灰带、
       // 顶部圆角出现在屏幕最上方 —— 不是"底部抽屉"。必须把容器本身改成 flex 底部对齐。
-      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      const css = await compiledScopedCss(pageSource, 'AutomationRules.vue')
       expect(css, '缺 .el-overlay-dialog 的 flex 底部对齐：底部抽屉会顶对齐').toMatch(
         /\.el-overlay-dialog[^{]*\{[^}]*display:\s*flex/,
       )
