@@ -160,19 +160,7 @@
 
         <!-- 中间：全局搜索 -->
         <div class="header-center">
-          <el-input
-            v-model="searchQuery"
-            :placeholder="searchPlaceholder"
-            aria-label="快速跳转"
-            prefix-icon="Search"
-            clearable
-            class="global-search"
-            @keyup.enter="handleSearch"
-          >
-            <template #suffix>
-              <kbd class="search-kbd">{{ isMac ? '⌘K' : 'Ctrl+K' }}</kbd>
-            </template>
-          </el-input>
+          <GlobalSearch />
         </div>
 
         <!-- 右侧：通知 + 主题 + 用户 -->
@@ -202,38 +190,11 @@
                 <el-button :icon="Bell" circle size="default" aria-label="打开通知中心" />
               </el-badge>
             </template>
-            <div class="notification-panel">
-              <div class="notification-header">
-                <span>通知中心</span>
-                <el-button link type="primary" size="small" @click="clearNotifications">全部已读</el-button>
-              </div>
-              <el-scrollbar max-height="300px">
-                <div v-if="notifications.length === 0" class="notification-empty">
-                  <el-icon :size="32"><Bell /></el-icon>
-                  <p>暂无新通知</p>
-                </div>
-                <div v-else class="notification-list">
-                  <button
-                    v-for="item in notifications"
-                    :key="item.id"
-                    type="button"
-                    class="notification-item"
-                    :class="{ unread: !item.read }"
-                    :aria-label="`通知：${item.title}`"
-                    @click="handleNotificationClick(item)"
-                  >
-                    <div class="notification-icon" :class="item.type">
-                      <el-icon><WarningFilled v-if="item.type === 'warning'" /><SuccessFilled v-else-if="item.type === 'success'" /><InfoFilled v-else /></el-icon>
-                    </div>
-                    <div class="notification-content">
-                      <p class="notification-title">{{ item.title }}</p>
-                      <p class="notification-desc">{{ item.description }}</p>
-                      <span class="notification-time">{{ item.created_at }}</span>
-                    </div>
-                  </button>
-                </div>
-              </el-scrollbar>
-            </div>
+            <NotificationPanel
+              :items="notifications"
+              @select="handleNotificationClick"
+              @read-all="clearNotifications"
+            />
           </el-popover>
 
           <!-- 主题切换 -->
@@ -284,29 +245,21 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  Odometer,
-  Connection,
-  Cpu,
-  Link,
-  DataLine,
-  Files,
-  Setting,
   Fold,
   ArrowDown,
-  DataAnalysis,
   HomeFilled,
   Bell,
-  SetUp,
   User,
   UserFilled,
   SwitchButton,
-  WarningFilled,
-  SuccessFilled,
-  InfoFilled,
   Menu,
-  Tickets,
 } from '@element-plus/icons-vue'
-import { NAV_DESTINATIONS, NAV_GROUPS, assertGroupsCoverDestinations } from './menuModel'
+// 导航视图（图标绑定 + 分组）是纯映射，已搬到同目录 navMenu.ts；
+// 页面只保留**渲染与键盘协议**（el-menu / roving tabindex / keydown）。
+import { menuGroups, allGroupTitles, menuItems } from './navMenu'
+import GlobalSearch from './components/GlobalSearch.vue'
+import NotificationPanel from './components/NotificationPanel.vue'
+import { useNotificationCenter } from './composables/useNotificationCenter'
 import { useUserStore } from '@/stores/user'
 import { withBase } from '@/utils/basePath'
 import { useUIStore } from '@/stores/ui'
@@ -314,11 +267,9 @@ import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useNodeStore } from '@/stores/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
-import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notification as ApiNotification } from '@/api/notification'
-import { WS_EVENT } from '@/events/events'
 // NotificationHandle 是 ElNotification() 的返回类型：m-2 需要保存实例以便显式关闭
 // （duration: 0 的提示没有自动关闭路径，路由跳转也不会清掉挂在 body 上的浮层）。
-import { ElMessage, ElNotification, type NotificationHandle } from 'element-plus'
+import { ElNotification, type NotificationHandle } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
@@ -332,6 +283,17 @@ const breadcrumbStore = useBreadcrumbStore()
 const wsStore = useWebSocketStore()
 const nodeStore = useNodeStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+
+// 通知中心的数据面（REST 拉取 / WS 实时推送 / 已读同步）整体搬到 composable，
+// 页面只保留：模板绑定、onMounted 订阅、onUnmounted 退订。
+const {
+  notifications,
+  notificationCount,
+  clearNotifications,
+  handleNotificationClick,
+  setupRealtimeNotifications,
+  teardownRealtimeNotifications,
+} = useNotificationCenter()
 
 // ─ WS 徽标三态（B3）────────────────────────────────────────
 // 「认证失效」与「网络中断」是两种完全不同的用户处境，却都只表现为「离线」：
@@ -403,12 +365,6 @@ watch(() => wsStore.authInvalidationNonce, (nonce, previous) => {
   })
 })
 
-// 搜索
-const searchQuery = ref('')
-
-// 平台检测
-const isMac = computed(() => /Mac/i.test(navigator.platform))
-
 // 响应式
 const { isMobile } = useResponsive()
 const mobileDrawerVisible = ref(false)
@@ -419,189 +375,7 @@ const warmPrimaryListData = () => Promise.allSettled([
   edgeDeviceStore.fetchList({ page: 1, page_size: 24 }),
 ])
 
-// 单主体模式下，所有菜单仅由登录状态保护。
-//
-// Phase 0.3：路径与标题来自 `menuModel.ts` 的**唯一真值源**，本文件只负责绑定图标。
-// 这样门禁可按「导航目标集合」判定覆盖（与平铺/分组布局无关），而不是把规模硬编码成
-// 14 —— 后者在 Phase 2 改分组时会整批变红，且无法区分真回归与"布局改了"。
-const menuIcons: Record<string, unknown> = {
-	'/dashboard': Odometer,
-	'/node': Connection,
-	'/edge-device': Cpu,
-	'/data-sources': Link,
-	'/source-groups': Link,
-	'/channel': Connection,
-	'/data': DataLine,
-	'/firmware': Files,
-	'/device-configs': Setting,
-	'/monitor': DataAnalysis,
-	'/alerts': Bell,
-	'/automation': SetUp,
-	'/notification-channels': Bell,
-	'/notification-deliveries': Tickets,
-}
-// 图标表必须覆盖模型全量：漏配会让菜单项渲染成空白图标（无报错，属静默降级）。
-const missingMenuIcon = NAV_DESTINATIONS.find(d => !menuIcons[d.path])
-if (import.meta.env.DEV && missingMenuIcon) {
-	throw new Error(`[menu] 图标表缺少 ${missingMenuIcon.path} —— 请同步 menuIcons 与 menuModel.NAV_DESTINATIONS`)
-}
-
-const allMenuItems = NAV_DESTINATIONS.map((d, flatIndex) => ({
-	path: d.path,
-	title: d.title,
-	icon: menuIcons[d.path] ?? Tickets,
-	flatIndex,
-}))
-/** 平铺列表（保留：供全局搜索等按顺序消费；menuGroups 是渲染用的分组视图）。 */
-const menuItems = computed(() => allMenuItems)
-
-// Phase 2.4：分组视图。`flatIndex` 取自 NAV_DESTINATIONS 的下标（**不是**组内下标），
-// 这样 roving tabindex 的序号与「分组展开后的 DOM 叶子顺序」一致 ——
-// 否则 activeMenuIndex 定位到的下标会指向另一个菜单项，键盘 Tab 进错页。
-// 顺序一致性由 menuModel.assertGroupsCoverDestinations() 强制校验。
-assertGroupsCoverDestinations()
-const menuGroups = computed(() =>
-	NAV_GROUPS.map(g => ({
-		title: g.title,
-		items: g.paths.map(p => {
-			const item = allMenuItems.find(i => i.path === p)
-			// 模型自检已保证 p 必在目标集内，这里的兜底只为类型收窄（不会触发）。
-			if (!item) throw new Error(`[menu] 分组引用了未定义的路径 ${p}`)
-			return item
-		}),
-	})),
-)
-/** el-menu 的 default-openeds：全部组默认展开（见模板注释中的键盘可达性理由）。 */
-const allGroupTitles = NAV_GROUPS.map(g => g.title)
-
 const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
-
-// 通知 - 从 API 获取
-const notifications = ref<ApiNotification[]>([])
-const notificationCount = ref(0)
-
-// 通知列表保留上限：与 REST 默认 limit 一致（api/notification.ts getNotifications(20)），
-// 避免实时推送插入导致列表无限增长。
-const NOTIFICATION_LIMIT = 20
-
-const fetchNotifications = async () => {
-  try {
-    const [notifs, count] = await Promise.all([
-      getNotifications(NOTIFICATION_LIMIT),
-      getUnreadCount()
-    ])
-    notifications.value = notifs.slice(0, NOTIFICATION_LIMIT)
-    notificationCount.value = count
-  } catch (error) {
-    // API 失败时显示空列表，不报错
-    notifications.value = []
-    notificationCount.value = 0
-  }
-}
-
-// insertNotification 实时推送落列表：按 id 去重（重复推送 / 与 REST 拉取重叠）
-// + 头部插入 + 未读数 +1（read=false）+ 上限截断。
-// 返回 true 表示确实新增了一条（用于测试断言与调用方判断）。
-const insertNotification = (raw: Partial<ApiNotification> | undefined | null): boolean => {
-  if (!raw || raw.id == null) return false
-  const existing = notifications.value.find(item => item.id === raw.id)
-  if (existing) {
-    // 同 id 已存在：只做就地更新（例如推送与 REST 竞态时字段更全），不重复计数。
-    Object.assign(existing, raw)
-    return false
-  }
-  // 后端广播载荷与 models.Notification 同形；这里兜底默认值，避免缺字段导致渲染异常。
-  const item: ApiNotification = {
-    id: raw.id,
-    type: raw.type ?? 'info',
-    title: raw.title ?? '',
-    description: raw.description ?? '',
-    source: raw.source ?? '',
-    source_id: raw.source_id,
-    read: raw.read ?? false,
-    created_at: raw.created_at ?? '',
-  }
-  notifications.value = [item, ...notifications.value].slice(0, NOTIFICATION_LIMIT)
-  if (!item.read) notificationCount.value += 1
-  return true
-}
-
-// 初始化获取通知
-fetchNotifications()
-
-// ── 实时通知：订阅 WS 推送（负债 D-3）──
-// 后端 events.Notification 的载荷是通知实体本身（与 REST 列表项同形），收到即插入。
-// 订阅 automation 的 3 个自定义事件：它们同样携带通知实体（顶层）与自动化领域详情
-// （detail），前端按语义给出差异化用户反馈。
-const handleNotificationPush = (message: { payload?: any; data?: any }) => {
-  // 兼容两种 WS 消息形状：{type, payload} 与扁平 {type, ...fields}
-  const body = (message?.payload ?? message?.data) as Partial<ApiNotification> | undefined
-  const inserted = insertNotification(body)
-  if (inserted) {
-    logger.debug('[MainLayout] 收到实时通知', { id: body?.id })
-  }
-}
-
-const handleAutomationDailyLimit = (message: { payload?: any; data?: any }) => {
-  handleNotificationPush(message)
-  const body = (message?.payload ?? message?.data) as any
-  const ruleName = body?.detail?.rule_name ?? body?.title ?? ''
-  feedback.warning(`策略「${ruleName}」已达日执行上限，今日后续触发将被抑制`)
-}
-
-const handleAutomationSystemActorUnavailable = (message: { payload?: any; data?: any }) => {
-  handleNotificationPush(message)
-  feedback.error('自动化执行已禁用：系统主体用户不可用，请检查初始化状态')
-}
-
-const handleAutomationPendingConfirm = (message: { payload?: any; data?: any }) => {
-  handleNotificationPush(message)
-  const body = (message?.payload ?? message?.data) as any
-  const ruleName = body?.detail?.rule_name ?? body?.title ?? ''
-  // 待确认事件 → 用户可见提示 + 跳转自动化策略页处理。
-  // ElNotification 支持 onClick（ElMessage 不支持），点击提示即前往确认。
-  ElNotification({
-    type: 'warning',
-    duration: 6000,
-    title: '策略等待确认',
-    message: `策略「${ruleName}」等待人工确认，点击前往处理`,
-    onClick: () => { router.push('/automation') },
-  })
-}
-
-let unsubscribeNotification: (() => void) | null = null
-let unsubscribeDailyLimit: (() => void) | null = null
-let unsubscribeSystemActor: (() => void) | null = null
-let unsubscribePendingConfirm: (() => void) | null = null
-// removeConnectionRefresh 解绑 wsStore.onConnected 注册的"重连成功后刷新"处理器。
-let removeConnectionRefresh: (() => void) | null = null
-
-// 页面重新可见时刷新（长时间挂后台的页面计数会过期）。
-// 刻意不用定时轮询：只在 visibilitychange → visible 这一个真实事件上拉取。
-const handleVisibilityChange = () => {
-  if (document.visibilityState === 'visible') {
-    void fetchNotifications()
-  }
-}
-
-const setupRealtimeNotifications = () => {
-  unsubscribeNotification = wsStore.subscribe(WS_EVENT.NOTIFICATION, handleNotificationPush)
-  unsubscribeDailyLimit = wsStore.subscribe('automation_daily_limit', handleAutomationDailyLimit)
-  unsubscribeSystemActor = wsStore.subscribe('automation_system_actor_unavailable', handleAutomationSystemActorUnavailable)
-  unsubscribePendingConfirm = wsStore.subscribe('automation_pending_confirm', handleAutomationPendingConfirm)
-  // WS 重连成功 → 重新拉取，补齐断线期间错过的推送（不依赖轮询）。
-  removeConnectionRefresh = wsStore.onConnected(() => { void fetchNotifications() })
-  document.addEventListener('visibilitychange', handleVisibilityChange)
-}
-
-const teardownRealtimeNotifications = () => {
-  unsubscribeNotification?.(); unsubscribeNotification = null
-  unsubscribeDailyLimit?.(); unsubscribeDailyLimit = null
-  unsubscribeSystemActor?.(); unsubscribeSystemActor = null
-  unsubscribePendingConfirm?.(); unsubscribePendingConfirm = null
-  removeConnectionRefresh?.(); removeConnectionRefresh = null
-  document.removeEventListener('visibilitychange', handleVisibilityChange)
-}
 
 // 移动端 logo 点击：关闭抽屉并导航
 const handleMobileLogoClick = () => {
@@ -618,7 +392,7 @@ const sidebarFocusIndex = ref(0)
 
 // 当前激活项下标 —— 进入侧栏时焦点落在用户当前所在页面，且始终落在有效范围内。
 const activeMenuIndex = computed(() => {
-  const idx = menuItems.value.findIndex((item) => item.path === activeMenu.value)
+  const idx = menuItems.findIndex((item) => item.path === activeMenu.value)
   return idx >= 0 ? idx : 0
 })
 
@@ -843,69 +617,6 @@ const breadcrumbs = computed<Array<{ text: string; to: string }>>(() => {
   }
   return crumbs
 })
-
-// 快速跳转提示
-const searchPlaceholder = computed(() => '快速跳转：仪表盘、节点、设备、通道…')
-
-// 搜索处理
-const handleSearch = () => {
-  const query = searchQuery.value.trim()
-  if (!query) return
-
-  // 顶栏仅承担页面快速跳转，资源检索由对应列表页完成。
-  const lowerQuery = query.toLowerCase()
-  const destinations = [
-    { keywords: ['仪表盘', 'dashboard'], path: '/dashboard' },
-    { keywords: ['节点', 'node'], path: '/node' },
-    { keywords: ['边缘设备', '设备', 'device'], path: '/edge-device' },
-    { keywords: ['通道', 'channel'], path: '/channel' },
-    { keywords: ['数据', 'data'], path: '/data' },
-    { keywords: ['固件', 'firmware'], path: '/firmware' },
-    { keywords: ['配置', 'config'], path: '/device-configs' },
-    { keywords: ['监控', 'monitor'], path: '/monitor' },
-  ]
-  const destination = destinations.find(({ keywords }) => keywords.some(keyword => lowerQuery.includes(keyword)))
-  if (destination) router.push(destination.path)
-  else ElMessage.info('未找到匹配页面，请输入仪表盘、节点、设备、通道、数据、固件、配置或监控')
-  searchQuery.value = ''
-}
-
-// 通知处理
-const clearNotifications = async () => {
-  try {
-    await markAllAsRead()
-    // 本地列表与计数同步收敛（不依赖随后的网络往返，避免"点了没反应"的窗口期）。
-    notifications.value.forEach(item => { item.read = true })
-    notificationCount.value = 0
-    await fetchNotifications()
-    feedback.success('已全部标记为已读')
-  } catch (error) {
-    feedback.handleError(error, '标记已读失败')
-  }
-}
-
-const handleNotificationClick = async (item: ApiNotification) => {
-  try {
-    await markAsRead(item.id)
-    // 已读同步：仅当此前确实未读才递减，避免重复点击把计数减成负数。
-    if (!item.read) {
-      item.read = true
-      notificationCount.value = Math.max(0, notificationCount.value - 1)
-    }
-  } catch (error) {
-    // 静默失败
-  }
-  // 通知跳转 (方案 v3.3 §六 D-2): 优先按 Notification.source 结构化路由,
-  // 替代脆弱的 title 字符串匹配; 离线通知保留原 title 匹配行为。
-  //
-  // 2026-10-23（逻辑设备移除）：原 merge_failed / retention_expiring 两个分支
-  // 都深链到已删除的 /logical-device 页面（合并任务管理 + 逻辑保留期编辑）。
-  // 合并任务与逻辑身份整体下线，两个 source 类别不会再产生 ⇒ 分支删除，
-  // 落回下方的离线通知规则；历史遗留通知不会跳到 404。
-  if (item.title.includes('离线')) {
-    router.push('/edge-device')
-  }
-}
 
 // 用户菜单操作
 const handleCommand = async (command: string) => {
@@ -1295,36 +1006,6 @@ onUnmounted(() => {
   margin: 0 24px;
 }
 
-.global-search {
-  width: 100%;
-}
-
-:deep(.global-search .el-input__wrapper) {
-  border-radius: 20px;
-  background: var(--el-fill-color-light);
-  box-shadow: none;
-  border: 1px solid transparent;
-  transition: all 0.3s;
-}
-
-:deep(.global-search .el-input__wrapper:hover),
-:deep(.global-search .el-input__wrapper.is-focus) {
-  border-color: var(--el-color-primary);
-  background: var(--bg-color-overlay);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
-}
-
-.search-kbd {
-  display: inline-block;
-  padding: 2px 6px;
-  font-size: 11px;
-  font-family: inherit;
-  background: var(--bg-color-overlay);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--el-text-color-secondary);
-}
-
 .header-right {
   display: flex;
   align-items: center;
@@ -1381,107 +1062,6 @@ onUnmounted(() => {
 
 .notification-badge :deep(.el-badge__content) {
   background: var(--el-color-danger);
-}
-
-.notification-panel {
-  margin: -12px;
-}
-
-.notification-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--divider-color);
-  font-weight: 500;
-}
-
-.notification-empty {
-  padding: 40px 20px;
-  text-align: center;
-  color: var(--el-text-color-secondary);
-}
-
-.notification-empty p {
-  margin-top: 8px;
-}
-
-/* 通知条目：<button> 承载（自带焦点与 Enter/Space 激活），视觉与原 <div> 一致 */
-.notification-item {
-  display: flex;
-  width: 100%;
-  gap: 12px;
-  padding: 12px 16px;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.notification-item:hover {
-  background: var(--el-fill-color-light);
-}
-
-.notification-item:focus-visible {
-  outline: 2px solid var(--el-color-primary);
-  outline-offset: -2px;
-}
-
-.notification-item.unread {
-  background: var(--el-color-primary-light-9);
-}
-
-.notification-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.notification-icon.info {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-}
-
-.notification-icon.warning {
-  background: var(--el-color-danger-light-9);
-  color: var(--el-color-warning);
-}
-
-.notification-icon.success {
-  background: var(--el-color-success-light-9);
-  color: var(--el-color-success);
-}
-
-.notification-content {
-  flex: 1;
-  min-width: 0;
-}
-
-.notification-title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-color-primary);
-}
-
-.notification-desc {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.notification-time {
-  font-size: 11px;
-  color: var(--el-text-color-placeholder);
 }
 
 .user-menu {

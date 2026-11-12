@@ -90,10 +90,12 @@ describe('touch target contract', () => {
   })
 
   it('wires the shared .touch-target class onto the row action buttons of NodeList', async () => {
-    const nodeList = (await import('@/views/node/NodeList.vue?raw')).default
-    expect(nodeList).toContain('class="touch-target"')
+    // 2026-11-12 列表页纯搬移拆分：表格（含 .touch-target 操作按钮）搬到
+    // components/NodeTable.vue，读取路径随之指向新位置；断言一字未改。
+    const nodeTable = (await import('@/views/node/components/NodeTable.vue?raw')).default
+    expect(nodeTable).toContain('class="touch-target"')
     // 删除按钮同时要有可访问名称（对象身份）
-    expect(nodeList).toContain(':aria-label=')
-    expect(nodeList).toContain('删除 ${row.name}')
+    expect(nodeTable).toContain(':aria-label=')
+    expect(nodeTable).toContain('删除 ${row.name}')
   })
 })
