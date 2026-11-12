@@ -3,9 +3,17 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 import listSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
-import apiSource from '@/api/edgeDevice.ts?raw'
+import barrelSource from '@/api/edgeDevice.ts?raw'
+import normalizeSource from '@/api/edgeDevice/normalize.ts?raw'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { parseDeviceAddress, isValidDeviceAddress } from '@/utils/deviceAddress'
+
+/**
+ * 源码文本门禁的读取路径（2026-11-12 按域拆分后机械替换）：api/edgeDevice.ts 已成为
+ * barrel，承载 normalize 的实现搬到了 api/edgeDevice/normalize.ts。因此把「原文件」
+ * 换成了「barrel + 承载该实现的模块」的拼接 —— **断言一字未改**，判据仍是同一段文本。
+ */
+const apiSource = `${barrelSource}\n${normalizeSource}`
 
 /**
  * task-10 / G3 + G4 —— 边缘设备地址语义的**前端剩余缺口**回归门禁。
