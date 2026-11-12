@@ -2,9 +2,17 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ChannelTerminal from '../ChannelTerminal.vue'
-import source from '../ChannelTerminal.vue?raw'
+// 2026-11-12 纯搬移拆分：collector 代际隔离 / 发送链路 / 通道加载随「终端会话组合式」
+// 搬到 composables/useChannelTerminalSession.ts。读取路径按任务规则机械改为
+// 「原文件 + 新文件拼接」—— 下面 9 条断言一字未改，判据仍是「这些标识出现在本次拆分
+// 涉及的实现文本里」。
+import componentSource from '../ChannelTerminal.vue?raw'
+import sessionSource from '../composables/useChannelTerminalSession.ts?raw'
 // 类型-only import（编译期擦除，不影响上方 vi.mock 对运行时模块的替换）
 import type { Channel } from '@/api/channel'
+
+/** 组件 + 会话组合式的源码拼接（被拆走的实现文本一并读入，断言不变）。 */
+const source = componentSource + '\n' + sessionSource
 
 vi.mock('@/api/channel', () => ({
   channelApi: { getList: vi.fn().mockResolvedValue([]), terminalWrite: vi.fn() },
