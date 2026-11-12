@@ -1,9 +1,35 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ref, computed } from 'vue'
-import bmsDetailSource from '@/views/edge-device/bms/BmsDetailPage.vue?raw'
 import cellChartSource from '@/views/edge-device/bms/BmsCellVoltageChart.vue?raw'
 import deviceInfoCardSource from '@/views/edge-device/shared/DeviceInfoCard.vue?raw'
 import deviceHeaderSource from '@/views/edge-device/shared/DeviceHeader.vue?raw'
+
+/**
+ * 纯搬移式拆分（2026-11-12）后，「页面源码」= 页面 + 拆分产物。
+ * 断言本身一字未改：只把读取范围机械地扩到新的存放位置（子组件 / 共享样式 / composable），
+ * 顺序固定为「页面 → 共享样式 → 各卡片子组件 → composable」—— 因为个别断言按「先出现」定位
+ * （如 @media (max-width:768px) 之后的移动端规则、mos-card → protect-card 的源码切片）。
+ */
+const BMS_DETAIL_SOURCE_FILES = [
+  'src/views/edge-device/bms/BmsDetailPage.vue',
+  'src/views/edge-device/bms/components/bmsDetail.shared.css',
+  'src/views/edge-device/bms/components/BmsMetricsRow.vue',
+  'src/views/edge-device/bms/components/BmsStatusCards.vue',
+  'src/views/edge-device/bms/components/BmsCellVoltageCard.vue',
+  'src/views/edge-device/bms/components/BmsTemperatureCard.vue',
+  'src/views/edge-device/bms/components/BmsOpsHistorySection.vue',
+  'src/views/edge-device/bms/composables/useBmsRealtime.ts',
+  'src/views/edge-device/bms/composables/useBmsMosControl.ts',
+  'src/views/edge-device/bms/composables/useBmsOperations.ts',
+  'src/views/edge-device/bms/composables/bmsOperationModel.ts',
+  'src/views/edge-device/bms/bmsProtection.ts',
+  'src/views/edge-device/bms/bmsFormat.ts',
+] as const
+const bmsDetailSource = BMS_DETAIL_SOURCE_FILES
+  .map((file) => readFileSync(resolve(process.cwd(), file), 'utf8'))
+  .join('\n')
 
 /**
  * BMS 详情页「容器感知 + 断点 + 页头」修复源码契约测试（2026-08-09）。

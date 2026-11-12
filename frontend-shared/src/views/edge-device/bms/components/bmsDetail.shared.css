@@ -1,0 +1,98 @@
+/* BMS 详情页「页面族」公共基座与卡片带（2026-11-12 纯搬移式拆分）。
+ *
+ * 为什么这些规则不留在页面文件里：MOS/保护/指标/电芯/温度/受控操作六个区块拆成子组件后，
+ * 父组件的 scoped 样式**不会作用到子组件内部 DOM**（scoped 只给子组件根节点打父作用域，
+ * 卡片基座、卡头、标签、骨架态这些基元在子组件内部同样要生效）。故收进这份"页面族"样式表，
+ * 由页面与各子组件分别以 <style scoped src> 引入 —— 作用域仍按组件隔离
+ * （引入方各拿一份 scoped 副本），不会外溢到全站其它页面。
+ *
+ * 代价（必须知情）：
+ *   ① 这份 CSS 会被打进**每一个引入方**的产物（页面 + 子组件各一份副本），
+ *      体积按引入方数量放大；换来的是"每张卡自带自己的视觉基座"，不再依赖父作用域。
+ *   ② 引入方必须把它放在**最后一个** style 块：原单文件里基础规则在前、业务规则在后，
+ *      层叠顺序反过来会让 .card { padding } 这类**同特异性**规则改变计算结果
+ *      （例：窄屏 14px 内距必须压在基础 20px 之上）。放在最后才与拆分前的计算结果一致。
+ *   ③ 作用域属性落在**选择器最后一个元素**上：.page-body > .row .card 在页面副本里只对
+ *      页面自己的卡片生效，在子组件副本里只对子组件自己的卡片生效 —— 两边各管各的，
+ *      这正是"父样式打不进子组件"的必经处理，不是重复声明。
+ */
+
+/* 卡片语言（沿用 .card / card-head） */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 16px 20px;
+  min-width: 0;
+}
+.card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
+.card-hint { font-size: 12px; color: var(--el-text-color-secondary); }
+.head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-note { margin: 0 0 12px; font-size: 12px; line-height: 1.7; color: var(--el-text-color-secondary); }
+.card-note code { font-size: 11px; background: var(--el-fill-color-light); border-radius: 3px; padding: 1px 5px; }
+.card-note b { color: var(--el-text-color-primary); }
+.card-footnote { margin: 12px 0 0; font-size: 12px; line-height: 1.7; color: var(--el-text-color-secondary); }
+.card-footnote b { color: var(--el-text-color-primary); }
+.mono-badge { font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 11px; color: var(--el-text-color-secondary); background: var(--el-fill-color-light); border-radius: 4px; padding: 2px 8px; }
+.alert-detail { margin-top: 4px; font-size: 12px; line-height: 1.6; }
+.inline-alert { margin: 8px 0; }
+
+/* 行内卡片的通用盒模型：卡片是行的 flex 子项，卡头不参与收缩。
+   这些规则必须对页面与子组件内的卡片都生效，故放在公共基座里。 */
+.row > .card,
+.row > .metric-card { flex-grow: 1; flex-shrink: 1; }
+.row > .card { display: flex; flex-direction: column; }
+.row > .card > .card-head { flex-shrink: 0; }
+
+/* 实时数据四态：骨架 / 错误占位（2026-10-21 修复「加载中伪装成空数据」）
+   加载中只出骨架与「正在加载…」，错误态固定给独立文案 + 重试；
+   骨架高度略小于真实内容，数据到达后由卡片自身高度兜住，避免页面跳动。 */
+.realtime-alert { margin-bottom: 12px; }
+/* 设备详情加载失败条：常驻页面（不随 toast 消失），与下方数据留出间隔 */
+.page-error { margin-bottom: 16px; }
+.realtime-state { padding: 6px 0 2px; }
+.realtime-state-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--el-text-color-secondary);
+}
+
+.txt-warning { color: var(--el-color-warning); }
+.txt-danger { color: var(--el-color-danger); }
+.txt-secondary { color: var(--el-text-color-regular); }
+.link-btn { border: none; background: none; padding: 0; margin-left: auto; color: var(--el-color-primary); cursor: pointer; font-size: 12px; }
+.link-btn:hover { text-decoration: underline; }
+
+/* 实时数据流区块已按用户要求移除（2026-10-21）；.stream-empty 仍被其它空态复用 */
+.stream-empty { padding: 40px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
+
+@media (max-width: 768px) {
+  /* 卡片内距降档（与基础规则同特异性，必须落在同一份样式表里且在其后） */
+  .card { padding: 14px 12px; }
+  /* 卡头右侧在窄屏不再右推：整行独占后右对齐会把标签甩到边缘 */
+  .head-right { margin-left: 0; }
+
+  /* 带壳：区块内卡片去圆角/左右描边/阴影，统一 10px 12px 内距。
+     ⚠ 作用域说明：页面副本只命中页面卡片，子组件副本只命中子组件卡片（父样式打不进子组件内部）。 */
+  .page-body > .row .card {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    box-shadow: none;
+    padding: 10px var(--gutter-x);
+  }
+  /* 图表卡：横向内距归零，画布自己贴边（.card.diag-card 三个类，压过 .row .card 的同名属性）。
+     ⚠ 必须紧跟在上面"带壳"规则之后：两者特异性同为 (0,4,0)，靠书写顺序决胜负；
+        拆开后若把它留在页面文件里，带壳规则（本文件）会反过来盖掉它，画布就不再贴边。 */
+  .page-body .card.diag-card { padding: 10px 0; }
+
+  /* 硬 min-width 在窄屏必须清零（卡片是行的 flex 子项时跟随容器 100% 宽）。
+     根因见页面文件同名注释：min-width 是硬底线，窄容器里会让整页横向可拖。 */
+  .row > .card {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+}

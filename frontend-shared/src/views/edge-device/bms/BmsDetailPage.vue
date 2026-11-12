@@ -78,172 +78,39 @@
         </div>
       </el-alert>
 
-      <!-- 指标卡 -->
-      <section class="row metrics">
-        <MetricStatCard label="SOC 剩余电量" :value="fmt(soc, 1)" unit="%" tone="success" :progress="socProgress" sub-text="健康区间 20% – 90%" :loading="realtimeLoading">
-          <template #icon><el-icon :size="22"><PieChart /></el-icon></template>
-        </MetricStatCard>
-        <MetricStatCard label="剩余容量" :value="fmt(remainingCapacity, 2)" unit="Ah" tone="primary" :sub-text="capacitySubText" :loading="realtimeLoading">
-          <template #icon><el-icon :size="22"><Odometer /></el-icon></template>
-        </MetricStatCard>
-        <MetricStatCard label="总电压" :value="fmt(totalVoltage, 2)" unit="V" tone="primary" :sub-text="voltageSubText" :loading="realtimeLoading">
-          <template #icon><el-icon :size="22"><DataLine /></el-icon></template>
-        </MetricStatCard>
-        <MetricStatCard label="电流" :value="fmt(currentDisplay, 2)" unit="A" tone="primary" :sub-text="currentHint" :loading="realtimeLoading">
-          <template #icon><el-icon :size="22"><Lightning /></el-icon></template>
-        </MetricStatCard>
-      </section>
+      <!-- 指标卡（BmsMetricsRow）：数值派生在 useBmsRealtime，四张卡统一受 realtimeLoading 驱动 -->
+      <BmsMetricsRow
+        :soc="soc"
+        :soc-progress="socProgress"
+        :remaining-capacity="remainingCapacity"
+        :total-voltage="totalVoltage"
+        :current-display="currentDisplay"
+        :capacity-sub-text="capacitySubText"
+        :voltage-sub-text="voltageSubText"
+        :current-hint="currentHint"
+        :realtime-loading="realtimeLoading"
+      />
 
-      <!-- 诉求①：MOS 充电/放电直接开关 + 诉求④：保护状态 -->
-      <section class="row mos-protect">
-        <!-- 诉求① 落点：MOS 直控卡（页首主位，不再埋进受控操作清单） -->
-        <div class="card mos-card" :aria-busy="realtimeLoading ? 'true' : undefined">
-          <div class="card-head">
-            <span class="card-title">MOS 直控</span>
-            <span class="card-hint">像电灯开关一样直接操作</span>
-            <span class="head-right mono-badge">{{ hasFetStatus ? 'fet_status = 0x' + fetHex : 'fet_status = ' + DASH }}</span>
-          </div>
-
-          <!-- 加载中：骨架占位。**不渲染「关断/导通」行，也不写「尚无 fet_status 数据」**
-               —— 那两种表达都会把「未知」说成事实（2026-10-21 用户真机反馈）。 -->
-          <div v-if="realtimeLoading" class="realtime-state" role="status">
-            <el-skeleton :rows="3" animated />
-            <p class="realtime-state-note">正在加载 MOS 状态…（尚未收到 fet_status，未知不等于关断）</p>
-          </div>
-          <!-- 失败：独立错误态 + 重试（与「暂无数据」彻底分开） -->
-          <div v-else-if="realtimeError" class="realtime-state" role="alert">
-            <el-alert type="error" :closable="false" show-icon class="inline-alert">
-              <template #title>MOS 状态加载失败（当前未知，不等于关断）</template>
-              <div class="alert-detail">
-                {{ snapshotErrorText }}
-                <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
-              </div>
-            </el-alert>
-          </div>
-          <template v-else>
-            <p class="card-note">
-              充电 / 放电回路通断的软件策略 <code>set_mos_policy</code>。开关即时下发，切换前弹
-              <b>一次极简确认</b>（只有 确认 / 取消，不填理由）；后端回读 fet_status 校验，不一致即判失败并常驻原因。
-            </p>
-
-            <div v-for="m in mosRows" :key="m.key" class="mos-item">
-              <div class="mos-row" :class="{ 'is-applying': !!m.phase }">
-                <span class="mos-icon" :class="m.known ? (m.on ? 'is-on' : 'is-off') : 'is-unknown'">
-                  <el-icon :size="18"><component :is="m.known && m.on ? Open : Lock" /></el-icon>
-                </span>
-                <div class="mos-main">
-                  <div class="mos-name-line">
-                    <span class="mos-name">{{ m.name }}</span>
-                    <!-- 未知（尚未收到 fet_status）显示中性「未知」，不得伪装成「关断」 -->
-                    <el-tag :type="m.known ? (m.on ? 'success' : 'info') : 'info'" size="small" effect="plain">
-                      {{ m.known ? (m.on ? '导通' : '关断') : '未知' }}
-                    </el-tag>
-                    <el-tag v-if="m.phase" type="primary" size="small">{{ m.phase }}…</el-tag>
-                    <span v-if="m.hwOff" class="hw-off-note"><el-icon :size="12"><WarningFilled /></el-icon>可能被硬件保护关断</span>
-                  </div>
-                  <div class="mos-desc">{{ m.desc }}</div>
-                </div>
-                <el-switch
-                  class="mos-switch"
-                  :model-value="m.known ? m.on : false"
-                  :loading="!!m.phase"
-                  :disabled="!!m.phase || !canControlMos"
-                  :aria-label="m.name + (m.known ? '开关' : '开关（状态未知，暂不可操作）')"
-                  @change="(v: string | number | boolean) => requestMosChange(m.key, !!v)"
-                />
-              </div>
-              <el-alert v-if="m.error" type="error" :closable="false" show-icon class="inline-alert">
-                <template #title>{{ m.name }}操作失败（回读校验不一致）</template>
-                <div class="alert-detail">{{ m.error }}</div>
-              </el-alert>
-            </div>
-
-            <p v-if="!canControlMos && !deviceOnline" class="card-footnote mos-manual-note">
-              当前不可控制：设备离线（状态 {{ statusTag.text }}），指令无法下发。
-            </p>
-            <p v-else-if="!hasFetStatus" class="card-footnote mos-manual-note">
-              当前不可控制：尚未收到 fet_status 字段（状态未知，不等于关断）。
-            </p>
-
-            <p class="card-footnote">
-              <b>关断</b>是正常工况而非故障，因此用中性色；只有「保护已触发」才显示告警色。
-            </p>
-          </template>
-        </div>
-
-        <!-- 诉求④ 落点：保护状态（正常态紧凑一行 / 有保护位时展开 12 项明细） -->
-        <div class="card protect-card" :aria-busy="realtimeLoading ? 'true' : undefined">
-          <div class="card-head">
-            <span class="card-title">保护状态</span>
-            <!-- 状态标签是互斥状态展示：关掉 el-tag 的切换动画，
-                 否则 loading→data 的 300ms 淡出/淡入会让两个状态标签同时出现（实测） -->
-            <el-tag v-if="realtimeLoading" type="info" size="small" effect="plain" disable-transitions>加载中…</el-tag>
-            <el-tag v-else-if="realtimeError" type="danger" size="small" effect="plain" disable-transitions>加载失败</el-tag>
-            <el-tag v-else-if="!hasProtectionData" type="info" size="small" effect="plain" disable-transitions>暂无数据</el-tag>
-            <el-tag v-else-if="activeProtections.length" type="danger" size="small" disable-transitions>
-              {{ activeProtections.length }} 项保护已触发
-            </el-tag>
-            <el-tag v-else type="success" size="small" effect="plain" disable-transitions>
-              <el-icon :size="12"><CircleCheckFilled /></el-icon> 全部正常
-            </el-tag>
-            <span class="head-right mono-badge">{{ hasProtectionData ? 'protection_status = 0x' + protHex : 'protection_status = ' + DASH }}</span>
-          </div>
-
-          <!-- 加载中：骨架占位。**绝不渲染 12 个「正常」徽标** ——
-               那会把「未知」伪装成「全部正常」，是安全语义错误（用户真机反馈）。 -->
-          <div v-if="realtimeLoading" class="realtime-state" role="status">
-            <el-skeleton :rows="3" animated />
-            <p class="realtime-state-note">正在加载保护状态…（尚未收到 protection_status，未知不等于正常）</p>
-          </div>
-          <!-- 失败：独立错误态 + 重试（与「暂无数据」彻底分开） -->
-          <el-alert v-else-if="realtimeError" type="error" :closable="false" show-icon class="inline-alert">
-            <template #title>保护状态加载失败（未知，不能当作「全部正常」）</template>
-            <div class="alert-detail">
-              {{ snapshotErrorText }}
-              <el-button size="small" text type="primary" @click="retryRealtime">重试</el-button>
-            </div>
-          </el-alert>
-          <template v-else>
-            <!-- 无保护命中：紧凑一行。
-                 ⚠ 2026-10-16 用户要求：**删除收起/展开，明细默认展开**。
-                 原来正常态只给一行摘要 + 「展开明细」按钮，要用户多点一次才能看到
-                 12 位明细；而这页的主要用途就是核对保护位，默认藏起来反而妨碍阅读。
-                 现在 12 项明细恒定可见（见下方 .protect-grid），少一层交互。 -->
-            <div
-              v-if="!activeProtections.length"
-              class="protect-compact"
-              :class="{ 'is-all-normal': hasProtectionData }"
-              role="status"
-            >
-              <el-icon :size="18" :color="hasProtectionData ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheckFilled /></el-icon>
-              <span class="protect-compact-text">{{ hasProtectionData ? '12 项保护均未触发（bit0 – bit11 全 0）' : '暂无 protection_status 数据（设备未上报，未知不等于正常）' }}</span>
-            </div>
-
-            <!-- 有保护命中：结论 + 明细 -->
-            <template v-else>
-              <el-alert type="error" :closable="false" show-icon class="inline-alert">
-                <template #title>{{ activeProtections.map(p => p.label).join('、') }} 已触发</template>
-                <div class="alert-detail">
-                  protection_status = 0x{{ protHex }}。硬件保护可能已覆盖对应 MOS：请先排除故障，再到左上方尝试开关。
-                </div>
-              </el-alert>
-            </template>
-
-            <!-- 12 位明细：**恒定展开**（用户要求删除收起/展开）。
-                 不再依赖 protectExpanded 状态，因此也不会有"默认收起"的信息缺口。
-                 未知（尚未收到 protection_status）显示中性「未知」，不得伪装成「正常」。 -->
-            <div class="protect-grid">
-              <div v-for="p in protectionBits" :key="p.bit" class="protect-item" :class="{ active: p.active }">
-                <span class="protect-name">{{ p.label }}</span>
-                <el-tag :type="p.active ? 'danger' : hasProtectionData ? 'success' : 'info'" size="small" :effect="p.active ? 'dark' : 'plain'">
-                  {{ p.active ? '已触发' : (hasProtectionData ? '正常' : '未知') }}
-                </el-tag>
-                <span class="protect-bit">bit{{ p.bit }}</span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </section>
+      <!-- 诉求①：MOS 直控 + 诉求④：保护状态（BmsStatusCards）——
+           fet_status / protection_status 的位语义与「未知不等于关断 / 不等于正常」的文案随卡片一起搬走；
+           四态（加载 / 失败 / 空 / 数据）仍由页面 useBmsRealtime 判定后下发，卡片只负责渲染。 -->
+      <BmsStatusCards
+        :realtime-loading="realtimeLoading"
+        :realtime-error="realtimeError"
+        :snapshot-error-text="snapshotErrorText"
+        :retry-realtime="retryRealtime"
+        :request-mos-change="requestMosChange"
+        :mos-phase="mosPhase"
+        :mos-error="mosError"
+        :has-fet-status="hasFetStatus"
+        :fet-hex="fetHex"
+        :charge-on="chargeOn"
+        :discharge-on="dischargeOn"
+        :can-control-mos="canControlMos"
+        :device-online="deviceOnline"
+        :status-text="statusTag.text"
+        :latest-data="latestData"
+      />
 
       <!-- 保护触发历史（新增）：计数口径是 protection_status 的 0→1 跃变次数，不是数值求和
            （实测非零值恒为 1 —— 它是状态位序列，求和会得到「1239 次」这种错数）。
@@ -268,59 +135,25 @@
         </CollapseBlock>
       </section>
 
-      <!-- 电芯电压分布：图表卡是固定高度的"异类"，独占一行 ——
+      <!-- 电芯电压分布（BmsCellVoltageCard）：图表卡是固定高度的"异类"，独占一行 ——
            与内容驱动卡片同行时，矮卡下方必然留出页面底色（padding 无法吸收固定高度差）。 -->
-      <section class="row cell-chart-row">
-        <div class="card cell-card">
-          <div class="card-head">
-            <span class="card-title">电芯电压分布</span>
-            <span class="card-hint">{{ cells.length }} 串 · 单位 V</span>
-            <span v-if="cells.length" class="head-right cell-summary">
-              最高 <b class="txt-warning">#{{ maxCell.index }} {{ maxCell.voltage.toFixed(3) }}V</b>
-              · 最低 <b class="txt-secondary">#{{ minCell.index }} {{ minCell.voltage.toFixed(3) }}V</b>
-              · 压差 <b :class="diff > 0.1 ? 'txt-warning' : 'txt-secondary'">{{ diff.toFixed(3) }}V</b>
-            </span>
-            <span v-else class="head-right cell-summary">{{ realtimeLoading ? '正在加载单体电压…' : realtimeError ? '单体电压加载失败' : '暂无单体电压数据' }}</span>
-          </div>
-          <div class="cell-chart-host">
-            <BmsCellVoltageChart
-              v-if="cellVoltages.length"
-              :voltages="cellVoltages"
-              :cell-count="cellVoltages.length"
-              :height="isMobileViewport ? '112px' : '300px'"
-            />
-            <div v-else class="cell-chart-empty">{{ realtimeLoading ? '正在加载单体电压…' : realtimeError ? '单体电压加载失败（下方已提供重试）' : '暂无单体电压数据' }}</div>
-          </div>
-          <div class="cell-legend">
-            <span class="lg"><i class="swatch swatch-normal"></i>正常</span>
-            <span class="lg"><i class="swatch swatch-high"></i>偏高 &gt; 3.600V</span>
-            <span class="lg"><i class="swatch swatch-danger"></i>偏低 &lt; 3.000V</span>
-            <span class="cell-thresholds">参考线 3.000V / 3.600V</span>
-          </div>
-          <p class="card-footnote">点击柱体可查看精确值。</p>
-        </div>
-      </section>
+      <BmsCellVoltageCard
+        :cells="cells"
+        :max-cell="maxCell"
+        :min-cell="minCell"
+        :diff="diff"
+        :cell-voltages="cellVoltages"
+        :realtime-loading="realtimeLoading"
+        :realtime-error="realtimeError"
+        :is-mobile-viewport="isMobileViewport"
+      />
 
-      <!-- 温度探头：内容驱动卡，与 MOS/保护等卡同属流式（auto-fill 列数） -->
-      <section class="row temp-row">
-        <div class="card temp-card">
-          <div class="card-head">
-            <span class="card-title">温度探头</span>
-            <span class="card-hint">{{ realtimeLoading ? '加载中…' : temps.length + ' 路' }}</span>
-          </div>
-          <div class="temp-list">
-            <div v-for="t in temps" :key="t.index" class="temp-item">
-              <span class="temp-label">探头{{ t.index }}</span>
-              <span class="temp-value" :class="'is-' + t.level">{{ t.value.toFixed(1) }} ℃</span>
-              <el-tag :type="t.level === 'success' ? 'success' : t.level === 'warning' ? 'warning' : 'danger'" size="small" effect="plain">
-                {{ t.text }}
-              </el-tag>
-            </div>
-            <div v-if="!temps.length" class="stream-empty">{{ realtimeLoading ? '正在加载温度数据…' : realtimeError ? '温度数据加载失败' : '暂无温度数据' }}</div>
-          </div>
-          <p class="card-footnote">&gt;45℃ 偏高 · &gt;60℃ 过高</p>
-        </div>
-      </section>
+      <!-- 温度探头（BmsTemperatureCard）：内容驱动卡，与 MOS/保护等卡同属流式（auto-fill 列数） -->
+      <BmsTemperatureCard
+        :temps="temps"
+        :realtime-loading="realtimeLoading"
+        :realtime-error="realtimeError"
+      />
 
       <!--
         页级时间窗（契约 §D，2026-11-12）：全页唯一实例，放在**图表区之前**而不是页面顶部。
@@ -451,107 +284,25 @@
         />
       </section>
 
-      <!-- 受控操作（目录来自后端，按用途分组） + 操作历史 -->
-      <section class="row ops-history">
-        <div class="card ops-card">
-          <div class="card-head">
-            <span class="card-title">受控操作</span>
-            <span class="card-hint">共 {{ totalOps }} 项 · 按用途分组，默认收起</span>
-            <span class="head-right state-legend">
-              <el-icon :size="13"><InfoFilled /></el-icon>
-              状态文案：已发送 → 执行中 → 校验中 → 成功 / 失败 / 结果未知 / 已取消
-            </span>
-          </div>
-
-          <el-alert v-if="catalogError" type="error" :closable="false" show-icon class="inline-alert">
-            <template #title>受控操作目录加载失败</template>
-            <div class="alert-detail">
-              {{ catalogError }}
-              <el-button size="small" text type="primary" @click="loadOperations">重试</el-button>
-            </div>
-          </el-alert>
-          <div v-else-if="catalogLoading" class="stream-empty">正在加载受控操作目录…</div>
-
-          <div class="op-groups">
-            <div v-for="g in opGroups" :key="g.id" class="op-group">
-              <button type="button" class="op-group-head" @click="toggleGroup(g.id)">
-                <el-icon :size="14" class="op-caret" :class="{ open: openGroups[g.id] }"><ArrowRight /></el-icon>
-                <el-icon :size="15" class="op-group-icon"><component :is="g.icon" /></el-icon>
-                <span class="op-group-name">{{ g.name }}</span>
-                <span class="op-group-count">{{ g.ops.length }} 项</span>
-                <el-tag v-if="riskCount(g)" type="danger" size="small" effect="plain">{{ riskCount(g) }} 项风险</el-tag>
-                <span class="op-group-hint">{{ g.hint }}</span>
-              </button>
-
-              <div v-show="openGroups[g.id]" class="op-list">
-                <div v-for="op in g.ops" :key="op.id" class="op-item">
-                  <div class="op-info">
-                    <div class="op-name-line">
-                      <span class="op-name">{{ op.name }}</span>
-                      <el-tag :type="op.risky ? 'danger' : 'info'" size="small" effect="plain">{{ op.risky ? '风险' : '普通' }}</el-tag>
-                      <el-tag v-if="!op.available" type="warning" size="small" effect="plain">暂不可用</el-tag>
-                      <el-tag v-if="op.needsParams" type="info" size="small" effect="plain">需参数</el-tag>
-                      <el-tag v-if="op.movedTo" type="primary" size="small">已移至上方直控</el-tag>
-                    </div>
-                    <div v-if="op.note" class="op-desc">{{ op.note }}</div>
-                    <div v-if="!op.available && op.reason" class="op-desc op-desc-warn">不可用原因：{{ op.reason }}</div>
-                    <!-- 不再把人支到生产页：本页现在就能填（2026-10-16 用户要求） -->
-                    <!-- movedTo 的条目右侧按钮是「去上方开关」，没有「填写参数」入口；
-                         再显示「点填写参数…」等于指着不存在的按钮（2026-10-20 实测），故排除。 -->
-                    <div v-else-if="op.needsParams && !op.movedTo" class="op-desc">该操作需要参数，点「填写参数」按后端 Schema 逐项填写后提交。</div>
-                  </div>
-                  <div class="op-right">
-                    <span v-if="opState(op.id).phase !== 'idle'" class="op-state">
-                      <i class="dot" :class="stateDot(opState(op.id).phase)"></i>{{ opState(op.id).text }}
-                    </span>
-                    <el-button v-if="op.movedTo" size="small" @click="scrollToMos">去上方开关</el-button>
-                    <el-button
-                      v-else
-                      size="small"
-                      :type="op.risky ? 'warning' : 'primary'"
-                      :plain="op.risky"
-                      :loading="opBusy(op.id)"
-                      :disabled="opBusy(op.id) || !op.available"
-                      @click="onOpClick(op)"
-                    >
-                      {{ !op.available ? '暂不可用' : op.needsParams ? '填写参数' : op.risky ? '确认后执行' : '执行' }}
-                    </el-button>
-                  </div>
-                  <el-alert v-if="opState(op.id).reason" type="error" :closable="false" class="op-reason" :title="opState(op.id).reason" />
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <CollapseBlock
-          block-id="history"
-          title="操作历史"
-          :summary="historyCollapseSummary"
-          :collapsible="isMobileViewport"
-          :lazy="true"
-          :open="collapse.isOpen('history')"
-          @toggle="collapse.toggle('history')"
-        >
-        <div class="card history-card">
-          <div class="card-head">
-            <span class="card-title">操作历史</span>
-            <span class="card-hint">审计线索 · 最近 {{ historyRows.length }} 条</span>
-          </div>
-          <div class="history-list">
-            <div v-for="h in historyRows" :key="h.id" class="history-item">
-              <div class="h-top">
-                <span class="h-type">{{ h.type }}</span>
-                <el-tag :type="resultTag(h.result)" size="small" effect="plain">{{ resultText(h.result) }}</el-tag>
-              </div>
-              <div class="h-content">{{ h.content }}</div>
-              <div class="h-meta">{{ h.time }}</div>
-            </div>
-            <div v-if="!historyRows.length" class="history-empty">暂无操作记录</div>
-          </div>
-        </div>
-        </CollapseBlock>
-      </section>
+      <!-- 受控操作（目录来自后端，按用途分组） + 操作历史（BmsOpsHistorySection）——
+           目录分组 / 执行状态机 / 参数表单 / 历史条目都在 useBmsOperations，本页只传展示数据与两个回调。 -->
+      <BmsOpsHistorySection
+        :total-ops="totalOps"
+        :op-groups="opGroups"
+        :open-groups="openGroups"
+        :toggle-group="toggleGroup"
+        :risk-count="riskCount"
+        :op-state="opState"
+        :op-busy="opBusy"
+        :on-op-click="onOpClick"
+        :catalog-error="catalogError"
+        :catalog-loading="catalogLoading"
+        :load-operations="loadOperations"
+        :history-rows="historyRows"
+        :history-collapse-summary="historyCollapseSummary"
+        :collapse="collapse"
+        :is-mobile-viewport="isMobileViewport"
+      />
     </main>
 
     <!-- 近期身份验证（后端 10 分钟窗口，缺失即 403 recent_auth_required） -->
@@ -598,28 +349,14 @@
     />
   </div>
 </template>
-
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
-import type { Component } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import {
-  PieChart, Odometer, DataLine, Lightning, Open, Lock,
-  CircleCheckFilled, WarningFilled, ArrowRight, InfoFilled,
-  Timer, Operation, SetUp, Tools, Document,
-} from '@element-plus/icons-vue'
-import MetricStatCard from '@/components/common/MetricStatCard.vue'
 // 页级时间窗（2026-11-12）：复用它而不是另写一套分段控件（TimeRangeSelectorUnified.spec 会红）
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { resolveTimeRange, useTimeRange } from '@/composables/useTimeRange'
 // 统一设备页头（逆变器 / BMS / 通用设备三页共用）：身份、标签、面包屑、操作组都由它渲染
 import DeviceHeader from '@/views/edge-device/shared/DeviceHeader.vue'
-// 实时数据首屏四态（加载/失败/数据/空态）纯函数：锁「加载中不得伪装成空数据」
-import {
-  REALTIME_FIRST_DATA_GRACE_MS,
-  resolveRealtimeViewState,
-  type RealtimeViewState,
-} from './realtimeViewState'
 // 参数化操作表单：按后端 input_schema 生成字段（boolean/enum/integer/string），
 // 复用生产页同一组件，避免"demo 自己做一套表单"再次造成风格与校验漂移。
 import ActionForm from '@/views/edge-device/shared/ActionForm.vue'
@@ -631,41 +368,27 @@ import ProtectionHistoryCard from './diag/ProtectionHistoryCard.vue'
 import TempTrendCard from './diag/TempTrendCard.vue'
 import SocCurrentCard from './diag/SocCurrentCard.vue'
 import { useCollapseState } from '@/composables/useCollapseState'
-// 电芯电压分布柱状图：直接复用旧 BMS 页的图表组件（业务逻辑不重写、不漂移）
-import BmsCellVoltageChart from '@/views/edge-device/bms/BmsCellVoltageChart.vue'
 import { feedback, extractErrorMessage } from '@/utils/feedback'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { haApi } from '@/api/homeassistant'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
-import { useRealtimeData } from '@/composables/useRealtimeData'
-import { useWebSocketStore } from '@/stores/websocket'
-import { useDeviceOperationStore } from '@/stores/deviceOperation'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useControlAction } from '@/composables/useControlAction'
-import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
-import { deviceOperationApi } from '@/api/deviceOperation'
-
-// ════════════ 通用小工具 ════════════
-const DASH = '—'
-function num(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-function fmt(v: number | null | undefined, digits: number): string {
-  return v === null || v === undefined || !Number.isFinite(v) ? DASH : v.toFixed(digits)
-}
-const pad2 = (n: number) => String(n).padStart(2, '0')
-function formatStamp(iso?: string | null): string {
-  if (!iso) return DASH
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return DASH
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' '
-    + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())
-}
-function hexOf(n: number): string {
-  return Math.round(n).toString(16).toUpperCase().padStart(2, '0')
-}
+// ── 2026-11-12 纯搬移式拆分：数据域进 composable、自包含卡片进子组件，本页只留页面级编排 ──
+// 页面级约定（§5 拆分纪律）：PageHeader / 路由参数解析 / 页级 composable 调用 / 折叠记忆 /
+// 页级时间窗 / 身份重验证弹窗 / 参数化表单弹窗 仍留在本文件；DOM 与文案逐字未变。
+import { useBmsRealtime } from './composables/useBmsRealtime'
+import { useBmsMosControl } from './composables/useBmsMosControl'
+import { useBmsOperations } from './composables/useBmsOperations'
+import type { ReauthTarget } from './composables/bmsOperationModel'
+import BmsMetricsRow from './components/BmsMetricsRow.vue'
+import BmsStatusCards from './components/BmsStatusCards.vue'
+import BmsCellVoltageCard from './components/BmsCellVoltageCard.vue'
+import BmsTemperatureCard from './components/BmsTemperatureCard.vue'
+import BmsOpsHistorySection from './components/BmsOpsHistorySection.vue'
+import { DASH, formatStamp, num, type TagType } from './bmsFormat'
 
 // ════════════ 路由 / 设备详情（edgeDeviceApi.getDetail） ════════════
 const route = useRoute()
@@ -678,6 +401,9 @@ const deviceId = computed(() => Number(route.params.id) || 0)
  * 默认折叠的 5 组：历史趋势（电芯历史+运行趋势）、保护触发历史、温度趋势、SOC 与电流、操作历史。
  * 默认全部收起，所以这里不传任何默认展开项。
  * （2026-10-21 用户要求移除「轮询间隔分布」与「实时数据流」两块，折叠项随之减少。）
+ *
+ * 2026-11-12 拆分边界：折叠对象仍由**页面**持有 —— 存储键 bms-collapse:<deviceId> 是页级约定，
+ * 子组件只拿到这个对象（操作历史的折叠块以 prop 透传），不各自再存一份。
  */
 const collapse = useCollapseState(() => deviceId.value)
 
@@ -727,7 +453,7 @@ const refreshing = ref(false)
  *
  * 为什么用 JS 判定而不是纯 CSS 媒体查询：
  *   页头在窄屏要把「同步到HA / 编辑 / 删除」收进 ⋯ 溢出菜单（少 3 个 DOM 按钮），
- *   这是**结构变化**，CSS 只能隐藏不能减少节点。用 `display:none` 藏起来的按钮
+ *   这是**结构变化**，CSS 只能隐藏不能减少节点。用 display:none 藏起来的按钮
  *   仍会被读屏与 Tab 顺序命中，属于可访问性缺陷。
  *   JS 判定后按结构渲染是干净的（与 DeviceHeader.vue 既有做法一致）。
  *
@@ -736,7 +462,7 @@ const refreshing = ref(false)
 const MOBILE_MAX = 768
 const isMobileViewport = ref(
   typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia(`(max-width: ${MOBILE_MAX}px)`).matches
+    ? window.matchMedia('(max-width: ' + MOBILE_MAX + 'px)').matches
     : false,
 )
 let mobileMql: MediaQueryList | null = null
@@ -748,6 +474,7 @@ const deviceName = computed(() => device.value?.name || DASH)
  * 顶部框架面包屑末段显示**设备名称**（2026-10-21 用户要求：不要「边缘设备详情」）。
  * 名称异步到达，watch 到就登记；卸载清空避免串页。
  * 用 device?.name（不是 deviceName：后者在加载期是占位符 DASH，不能拿去当面包屑）。
+ * 登记点必须留在页面（ChartPlotAlignment.spec 锁的就是本页这行 watch）。
  */
 const breadcrumbStore = useBreadcrumbStore()
 watch(
@@ -770,7 +497,6 @@ const deviceOnline = computed(() => {
   const s = device.value?.status
   return s === 'active' || s === 'online'
 })
-type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
 const DEVICE_STATUS_MAP: Record<string, { type: TagType; text: string }> = {
   active: { type: 'success', text: '在线' },
   online: { type: 'success', text: '在线' },
@@ -793,130 +519,42 @@ async function loadDetail() {
   }
 }
 
-// ════════════ 实时数据（useRealtimeData） ════════════
-const REALTIME_MAX_ITEMS = 200
-// 本页是独立 DEV 路由（不在 MainLayout 之下，而 WS 连接由 MainLayout 建立）。
-// 不在这里补一次 connect()，useRealtimeData 就永远收不到推送 —— 实时流会只剩快照兜底。
-const wsStore = useWebSocketStore()
+// ════════════ 实时数据（useBmsRealtime：快照兜底 + 首屏四态 + 字段派生） ════════════
 /**
- * 页头「实时连接」标签：与逆变器页/通用设备页同一口径（WS 已连接才显示）。
- * 改前自建页头没有这个状态位 —— 统一页头后补上，用户一眼能看出数据是否在推。
+ * 这一整段（快照兜底 /latest-values、四态 loading-error-empty-data、单体电压与温度的口径）
+ * 是**一个数据域**，2026-11-12 拆进 useBmsRealtime；页面只保留「什么时候调用」
+ * （onMounted / 切换设备 / 刷新 / 错误重试）。四态必须由页面统一驱动三块卡片
+ * （指标卡 / MOS+保护 / 电芯+温度），所以状态仍从页面往下发。
  */
-const wsConnected = computed(() => wsStore.isConnected)
-// 只消费 latestData（按 sensor_name 取值的字典）。dataItems（实时流列表）本页
-// 已于 2026-10-21 按用户要求移除渲染，不再解构 —— 留着会是一个永不被读的 ref。
-const { latestData } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
-
-/**
- * 挂载时用最新快照兜底（WS 尚无推送时不至于整页空白），口径同 useDeviceData。
- *
- * 2026-11-11 原始数据退役：原 `/latest-data`（device_data 最后一条原始记录）
- * 已随表删除，改读 `/latest-values`（每个传感器各自的最新值，跨命令聚合）。
- *
- * 这不是"换个地址拿同一份数据"，展示口径**变好了**：/latest-data 只含最后
- * 执行的那条命令的物理量，对 ASCII 一问一答设备（逆变器，9 条命令/周期）
- * 表现为"页面大部分是空的"；/latest-values 是全集。本页各指标卡本来就把
- * latestData 当「按 sensor_name 取值的字典」用（latestData.value?.cell_voltage_1
- * 之类），形状完全兼容。
- */
-async function loadLatestSnapshot() {
-  snapshotError.value = ''
-  snapshotLoading.value = true
-  try {
-    const values = await edgeDeviceApi.getLatestValues(deviceId.value)
-    if (values.length === 0) return
-    // 只取数值：/latest-values 的契约是 {sensor_name, value, unit, timestamp}。
-    //
-    // ⚠ 能力损失（方案 §3.1 已裁决，非本次引入）：字符串型读数
-    // （hardware_version="V19" / serial_number）原来只存在
-    // device_data.data_json.str_values 里，随表删除后无落库位置 ——
-    // 生产实测该字段全库 0 行，这条路径从未被走过，故不丢真实数据。
-    const parsed: Record<string, any> = {}
-    for (const v of values) parsed[v.sensor_name] = v.value
-    latestData.value = { ...(latestData.value ?? {}), ...parsed }
-    // 实时数据流只由 WebSocket 填充：快照是"现在各字段是多少"的点，
-    // 不是"刚收到了一帧"的事件。把快照包装成一条历史 item 塞进流里，
-    // 会凭空造出一条用户从未见过的"收到记录"（时间戳还是快照时刻）。
-    // 该列表已于 2026-10-21 按用户要求从页面移除，这里顺带删掉死写入。
-  } catch (e) {
-    // 快照只是兜底：失败不弹 toast，但原因常驻页面（WS 仍会带来数据）。
-    snapshotError.value = extractErrorMessage(e, '最新快照加载失败')
-  } finally {
-    snapshotLoading.value = false
-  }
-}
-const snapshotError = ref('')
-/** 最新快照请求在途（首屏骨架的判定信号之一；改前没有这个状态位） */
-const snapshotLoading = ref(false)
-/**
- * 快照是**兜底**请求（WS 才是主通道），它的失败不该把 axios 原文怼到用户脸上。
- * 生产实测：历史查询并发时 latest-data 会 10s 超时，页面就常驻一行
- * 「最新快照加载失败：timeout of 10000ms exceeded」—— 纯技术噪声。
- * 这里只保留「发生了什么 + 还能做什么」，原始信息不再展示（日志里仍有）。
- */
-const snapshotErrorText = computed(() => {
-  const raw = snapshotError.value
-  if (!raw) return ''
-  // 2026-10-21：「实时数据流」列表已按用户要求移除，但 WS 实时通道仍在 ——
-  // 文案不能再承诺「数据流仍会更新」（页面已无该列表），改为「通过实时连接更新数据」。
-  if (/timeout/i.test(raw)) return '最新快照请求超时（设备数据较多时偶发；页面仍会通过实时连接更新数据）'
-  if (/network|Network Error/i.test(raw)) return '最新快照请求失败：网络不可达（页面仍会通过实时连接更新数据）'
-  return '最新快照加载失败：' + raw
-})
-
-// ════════════ 实时数据首屏四态（2026-10-21 修复「加载中伪装成空数据」） ════════════
-/**
- * 用户真机反馈：刚进 BMS 页面时顶栏指标卡显示「—」、保护状态卡显示「暂无数据」+ 12 个
- * 「正常」、MOS 卡显示「尚无 fet_status 数据」，而真实状态是**还在加载**。
- * 把「未知」渲染成「空数据 / 正常 / 关断」是信息错误 —— 保护位尤其危险：
- * 「未知」被当成「正常」会让用户错过真实故障。
- *
- * 修法：用四态（与其它列表页同款、互斥）驱动三块卡片的渲染：
- *   loading → 骨架（不渲染「—」/「暂无数据」/「正常」徽标）
- *   error   → 独立错误文案 + 重试（绝不与空态共用文案）
- *   data    → 真实数据（保护位未知时显示「未知」而不是「正常」）
- *   empty   → 明确「设备未上报」，不是加载中
- */
-const hasRealtimeData = computed(() => !!latestData.value && Object.keys(latestData.value).length > 0)
-const firstDataGraceOver = ref(false)
-let firstDataGraceTimer: ReturnType<typeof setTimeout> | null = null
-/** 重新开始首帧宽限计时（首挂载 / 切换设备 / 手动重试时调用） */
-function startFirstDataGrace() {
-  firstDataGraceOver.value = false
-  if (firstDataGraceTimer) clearTimeout(firstDataGraceTimer)
-  firstDataGraceTimer = setTimeout(() => { firstDataGraceOver.value = true }, REALTIME_FIRST_DATA_GRACE_MS)
-}
-const realtimeState = computed<RealtimeViewState>(() => resolveRealtimeViewState({
-  hasData: hasRealtimeData.value,
-  snapshotLoading: snapshotLoading.value,
-  snapshotError: snapshotError.value,
-  graceOver: firstDataGraceOver.value,
-}))
-/** 加载中：三块卡片渲染骨架，**不渲染「—」/「暂无数据」/「正常」徽标** */
-const realtimeLoading = computed(() => realtimeState.value === 'loading')
-/** 失败：独立错误态 + 重试（与空态文案彻底分开） */
-const realtimeError = computed(() => realtimeState.value === 'error')
-/** 空态：宽限期已过、请求成功但设备确实没上报 —— 与「加载中」分开表达 */
-const realtimeEmpty = computed(() => realtimeState.value === 'empty')
-/** 重试：清掉错误、重新请求快照并重新给首帧宽限（WS 断线时顺带重连） */
-function retryRealtime() {
-  snapshotError.value = ''
-  startFirstDataGrace()
-  wsStore.connect()
-  void loadLatestSnapshot()
-}
-
-// ── 字段口径：单体电压 cell_voltage_N / 温度 temp_N（或 temperature_N） ──
-const cellCount = computed(() => {
-  const declared = num(latestData.value?.cell_count)
-  if (declared && declared > 0) return Math.min(32, Math.floor(declared))
-  let highest = 0
-  for (let i = 1; i <= 32; i++) {
-    if (num(latestData.value?.['cell_voltage_' + i] ?? latestData.value?.['cell_v_' + i]) !== null) highest = i
-  }
-  return highest
-})
-const cellCountLabel = computed(() => (cellCount.value > 0 ? cellCount.value + 'S' : DASH))
+const {
+  wsConnected,
+  connectRealtime,
+  latestData,
+  snapshotErrorText,
+  realtimeLoading,
+  realtimeError,
+  realtimeEmpty,
+  loadLatestSnapshot,
+  retryRealtime,
+  startFirstDataGrace,
+  resetRealtime,
+  disposeFirstDataGrace,
+  cellCountLabel,
+  cells,
+  totalVoltage,
+  maxCell,
+  minCell,
+  diff,
+  cellVoltages,
+  soc,
+  socProgress,
+  remainingCapacity,
+  currentDisplay,
+  currentHint,
+  voltageSubText,
+  capacitySubText,
+  temps,
+} = useBmsRealtime(deviceId)
 
 /**
  * 页头状态标签（在线/离线 … + 设备类型 · 串数）。
@@ -926,249 +564,83 @@ const headerTags = computed<Array<{ text: string; type: TagType; effect: 'plain'
   { text: statusTag.value.text, type: statusTag.value.type, effect: 'plain' },
   { text: deviceTypeLabel.value + ' · ' + cellCountLabel.value, type: 'info', effect: 'plain' },
 ])
-/** 页头面包屑：首段可点（DeviceHeader 用原生 button + router.push 承载，不是假可点） */
 
-interface CellVoltage { index: number; voltage: number }
-const cells = computed<CellVoltage[]>(() => {
-  const out: CellVoltage[] = []
-  for (let i = 1; i <= cellCount.value; i++) {
-    const v = num(latestData.value?.['cell_voltage_' + i] ?? latestData.value?.['cell_v_' + i])
-    if (v !== null) out.push({ index: i, voltage: v })
-  }
-  return out
-})
-const cellSum = computed(() => cells.value.reduce((a, b) => a + b.voltage, 0))
-const totalVoltage = computed(() => {
-  const declared = num(latestData.value?.total_voltage ?? latestData.value?.voltage)
-  if (declared !== null) return declared
-  return cells.value.length ? cellSum.value : null
-})
-const avgCell = computed(() => (totalVoltage.value !== null && cells.value.length ? totalVoltage.value / cells.value.length : null))
-const maxCell = computed<CellVoltage>(() =>
-  cells.value.length ? cells.value.reduce((a, b) => (b.voltage > a.voltage ? b : a)) : { index: 0, voltage: 0 })
-const minCell = computed<CellVoltage>(() =>
-  cells.value.length ? cells.value.reduce((a, b) => (b.voltage < a.voltage ? b : a)) : { index: 0, voltage: 0 })
-const diff = computed(() => maxCell.value.voltage - minCell.value.voltage)
-/** 供旧页 BmsCellVoltageChart 使用的纯数值序列 */
-const cellVoltages = computed(() => cells.value.map((c) => c.voltage))
-const soc = computed(() => num(latestData.value?.rsoc ?? latestData.value?.soc))
-const socProgress = computed(() => (soc.value === null ? undefined : Math.max(0, Math.min(100, Math.round(soc.value)))))
-const nominalCapacity = computed(() => num(latestData.value?.nominal_capacity))
-const remainingCapacity = computed(() => {
-  const declared = num(latestData.value?.remaining_capacity)
-  if (declared !== null) return declared
-  if (soc.value !== null && nominalCapacity.value !== null) return (soc.value / 100) * nominalCapacity.value
-  return null
-})
-const currentDisplay = computed(() => num(latestData.value?.current))
-const currentHint = computed(() => {
-  const c = currentDisplay.value
-  if (c === null) return '暂无电流数据'
-  if (c < 0) return '放电中（电流为负）'
-  if (c > 0) return '充电中（电流为正）'
-  return '无电流'
-})
-const voltageSubText = computed(() => {
-  if (cells.value.length) return cells.value.length + ' 串 · 平均 ' + fmt(avgCell.value, 3) + 'V'
-  if (cellCount.value) return cellCount.value + ' 串 · 单体电压未上报'
-  return DASH
-})
-const capacitySubText = computed(() => '/ ' + fmt(nominalCapacity.value, 0) + ' Ah 标称')
-
-// ── 温度探头 ──
-interface TempProbe { index: number; value: number; level: 'success' | 'warning' | 'danger'; text: string }
-function tempLevel(v: number): 'success' | 'warning' | 'danger' {
-  return v > 60 ? 'danger' : v > 45 ? 'warning' : 'success'
-}
-function tempText(v: number): string {
-  return v > 60 ? '过高' : v > 45 ? '偏高' : '正常'
-}
-const temps = computed<TempProbe[]>(() => {
-  const out: TempProbe[] = []
-  for (let i = 1; i <= 8; i++) {
-    const v = num(latestData.value?.['temp_' + i] ?? latestData.value?.['temperature_' + i])
-    if (v !== null) out.push({ index: i, value: v, level: tempLevel(v), text: tempText(v) })
-  }
-  return out
-})
-
-// 电芯电压分布改由旧页 BmsCellVoltageChart 渲染（自适应 Y 轴 + 上下限标注 + 标签降级），
-// 页面不再自带一套手绘柱状图。
-
-// ════════════ 诉求①：MOS 直控（真机 fet_status + set_mos_policy） ════════════
-const opStore = useDeviceOperationStore()
-const historyOps = computed<DeviceOperation[]>(() => opStore.histories.get(deviceId.value) ?? [])
-const catalog = computed<EffectiveAction[]>(() => opStore.catalogs.get(deviceId.value) ?? [])
-
-const mosPhase = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
-const mosError = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
-
-/**
- * 最近一次**真正携带** fet_status 的值（2026-10-15 实测缺陷修复）。
- *
- * 根因：latestData 是"**任意指令的最新一帧**"，不是"0x03 基本信息帧"。
- *   设备按各指令自己的间隔轮流上报，实测 60 次采样的帧分布：
- *     0x03 读取基本信息 45%（唯一含 fet_status）
- *     0xAA 保护次数 32% / 0x05 硬件版本 8% / 0x0F 综合 8% / 0x04 单体 7%（均不含）
- *   ⇒ 约 **47% 的时间**当前帧根本没有 fet_status。
- *
- * 改前把"本帧没这个字段"当成"MOS 关断"（effectiveFet 变 null ⇒ chargeOn=false），
- * 于是开关每几秒自己翻转，并在设备实际充电时显示「充电 MOS 关断」——
- * 这是**危险的信息错误**：用户会据此判断电池没在充电。
- *
- * 正确语义：该帧对 MOS **没有信息** ⇒ 保留上一次已知值，而不是解释为 false。
- * 启用 5 条轮询后非 0x03 帧占比升高，把该缺陷从偶发放大成显性。
- *
- * （另有一个模拟器侧缺陷已同时修复：0x0F 帧曾硬编码 fet_status=0，
- *   而 0x0F 是 0x03 的超集、同样会被解析 ⇒ 两条指令对同一字段给出矛盾取值。）
- */
-const lastFet = ref<number | null>(null)
-watch(() => latestData.value?.fet_status, (v) => {
-  const n = num(v)
-  if (n !== null) lastFet.value = n
-}, { immediate: true })
-// 设备切换时清空，避免把上一台设备的 MOS 状态当成新设备的
-watch(deviceId, () => { lastFet.value = null })
-
-/** fetStatus：优先本帧，其次最近一次携带该字段的帧（保证展示的是**已知**状态而非默认值） */
-const fetStatus = computed(() => num(latestData.value?.fet_status) ?? lastFet.value ?? 0)
-const hasFetStatus = computed(() => num(latestData.value?.fet_status) !== null || lastFet.value !== null)
-const fetHex = computed(() => hexOf(fetStatus.value))
-
-/**
- * 操作回执带来的**权威** fet_status（时序差桥接）。
- * 周期快照最长落后约 8s，若只等快照，会出现「报成功了开关却没动」。成功回执里带着
- * 写后回读的 fet_status，用它立即桥接；一旦周期帧也报出同一个值即撤掉桥接（自愈）。
- */
-const verifiedFet = ref<number | null>(null)
-watch(() => latestData.value?.fet_status, (live) => {
-  if (verifiedFet.value !== null && num(live) === verifiedFet.value) verifiedFet.value = null
-})
-/** 优先操作回执的权威值；否则用 fetStatus（已含 lastFet 兜底，不会因缺字段而塌陷） */
-const effectiveFet = computed(() => verifiedFet.value ?? (hasFetStatus.value ? fetStatus.value : null))
-const chargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 1) !== 0)
-const dischargeOn = computed(() => effectiveFet.value !== null && (effectiveFet.value & 2) !== 0)
-const canControlMos = computed(() => hasFetStatus.value && deviceOnline.value)
-
-const mosRows = computed(() => [
-  {
-    key: 'charge' as const,
-    name: '充电 MOS',
-    on: chargeOn.value,
-    phase: mosPhase.charge,
-    error: mosError.charge,
-    known: hasFetStatus.value,
-    hwOff: hasFetStatus.value && !chargeOn.value && protectionActive(0),
-    desc: !hasFetStatus.value
-      ? '尚未收到 fet_status 字段（状态未知，不等于关断）'
-      : chargeOn.value ? '允许充电 · fet_status bit0 = 1' : '禁止充电 · fet_status bit0 = 0',
-  },
-  {
-    key: 'discharge' as const,
-    name: '放电 MOS',
-    on: dischargeOn.value,
-    phase: mosPhase.discharge,
-    error: mosError.discharge,
-    known: hasFetStatus.value,
-    hwOff: hasFetStatus.value && !dischargeOn.value && (protectionActive(9) || protectionActive(10)),
-    desc: !hasFetStatus.value
-      ? '尚未收到 fet_status 字段（状态未知，不等于关断）'
-      : dischargeOn.value ? '允许放电 · fet_status bit1 = 1' : '禁止放电 · fet_status bit1 = 0',
-  },
-])
-
-/**
- * ⚠ 极性换算（唯一一处，模板/参数里禁止手写取反）。
- *
- * 协议参数字段是 charge_software_closed / discharge_software_closed —— 语义为
- * 「**软件关闭**位」；fet_status 的位语义是「**导通** = 1」，两者**反相**：
- * 要让 MOS 导通，必须把 software_closed 置 **false**。
- */
-function swClosed(conducting: boolean): boolean {
-  return !conducting
-}
-
-let mosKind: 'charge' | 'discharge' | null = null
-let activeCommandId = ''
-
+// ════════════ 受控操作 / MOS 直控 / 身份重验证（同一批回执，故一起装配） ════════════
 const ca = useControlAction(() => deviceId.value)
 const { lastError, reauthVisible, reauthPassword, reauthBusy, dispatch, retryAfterReauth, cancelReauth: cancelReauthAction, clearError } = ca
 
-type ReauthTarget = { type: 'mos'; which: 'charge' | 'discharge' } | { type: 'op'; id: string } | null
-let reauthTarget: ReauthTarget = null
+/** 重验证目标：MOS 直控与受控操作共用同一个「验证当前身份」弹窗（状态不在两个 composable 各存一份） */
+const reauthTarget = ref<ReauthTarget>(null)
 
-async function requestMosChange(which: 'charge' | 'discharge', target: boolean) {
-  if (mosPhase[which] !== '' || !canControlMos.value) return
-  const currentOn = which === 'charge' ? chargeOn.value : dischargeOn.value
-  if (currentOn === target) return
-  const name = which === 'charge' ? '充电 MOS' : '放电 MOS'
-  const action = target ? '导通' : '关断'
-  const effect = which === 'charge'
-    ? (target ? '导通后允许充电。' : '关断后禁止充电，充电回路会被切断。')
-    : (target ? '导通后允许放电。' : '关断后禁止放电，设备会停止输出。')
-  // 风险动作的最小确认：只有 确认 / 取消 两键，不填理由、不加必填项。
-  const ok = await feedback.confirmDanger(
-    '确认将' + name + '设为「' + action + '」？' + effect + '指令下发约需 1~2 秒，完成后自动回读 fet_status 校验。',
-    { title: 'MOS 直控 · ' + name + action, confirmText: '确认' + action, cancelText: '取消' },
-  )
-  if (!ok) return
-  await applyMos(which, target)
-}
+// 两个数据域各需对方一处：MOS 需要「页面发起命令后登记跟踪」，操作域需要把 set_mos_policy
+// 回执**转交**给 MOS（谁的状态谁维护）。用晚绑定表达，避免两个 composable 互相 import 成环：
+// 先建操作域（onMosReceipt 只在回执到达时才被调用），再建 MOS 域并回填 mosApi。
+let mosApi: ReturnType<typeof useBmsMosControl> | null = null
+const ops = useBmsOperations({
+  deviceId,
+  isMobileViewport,
+  dispatch,
+  clearError,
+  lastError,
+  reauthVisible,
+  reauthTarget,
+  onMosReceipt: (op) => mosApi?.handleReceipt(op),
+})
+const {
+  opGroups, totalOps, openGroups, toggleGroup, riskCount, opState, opBusy,
+  trackCommand, historyRows, historyCollapseSummary,
+  opFormVisible, opFormTarget, opFormCanRead, opFormReading, opFormPrefill,
+  onOpClick, submitOpForm, readOpFormValues,
+  catalogError, catalogLoading, loadOperations, resetOperations,
+  markSent: markOpSent, markFailed: markOpFailed, markCancelled: markOpCancelled,
+} = ops
+const mos = useBmsMosControl({
+  deviceId,
+  deviceOnline,
+  latestData,
+  dispatch,
+  clearError,
+  lastError,
+  reauthVisible,
+  reauthTarget,
+  trackCommand,
+})
+mosApi = mos
+const {
+  mosPhase, mosError, hasFetStatus, fetHex, chargeOn, dischargeOn, canControlMos,
+  requestMosChange, resetMos, markSent: markMosSent, markFailed: markMosFailed,
+} = mos
 
-async function applyMos(which: 'charge' | 'discharge', target: boolean) {
-  const name = which === 'charge' ? '充电 MOS' : '放电 MOS'
-  mosPhase[which] = '下发中'
-  mosError[which] = ''
-  mosKind = which
-  clearError()
-  // 两个位一起提交（协议要求两个字段都必填）：未操作的那个保持当前实际状态。
-  const ok = await dispatch('set_mos_policy', {
-    charge_software_closed: swClosed(which === 'charge' ? target : chargeOn.value),
-    discharge_software_closed: swClosed(which === 'discharge' ? target : dischargeOn.value),
-    priority: 'user',
-  }, true)
+/** 重验证通过后自动继续执行（令牌单次且绑定 params，由 useControlAction 重新 confirm）。 */
+async function doReauth() {
+  const target = reauthTarget.value
+  const ok = await retryAfterReauth()
   if (ok) {
-    mosPhase[which] = '已发送'
-    reauthTarget = null
-    trackCommand('set_mos_policy')
-  } else if (reauthVisible.value) {
-    reauthTarget = { type: 'mos', which }
-  } else {
-    mosPhase[which] = ''
-    mosError[which] = lastError.value || 'MOS 指令未能提交'
-    feedback.error(name + '指令未能提交：' + (lastError.value || '未知原因'))
+    if (target?.type === 'mos') {
+      markMosSent(target.which)
+      trackCommand('set_mos_policy')
+    } else if (target?.type === 'op') {
+      markOpSent(target.id)
+      trackCommand(target.id)
+    }
+    reauthTarget.value = null
+    return
+  }
+  if (!reauthVisible.value) {
+    if (target?.type === 'mos') markMosFailed(target.which, lastError.value || 'MOS 指令未能提交')
+    else if (target?.type === 'op') markOpFailed(target.id, lastError.value || '操作未能提交')
+    reauthTarget.value = null
   }
 }
 
-// ════════════ 诉求④：保护状态（12 位掩码） ════════════
-const PROTECTION_BITS: Array<{ bit: number; label: string }> = [
-  { bit: 0, label: '单体过压' },
-  { bit: 1, label: '单体欠压' },
-  { bit: 2, label: '整组过压' },
-  { bit: 3, label: '整组欠压' },
-  { bit: 4, label: '充电过温' },
-  { bit: 5, label: '充电低温' },
-  { bit: 6, label: '放电过温' },
-  { bit: 7, label: '放电低温' },
-  { bit: 8, label: '充电过流' },
-  { bit: 9, label: '放电过流' },
-  { bit: 10, label: '短路保护' },
-  { bit: 11, label: '前端 IC 错误' },
-]
-const hasProtectionData = computed(() => num(latestData.value?.protection_status) !== null)
-const protectionStatus = computed(() => num(latestData.value?.protection_status) ?? 0)
-const protHex = computed(() => hexOf(protectionStatus.value))
-// （2026-10-16 已删除 protectExpanded：用户要求保护明细默认展开、不留收起/展开交互）
-interface ProtectionBit { bit: number; label: string; active: boolean }
-const protectionBits = computed<ProtectionBit[]>(() =>
-  PROTECTION_BITS.map((p) => ({ ...p, active: protectionActive(p.bit) })),
-)
-/** 只有真的收到 protection_status 才谈「已触发」；未知时不得推断（未知 ≠ 全部正常） */
-const activeProtections = computed(() =>
-  hasProtectionData.value ? protectionBits.value.filter((p) => p.active) : [],
-)
-function protectionActive(bit: number): boolean {
-  return (protectionStatus.value & (1 << bit)) !== 0
+function cancelReauth() {
+  cancelReauthAction()
+  if (reauthTarget.value?.type === 'mos') {
+    markMosFailed(reauthTarget.value.which, lastError.value || '已取消（未执行 MOS 操作）')
+  } else if (reauthTarget.value?.type === 'op') {
+    markOpCancelled(reauthTarget.value.id, '已取消（未执行该操作）')
+  }
+  reauthTarget.value = null
 }
 
 // ════════════ 轮询指令配置（共享组件 CommandFrequencySection） ════════════
@@ -1195,451 +667,6 @@ function onUsageChange(payload: { enabled: number }) {
   enabledCount.value = payload.enabled
 }
 
-
-// ════════════ 受控操作（目录来自后端 catalogs） ════════════
-interface OpDef {
-  id: string
-  name: string
-  note: string
-  risky: boolean
-  requiresConfirmation: boolean
-  available: boolean
-  reason: string
-  needsParams: boolean
-  movedTo: boolean
-  /** 后端动作定义，参数化表单据此生成字段（input_schema） */
-  definition: ActionDefinition
-}
-interface OpGroup { id: string; name: string; hint: string; icon: Component; ops: OpDef[] }
-type OpPhase = 'idle' | 'sent' | 'running' | 'verifying' | 'success' | 'failed' | 'unknown' | 'cancelled'
-interface OpState { phase: OpPhase; text: string; reason: string }
-
-/** 分组只是展示层归属（目录本身不含分组），成员按 action id 归属；未列出的归入「其他操作」。 */
-const OP_GROUP_DEFS: Array<{ id: string; name: string; hint: string; icon: Component; ids: string[] }> = [
-  {
-    id: 'read', name: '读取信息', hint: '一次性读取，不改设备配置', icon: Document,
-    ids: ['read_basic_info', 'read_cell_voltage', 'read_hardware_version', 'read_comprehensive', 'read_protection_count', 'read_custom_attributes', 'read_test_mos_status'],
-  },
-  {
-    id: 'diag', name: '诊断与测试', hint: '不写入参数，用于现场排障', icon: Tools,
-    ids: ['find_car', 'test_charge_mos', 'test_discharge_mos'],
-  },
-  {
-    id: 'runtime', name: '运行控制', hint: '直接影响设备当前运行状态', icon: Operation,
-    ids: ['set_mos_policy', 'force_balance', 'clear_alarm', 'auto_test_edv', 'bms_restart'],
-  },
-  {
-    id: 'param', name: '参数与标定', hint: '读取 / 写入厂内参数，需进厂模式', icon: SetUp,
-    ids: ['read_protection_parameters', 'read_system_parameters', 'write_protection_parameters', 'write_system_parameters', 'write_custom_attributes', 'write_internal_resistance', 'write_sn'],
-  },
-  {
-    id: 'timer', name: '时间与上报设置', hint: '改变设备行为参数', icon: Timer,
-    ids: ['set_static_correction_time', 'set_report_interval', 'set_charge_time_window', 'set_discharge_time_limit'],
-  },
-]
-
-function toOp(action: EffectiveAction): OpDef {
-  const def = action.definition
-  const properties = Object.keys(def.input_schema?.properties ?? {})
-  return {
-    id: def.id,
-    name: def.name,
-    note: def.description || '',
-    risky: def.risk_level === 'elevated',
-    requiresConfirmation: def.requires_confirmation === true,
-    available: action.available,
-    reason: action.reason || '',
-    needsParams: properties.length > 0,
-    movedTo: def.id === 'set_mos_policy',
-    definition: def,
-  }
-}
-
-const opGroups = computed<OpGroup[]>(() => {
-  if (!catalog.value.length) return []
-  const byId = new Map(catalog.value.map((a) => [a.definition.id, a]))
-  const claimed = new Set<string>()
-  const groups: OpGroup[] = []
-  for (const g of OP_GROUP_DEFS) {
-    const ops = g.ids
-      .map((id) => byId.get(id))
-      .filter((a): a is EffectiveAction => !!a)
-      .map(toOp)
-    if (!ops.length) continue
-    for (const o of ops) claimed.add(o.id)
-    groups.push({ id: g.id, name: g.name, hint: g.hint, icon: g.icon, ops })
-  }
-  const rest = catalog.value.filter((a) => !claimed.has(a.definition.id)).map(toOp)
-  if (rest.length) groups.push({ id: 'other', name: '其他操作', hint: '目录中未归类的操作', icon: Operation, ops: rest })
-  return groups
-})
-const totalOps = computed(() => catalog.value.length)
-// 窄屏默认全部收起（桌面保持「运行控制」展开）：
-// 「运行控制」5 条指令展开就是 762px，把「始终可见」预算顶穿；
-// 而 MOS/直控开关已经上移到页首主位，不需要再从清单里翻。
-// 每条目只有在用户点开分组后才渲染（v-show），展开后条条目也已网格化（~78px/条）。
-const openGroups = reactive<Record<string, boolean>>({ runtime: !isMobileViewport.value })
-function toggleGroup(id: string) {
-  openGroups[id] = !openGroups[id]
-}
-function riskCount(g: OpGroup): number {
-  return g.ops.filter((o) => o.risky).length
-}
-function catalogName(actionId: string): string {
-  const hit = catalog.value.find((a) => a.definition.id === actionId)
-  return hit?.definition.name || actionId
-}
-
-const opStates = reactive<Record<string, OpState>>({})
-// 预初始化：render 期间不写响应式状态（避免渲染中改 dep 触发递归更新）。
-watch(catalog, (list) => {
-  for (const a of list) {
-    if (!opStates[a.definition.id]) opStates[a.definition.id] = { phase: 'idle', text: '', reason: '' }
-  }
-}, { immediate: true })
-function opState(id: string): OpState {
-  const existing = opStates[id]
-  if (existing) return existing
-  const created: OpState = { phase: 'idle', text: '', reason: '' }
-  opStates[id] = created
-  return created
-}
-function setPhase(id: string, phase: OpPhase, text: string) {
-  const st = opState(id)
-  st.phase = phase
-  st.text = text
-}
-function opBusy(id: string): boolean {
-  const p = opState(id).phase
-  return p === 'sent' || p === 'running' || p === 'verifying'
-}
-function stateDot(phase: OpPhase): string {
-  switch (phase) {
-    case 'success': return 'dot-green'
-    case 'failed': return 'dot-red'
-    case 'unknown': return 'dot-orange'
-    case 'cancelled': return 'dot-orange'
-    default: return 'dot-blue'
-  }
-}
-
-/** 执行状态 → 中文（不暴露 QUEUED/VERIFYING 等内部枚举）。 */
-const OPERATION_UI: Record<OperationStatus, { phase: OpPhase; text: string }> = {
-  QUEUED: { phase: 'sent', text: '已发送' },
-  DISPATCHED: { phase: 'running', text: '已下发' },
-  DEVICE_ACCEPTED: { phase: 'running', text: '设备已收到' },
-  VERIFYING: { phase: 'verifying', text: '校验中' },
-  SUCCEEDED: { phase: 'success', text: '成功' },
-  FAILED: { phase: 'failed', text: '失败' },
-  UNKNOWN: { phase: 'unknown', text: '结果未知' },
-  CANCELLED: { phase: 'cancelled', text: '已取消' },
-}
-
-const notified = new Set<string>()
-function notifyOnce(op: DeviceOperation, fn: () => void) {
-  const key = op.command_id + ':' + op.status
-  if (notified.has(key)) return
-  notified.add(key)
-  fn()
-}
-
-const TERMINAL: OperationStatus[] = ['SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED']
-
-/** 把一条真实操作回执映射到页面状态（失败原因常驻，成功用权威回读桥接）。 */
-function applyOperationToUi(op: DeviceOperation) {
-  const ui = OPERATION_UI[op.status]
-  const terminal = TERMINAL.includes(op.status)
-
-  if (op.action_id === 'set_mos_policy') {
-    const kind = mosKind
-    if (kind) mosPhase[kind] = terminal ? '' : ui.text
-    notifyOnce(op, () => {
-      const label = kind === 'charge' ? '充电 MOS' : '放电 MOS'
-      if (op.status === 'SUCCEEDED') {
-        if (kind) mosError[kind] = ''
-        // 用回执里的权威 fet_status 立即桥接，抹掉"成功但开关没动"的窗口。
-        const verified = (op.verified_result ?? []).find((v) => v.name === 'fet_status')
-        if (typeof verified?.value === 'number') verifiedFet.value = verified.value
-        feedback.success(label + '操作成功（已回读校验）')
-      } else if (op.status === 'FAILED') {
-        const reason = readableFinalReason(op.final_reason) || '设备未接受或回读不一致'
-        if (kind) mosError[kind] = reason
-        feedback.error(label + '操作失败：' + reason)
-      } else if (op.status === 'UNKNOWN') {
-        if (kind) mosError[kind] = '操作结果未知；请先核对当前 MOS 状态，勿重复提交。'
-        feedback.warning(label + '操作结果未知，请核对当前状态')
-      } else if (op.status === 'CANCELLED') {
-        if (kind) mosError[kind] = '操作已取消'
-        feedback.warning(label + '操作已取消')
-      }
-    })
-    return
-  }
-
-  const st = opState(op.action_id)
-  if (op.status === 'SUCCEEDED') {
-    setPhase(op.action_id, 'success', '成功')
-    st.reason = ''
-  } else if (op.status === 'FAILED') {
-    setPhase(op.action_id, 'failed', '失败')
-    st.reason = readableFinalReason(op.final_reason) || '设备未接受或回读校验不一致'
-  } else if (op.status === 'UNKNOWN') {
-    setPhase(op.action_id, 'unknown', '结果未知')
-    st.reason = '观察类操作无法以 ACK 判定成功；请等待设备重新上线后在设备详情页确认。'
-  } else if (op.status === 'CANCELLED') {
-    setPhase(op.action_id, 'cancelled', '已取消')
-    st.reason = '操作已取消'
-  } else {
-    setPhase(op.action_id, ui.phase, ui.text)
-  }
-  notifyOnce(op, () => {
-    const name = catalogName(op.action_id)
-    if (op.status === 'SUCCEEDED') feedback.success('「' + name + '」执行成功')
-    else if (op.status === 'FAILED') feedback.error('「' + name + '」失败：' + (readableFinalReason(op.final_reason) || '回读校验不一致'))
-    else if (op.status === 'UNKNOWN') feedback.warning('「' + name + '」结果未知：请等待设备重新上线')
-  })
-}
-
-/** 记录本次页面发起的命令，只跟踪它自己的回执（不把历史遗留操作当成本次结果）。 */
-function trackCommand(actionId: string) {
-  const op = historyOps.value.find((o) => o.action_id === actionId)
-  if (!op) return
-  activeCommandId = op.command_id
-  applyOperationToUi(op)
-}
-watch(historyOps, (list) => {
-  if (!activeCommandId) return
-  const op = list.find((o) => o.command_id === activeCommandId)
-  if (op) applyOperationToUi(op)
-})
-
-/**
- * 参数化操作表单（2026-10-16 用户要求："参数与标定功能应该参数化显示，可修改保存"）。
- *
- * 改前带参数的操作（参数与标定全组、诊断/运行/时间组共 12 项）按钮一律置灰，
- * 只给一句"请到设备详情页填写"—— 在评审页等于不可用。
- * 现在复用生产页同一份 ActionForm：字段直接由后端 definition.input_schema 生成
- * （boolean→开关、enum→下拉、integer→带上下限的数字框、string→文本框），
- * 必填与范围也在同一处校验，不再有第二套表单导致的规则漂移。
- *
- * 提交流程：填参数 →（若为高风险动作）极简确认 → dispatch(带参数)。
- * 风险动作后端强制单次令牌，仍由 useControlAction 内部处理重验证。
- */
-const opFormVisible = ref(false)
-const opFormTarget = ref<OpDef | null>(null)
-
-function onOpClick(op: OpDef) {
-  if (op.movedTo || !op.available) return
-  if (op.needsParams) {
-    opFormTarget.value = op
-    // 每次打开都清掉上一次的读取结果，避免把 A 动作的值带进 B 动作的表单
-    opFormPrefill.value = null
-    opFormVisible.value = true
-    return
-  }
-  void runOp(op)
-}
-
-function submitOpForm(params: Record<string, unknown>) {
-  const op = opFormTarget.value
-  opFormVisible.value = false
-  if (!op) return
-  void runOp(op, params)
-}
-
-/* ══════════ 读取现有值 → 回填表单（2026-10-16 用户要求） ══════════
-   用户原话："参数应该先读取现有值，弹窗内取消最左边增加'读取'"。
-
-   为什么必须有：写入类动作的参数表动辄 15/30/33 项（保护参数 / 系统参数 / 内阻表），
-   空白手填既慢又极易填错；而这些值设备本来就有，读一次就能拿到。
-   这里把「写入动作」配对到「读动作」——后端命名是一一对应的
-   （write_protection_parameters ↔ read_protection_parameters 等），
-   按 write_→read_ 推导并**要求该读动作在当前目录里存在且可用**，
-   不存在就不显示「读取」按钮（避免给出一个点了没反应的按钮）。
-
-   结果取回：读动作以 verified_result 返回 [{name, value}]，
-   字段名与写入 schema 完全对应（实测 read_protection_parameters 回 23 项，
-   cell_ov_protect / cell_uv_delay / chg_ot_protect 等与写表单同名）。 */
-
-const opFormReading = ref(false)
-const opFormPrefill = ref<Record<string, unknown> | null>(null)
-
-/** 写入动作对应的读动作 id；没有可用读动作时返回空串 ⇒ 不显示「读取」按钮 */
-function readActionFor(writeId: string): string {
-  if (!writeId.startsWith('write_')) return ''
-  const candidate = 'read_' + writeId.slice('write_'.length)
-  const hit = catalog.value.find((a) => a.definition.id === candidate && a.available)
-  return hit ? candidate : ''
-}
-
-const opFormCanRead = computed(() => !!opFormTarget.value && !!readActionFor(opFormTarget.value.id))
-
-/** 轮询该读操作的终态并取回 verified_result（有界等待，失败返回 null） */
-async function waitReadResult(readId: string): Promise<Record<string, unknown> | null> {
-  for (let i = 0; i < 20; i++) {
-    await new Promise((r) => setTimeout(r, 1000))
-    const list = await deviceOperationApi.list(deviceId.value)
-    const op = list.find((o) => o.action_id === readId)
-    if (!op) continue
-    if (['QUEUED', 'DISPATCHED', 'DEVICE_ACCEPTED', 'VERIFYING'].includes(op.status)) continue
-    if (op.status !== 'SUCCEEDED') return null
-    const out: Record<string, unknown> = {}
-    for (const v of op.verified_result ?? []) {
-      if (v.string_value !== undefined && v.string_value !== '') out[v.name] = v.string_value
-      else out[v.name] = v.value
-    }
-    return Object.keys(out).length ? out : null
-  }
-  return null
-}
-
-async function readOpFormValues() {
-  const op = opFormTarget.value
-  if (!op || opFormReading.value) return
-  const readId = readActionFor(op.id)
-  if (!readId) return
-  opFormReading.value = true
-  opFormPrefill.value = null
-  clearError()
-  try {
-    // 是否取确认令牌必须**按该读动作自己的 requires_confirmation**，不能写死 true：
-    //   read_protection_parameters / read_sn 是 elevated ⇒ 需要令牌；
-    //   read_internal_resistance 是单步 low-risk 读 ⇒ **不需要**令牌，此时若仍去
-    //   申请，后端直接 409 "confirmation is not required for this action"，读取静默失败。
-    // 读取不改设备，两种情况下都不额外弹本地确认框。
-    const readAction = catalog.value.find((a) => a.definition.id === readId)
-    const ok = await dispatch(readId, {}, readAction?.definition.requires_confirmation === true)
-    if (!ok) {
-      feedback.error('读取现有值失败：' + (lastError.value || '未知原因'))
-      return
-    }
-    const values = await waitReadResult(readId)
-    if (!values) {
-      feedback.error('已下发读取，但未取回可用值（设备未响应或读取被拒）')
-      return
-    }
-    opFormPrefill.value = values
-    feedback.success('已读取设备现有值，共 ' + Object.keys(values).length + ' 项，可直接修改后提交')
-  } catch (e) {
-    feedback.error('读取现有值失败：' + String(e))
-  } finally {
-    opFormReading.value = false
-  }
-}
-
-async function runOp(op: OpDef, params: Record<string, unknown> = {}) {
-  // ⚠ 不再因 needsParams 直接 return —— 参数由 ActionForm 收集后传入（2026-10-16 用户要求
-  // "参数与标定功能应该参数化显示，可修改保存"）。原实现把带参数的操作一律挡在门外，
-  // 且 dispatch 传的是空对象 {}，即使绕过去也必然被后端 schema 拒绝。
-  if (op.movedTo || !op.available) return
-  const st = opState(op.id)
-  st.reason = ''
-  clearError()
-  if (op.risky || op.requiresConfirmation) {
-    // 后端对高风险动作强制单次确认令牌（useControlAction 内部走 confirm），这里再补一次极简确认。
-    const ok = await feedback.confirmDanger(
-      '确认执行「' + op.name + '」？该操作会影响设备运行参数，执行后自动回读校验。',
-      { title: '受控操作 · ' + op.name, confirmText: '确认执行', cancelText: '取消' },
-    )
-    if (!ok) return
-  }
-  setPhase(op.id, 'sent', '已发送')
-  const ok = await dispatch(op.id, params, op.requiresConfirmation)
-  if (ok) {
-    reauthTarget = null
-    trackCommand(op.id)
-  } else if (reauthVisible.value) {
-    reauthTarget = { type: 'op', id: op.id }
-  } else {
-    setPhase(op.id, 'failed', '失败')
-    st.reason = lastError.value || '操作未能提交'
-    feedback.error('「' + op.name + '」未能提交：' + (lastError.value || '未知原因'))
-  }
-}
-
-/** 重验证通过后自动继续执行（令牌单次且绑定 params，由 useControlAction 重新 confirm）。 */
-async function doReauth() {
-  const target = reauthTarget
-  const ok = await retryAfterReauth()
-  if (ok) {
-    if (target?.type === 'mos') {
-      mosPhase[target.which] = '已发送'
-      trackCommand('set_mos_policy')
-    } else if (target?.type === 'op') {
-      setPhase(target.id, 'sent', '已发送')
-      trackCommand(target.id)
-    }
-    reauthTarget = null
-    return
-  }
-  if (!reauthVisible.value) {
-    if (target?.type === 'mos') {
-      mosPhase[target.which] = ''
-      mosError[target.which] = lastError.value || 'MOS 指令未能提交'
-    } else if (target?.type === 'op') {
-      const st = opState(target.id)
-      setPhase(target.id, 'failed', '失败')
-      st.reason = lastError.value || '操作未能提交'
-    }
-    reauthTarget = null
-  }
-}
-
-function cancelReauth() {
-  cancelReauthAction()
-  if (reauthTarget?.type === 'mos') {
-    mosPhase[reauthTarget.which] = ''
-    mosError[reauthTarget.which] = lastError.value || '已取消（未执行 MOS 操作）'
-  } else if (reauthTarget?.type === 'op') {
-    const st = opState(reauthTarget.id)
-    setPhase(reauthTarget.id, 'cancelled', '已取消')
-    st.reason = '已取消（未执行该操作）'
-  }
-  reauthTarget = null
-}
-
-function scrollToMos() {
-  const el = document.querySelector('.mos-card')
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-// ════════════ 操作历史（审计线索，来自 store.histories） ════════════
-type HistoryResult = 'success' | 'failed' | 'unknown' | 'cancelled'
-interface HistoryRow { id: string; time: string; type: string; content: string; result: HistoryResult }
-/** 后端 reason 里会出现 final_succeeded / final_failed 这类内部令牌，转成中文或交给回读摘要。 */
-function readableFinalReason(reason?: string): string {
-  if (!reason) return ''
-  if (reason === 'final_failed') return '设备未接受或回读校验不一致'
-  if (reason === 'final_succeeded') return ''
-  return reason
-}
-function verifiedSummary(op: DeviceOperation): string {
-  return (op.verified_result ?? [])
-    .filter((v) => !v.name.endsWith('_ack'))
-    .slice(0, 3)
-    .map((v) => v.name + '=' + (v.string_value || v.value) + (v.unit || ''))
-    .join(', ')
-}
-const historyRows = computed<HistoryRow[]>(() => {
-  // store.apply 在 REST 合并时会 unshift，数组顺序不保证「新的在前」；显式按时间倒序，
-  // 保证「最近 N 条」真的是最近的（否则 slice(0,30) 会留下最老的 30 条）。
-  const ordered = [...historyOps.value].sort((a, b) => {
-    const ta = Date.parse(a.updated_at || a.completed_at || a.created_at || '')
-    const tb = Date.parse(b.updated_at || b.completed_at || b.created_at || '')
-    return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta)
-  })
-  return ordered.slice(0, 30).map((op) => {
-    const detail = op.manual_resolution?.reason || readableFinalReason(op.final_reason) || verifiedSummary(op)
-    return {
-      id: op.command_id,
-      time: formatStamp(op.manual_resolution?.resolved_at || op.completed_at || op.updated_at || op.created_at),
-      type: op.action_id === 'set_mos_policy' ? 'MOS 直控' : '受控操作',
-      content: catalogName(op.action_id) + (detail ? ' — ' + detail : ''),
-      result: op.status === 'SUCCEEDED' ? 'success' : op.status === 'FAILED' ? 'failed' : op.status === 'CANCELLED' ? 'cancelled' : 'unknown',
-    }
-  })
-})
-
 // ════════════ 折叠态摘要（§3.2：折叠不是隐藏信息，标题行要留一行关键结论） ════════════
 /** 历史趋势：压差 + 总电压，两个最常用的判读量 */
 const chartsCollapseSummary = computed(() => {
@@ -1648,47 +675,14 @@ const chartsCollapseSummary = computed(() => {
   if (totalVoltage.value !== null) parts.push('总电压 ' + totalVoltage.value.toFixed(2) + 'V')
   return parts.join(' · ')
 })
-const historyCollapseSummary = computed(() => '最近 ' + historyRows.value.length + ' 条')
-
-function resultTag(r: HistoryResult): TagType {
-  return r === 'success' ? 'success' : r === 'failed' ? 'danger' : r === 'cancelled' ? 'info' : 'warning'
-}
-function resultText(r: HistoryResult): string {
-  return r === 'success' ? '成功' : r === 'failed' ? '失败' : r === 'cancelled' ? '已取消' : '结果未知'
-}
-
-// ════════════ 受控操作目录加载 ════════════
-const catalogReady = ref(false)
-const catalogError = ref('')
-const catalogLoading = computed(() => !catalogReady.value)
-async function loadOperations() {
-  catalogReady.value = false
-  catalogError.value = ''
-  try {
-    await opStore.refresh(deviceId.value)
-  } catch (e) {
-    catalogError.value = extractErrorMessage(e, '受控操作目录加载失败')
-  } finally {
-    catalogReady.value = true
-  }
-}
 
 // ════════════ 刷新 / 生命周期 ════════════
 function resetDeviceScopedState() {
-  snapshotError.value = ''
-  snapshotLoading.value = false
-  startFirstDataGrace()
-  mosPhase.charge = ''
-  mosPhase.discharge = ''
-  mosError.charge = ''
-  mosError.discharge = ''
-  mosKind = null
-  activeCommandId = ''
-  verifiedFet.value = null
-  reauthTarget = null
-  Object.keys(opStates).forEach((k) => {
-    opStates[k] = { phase: 'idle', text: '', reason: '' }
-  })
+  // 三个数据域各自复位（快照错误/首帧宽限、MOS 在途态与权威回读、操作执行态与跟踪目标）
+  resetRealtime()
+  resetMos()
+  resetOperations()
+  reauthTarget.value = null
 }
 
 async function refreshAll() {
@@ -1709,6 +703,7 @@ async function refreshAll() {
 
 // ════════════ 设备级操作（同步到 HA / 编辑 / 删除 / 返回）════════════
 // 2026-10-17 由 demo 转正时补回：demo 是视觉稿没有这些入口，但生产页必须有。
+// 2026-11-12 拆分边界：这些入口是页头的**页面级**操作（DeviceHeader 事件直连），留在页面。
 
 /** 返回列表。用 push 而不是 back()：详情页可能是直接打开/刷新进入的，
  *  此时 history 里没有上一页，back() 会退出站点。 */
@@ -1805,12 +800,12 @@ watch(deviceId, () => {
 onMounted(() => {
   // 监听视口变化：横竖屏切换、桌面窗口缩放时页头要在「4 按钮」与「刷新+⋯」间切换
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    mobileMql = window.matchMedia(`(max-width: ${MOBILE_MAX}px)`)
+    mobileMql = window.matchMedia('(max-width: ' + MOBILE_MAX + 'px)')
     mobileMql.addEventListener('change', onMobileChange)
     isMobileViewport.value = mobileMql.matches
   }
   // connect() 幂等：已连接/连接中会直接返回，不会打断 MainLayout 建立的连接。
-  wsStore.connect()
+  connectRealtime()
   startFirstDataGrace()
   void loadDetail()
   void loadLatestSnapshot()
@@ -1821,12 +816,15 @@ onUnmounted(() => {
   // 必须解绑：不解绑会在路由切换后留下指向已销毁组件的监听，属于内存泄漏
   mobileMql?.removeEventListener('change', onMobileChange)
   mobileMql = null
-  if (firstDataGraceTimer) clearTimeout(firstDataGraceTimer)
-  firstDataGraceTimer = null
+  disposeFirstDataGrace()
 })
 </script>
 
 <style scoped>
+/* 页面自有样式：页面骨架、流式行基座、页级时间窗条、窄屏通栏带（band/bleed），
+   以及仍留在本页的诊断区/折叠块规则。
+   卡片基座与"卡片带"在 components/bmsDetail.shared.css（本文件末尾引入，且必须是最后一个
+   style 块）；各张卡自身的样式随卡片进了 components/*.vue。 */
 /* ══════════ 页面骨架 ══════════ */
 /**
  * ⚠ 本页是**独立 DEV 路由**（不在 MainLayout 之下），因此必须自己提供滚动容器。
@@ -1912,212 +910,20 @@ onUnmounted(() => {
    避免"卡片被拉高但内容仍挤在顶部"的空旷感 */
 .row > .card { display: flex; flex-direction: column; }
 .row > .card > .card-head { flex-shrink: 0; }
-/* 需要撑满剩余高度的内容区（列表/网格）显式声明，未声明者按内容高度、自然留白 */
-.row > .card > .op-groups,
-.row > .card > .history-list { flex: 1 1 auto; min-height: 0; }
-
-/*
-  四个指标卡：等权重自动折行。
-
-  ⚠ flex-basis 与 min-width 的取值有实测依据（2026-10-20 二次复审修正）：
-    v2 用 flex-basis:140 / min-width:0 → 在 **769~809px** 区间容器约 473px，
-    140*3 + gap32 = 452 < 473 ⇒ 排成 3+1，每张仅 147px ⇒ 「8.34Ah」「51.71V」
-    被省略号吃掉（实测 63>33 / 67>33）。769px 只比 768px 宽 1px 就崩，属悬崖式回归。
-    修正：basis 回到 160、min-width 回到 150（放不下就折成 2 列而不是硬塞 3 列），
-    窄屏 2 列由下方 @media (max-width:768px) 显式接管。 */
-.metrics > .metric-card { flex: 1 1 160px; min-width: 150px; }
 
 /* 各组按设计意图给大/小卡不同的基准宽度；窄屏自动堆叠 */
-.mos-protect > .mos-card      { flex-basis: 380px; min-width: 320px; }
-.mos-protect > .protect-card  { flex-basis: 520px; min-width: 340px; }
-.cell-chart-row > .cell-card  { flex: 1 1 100%; }   /* 图表卡独占一行 */
 .diag-row > .card            { flex: 1 1 100%; }   /* 新增诊断卡同样独占一行（图表宽度优先） */
-.temp-row > .temp-card         { flex: 1 1 100%; }   /* 与 .op-groups 同宽，内部 auto-fill 决定列数 */
 /* 2026-10-21：该行原为「实时数据流 + 轮询指令配置」并排，数据流移除后
    轮询配置独占整行（若仍沿用 380px 基准，宽屏下会被压成一条窄条）。
    2026-10-22：轮询配置改用共享组件 CommandFrequencySection（根元素 .command-frequency-card），
    它是组件根节点、带本页 scoped 属性，故此处选择器可直接命中。 */
 .stream-poll > .command-frequency-card { flex: 1 1 100%; min-width: 0; margin-top: 0; }
-.ops-history > .ops-card      { flex-basis: 600px; min-width: 400px; }
-.ops-history > .history-card  { flex-basis: 320px; min-width: 300px; }
-
-/* ══════════ 卡片语言（沿用 .card / card-head） ══════════ */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: 16px 20px;
-  min-width: 0;
-}
-.card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
-.card-hint { font-size: 12px; color: var(--el-text-color-secondary); }
-.head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.card-note { margin: 0 0 12px; font-size: 12px; line-height: 1.7; color: var(--el-text-color-secondary); }
-.card-note code { font-size: 11px; background: var(--el-fill-color-light); border-radius: 3px; padding: 1px 5px; }
-.card-note b { color: var(--el-text-color-primary); }
-.card-footnote { margin: 12px 0 0; font-size: 12px; line-height: 1.7; color: var(--el-text-color-secondary); }
-.card-footnote b { color: var(--el-text-color-primary); }
-.mono-badge { font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 11px; color: var(--el-text-color-secondary); background: var(--el-fill-color-light); border-radius: 4px; padding: 2px 8px; }
-.alert-detail { margin-top: 4px; font-size: 12px; line-height: 1.6; }
-.inline-alert { margin: 8px 0; }
-
-/* ── 实时数据四态：骨架 / 错误占位（2026-10-21 修复「加载中伪装成空数据」） ──
-   加载中只出骨架与「正在加载…」，错误态固定给独立文案 + 重试；
-   骨架高度略小于真实内容，数据到达后由卡片自身高度兜住，避免页面跳动。 */
-.realtime-alert { margin-bottom: 12px; }
-.realtime-state { padding: 6px 0 2px; }
-.realtime-state-note {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--el-text-color-secondary);
-}
-/* MOS 状态未知时图标用中性色：既不是「导通」也不是「关断」 */
-.mos-icon.is-unknown { color: var(--el-text-color-secondary); }
-.page-error { margin-bottom: 16px; }
-.txt-warning { color: var(--el-color-warning); }
-.txt-danger { color: var(--el-color-danger); }
-.txt-secondary { color: var(--el-text-color-regular); }
-.link-btn { border: none; background: none; padding: 0; margin-left: auto; color: var(--el-color-primary); cursor: pointer; font-size: 12px; }
-.link-btn:hover { text-decoration: underline; }
-
-/* ══════════ MOS 直控 ══════════ */
-.mos-item { border-top: 1px solid var(--el-border-color-lighter); padding-top: 8px; margin-top: 8px; }
-.mos-item:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
-.mos-row { display: flex; align-items: center; gap: 12px; min-height: 48px; }
-.mos-row.is-applying { opacity: 0.72; }
-.mos-icon { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: var(--radius-sm); background: var(--el-fill-color-light); flex-shrink: 0; }
-.mos-icon.is-on { color: var(--el-color-success); }
-.mos-icon.is-off { color: var(--el-text-color-secondary); }
-.mos-main { flex: 1; min-width: 0; }
-.mos-name-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mos-name { font-size: 14px; font-weight: 600; }
-.mos-desc { margin-top: 3px; font-size: 12px; color: var(--el-text-color-secondary); }
-.mos-switch { flex-shrink: 0; }
-.mos-manual-note { margin-top: 8px; }
-.hw-off-note { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--el-color-warning); }
-
-/* ══════════ 保护状态 ══════════ */
-.protect-compact { display: flex; align-items: center; gap: 8px; padding: 6px 0; flex-wrap: wrap; }
-.protect-compact-text { font-size: 13px; font-weight: 500; }
-/* 流式：12 项明细按可用宽度自动决定列数（窄屏 2 列 / 宽屏 4 列以上），
-   而不是写死 3 列 —— 写死会让窄屏每格过窄、宽屏留白过多。 */
-.protect-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
-.protect-item {
-  display: flex; align-items: center; gap: 6px; padding: 8px 10px;
-  background: var(--el-fill-color-lighter); border: 1px solid transparent;
-  border-radius: var(--radius-sm); min-width: 0;
-}
-.protect-item.active { background: var(--el-color-danger-light-9); border-color: var(--el-color-danger-light-5); }
-.protect-name { font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.protect-bit { font-size: 11px; color: var(--el-text-color-secondary); font-family: 'SF Mono', Consolas, Monaco, monospace; }
-
-/* ══════════ 电芯电压分布（图表复用旧页 BmsCellVoltageChart） ══════════ */
-.cell-summary { font-size: 12px; color: var(--el-text-color-secondary); }
-/* 固定高度：图表异步渲染不得改变卡片高度（本页依赖 overflow-anchor:none 防跳动）。
-   图表卡独占一行（.cell-chart-row），不再有"同排矮卡"要迁就，故恢复到 300px 的可读高度。 */
-.cell-chart-host { height: 300px; }
-.cell-chart-empty { height: 300px; display: flex; align-items: center; justify-content: center; color: var(--el-text-color-secondary); font-size: 12px; }
-.cell-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--el-text-color-secondary); }
-.lg { display: inline-flex; align-items: center; gap: 5px; }
-.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-/* 与 BmsCellVoltageChart 口径一致：正常=成功色，>3.6V=告警色，<3.0V=危险色 */
-.swatch-normal { background: var(--el-color-success); }
-.swatch-high { background: var(--el-color-warning); }
-.swatch-danger { background: var(--el-color-danger); }
-.cell-thresholds { margin-left: auto; }
-
-/* ══════════ 温度 ══════════ */
-/* 流式：温度卡按宽度自适应列数（写死 2 列在窄屏会挤成两行文字）。 */
-.temp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-.temp-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--el-fill-color-lighter); border-radius: var(--radius-sm); min-width: 0; }
-.temp-label { font-size: 12px; color: var(--el-text-color-regular); white-space: nowrap; }
-.temp-value { font-size: 16px; font-weight: 600; margin-left: auto; white-space: nowrap; }
-.temp-value.is-success { color: var(--el-color-success); }
-.temp-value.is-warning { color: var(--el-color-warning); }
-.temp-value.is-danger { color: var(--el-color-danger); }
-
-/* 实时数据流区块已按用户要求移除（2026-10-21）；.stream-empty 仍被其它空态复用 */
-.stream-empty { padding: 40px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
-
-/* ══════════ 受控操作 ══════════ */
-.state-legend { font-size: 12px; color: var(--el-text-color-secondary); }
-.op-groups { display: flex; flex-direction: column; gap: 8px; }
-.op-group { border: 1px solid var(--el-border-color-lighter); border-radius: var(--radius-sm); overflow: hidden; }
-.op-group-head {
-  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px;
-  padding: 8px 12px; border: none; background: var(--el-fill-color-lighter);
-  cursor: pointer; text-align: left; font-size: 13px; color: var(--el-text-color-primary);
-}
-.op-group-head:hover { background: var(--el-fill-color-light); }
-.op-caret { color: var(--el-text-color-secondary); transition: transform 0.2s; }
-.op-caret.open { transform: rotate(90deg); }
-.op-group-icon { color: var(--el-color-primary); }
-/*
-  中文标签必须禁逐字断行（2026-10-20 移动端实测）：
-  390px 下分组头只有 290px，图标/caret/计数/风险标签/提示 挤占后，
-  「读取信息」被逐字拆成 4 行（49×38px，像竖排），分组头高 54~73px 参差。
-  用 word-break: keep-all 保证中文词不被拆开，再用 flex-wrap 让整块换行。
-*/
-.op-group-name { font-weight: 600; word-break: keep-all; white-space: nowrap; }
-.op-group-count { font-size: 12px; color: var(--el-text-color-secondary); white-space: nowrap; flex-shrink: 0; }
-.op-group-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-left: auto; word-break: keep-all; }
-.op-list { display: flex; flex-direction: column; }
-.op-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--el-border-color-lighter); flex-wrap: wrap; }
-.op-info { flex: 1; min-width: 220px; }
-.op-name-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.op-name { font-size: 13px; font-weight: 500; }
-.op-desc { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 3px; line-height: 1.6; }
-.op-desc-warn { color: var(--el-color-warning); }
-.op-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.op-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--el-text-color-regular); }
-.op-reason { flex-basis: 100%; margin: 4px 0 0; }
-.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
-.dot-green { background: var(--el-color-success); }
-.dot-red { background: var(--el-color-danger); }
-.dot-orange { background: var(--el-color-warning); }
-.dot-blue { background: var(--el-color-primary); }
-
-/* ══════════ 操作历史 ══════════ */
-.history-list { display: flex; flex-direction: column; gap: 8px; max-height: 520px; overflow-y: auto; }
-.history-item { padding: 10px 12px; background: var(--el-fill-color-lighter); border-radius: var(--radius-sm); }
-.h-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.h-type { font-size: 12px; font-weight: 600; }
-.h-content { font-size: 12px; color: var(--el-text-color-regular); margin-top: 4px; line-height: 1.6; word-break: break-word; }
-.h-meta { font-size: 11px; color: var(--el-text-color-secondary); margin-top: 4px; }
-.history-empty { padding: 24px 12px; text-align: center; color: var(--el-text-color-secondary); font-size: 12px; }
-
-/* ══════════ 身份重验证 ══════════ */
-.dialog-note { margin: 0 0 12px; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
 
 /* ══════════ 响应式 ══════════ */
 /* 流式布局下 .row 已是 flex —— 换行由 flex-basis / min-width 自动决定，
    下面这些 grid-template-columns 覆盖在 flex 容器上已**完全失效**
    （留着会让后人以为窄屏重排还靠它，属于误导性死代码），故改为收窄大卡基准宽度，
    让"大小卡并排"更早变成堆叠。 */
-@media (max-width: 1200px) {
-  .mos-protect > .protect-card,
-  .ops-history > .ops-card { flex-basis: 420px; }
-}
-/* 平板/窄桌面（769~1100）：指标卡固定 2 列。
-   为什么需要单独一档：这个区间容器宽度刚好能塞下 3 张 160px 的卡，
-   但每张只剩 ~147px，数值会被省略号吃掉（复审实测 N1）。宁可 2 列宽松，
-   不要 3 列挤爆。 */
-@media (max-width: 1100px) {
-  .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
-  /*
-    保护项在 1100 以下：2 列（原来是无条件单列）。
-
-    原来单列的原因：2 列时 820/1024 会把「前端 IC 错误」截断 18~19px。
-    但那是**旧实现只给 name 一段固定宽度 + nowrap 省略号**导致的。
-    现在 name 允许折行（见下），2 列不会截断，且比单列省一半高度。
-    3 列留给手机（≤768px，见该断点）。
-  */
-  .protect-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
-}
 
 /*
   桌面：页头卡片必须与内容卡片同一条左右边界。
@@ -2158,6 +964,9 @@ onUnmounted(() => {
     margin-right: 24px;
   }
 }
+
+/* ══════════ 身份重验证 ══════════ */
+.dialog-note { margin: 0 0 12px; font-size: 13px; line-height: 1.7; color: var(--el-text-color-regular); }
 
 @media (max-width: 768px) {
   /*
@@ -2203,8 +1012,9 @@ onUnmounted(() => {
     border-left: 0;
     border-right: 0;
   }
-  /* 带壳：区块内卡片去圆角/左右描边/阴影，统一 10px 12px 内距 */
-  .page-body > .row .card,
+  /* 带壳：区块内卡片去圆角/左右描边/阴影，统一 10px 12px 内距。
+     .page-body > .row .card 的同名规则在 bmsDetail.shared.css：子组件内的卡片只会被
+     子组件自己的 scoped 副本命中，故两条各放一处；这里只保留直接挂在 .collapse-block 下的卡片。 */
   .page-body > .collapse-block .card {
     border-radius: 0;
     border-left: 0;
@@ -2220,8 +1030,9 @@ onUnmounted(() => {
   /* 保护触发历史不是图表（CSS 条形 + 30 天档），画布内距归零后它的文字会贴边 ⇒ 单独补 12px */
   #collapse-body-protection-history .diag-body { padding: 0 var(--gutter-x); }
 
-  /* 图表卡：横向内距归零，画布自己贴边（.card.diag-card 三个类，压过 .row .card 的同名属性） */
-  .page-body .card.diag-card { padding: 10px 0; }
+  /* 图表卡：横向内距归零，画布自己贴边 —— 该规则与"带壳"规则同特异性（0,4,0），
+     原本靠"后写的赢"；拆开后带壳规则进了 bmsDetail.shared.css，故这条也随它搬过去，
+     保证层叠顺序与拆分前一致（详见该文件同名注释）。 */
   /* 指标区：4 个 tile 是行的直接子项（没有 .card 外壳），行自己做带并给 12px 内距 */
   .row.metrics {
     padding: 10px var(--gutter-x);
@@ -2231,6 +1042,7 @@ onUnmounted(() => {
     border-right: 0;
     border-radius: 0;
   }
+  .row.metrics { gap: 8px; }
   /* 裸折叠块本身也是「带」 */
   .page-body > .collapse-block {
     background: var(--card-bg);
@@ -2283,244 +1095,30 @@ onUnmounted(() => {
     line-height: 17px;
   }
   .bms-sub > span { white-space: nowrap; }
-
-  .card { padding: 14px 12px; }
-  .head-right { margin-left: 0; }
-  /* 折叠头已经写了区块名，展开后卡片自己的标题就是重复内容（用户点名「顶部重复内容」）：
-     窄屏隐藏这两个标题文本（卡片头的标签/按钮全部保留，不会被一起藏掉）。 */
-  .history-card > .card-head > .card-title { display: none; }
-
-  /* ── 电芯电压分布：477 → ≈200px ──
-     393px 下每根柱只有 ~24px，柱顶标签已降级为「只标越界/极值」，
-     300px 高的图里大半是空白；卡头（最高/最低/压差）在 393px 会折成 3 行，图例也折 2 行。
-     压法：图区 112px + 卡头 2 行 + 图例 1 行 + 脚注收起。
-     最高/最低/压差全部保留（不截断），信息一条不少。 */
-  .cell-chart-host, .cell-chart-empty { height: 112px; }
-  .cell-card > .card-head { flex-wrap: wrap; row-gap: 2px; margin-bottom: 6px; }
-  .cell-summary { font-size: 11px; line-height: 16px; }
-  .cell-legend { gap: 8px; margin-top: 6px; font-size: 10px; }
-  /* 「点击柱体可查看精确值」是触摸交互的提示，手机上点柱子本身即可发现，收起省 20px */
-  .cell-card > .card-footnote { display: none; }
-
   /* ── 新增诊断卡（保护触发历史 / 温度趋势 / SOC 与电流 / 轮询间隔分布）──
      ① 折叠块占满一行：它是 .row 的 flex 子项，不给 basis 会按内容宽做「窄条」；
      ② 卡片头在窄屏整块隐藏：折叠头已经写了区块名，两级同名标题就是用户点名的「顶部重复内容」。
         组件内容区自带工具行（时间范围选择器 / 弹层触发器），不会因此丢控件。 */
   .diag-row > .collapse-block { flex: 1 1 100%; min-width: 0; }
   .diag-card > .card-head { display: none; }
-  /* 操作历史：折叠头已是「操作历史 · 最近 N 条」，卡内「审计线索 · 最近 N 条」同屏重复 */
-  .history-card > .card-head { display: none; }
-  /* 「参考线 3.000V / 3.600V」与图例里「偏高 > 3.600V / 偏低 < 3.000V」是同一组阈值的重复表述，
-     窄屏只保留图例（它带色块，能直接对上柱子颜色），省一行 16px。 */
-  .cell-thresholds { display: none; }
-
-  /* ── 温度探头：240 → ≈170px ──
-     桌面 auto-fill 在 295px 下退化成 1 列（minmax 150px × 2 > 295），4 个探头竖排 160px。
-     窄屏固定 2 列、数值与状态同排，行高 44px（触摸目标不变）。 */
-  .temp-card > .card-head { margin-bottom: 6px; }
-  .temp-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-  .temp-item { padding: 6px 8px; gap: 6px; }
-  .temp-label { font-size: 11px; }
-  .temp-value { font-size: 15px; }
-  .temp-item :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 4px; }
-  .temp-card > .card-footnote { font-size: 10px; margin-top: 6px; }
-  .cell-thresholds { margin-left: 0; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
-  .mos-switch, .op-group-head { min-height: 44px; }
-  /* ── 受控操作：折叠分层后默认 1280 → ~370px ──
-     ① 卡头那句「状态文案：已发送 → 执行中 → …」是状态机词表，窄屏要占 4 行 55px；
-        每条操作执行后就地显示圆点+状态词，失败还有红色原因条，所以移动端只留标题+计数；
-     ② 分组头：名称行 + 提示行（提示区分「只读」「会改运行状态」「需进厂模式」，
-        是执行前的风险预判，不能删），内距压到 4px 让每条正好 44px 触摸目标；
-     ③ 条目网格化：桌面是「信息块 220px + 右侧按钮」的 flex，窄屏会折成 3~4 行（实测 152px/条），
-        改成「名称+标签 | 按钮」一行、说明独占整行。 */
-  .ops-card .state-legend { display: none; }
-  .op-groups { gap: 6px; }
-  .op-group-head { flex-wrap: wrap; row-gap: 1px; align-items: center; gap: 6px; padding: 4px 10px; }
-  .op-group-hint { margin-left: 0; flex-basis: 100%; font-size: 11px; line-height: 15px; }
-  .op-item {
-    display: grid;
-    /* 动作列定宽 88px：用 auto 时按钮宽度随文案变（执行 44 / 填写参数 84 / 确认后执行 99），
-       每行按钮起点都不一样，视觉上像「浮在右边」；定宽后 5 行按钮左边缘对齐。 */
-    grid-template-columns: minmax(0, 1fr) 88px;
-    column-gap: 8px;
-    row-gap: 2px;
-    align-items: center;
-    padding: 8px 10px;
-  }
-  .op-info { display: contents; }
-  .op-name-line { grid-column: 1; grid-row: 1; }
-  .op-desc { grid-column: 1 / -1; margin-top: 0; font-size: 11px; line-height: 16px; }
-  .op-right { grid-column: 2; grid-row: 1; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
-  /* 判别标签（风险/普通/需参数/暂不可用）降一档：默认尺寸在 393px 下会把名称行挤成 3 行 */
-  .op-name-line :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 4px; }
-  .op-right :deep(.el-button) { padding: 0 8px; font-size: 12px; }
-  .op-reason { grid-column: 1 / -1; margin: 2px 0 0; }
-
-  /* ── 指标卡：窄屏 2×2（此前是 1 列 × 4 行，白占 386px 高度） ──
-     用 flex-basis 50% 而非 grid：与上面的 .row 流式模型保持一致。
-     实测目标：区块 226 → ≤180px（4 张卡 2 行，每行约 82px）。 */
-  .metrics > .metric-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
-  .row.metrics { gap: 8px; }
-
-  /*
-    指标卡内部再压一档：MetricStatCard 的移动端样式是按"卡片独占一行"设计的
-    （padding 8px 4px + 图标 34px），2×2 之后每张只有 ~186px 宽，
-    「SOC 剩余电量」「剩余容量」这类 5 字标签 + 数值 + 副文本会显得拥挤。
-      ① 收紧左内距（图标靠边）；
-      ② 图标 34→28px，给文字腾 6px；
-      ③ 数值 20→18px、标签 13→12px，保证「51.76V」这类四位数不折行。
-  */
-  /*
-    同一行两张卡必须等高：实测出现 83 / 76 两种高度（SOC 卡有 progress 多 6px，
-    总电压卡只有一行副文本）。虽然 flex 的 align-items:stretch（继承自 .row.metrics）
-    已经让底边对齐，但**卡片自身高度仍不同**，视觉上像"一张卡悬空"。
-    这里给固定 min-height 让两张卡实体等高，内容少的居中。
-  */
-  .row.metrics :deep(.metric-card) { padding: 8px 6px; gap: 8px; min-height: 84px; }
-  .row.metrics :deep(.metric-icon) { width: 28px; height: 28px; border-radius: 7px; }
-  .row.metrics :deep(.metric-icon .el-icon) { font-size: 18px; }
-  .row.metrics :deep(.metric-label) { font-size: 12px; }
-  .row.metrics :deep(.metric-value) { font-size: 18px; }
-  .row.metrics :deep(.metric-unit) { font-size: 12px; }
-  .row.metrics :deep(.metric-sub) { font-size: 11px; line-height: 16px; }
-  .row.metrics :deep(.metric-aux) { height: auto; min-height: 16px; margin-top: 2px; }
-
-  /*
-    极窄屏（≤360px）改回单列：2 列时每张仅 116px，
-    「SOC 剩余电量」「充电中（电流为正）」这类标签/副文本会被压到折行或截断。
-    360px 以下本身已是小屏设备，单列可读性优先于紧凑度。
-  */
-  @media (max-width: 360px) {
-    .metrics > .metric-card { flex: 1 1 100%; }
-  }
-
   /* ── 硬 min-width 在窄屏必须清零 ──
      根因（实测）：.ops-card { min-width: 400px }、.command-frequency-card（旧 .poll-card）等在
      等在 318px 的容器里**不能收缩**（min-width 是硬底线），于是卡片宽 400、
      整页 el-main scrollWidth 432 > clientWidth 382，页面可以横向拖动。
      桌面端这些 min-width 用于保证"卡片不会被压到不可读"，窄屏已经是单列堆叠，
-     不需要它们 —— 清零后卡片跟随容器 100% 宽。 */
-  .row > .card,
-  .mos-protect > .mos-card,
-  .mos-protect > .protect-card,
-  .stream-poll > .command-frequency-card,
-  .ops-history > .ops-card,
-  .ops-history > .history-card {
+     不需要它们 —— 清零后卡片跟随容器 100% 宽。
+     （2026-11-12 拆分：卡片侧的同名规则随卡片进了 bmsDetail.shared.css 与各子组件，
+       这里只留页面自己持有的 CommandFrequencySection 根节点。） */
+  .stream-poll > .command-frequency-card {
     flex: 1 1 100%;
     min-width: 0;
   }
-
-  /*
-    保护网格：窄屏单列。
-    实测：2 列时每项 ≤153px，name+tag+bit 挤不下，「短路保护」→「短路…」、
-    「前端 IC 错误」→「前端 …」。保护名是关键信息，绝不能截断。
-    单列断点从 768 提到 1100（复审：820px 与 1024px 下 2 列仍截「前端 IC 错误」
-    18~19px）——1100px 以下统一单列，宽度充裕后再回 2 列。
-  */
-  /*
-    ══════════ 保护状态：3 列紧凑网格（670px → 目标 ≤250px）══════════
-
-    现状问题（实测 393px）：单列布局，12 项 × 44px 触控高 = 670px，
-    占 0.77 屏；每项内部「名称 + 正常标签 + bitN」三段横排，
-    而右侧还有大片空白（卡片 321px 但内容只用到 295px）。
-
-    关键决策：**bitN 在移动端隐藏，名称必须保留**。
-    理由：bitN 是给工程师对寄存器用的次要信息，名称才是用户判断"哪项保护"的依据；
-    用户此前明确批评"短路保护被截成短路…"。两者冲突时保名称、舍 bitN。
-    桌面端 bitN 保留（空间够）。
-
-    3 列而非 2 列：实测每格 ~103px 恰好放得下 4 字名称（12px 字号），
-    2 列会浪费宽度、1 列就是现状。
-  */
-  .protect-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 4px;
-    margin-top: 4px;
-  }
-  .protect-item {
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1px;
-    padding: 4px 3px;
-    /* 名称 15 + gap 1 + 标签 16 + 上下内距 8 = 40px，仍高于 WCAG 的 24px 下限 */
-    min-height: 40px;
-  }
-  .protect-name {
-    /* 名称必须完整可读：允许折行，不用省略号 */
-    white-space: normal;
-    overflow: visible;
-    text-overflow: clip;
-    text-align: center;
-    font-size: 12px;
-    line-height: 15px;
-    flex: none;
-    width: 100%;
-  }
-  /* bitN 收起（移动端）；桌面端仍显示 */
-  .protect-bit { display: none; }
-  /* 「正常/已触发」标签收紧，不再单独占一行高度 */
-  .protect-item :deep(.el-tag) {
-    height: 16px;
-    line-height: 14px;
-    padding: 0 4px;
-    font-size: 11px;
-  }
-
-  /*
-    移动端把「12 项保护均未触发（bit0 – bit11 全 0）」这行摘要收掉 30px。
-
-    为什么可以收：卡片头已有「全部正常」绿标签 + protection_status = 0x00 徽章，
-    这句是同义重复，而它正是超出 250px 目标的那部分。
-
-    ⚠ 只收「全正常」这一种（.is-all-normal），**「暂无 protection_status 数据」
-      必须保留** —— 那是"采不到数据"的重要提示，藏掉等于让用户以为一切正常，
-      属 fail-open。有保护触发时走另一分支，也不受影响。
-  */
-  .protect-compact.is-all-normal { display: none; }
-
-  /*
-    卡片头压缩 47 → ~28px：
-    393px 下「保护状态 + 全部正常标签 + protection_status = 0x00 徽章」放不下，
-    徽章被挤到第二行（monospace 长串换行占 20px）。
-
-    ⚠ 隐藏的是**徽章**不是标签：
-      · 「全部正常 / N 项保护已触发 / 暂无数据」标签保留（这是用户要看的结论）；
-      · `protection_status = 0x00` 是给工程师对寄存器用的原始值，
-        移动端属于"开发者文案"（用户明确批评过这类内容），且完整值在
-        protectionBits 的 12 格里已逐位体现。桌面端保留。
-  */
-  .protect-card .card-head { margin-bottom: 6px; }
-  .protect-card .card-head .mono-badge { display: none; }
-  .protect-card .card-head { min-height: 0; padding-bottom: 0; }
-
-  /*
-    ══════════ MOS 直控：364px → 目标 ≤200px ══════════
-
-    移动端收起三段**说明性长文本**，保留全部操作元素（2 个开关 + 状态标签）：
-      ① .card-note（"充电/放电回路通断的软件策略 set_mos_policy。开关即时下发…"4 行）
-         —— 解释机制，用户点一下开关就能理解，属"首次阅读才有价值"的内容；
-      ② .card-footnote（"关断是正常工况而非故障…"）
-         —— 解释配色决策，同理；
-      ③ mono-badge（fet_status = 0x03）—— 原始寄存器值，工程师用，同保护卡处置。
-
-    ⚠ 不收起：mos-name（充电/放电 MOS）、状态标签（导通/关断）、
-      mos-desc（允许充电/允许放电）、开关本身、错误 alert、不可控提示。
-      这些是操作与状态，一个都不能少。
-  */
-  .mos-card .card-note,
-  .mos-card .card-footnote,
-  .mos-card .card-head .mono-badge { display: none; }
-  .mos-card .card-head { margin-bottom: 8px; }
-  .mos-row { padding: 8px 0; }
-  .mos-icon { width: 28px; height: 28px; }
-  .mos-name { font-size: 14px; }
-  .mos-desc { font-size: 11px; }
-
 }
+
 @media (pointer: coarse) {
-  .mos-switch, .op-group-head { min-height: 44px; }
   .page-body .el-button:not(.is-circle) { min-height: 44px; }
 }
 </style>
+
+<style scoped src="./components/bmsDetail.shared.css"></style>
