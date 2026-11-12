@@ -28,38 +28,14 @@
     </div>
 
     <!-- 工具栏 -->
-    <el-card class="toolbar-card" shadow="hover">
-      <div class="filter-bar">
-        <div class="filter-left">
-          <el-input
-            v-model="searchKeyword"
-            placeholder="搜索模板名称..."
-            prefix-icon="Search"
-            clearable
-            class="search-input"
-            @input="handleSearch"
-          />
-          
-          <el-select v-model="typeFilter" placeholder="设备类型" clearable class="filter-select">
-            <template #prefix>
-              <el-icon><Grid /></el-icon>
-            </template>
-            <el-option v-for="t in deviceTypeOptions" :key="t.value" :label="t.label" :value="t.value" />
-          </el-select>
-          
-          <el-select v-model="hardwareFilter" placeholder="硬件类型" clearable class="filter-select">
-            <el-option label="UART" value="uart" />
-            <el-option label="I2C" value="i2c" />
-            <el-option label="SPI" value="spi" />
-            <el-option label="ADC" value="adc" />
-          </el-select>
-          
-          <el-select v-model="statusFilter" placeholder="状态" clearable class="filter-select">
-            <el-option label="启用" value="active" />
-            <el-option label="禁用" value="inactive" />
-          </el-select>
-        </div>
-        
+    <DeviceConfigToolbar
+      v-model:keyword="searchKeyword"
+      v-model:type="typeFilter"
+      v-model:hardware="hardwareFilter"
+      v-model:status="statusFilter"
+      @search="handleSearch"
+    >
+      <template #actions>
         <div class="filter-right">
           <el-button @click="importConfig">
             <el-icon><Upload /></el-icon>
@@ -74,8 +50,8 @@
             新建模板
           </el-button>
         </div>
-      </div>
-    </el-card>
+      </template>
+    </DeviceConfigToolbar>
 
     <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
       <span class="active-filters-label">当前筛选：</span>
@@ -93,9 +69,9 @@
          这里按仓库惯例（DataSourceList.vue:102 等）用 v-loading，与下方
          `v-if="!loading && ..."` 的空态口径一致。 -->
     <div class="config-grid" v-loading="loading" data-test="config-grid">
-      <el-card 
-        v-for="config in filteredConfigs" 
-        :key="config.id" 
+      <el-card
+        v-for="config in filteredConfigs"
+        :key="config.id"
         class="config-card"
         :class="{ inactive: config.status === 'inactive' }"
         shadow="hover"
@@ -115,43 +91,9 @@
             </el-tag>
           </div>
         </div>
-        
-        <div class="card-body">
-          <div class="spec-list">
-            <div class="spec-item">
-              <span class="label">设备类型</span>
-              <el-tag size="small">{{ getDeviceTypeLabel(config.device_type) }}</el-tag>
-            </div>
-            
-            <div class="spec-item">
-              <span class="label">通信协议</span>
-              <el-tag v-if="config.protocol" :type="config.protocol === 'modbus' ? 'primary' : 'info'" size="small">
-                {{ config.protocol.toUpperCase() }}
-              </el-tag>
-              <span v-else class="text-muted">-</span>
-            </div>
-            
-            <div class="spec-item">
-              <span class="label">总线类型</span>
-              <el-tag :type="getHardwareTagType(config.hardware_type)" size="small">{{ getHardwareLabel(config.hardware_type) }}</el-tag>
-            </div>
-            
-            <div class="spec-item" v-if="config.config">
-              <span class="label">参数配置</span>
-              <div class="params-preview">
-                <el-tag 
-                  v-for="(v, k) in getParamsPreview(config.config)" 
-                  :key="k" 
-                  size="small" 
-                  type="info"
-                >
-                  {{ k }}: {{ v }}
-                </el-tag>
-              </div>
-            </div>
-          </div>
-        </div>
-        
+
+        <DeviceConfigCardSpecs :config="config" />
+
         <div class="card-footer">
           <el-button size="small" @click="handlePreview(config)">
             <el-icon><View /></el-icon>
@@ -170,18 +112,7 @@
               <el-icon><MoreFilled /></el-icon>
             </el-button>
             <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="setDefault" :disabled="config.is_default">
-                  设为默认
-                </el-dropdown-item>
-                <el-dropdown-item command="toggle">
-                  {{ config.status === 'active' ? '禁用' : '启用' }}
-                </el-dropdown-item>
-                <el-dropdown-item command="export">导出配置</el-dropdown-item>
-                <el-dropdown-item command="delete" divided>
-                  <span style="color: var(--el-color-danger);">删除</span>
-                </el-dropdown-item>
-              </el-dropdown-menu>
+              <DeviceConfigCardMoreMenu :config="config" />
             </template>
           </el-dropdown>
         </div>
@@ -214,26 +145,7 @@
     </div>
 
     <!-- 预览对话框 -->
-    <el-dialog v-model="previewVisible" title="配置预览" width="640px">
-      <el-descriptions v-if="previewConfig" :column="2" border>
-        <el-descriptions-item label="模板名称">{{ previewConfig.name }}</el-descriptions-item>
-        <el-descriptions-item label="状态">
-          <el-tag :type="previewConfig.status === 'active' ? 'success' : 'info'">
-            {{ previewConfig.status === 'active' ? '启用' : '禁用' }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="设备类型">{{ getDeviceTypeLabel(previewConfig.device_type) }}</el-descriptions-item>
-        <el-descriptions-item label="硬件类型">{{ getHardwareLabel(previewConfig.hardware_type) }}</el-descriptions-item>
-        <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() || UNKNOWN }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ formatTime(previewConfig.created_at) }}</el-descriptions-item>
-        <el-descriptions-item label="描述" :span="2">{{ previewConfig.description || '无' }}</el-descriptions-item>
-      </el-descriptions>
-      
-      <div v-if="previewConfig?.config" class="config-json">
-        <h4>配置参数 (JSON)</h4>
-        <pre>{{ JSON.stringify(previewConfig.config, null, 2) }}</pre>
-      </div>
-    </el-dialog>
+    <DeviceConfigPreviewDialog v-model="previewVisible" :config="previewConfig" />
 
     <!-- 创建/编辑对话框 -->
     <DeviceConfigForm
@@ -245,19 +157,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { 
-  Document, CircleCheck, Connection, Cpu, Grid, 
+import { onMounted } from 'vue'
+import {
+  Document, CircleCheck, Connection, Cpu,
   Upload, Download, Plus, View, Edit, CopyDocument, MoreFilled,
-  DataBoard, DataAnalysis, Files
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
-import { UNKNOWN } from '@/utils/format'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import DeviceConfigCardSpecs from './components/DeviceConfigCardSpecs.vue'
+import DeviceConfigCardMoreMenu from './components/DeviceConfigCardMoreMenu.vue'
+import DeviceConfigPreviewDialog from './components/DeviceConfigPreviewDialog.vue'
+import DeviceConfigToolbar from './components/DeviceConfigToolbar.vue'
+import { getBusIcon, getDeviceTypeLabel } from './deviceConfigDisplay'
+import { getHardwareLabel } from '@/utils/hardwareTag'
+import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
+import { useDeviceConfigList } from './composables/useDeviceConfigList'
+import { useDeviceConfigActions } from './composables/useDeviceConfigActions'
+import { useDeviceConfigTransfer } from './composables/useDeviceConfigTransfer'
 
 /**
  * F14 统计卡范围词（规范 §4.3 MUST）。
@@ -267,170 +187,33 @@ import PageHeader from '@/components/common/PageHeader.vue'
  *   · 其余三项（active/busTypes/deviceTypes）由 `configs.value`（当前页 pageSize 条）算出，
  *     已在标签里写作「本页启用」；busTypes/deviceTypes 此前只有名词，同样必须标出本页。
  * 不规范标注时：「模板总数=137」而「总线类型」只反映本页出现过的类型，用户会以为是全站类型数。
+ *
+ * 常量的解析者是 statCardScopeGate.spec.ts（它从**同一份源码**里读 SCOPE_* 与 <StatCard>），
+ * 故这两个常量必须留在页面文件内，不能随逻辑搬进 composable。
  */
 const SCOPE_FILTERED = '当前筛选'
 const SCOPE_PAGE = '本页'
-import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
-import { deviceTypeOptions } from '@/utils/deviceType'
-import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 
-// 状态
-const loading = ref(false)
-const configs = ref<DeviceConfig[]>([])
-const currentPage = ref(1)
-const pageSize = ref(12)
-const total = ref(0)
-const searchKeyword = ref('')
-const typeFilter = ref('')
-const hardwareFilter = ref('')
-const statusFilter = ref('')
-const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || hardwareFilter.value || statusFilter.value))
+// 列表状态 / 请求 / 筛选 / 统计：全部搬进 useDeviceConfigList（页面只接线）。
+const {
+  loading, currentPage, pageSize, total,
+  searchKeyword, typeFilter, hardwareFilter, statusFilter,
+  hasActiveFilters, stats, filteredConfigs,
+  fetchConfigs, handleSearch, handleFiltersChanged, clearFilters,
+} = useDeviceConfigList()
 
-// 对话框
-const showFormDialog = ref(false)
-const previewVisible = ref(false)
-const editingConfig = ref<DeviceConfig | null>(null)
-const previewConfig = ref<DeviceConfig | null>(null)
+// 预览·表单对话框状态：搬进 useDeviceConfigActions。
+const {
+  showFormDialog, previewVisible, editingConfig, previewConfig,
+  handlePreview, handleEdit, handleFormSuccess,
+} = useDeviceConfigActions({ fetchConfigs })
 
-// 统计数据
-const stats = reactive({
-  total: 0,
-  active: 0,
-  busTypes: 0,
-  deviceTypes: 0
-})
-
-// 设备类型选项 — 从 deviceType.ts 统一导入
-
-// 过滤后的配置
-const filteredConfigs = computed(() => {
-  let result = configs.value
-  
-  if (searchKeyword.value) {
-    const kw = searchKeyword.value.toLowerCase()
-    result = result.filter(c => c.name?.toLowerCase().includes(kw))
-  }
-  
-  if (typeFilter.value) {
-    result = result.filter(c => c.device_type === typeFilter.value)
-  }
-  
-  if (hardwareFilter.value) {
-    result = result.filter(c => c.hardware_type === hardwareFilter.value)
-  }
-  
-  if (statusFilter.value) {
-    result = result.filter(c => c.status === statusFilter.value)
-  }
-  
-  return result
-})
-
-// 获取配置列表
-const fetchConfigs = async () => {
-  loading.value = true
-  try {
-    const response = await deviceConfigApi.getList({
-      device_type: typeFilter.value || undefined,
-      hardware_type: hardwareFilter.value || undefined,
-      page: currentPage.value,
-      page_size: pageSize.value
-    })
-    
-    configs.value = response.items || []
-    total.value = response.total || 0
-    updateStats()
-  } catch (error: any) {
-    feedback.handleError(error, '获取配置模板列表失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-// 更新统计
-// total 用服务端返回的全量总数；其余指标仅有本页数据，保持本页口径（标签已注明"本页"）
-const updateStats = () => {
-  stats.total = total.value
-  stats.active = configs.value.filter(c => c.status === 'active').length
-  
-  const hardwareTypes = new Set(configs.value.map(c => c.hardware_type))
-  stats.busTypes = hardwareTypes.size
-  
-  const deviceTypes = new Set(configs.value.map(c => c.device_type))
-  stats.deviceTypes = deviceTypes.size
-}
-
-// 搜索
-const handleSearch = () => {
-  handleFiltersChanged()
-}
-
-const handleFiltersChanged = () => {
-  currentPage.value = 1
-  fetchConfigs()
-}
-
-const clearFilters = () => {
-  searchKeyword.value = ''
-  typeFilter.value = ''
-  hardwareFilter.value = ''
-  statusFilter.value = ''
-  currentPage.value = 1
-  fetchConfigs()
-}
-
-watch([typeFilter, hardwareFilter, statusFilter], handleFiltersChanged)
-
-// 总线图标
-const getBusIcon = (busType: string) => {
-  const iconMap: Record<string, any> = {
-    uart: DataBoard,
-    i2c: DataAnalysis,
-    spi: Files,
-    adc: Files,
-  }
-  return iconMap[busType] || Files
-}
-
-// 设备类型标签
-const getDeviceTypeLabel = (type: string) => {
-  return deviceTypeOptions.find(t => t.value === type)?.label || type
-}
-
-// 参数预览
-const getParamsPreview = (config: any) => {
-  if (!config) return {}
-  
-  const preview: Record<string, any> = {}
-  const keys = Object.keys(config).slice(0, 3)
-  
-  for (const key of keys) {
-    let value = config[key]
-    if (typeof value === 'number') {
-      value = value.toString()
-    }
-    if (value && typeof value === 'string' && value.length > 10) {
-      value = value.slice(0, 10) + '...'
-    }
-    preview[key] = value
-  }
-  
-  return preview
-}
-
-// 预览
-const handlePreview = (config: DeviceConfig) => {
-  previewConfig.value = config
-  previewVisible.value = true
-}
-
-// 编辑
-const handleEdit = (config: DeviceConfig) => {
-  editingConfig.value = { ...config }
-  showFormDialog.value = true
-}
+// 导入 / 导出（单条、批量）：搬进 useDeviceConfigTransfer。
+const { exportConfig, importConfig, exportConfigs } = useDeviceConfigTransfer({ fetchConfigs, filteredConfigs })
 
 // 克隆
+// 留在页面：listPageConventions.spec.ts 的 EXEMPT_BARE_CONFIRM 按页面路径登记了
+// 这里的 feedback.confirm（非破坏性确认），路径登记必须在页面里仍有对应调用。
 const handleClone = async (config: DeviceConfig) => {
   // 克隆是**非破坏性**操作 ⇒ 走 feedback.confirm (普通确认)。
   // 不得改走 confirmDanger: §3.4.3 的 danger 类目只用于破坏性操作, 给"克隆"的确认键
@@ -452,7 +235,7 @@ const handleClone = async (config: DeviceConfig) => {
       created_at: undefined,
       updated_at: undefined
     }
-    
+
     await deviceConfigApi.create(clonedConfig)
     ElMessage.success('克隆成功')
     await fetchConfigs()
@@ -462,6 +245,9 @@ const handleClone = async (config: DeviceConfig) => {
 }
 
 // 更多操作
+// 分发与危险确认刻意留在页面：listPageConventions.spec.ts 的「危险操作必须二次确认」
+// 按**页面文件**扫描 deviceConfigApi.delete 与 feedback.confirmDanger —— 搬进 composable
+// 会让本页退出该规则的射程（规则仍绿，但已经扫不到这里）。
 const handleMoreAction = async (command: string, config: DeviceConfig) => {
   switch (command) {
     case 'setDefault':
@@ -473,7 +259,7 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
         feedback.handleError(error, '设置失败')
       }
       break
-      
+
     case 'toggle': {
       // 目标状态必须在 try **外**算出来：catch 里要用它决定失败文案
       // （放在 try 内会被块级作用域挡住，vue-tsc 会报 TS2552）。
@@ -490,11 +276,11 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
       }
       break
     }
-      
+
     case 'export':
       exportConfig(config)
       break
-      
+
     case 'delete': {
       // 删除配置模板不可恢复：走统一危险确认（danger 确认键 + 焦点不落在破坏性按钮上）。
       // 取消时直接跳出，不再进入下面的 try，故 catch 只处理接口失败（与迁移前一致）。
@@ -514,87 +300,6 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
       break
     }
   }
-}
-
-// 导出单个配置
-const exportConfig = (config: DeviceConfig) => {
-  const data = JSON.stringify(config, null, 2)
-  const blob = new Blob([data], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${config.name}.json`
-  link.click()
-  URL.revokeObjectURL(url)
-  
-  ElMessage.success('导出成功')
-}
-
-// 导入
-const importConfig = () => {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.json'
-  input.onchange = async (e) => {
-    const file = (e.target as HTMLInputElement).files?.[0]
-    if (!file) return
-    
-    try {
-      const text = await file.text()
-      const config = JSON.parse(text)
-      
-      // 验证必要字段
-      if (!config.name || !config.device_type || !config.hardware_type) {
-        throw new Error('配置文件格式不正确')
-      }
-      
-      delete config.id
-      delete config.created_at
-      delete config.updated_at
-      config.is_default = false
-      
-      await deviceConfigApi.create(config)
-      ElMessage.success('导入成功')
-      await fetchConfigs()
-    } catch (error: any) {
-      feedback.handleError(error, '导入失败')
-    }
-  }
-  input.click()
-}
-
-// 批量导出
-const exportConfigs = () => {
-  if (filteredConfigs.value.length === 0) {
-    ElMessage.warning('暂无配置可导出')
-    return
-  }
-  
-  const data = JSON.stringify(filteredConfigs.value, null, 2)
-  const blob = new Blob([data], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `device_configs_${Date.now()}.json`
-  link.click()
-  URL.revokeObjectURL(url)
-  
-  ElMessage.success('导出成功')
-}
-
-// 表单成功
-const handleFormSuccess = () => {
-  showFormDialog.value = false
-  editingConfig.value = null
-  fetchConfigs()
-}
-
-// 格式化时间
-const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
-  const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
-  return date.toLocaleString('zh-CN')
 }
 
 onMounted(() => {
@@ -647,37 +352,7 @@ onMounted(() => {
 .stat-value { display: block; font-size: 24px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
-/* 工具栏 */
-.toolbar-card :deep(.el-card__body) {
-  padding: 16px 20px;
-}
-
-.filter-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.filter-left {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.search-input {
-  width: 240px;
-}
-
-.filter-select {
-  width: 140px;
-}
-
-.text-muted {
-  color: var(--el-text-color-secondary);
-}
-
+/* 工具栏右侧动作组（模板+样式留在页面：DeviceConfigList.spec 直接断言页面 scoped CSS） */
 .filter-right {
   display: flex;
   gap: 8px;
@@ -762,37 +437,6 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.card-body {
-  padding: 16px 0;
-  border-top: 1px solid var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-fill-color-light);
-}
-
-.spec-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.spec-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.spec-item .label {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
-
-.params-preview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  max-width: 200px;
-  justify-content: flex-end;
-}
-
 .card-footer {
   display: flex;
   justify-content: flex-end;
@@ -825,28 +469,6 @@ onMounted(() => {
   font-size: 13px;
 }
 
-/* 预览对话框 */
-.config-json {
-  margin-top: 20px;
-}
-
-.config-json h4 {
-  margin: 0 0 10px;
-  font-size: 14px;
-  color: var(--el-text-color-regular);
-}
-
-.config-json pre {
-  margin: 0;
-  padding: 12px;
-  background: var(--el-fill-color-light);
-  border-radius: 6px;
-  font-size: 12px;
-  font-family: monospace;
-  max-height: 300px;
-  overflow: auto;
-}
-
 /* 响应式：中屏 2 列；移动端单行 4 列紧凑横排（与 NodeList/EdgeDeviceList 一致，占高约一行） */
 @media (max-width: 1200px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
@@ -860,11 +482,8 @@ onMounted(() => {
   .stat-content { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 1px; }
   .stat-value { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .stat-label { font-size: 10px; line-height: 1.3; max-height: 2.6em; overflow: hidden; word-break: keep-all; overflow-wrap: break-word; }
-  .filter-bar { flex-direction: column; align-items: stretch; }
-  .filter-left { flex-direction: column; align-items: stretch; }
-  .filter-left, .filter-right { width: 100%; }
+  .filter-right { width: 100%; }
   .filter-right { justify-content: flex-end; }
-  .search-input, .filter-select { width: 100%; }
   .config-grid { grid-template-columns: 1fr; }
 }
 
