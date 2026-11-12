@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ChannelCommandInput: typeof import('./components/channel/ChannelCommandInput.vue')['default']
     ChannelManager: typeof import('./components/channel/ChannelManager.vue')['default']
     ChannelParamFields: typeof import('./components/channel/ChannelParamFields.vue')['default']
     ChannelTerminal: typeof import('./components/channel/ChannelTerminal.vue')['default']

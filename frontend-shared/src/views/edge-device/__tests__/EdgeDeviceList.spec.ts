@@ -3,7 +3,30 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, type VNode } from 'vue'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
-import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
+import pageSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
+import createDialogSource from '@/views/edge-device/components/EdgeDeviceCreateDialog.vue?raw'
+import createComposableSource from '@/views/edge-device/composables/useEdgeDeviceCreate.ts?raw'
+/**
+ * 源码级门禁的读取口径（2026-11-12 第二轮拆分，纯搬移）。
+ *
+ * 创建 / 编辑对话框的模板与 scoped 样式搬到了 components/EdgeDeviceCreateDialog.vue，
+ * handleCreate / 向导状态 / 地址能力判定搬到了 composables/useEdgeDeviceCreate.ts。
+ * 被这些断言钉住的文本确实随片段搬走了。为了**断言一个字不改**（判据、条数、豁免都不动），
+ * 改成三段拼接 —— 而不是新增豁免或放宽成「某一处出现即可」。
+ *
+ * 拼接顺序：页面在前、子组件与组合式在后。理由有两个：
+ *   ① 顺序断言（如 P1-1 用 source.slice(source.indexOf('if (frozenEditingDeviceId) {'))
+ *      取编辑分支）在拼接串里仍复现「页面段 → 组合式段」的原先后关系；
+ *   ② 页面级约定（<el-pagination> 绑定、DeviceDeleteDialog / ElMessageBox 禁令等）
+ *      仍然只在页面段命中 —— 子组件与组合式里没有这些文本。
+ *
+ * 页面文件自己**必须**有的东西（PageHeader 豁免、<el-pagination> 绑定、
+ * feedback.confirmDanger 口径、loader 命名与路径登记）由
+ * views/__tests__/listPageConventions.spec.ts 直接解析页面文件断言，不经过这里的拼接。
+ *
+ * 三段都是 ?raw 从同一工作树读到的**真实源码**（不是占位空壳）；断言文本、条数与豁免一字未改。
+ */
+const source = pageSource + '\n' + createDialogSource + '\n' + createComposableSource
 import type { EdgeDeviceListParams } from '@/api/edgeDevice'
 
 // 显式标注 mock 签名: 无参 `vi.fn(() => ...)` 会把 `mock.calls` 推成 `[][]`
