@@ -205,48 +205,19 @@
     </el-row>
 
     <!-- 真实节点状态变化 -->
+    <!-- 2026-11-12 纯搬移：「节点状态变化」卡整块搬进 components/StatusHistoryCard.vue。
+         它是本页唯一不被源码文本门禁点名的自包含模板片段 —— 统计卡（骨架几何门禁）、
+         异常摘要（IconActionAccessibilityGate 登记的三处 @click）、趋势卡
+         （TimeRangeSelectorUnified）、最新数据表（F8 横滚 + UiAudit 摘要门禁）
+         都被钉在页面。外层 el-row/el-col 与 20px 上间距属页面级栅格，留在页面。 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
-        <el-card shadow="hover">
-          <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>节点状态变化</span>
-              <span class="status-history-hint">{{ statusHistoryHint }}</span>
-            </div>
-          </template>
-          <el-timeline v-if="statusHistory.length > 0">
-            <el-timeline-item
-              v-for="event in statusHistory"
-              :key="event.id"
-              :timestamp="formatTime(event.created_at)"
-              :type="event.new_status === 'online' ? 'success' : 'warning'"
-            >
-              <strong>{{ event.node_name || event.node_id }}</strong>
-              <el-tag size="small" :type="event.new_status === 'online' ? 'success' : 'info'" style="margin-left: 8px;">
-                {{ event.new_status === 'online' ? '在线' : '离线' }}
-              </el-tag>
-            </el-timeline-item>
-          </el-timeline>
-          <EmptyState
-            v-else-if="statusHistoryUnknown"
-            kind="error"
-            icon="WarningFilled"
-            size="small"
-            data-test="dashboard-history-error"
-            title="状态变化记录加载失败"
-            description="无法确认节点是否发生过状态变化。"
-            :quick-actions="[
-              { label: '重试', type: 'primary', handler: retryLoad }
-            ]"
-          />
-          <EmptyState
-            v-else
-            icon="Connection"
-            size="small"
-            title="暂无状态变化记录"
-            description="节点首次上线、恢复或离线后，状态变化会显示在这里。"
-          />
-        </el-card>
+        <StatusHistoryCard
+          :events="statusHistory"
+          :unknown="statusHistoryUnknown"
+          :hint="statusHistoryHint"
+          @retry="retryLoad"
+        />
       </el-col>
     </el-row>
 
@@ -374,7 +345,9 @@ import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } fr
 import { feedback } from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { useRouter } from 'vue-router'
-import { Cpu, CircleCheck, CloseBold, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
+// CloseBold 随「异常摘要图标三态」搬进 composables/useDashboardOverview.ts；
+// 模板仍直接使用 Cpu / CircleCheck / Refresh / Connection / WarningFilled。
+import { Cpu, CircleCheck, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 // 骨架态改为复用 .stat-card 自带结构（不再使用 SkeletonCard 的 stat 变体），
@@ -383,14 +356,23 @@ import EmptyState from '@/components/common/EmptyState.vue'
 // 异步拆分：LineChart（echarts 核心）渲染耗时且仅趋势区使用，
 // 独立 chunk 延迟加载，避免阻塞仪表盘首屏。
 const LineChart = defineAsyncComponent(() => import('@/components/charts/LineChart.vue'))
-import { dataApi, type Overview } from '@/api/data'
 import client, { type ApiEnvelope } from '@/api/client'
-import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
-import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
 import { useResponsive } from '@/composables/useResponsive'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
+// 2026-11-12 纯搬移式拆分（Dashboard.vue 1205 → 1045 行；三个新文件 76 / 227 / 88 行）：
+//   · composables/useDashboardOverview —— 概览三态 / 状态历史 / WS 防抖刷新 / 告警摘要派生值；
+//   · dashboardFormat —— 展示口径纯函数（最新数据宽表与窄屏卡片共用同一份）；
+//   · components/StatusHistoryCard —— 唯一不受源码文本门禁约束的自包含模板片段。
+// 不可切（门禁钉住，详见各段注释）：统计卡 + .stat-* 全部 CSS（DashboardSkeletonGeometry）、
+// 异常摘要卡（IconActionAccessibilityGate 登记的三处 @click）、趋势卡含 TimeRangeSelector
+// 与「趋势类别自愈」watch（TimeRangeSelectorUnified + UiAuditSystemicFixes）、
+// 最新数据表 + 完整数据弹层（F8 横滚 + UiAudit 的 latest-cards/dataDetailVisible/
+// SUMMARY_PRIORITY/查看完整数据）。
+import { useDashboardOverview } from './composables/useDashboardOverview'
+import { displayNodeName, formatData, formatRawData, formatTime } from './dashboardFormat'
+import StatusHistoryCard from './components/StatusHistoryCard.vue'
 
 const router = useRouter()
 const { isMobile } = useResponsive()
@@ -403,38 +385,46 @@ const openDataDetail = (row: any) => {
   dataDetailVisible.value = true
 }
 
-/**
- * 所属节点展示名：接口的 node_name 实测为空串（3 台设备全空），直接渲染会让整列空白。
- * 回退到「节点 <物理 ID>」，节点名缺失时也始终有可识别信息。
- */
-const displayNodeName = (row: { node_name?: string; node_id?: string }) => {
-  const name = (row.node_name || '').trim()
-  if (name) return name
-  const id = (row.node_id || '').toString().trim()
-  return id ? `节点 ${id}` : '—'
-}
-
-const overview = ref<Overview>({
-  nodes: { total: 0, online: 0, offline: 0 },
-  edge_devices: { total: 0, online: 0, offline: 0 },
-  latest_data: []
-})
-
-const loading = ref(true)
+// 刷新按钮的 loading：只服务「最新数据」卡头的刷新入口（页面级动作）。
+// 概览自身的 loading / 三态由 composable 提供。
 const refreshing = ref(false)
-// 概览接口是否已成功加载过。区分「尚未加载 / 加载失败 / 已加载」三态：
-// 失败时 KPI 与摘要必须显示未知，而不是把缺失数据渲染成 0 或"运行正常"。
-const overviewLoaded = ref(false)
-const overviewError = ref('')
-const wsStore = useWebSocketStore()
+
+/**
+ * 概览三态 + 状态历史 + WS 防抖刷新 + 告警摘要派生值整块搬入 composable。
+ * 边界依据见该文件头：这些值描述的是**同一个** overview 的三态语义，
+ * 拆开放会让「接口失败不得报运行正常」出现两个版本。
+ * WS「数据更新」还要驱动趋势图 2s 防抖刷新 —— 趋势状态与「类别自愈」watch 被
+ * UiAuditSystemicFixes 的源码文本门禁钉在页面，故用闭包回灌（调用时机不变）。
+ */
+const {
+  overview,
+  loading,
+  overviewError,
+  statusHistory,
+  statusHistoryUnknown,
+  offlineCollectors,
+  offlineDevices,
+  dataErrorCount,
+  metricsReady,
+  hasAlerts,
+  summaryTagText,
+  summaryTagType,
+  summaryIcon,
+  summaryIconColor,
+  statusHistoryHint,
+  fetchOverview,
+  fetchStatusHistory,
+  subscribeWebSocket,
+  disposeOverview,
+} = useDashboardOverview({
+  onDataUpdate: () => scheduleTrendRefresh(),
+})
 
 // 趋势图相关
 const trendLoading = ref(false)
 const trendCategory = ref('temperature')
 const trendSeries = ref<any[]>([])
-const statusHistory = ref<Array<{ id: number; node_id: string; node_name?: string; new_status: string; created_at: string }>>([])
-// 状态历史接口自身失败（而非"确实没有记录"）的标记，用于区分两种空列表。
-const statusHistoryUnknown = ref(false)
+// statusHistory / statusHistoryUnknown 随状态历史取数搬进 composable（页面只渲染）。
 const trendRange = ref<'1h' | '24h' | '7d'>('24h')
 const trendRangeLabel = computed(() => {
   const map: Record<string, string> = { '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天' }
@@ -511,60 +501,17 @@ watch(availableTrendCategories, (list) => {
   }
 })
 
-// 告警摘要计算属性
-const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
-// 离线设备数：必须减去 pending（2026-10-03 审查发现）。
-//
-// 原写法是 `total - online`，把「已创建但还没采到数据」的设备也算成离线。
-// 此前设备默认 status=active，所以看不出问题；改成 pending 后，新建设备会在
-// ~60s 的 pending 窗口内被仪表盘报成「离线设备」，触发无谓的告警摘要
-// （hasAlerts 会因此为真）。pending 既不是在线也不是故障，必须从离线里排除。
-const offlineDevices = computed(() =>
-  Math.max(
-    0,
-    (overview.value.edge_devices?.total || 0)
-      - (overview.value.edge_devices?.online || 0)
-      - (overview.value.edge_devices?.pending || 0),
-  ),
-)
-const dataErrorCount = computed(() => {
-  return (overview.value.latest_data || []).filter(d => (d.error_code ?? 0) > 0).length
-})
-// 仅在概览成功加载后，"无告警"才等价于"运行正常"。
-// 失败时三者都不得断言，否则会把接口故障伪装成健康状态。
-const metricsReady = computed(() => overviewLoaded.value && !overviewError.value)
-const hasAlerts = computed(() => metricsReady.value && (offlineCollectors.value > 0 || offlineDevices.value > 0 || dataErrorCount.value > 0))
+// 告警摘要的计算属性（offlineCollectors / offlineDevices / dataErrorCount /
+// metricsReady / hasAlerts）与摘要标签/图标、状态条数提示，全部在
+// composables/useDashboardOverview.ts：它们与 overview 的三态判定同属一套语义，
+// 留在页面就会出现两份「未知 vs 0」的口径。
 
 /** 未知态统一显示 '—'：0 是"确实是 0"，'—' 是"接口没说"。 */
 function metric(value: number | undefined): string | number {
   return metricsReady.value ? (value ?? '—') : '—'
 }
 
-const summaryTagText = computed(() => {
-  if (!metricsReady.value) return '状态未知'
-  return hasAlerts.value ? '需关注' : '运行正常'
-})
-const summaryTagType = computed<'warning' | 'success' | 'info'>(() => {
-  if (!metricsReady.value) return 'info'
-  return hasAlerts.value ? 'warning' : 'success'
-})
-const summaryIcon = computed(() => {
-  if (!metricsReady.value) return CloseBold
-  return hasAlerts.value ? WarningFilled : CircleCheck
-})
-const summaryIconColor = computed(() => {
-  if (!metricsReady.value) return 'var(--el-color-info)'
-  return hasAlerts.value ? 'var(--el-color-warning)' : 'var(--el-color-success)'
-})
-
-/** 状态事件数量在接口失败时是未知的，不能报成 "最近 0 条"。 */
-const statusHistoryHint = computed(() => {
-  if (statusHistoryUnknown.value) return '状态变化记录暂时不可用'
-  return `最近 ${statusHistory.value.length} 条真实状态事件`
-})
-
-let unsubscribeStatus: (() => void) | null = null
-let unsubscribeData: (() => void) | null = null
+// 趋势图 30s 自动刷新定时器；WS 退订句柄与概览 1s 防抖定时器随 composable 搬走。
 let trendRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 // 获取趋势数据
@@ -637,49 +584,8 @@ const fetchTrendData = async () => {
 }
 
 
-const fetchStatusHistory = async () => {
-  try {
-    const response = await client.get<unknown, ApiEnvelope<Array<{ id: number; node_id: string; node_name?: string; new_status: string; created_at: string }>>>('/api/v1/nodes/status-history', { params: { limit: 20 } })
-    const events = response.data ?? []
-    statusHistory.value = Array.isArray(events) ? events : []
-  } catch (error) {
-    logger.warn('获取节点状态历史失败', { error: String(error) })
-    statusHistory.value = []
-    // 概览不可用时，空数组不代表"没有状态变化"，标记未知以免误导。
-    if (!metricsReady.value) statusHistoryUnknown.value = true
-  }
-}
-
-// 处理状态更新 — 防抖：多个状态变更在1秒内只触发一次fetchOverview
-let overviewDirty = false
-let overviewDebounceTimer: ReturnType<typeof setTimeout> | null = null
-const scheduleOverviewRefresh = () => {
-  overviewDirty = true
-  if (overviewDebounceTimer) clearTimeout(overviewDebounceTimer)
-  overviewDebounceTimer = setTimeout(() => {
-    if (overviewDirty) {
-      overviewDirty = false
-      fetchOverview(true)
-    }
-  }, 1000)
-}
-
-const handleStatusUpdate = (message: WebSocketMessage) => {
-  logger.debug('状态更新', { payload: message.payload })
-
-  if (message.payload?.node_id || message.payload?.edge_device_id) {
-    scheduleOverviewRefresh()
-    fetchStatusHistory()
-  }
-}
-
-// 处理数据更新 — 不直接修改 latest_data，触发防抖刷新避免表格跳动
-const handleDataUpdate = (message: WebSocketMessage) => {
-  logger.debug('数据更新', { payload: message.payload })
-  scheduleOverviewRefresh()
-  // 有数据更新时也刷新趋势图(复用防抖)
-  scheduleTrendRefresh()
-}
+// 状态历史取数 / 概览取数 / WS 1s 防抖刷新都随 useDashboardOverview 搬走
+// （它们与 overview 三态共用同一个定时器与同一组退订句柄，拆分即破时序）。
 
 // 趋势图防抖刷新 — WS数据到达时触发，2s防抖避免频繁刷新
 let trendDirty = false
@@ -695,32 +601,11 @@ const scheduleTrendRefresh = () => {
   }, 2000)
 }
 
-const fetchOverview = async (silent = false) => {
-  if (!silent) loading.value = true
-  try {
-    const data = await dataApi.getOverview()
-    overview.value = data
-    overviewLoaded.value = true
-    overviewError.value = ''
-  } catch (error: any) {
-    // 失败必须留下常驻痕迹：KPI 与摘要据此显示未知态并给出重试入口。
-    // 静默刷新（WebSocket 触发）失败与首次加载失败同等对待——接口一旦不可用，
-    // 就不能再断言"运行正常"；保留上一份数据继续显示绿色对勾正是本缺陷本身。
-    // 唯一差别是不弹 toast：后台刷新不该刷屏，常驻横幅已经足够。
-    overviewLoaded.value = false
-    overview.value = {
-      nodes: { total: 0, online: 0, offline: 0 },
-      edge_devices: { total: 0, online: 0, offline: 0 },
-      latest_data: []
-    }
-    overviewError.value = error?.message || '网络请求失败'
-    if (!silent) feedback.handleError(error, '获取概览数据失败')
-  } finally {
-    if (!silent) loading.value = false
-  }
-}
-
-/** 错误态的重试入口：清空错误后重新拉取概览与其派生数据。 */
+/**
+ * 错误态的重试入口：清空错误后重新拉取概览与其派生数据。
+ * 留在页面（而不是 composable）的理由：这是一次动作同时驱动**三个**数据源，
+ * 顺序就是契约 —— 趋势查询的设备列表来自 overview.latest_data，必须等概览先回来。
+ */
 const retryLoad = async () => {
   overviewError.value = ''
   statusHistoryUnknown.value = false
@@ -770,51 +655,10 @@ const formatDataSummary = (data: Record<string, any>) => {
     .join(' · ')
 }
 
-const formatData = (data: Record<string, any>) => {
-  if (!data) return UNKNOWN
-
-  return Object.entries(data)
-    .map(([key, value]) => {
-      if (typeof value === 'object' && value !== null && 'value' in value) {
-        const val = value.value
-        const unit = value.unit || ''
-        if (typeof val === 'number') {
-          return `${key}: ${val.toFixed(2)} ${unit}`.trim()
-        }
-        return `${key}: ${val} ${unit}`.trim()
-      }
-      if (typeof value === 'number') {
-        return `${key}: ${value.toFixed(2)}`
-      }
-      return `${key}: ${value}`
-    })
-    .join(', ')
-}
-
-const formatRawData = (rawData: any) => {
-  if (!rawData) return UNKNOWN
-  if (typeof rawData === 'string') {
-    // hex-encoded raw bytes from backend
-    if (/^[0-9a-f]+$/i.test(rawData)) {
-      const truncated = rawData.length > 64 ? rawData.slice(0, 64) + '…' : rawData
-      return truncated
-    }
-    try {
-      const parsed = JSON.parse(rawData)
-      return JSON.stringify(parsed).slice(0, 80)
-    } catch {
-      return rawData.slice(0, 80)
-    }
-  }
-  return JSON.stringify(rawData).slice(0, 80)
-}
-
-const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
-  const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
-  return date.toLocaleString('zh-CN')
-}
+// formatData / formatRawData / formatTime / displayNodeName 已搬到 dashboardFormat.ts
+// （最新数据宽表与窄屏卡片共用同一份展示口径）。SUMMARY_PRIORITY + formatDataSummary
+// 仍留在页面：UiAuditSystemicFixes 的源码文本门禁要求 Dashboard.vue 里必须出现
+// SUMMARY_PRIORITY，它锚定的正是「窄屏摘要不截断配置值」这条审计结论。
 
 watch(trendCategory, () => {
   fetchTrendData()
@@ -840,8 +684,9 @@ onMounted(async () => {
   await fetchOverview()
   await Promise.all([fetchTrendData(), fetchStatusHistory()])
 
-  unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
-  unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
+  // WS 订阅与退订随 useDashboardOverview 搬走，订阅时机不变：
+  // 先取首屏数据、再订阅，避免首帧被 WS 触发的静默刷新打断。
+  subscribeWebSocket()
 
   // 30秒自动刷新趋势图
   trendRefreshTimer = setInterval(() => {
@@ -852,12 +697,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (unsubscribeStatus) unsubscribeStatus()
-  if (unsubscribeData) unsubscribeData()
-  if (overviewDebounceTimer) {
-    clearTimeout(overviewDebounceTimer)
-    overviewDebounceTimer = null
-  }
+  // 概览 1s 防抖定时器与两条 WS 退订由 composable 自己收尾（与它们同生共死）；
+  // 页面只收尾自己的两个趋势定时器。
+  disposeOverview()
   if (trendDebounceTimer) {
     clearTimeout(trendDebounceTimer)
     trendDebounceTimer = null
@@ -969,10 +811,8 @@ onUnmounted(() => {
   border-radius: 4px;
 }
 
-.status-history-hint {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
+/* .status-history-hint 随「节点状态变化」卡搬进 components/StatusHistoryCard.vue：
+   父组件 scoped 样式打不进子组件内部 DOM，规则必须跟着片段走。 */
 
 .device-link {
   color: var(--el-color-primary);
