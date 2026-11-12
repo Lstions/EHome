@@ -38,11 +38,16 @@ import (
 // 为什么拆两个（Lead 2026-10-21 裁决）：unresolved_selector = "语法合法但本帧解析不到"；
 // field_resolver_disabled = "开关关闭导致无法求值"（含 enabled=false 的混合规则整条
 // fail-closed）。两者运维处置不同（前者查字段/换型，后者是配置/回滚），合并会让
-// 告警分不清"配错"与"开关"。models 常量表与前端枚举由 impl-wiring/D5 批次同步
-// （models 不在本任务写入范围），本包常量承载同一字符串值。
+// 告警分不清"配错"与"开关"。
+//
+// 唯一事实源是 models 的结果码常量（models.AutomationResultUnresolvedSelector /
+// AutomationResultFieldResolverDisabled，由 TestAutomationResultCodesThreeWayConsistency
+// 与仿真白名单、前端 AutomationEventResult 三向钉住）。本包只保留同名别名供调用点
+// 可读，**不再各写一份字面量** —— 两份字面量正是漂移源（本批次前 models 漏了这两码，
+// 门禁因此显红）。值必须与 models 逐字一致。
 const (
-	ResultUnresolvedSelector    = "unresolved_selector"
-	ResultFieldResolverDisabled = "field_resolver_disabled"
+	ResultUnresolvedSelector    = models.AutomationResultUnresolvedSelector
+	ResultFieldResolverDisabled = models.AutomationResultFieldResolverDisabled
 )
 
 // unresolvedAuditInterval 是"解析不到"审计的节流周期（设计 §12.1：5 分钟）。

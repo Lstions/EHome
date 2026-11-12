@@ -83,6 +83,33 @@ const (
 	// 每节点每日本事件只落一次 (与 recordSuppressed 同款同窗节流, 防刷量)。
 	AutomationResultSuppressedNoSolarEvent = "suppressed_no_solar_event"
 
+	// ── 数据字段解析层结果码（设计《数据字段解析层-方案-2026-10-21》§10 审计口径 / §12.1 节流）──
+	//
+	// 为什么**不是** failed_*：这两条在**求值阶段**就 fail-closed（规则不触发），
+	// 没有任何动作进入执行路径 —— 没有下发、没有 command_id、设备无副作用，
+	// 也就没有"执行失败"可回滚。failed_* 的口径是"已经要执行却失败"（availability
+	// gate 拦截 / commandexec.Create 调用失败）。混进 failed_* 会让运维去查设备与
+	// 链路，而真实原因是规则配置或解析层开关 —— 归因被带偏。
+	//
+	// 为什么必须是**两个**码（Lead 2026-10-21 裁决，窄复核 N-2 拆分）：处置人不同。
+	//   · AutomationResultUnresolvedSelector：**配置错** —— 选择器语法合法但当前解析
+	//     不到（字段名/设备类型/别名不对，family/semantic/virtual 编译失败或求值
+	//     unbound；来源组解析器未接线时亦复用此码）。处置=改规则、换设备类型、补别名。
+	//   · AutomationResultFieldResolverDisabled：**运维开关** —— field_resolver.enabled=
+	//     false / kill switch B7，整条规则 fail-closed（含 literal trigger + 特殊
+	//     conditions 的混合规则）。处置=开开关或回滚配置并重启，不改规则字段。
+	// 合并成一个码，告警就分不清该找"配规则的人"还是"动开关的人"。
+	//
+	// 为什么必须**落库**而不只是打日志：配错的 selector 表现为"规则永远不触发"，
+	// 正是本方案要消灭的静默失效形态（§10 的 ehome_rule_never_resolved 口径）。
+	// 落一条审计后前端事件表才能显示"选择器解析不到"/"字段解析未启用"，用户才知道
+	// 规则没在工作。写入按 (ruleID, selectorHash) 5 分钟去重（§12.1），不会刷爆事件表。
+	//
+	// 值必须与 backend/internal/automation/selector.go 的 ResultUnresolvedSelector /
+	// ResultFieldResolverDisabled **逐字一致**（该侧现已改为引用本组常量，唯一事实源在这里）。
+	AutomationResultUnresolvedSelector    = "unresolved_selector"     // 选择器语法合法但当前解析不到（配置错）
+	AutomationResultFieldResolverDisabled = "field_resolver_disabled" // 字段解析层开关关闭（运维开关，整条规则 fail-closed）
+
 	// ── 来源组结果码（方案《规则数据来源与复合来源》N-18 / D-7；共 5 个）──
 	//
 	// 为什么单列一组：来源失败与动作失败**语义不同**（前者是"没拿到可信数据"，

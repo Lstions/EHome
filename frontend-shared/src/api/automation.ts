@@ -61,6 +61,21 @@ export type AutomationEventResult =
   | 'source_member_changed'    // 触发成员已非 active / 组已删改 → 安全拦截，不执行
   | 'source_stale'             // 触发证据过期（仅来源组规则；存量单设备规则豁免）
   | 'source_degraded'          // 复合组带降级求值（有成员缺席但策略允许继续），必须看 members_json
+  // ── 数据字段解析层（sensorfield）结果码 ──
+  // 设计依据: docs/设计/数据字段解析层-方案-2026-10-21.md:637（§10 明令前端枚举同步这两个值）。
+  // 锚点: backend/internal/models/automation.go 的 AutomationResultUnresolvedSelector /
+  //   AutomationResultFieldResolverDisabled —— 本 union 与 models 常量、仿真白名单
+  //   （simulation/catalog/audit.go auditIsDefinedResult）由后端
+  //   TestAutomationResultCodesThreeWayConsistency 钉成同一集合；automation/selector.go
+  //   侧只保留指向 models 的别名常量，故值一律以 models 为准。
+  //
+  // 与 failed_* 的区别：这两条**不是执行故障** —— 规则在求值阶段就 fail-closed，
+  //   没有任何动作被下发或执行（设备无副作用、没有命令需要回滚），只是"规则不工作"；
+  //   failed_* 是"已经进入执行路径后失败"（gate 拦截 / Create 调用失败）。
+  // 与 suppressed_* 的区别：抑制是规则**正常求值**后的主动取舍（冷却/日上限/极昼极夜），
+  //   而这两条说明规则**根本没在参与求值**，属故障前的配置/开关问题。
+  | 'unresolved_selector'      // 字段选择器语法合法但**当前解析不到**（family/semantic/virtual 形态编译失败或求值 unbound；来源组解析器未接线时亦复用此码）⇒ 规则永不触发。处置=**改配置**（查字段名/换设备类型/补别名）
+  | 'field_resolver_disabled'  // 字段解析层**开关关闭**（field_resolver.enabled=false / kill switch B7）⇒ 整条规则 fail-closed（含 literal trigger + 特殊 conditions 的混合规则）。处置=**运维动作**（开启开关或回滚配置），与上一条"改规则字段"是两件事
 
 /** 自动化策略规则 */
 export interface AutomationRule {

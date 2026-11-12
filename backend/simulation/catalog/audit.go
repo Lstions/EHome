@@ -326,17 +326,26 @@ func auditRun001(e *harness.Env) {
 //
 //	executed / pending_confirm / suppressed_cooldown / suppressed_daily_limit /
 //	condition_changed / failed_gate / failed_dispatch / confirmation_required /
-//	partial_failure / suppressed_no_solar_event / notification / expired
+//	partial_failure / suppressed_no_solar_event / notification / expired /
+//	unresolved_selector / field_resolver_disabled
 //
 // confirmation_required 由 B1 新增（方案 §3.2.5 第 1 步）；partial_failure 由 B2
 // 新增（多动作第 k 个失败，方案 §3.2.4 / §6.3）；suppressed_no_solar_event 由 B3
 // 新增（极昼/极夜不触发但必须显式审计，选型文档 §6.1 / 方案 §3.1.4 —— 该场景
 // 禁止静默 return，否则用户会以为规则坏了）。
+// unresolved_selector / field_resolver_disabled 由数据字段解析层批次新增（设计
+// 《数据字段解析层-方案-2026-10-21》§10）：求值阶段 fail-closed、不执行任何动作，
+// 生产路径 automation/selector.go 会真实写入 automation_events.result —— 仿真侧
+// 漏列会把合法结果码判成"未定义"而误红。
 func auditIsDefinedResult(result string) bool {
 	switch result {
 	case "executed", "pending_confirm", "suppressed_cooldown", "suppressed_daily_limit",
 		"condition_changed", "failed_gate", "failed_dispatch", "confirmation_required",
 		"partial_failure", "suppressed_no_solar_event", "notification", "expired",
+		// 数据字段解析层结果码（设计《数据字段解析层》§10；与 models.AutomationResult
+		// UnresolvedSelector / FieldResolverDisabled 逐项一致 —— 求值阶段 fail-closed，
+		// 生产路径 automation/selector.go 会真实写入，漏列即误判为"未定义"）
+		"unresolved_selector", "field_resolver_disabled",
 		// 来源组结果码（方案 N-18；与 models.AutomationResultSource* 逐项一致，
 		// 由 TestAutomationResultWhitelistMatchesModelConstants 双向钉住）
 		"source_member_changed", "source_stale", "source_degraded":
