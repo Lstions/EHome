@@ -9,6 +9,10 @@ import ruleListSectionSource from '../components/RuleListSection.vue?raw'
 import eventHistorySectionSource from '../components/EventHistorySection.vue?raw'
 import commandDetailDialogSource from '../components/CommandDetailDialog.vue?raw'
 import automationFormatSource from '../automationFormat.ts?raw'
+import triggerFieldsSource from '../components/TriggerFields.vue?raw'
+import conditionEditorSource from '../components/ConditionEditor.vue?raw'
+import actionCardsSource from '../components/ActionCards.vue?raw'
+import saveDiagnosticsSource from '../components/SaveDiagnostics.vue?raw'
 
 import { automationApi, type AutomationEvent, type AutomationEventPage, type PrecheckResponse } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
@@ -28,6 +32,10 @@ import { ApiError } from '@/api/client'
  *
  * ⚠ 纪律：断言（expect 的匹配条件）一个字符都没改，只把「从哪个文件读」指向了新文件；
  * 需要跨文件的结构事实用拼接后的源码（页面在前，保证 @media 断点顺序等断言口径不变）。
+ *
+ * 2026-11-12 第二轮「表单区纯搬移」同理：触发字段组（含条件行）与动作卡片搬进
+ * TriggerFields / ConditionEditor / ActionCards，保存前诊断区搬进 SaveDiagnostics。
+ * 读取路径按同一口径机械扩展（页面仍排最前），所有 expect 一字未改。
  */
 const source = [
   pageSource,
@@ -35,6 +43,10 @@ const source = [
   eventHistorySectionSource,
   commandDetailDialogSource,
   automationFormatSource,
+  triggerFieldsSource,
+  conditionEditorSource,
+  actionCardsSource,
+  saveDiagnosticsSource,
 ].join('\n')
 
 /**
@@ -1474,25 +1486,36 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
 
   describe('F-10 窄屏 ≤480px 断点', () => {
     it('样式含 480px 断点，且动作卡操作区与弹窗 footer 在该断点下换行/撑满', async () => {
-      const css = await compiledScopedCss(pageSource, 'AutomationRules.vue')
+      // 2026-11-12 表单区拆分（纯搬移）：同一断点下的声明现在分布在页面与子组件的
+      // scoped 样式里（动作卡在 ActionCards、触发字段组在 TriggerFields），故按同一
+      // scope id 把它们编译成一张表；判定内容一字未改，只是「样式来自哪个文件」补全。
+      const css = await compiledScopedCssAll([pageSource, actionCardsSource, triggerFieldsSource], 'AutomationRules.vue')
       // 按**花括号配对**取媒体块，而不是 \n} 这种格式假设 —— 编译产物的缩进/换行
       // 不是契约，用格式去匹配会让门禁在无关的格式变化下假红。
+      // 同一宽度可能有多段（页面 + 各子组件），全部取出后拼接 —— 与前缀口径一致。
       function mediaBlock(maxWidth: number): string | null {
         // 编译产物是 `@media (max-width: 480px)`（@media 与括号之间有空格），
         // 故必须允许 \s*；写死 "@media(" 会让门禁永远找不到该断点（假红）。
-        const start = css.search(new RegExp('@media\\s*\\(max-width:\\s*' + maxWidth + 'px\\)'))
-        if (start < 0) return null
-        const open = css.indexOf('{', start)
-        if (open < 0) return null
-        let depth = 0
-        for (let i = open; i < css.length; i++) {
-          if (css[i] === '{') depth++
-          else if (css[i] === '}') {
-            depth--
-            if (depth === 0) return css.slice(open + 1, i)
+        const pattern = new RegExp('@media\\s*\\(max-width:\\s*' + maxWidth + 'px\\)', 'g')
+        const chunks: string[] = []
+        for (const match of css.matchAll(pattern)) {
+          const start = match.index ?? -1
+          if (start < 0) continue
+          const open = css.indexOf('{', start)
+          if (open < 0) continue
+          let depth = 0
+          for (let i = open; i < css.length; i++) {
+            if (css[i] === '{') depth++
+            else if (css[i] === '}') {
+              depth--
+              if (depth === 0) {
+                chunks.push(css.slice(open + 1, i))
+                break
+              }
+            }
           }
         }
-        return null
+        return chunks.length ? chunks.join('\n') : null
       }
 
       const body = mediaBlock(480)

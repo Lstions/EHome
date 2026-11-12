@@ -40,6 +40,17 @@ export interface SequencedAction {
   action_level?: 'info' | 'warning' | 'critical'
 }
 
+/**
+ * 前端稳定标识（v-for 的 key，不落库）。
+ *
+ * 为什么不能用心下标当 key：删掉中间一行/一张卡片后，后面所有组件实例会被错位复用 ——
+ * 值"跳"到别的行、输入焦点跑掉，而这一行的值还可能被写进另一行的 uid 上。
+ * 同一份生成逻辑被动作卡片与附加条件行**共用**，故放在这里而不是各写一遍。
+ */
+export function uidSeed(): number {
+  return Date.now() + Math.floor(Math.random() * 1000)
+}
+
 export function emptyAction(uid: number): ActionDraft {
   // 不写 action_device_id: 0 —— 见 ActionDraft.action_device_id 注释：0 会被
   // el-select 回显成「0」，而 undefined 才显示「请选择」。
