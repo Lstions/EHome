@@ -8,6 +8,9 @@ import source from '../AutomationRules.vue?raw'
 import { automationApi, type AutomationEvent, type AutomationEventPage, type PrecheckResponse } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { deviceOperationApi } from '@/api/deviceOperation'
+import { sensorFieldApi, type SensorFieldPreview } from '@/api/sensorField'
+import { sourceGroupApi } from '@/api/sourceGroup'
+import { ApiError } from '@/api/client'
 
 /**
  * 样式契约辅助：用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的
@@ -82,6 +85,20 @@ vi.mock('@/api/deviceOperation', () => ({
   // actions() 是新的动作目录来源（风险徽标读后端下发的 requires_confirmation）。
   // 不 mock 会让页面挂载时打到真实 axios。
   deviceOperationApi: { get: vi.fn(), actions: vi.fn() },
+}))
+// 来源组候选：onMounted 的 loadSourceGroups() 每次挂载都会真实请求。
+// 旧文件漏了这一层 mock ⇒ 每个用例都打一次 axios 并失败，测试 stderr 里长期是
+// "connect ECONNREFUSED 127.0.0.1:3000" 噪声（用例本身靠 catch 兜住，所以从未变红，
+// 但那行噪声会淹没真正的失败信息）。这里给出空列表：来源组下拉为空，既有用例不受影响。
+vi.mock('@/api/sourceGroup', () => ({
+  sourceGroupApi: { list: vi.fn() },
+}))
+// 保存前试算 API：本页只在用户点「用近 24h 数据试算」时调用（绝不在输入时自动请求）；
+// 不需要试算的用例永远不会调用它，需要结论的用例在用例内给 mockResolvedValue。
+// 字段选择器内部另有 /sensor-fields / /resolve /schema 三路请求，已由 SensorFieldPicker
+// stub 隔掉，这里只需要 page 直接消费的 preview。
+vi.mock('@/api/sensorField', () => ({
+  sensorFieldApi: { preview: vi.fn() },
 }))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
@@ -282,6 +299,8 @@ async function setActionId(
 const mockedAutomationApi = vi.mocked(automationApi)
 const mockedEdgeApi = vi.mocked(edgeDeviceApi)
 const mockedOperationApi = vi.mocked(deviceOperationApi)
+const mockedSensorFieldApi = vi.mocked(sensorFieldApi)
+const mockedSourceGroupApi = vi.mocked(sourceGroupApi)
 
 /** 一次成功执行的执行记录（GET /device-operations/:id 的响应形状）。 */
 const operationFixture = {
@@ -355,6 +374,10 @@ beforeEach(() => {
   // 默认预检：无风险动作（既有用例大多走普通路径，保持它们的行为不变）
   mockedAutomationApi.precheckRule.mockResolvedValue({ risk_actions: [], blocking_errors: [], warnings: [] })
   mockedOperationApi.actions.mockResolvedValue(deviceActionsFixture as never)
+  // 来源组列表为空：只影响来源组下拉候选，不改变既有用例（噪声消失见文件顶部 mock 注释）。
+  mockedSourceGroupApi.list.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 })
+  // 试算响应按用例给：上一条用例的 mock 实现不得泄漏到下一条（clearAllMocks 不清实现）。
+  mockedSensorFieldApi.preview.mockReset()
 })
 
 async function mountPage() {
@@ -2149,9 +2172,9 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     /**
      * 等动作目录落定。
      *
-     * 为什么需要：onMounted 里目录请求排在 source-groups 之后（既有顺序；本文件没有 mock
-     * sourceGroupApi，那一层会真打 axios 并失败），单靠 flushPromises 只能跑到"目录还在
-     * 加载"的中间态 —— 此时下拉只有 placeholder，断言会假红（或更糟：假绿）。
+     * 为什么需要：onMounted 里目录请求排在 source-groups 之后（既有顺序），而目录本身
+     * 也是一条真实的异步链；只靠 flushPromises 在某些时序下只能跑到"目录还在加载"的
+     * 中间态 —— 此时下拉只有 placeholder，断言会假红（或更糟：假绿）。
      * 这里轮询到候选出现为止，最多 1s，超时直接失败（不静默跳过）。
      */
     async function waitForActionOptions(wrapper: Awaited<ReturnType<typeof mountPage>>, index = 0) {
@@ -2376,6 +2399,250 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await select.setValue('read_basic_info')
       await flushPromises()
       expect(actionDrafts(wrapper)[0].action_id).toBe('read_basic_info')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 保存前试算（文档 §4.4）：用近 24h 真实数据预演可达性
+  //
+  // 契约要点：
+  //   ① 只有显式点按钮才请求（后端扫帧表代价高，输入即请求 = 压测表单）；
+  //   ② 结论只有**一句人话**（满足 N/M 帧 → 最长连续 → 会/不会触发），不堆 frames；
+  //   ③ 输入一变结论立刻作废（否则 45°C 的答案会挂在 30°C 的规则上）；
+  //   ④ 结论只提示、不阻止保存 —— 阈值可能就是等设备接入后才生效；
+  //   ⑤ 来源组没有单一设备可扫，按钮不出现，改为一行说明。
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('保存前试算：用近 24h 真实数据预演可达性', () => {
+    /** 五帧（1 分钟采样）：满足 / 满足 / 不满足 / 满足 / 不满足 ⇒ N=3、最长连续 1m。 */
+    function previewFixture(overrides: Partial<SensorFieldPreview> = {}): SensorFieldPreview {
+      return {
+        selector: 'temperature_1',
+        status: 'resolved',
+        kind: 'literal',
+        aggregate: '',
+        matched: ['temperature_1'],
+        samples_considered: 5,
+        truncated: false,
+        aggregation_trace: [{ field: 'temperature_1', value: 31, valid: true, cmp: true }],
+        reduced: null,
+        missing_known: [],
+        frames: [
+          { timestamp: '2026-11-12T10:00:00Z', ok: true, satisfied: true, value: 31, reason: '', degraded: false },
+          { timestamp: '2026-11-12T10:01:00Z', ok: true, satisfied: true, value: 32, reason: '', degraded: false },
+          { timestamp: '2026-11-12T10:02:00Z', ok: true, satisfied: false, value: 20, reason: '', degraded: false },
+          { timestamp: '2026-11-12T10:03:00Z', ok: true, satisfied: true, value: 33, reason: '', degraded: false },
+          { timestamp: '2026-11-12T10:04:00Z', ok: true, satisfied: false, value: 20, reason: '', degraded: false },
+        ],
+        duration_sec: 30,
+        duration_would_fire: true,
+        approx: true,
+        sparse_frames: false,
+        frame_semantics: '数据源：telemetry_frame（帧表）。',
+        data_source: 'telemetry_frame',
+        ...overrides,
+      }
+    }
+
+    /** 打开创建对话框并填到"可试算"状态：设备 + 选择器 + 阈值 + 持续时长齐备。 */
+    async function openCreateReady(wrapper: Awaited<ReturnType<typeof mountPage>>) {
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature_1')
+      await wrapper.find('[data-test="field-threshold"]').setValue('30')
+      await wrapper.find('[data-test="field-duration"]').setValue('30')
+      await flushPromises()
+    }
+
+    it('点击才请求：按后端响应渲染「满足 N/M 帧」与「会触发」', async () => {
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture())
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+
+      // 输入阶段一次请求都不发（否则每敲一位数字都会扫一次帧表）
+      expect(mockedSensorFieldApi.preview).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-test="preview-result"]').exists()).toBe(false)
+
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedSensorFieldApi.preview).toHaveBeenCalledTimes(1)
+      expect(mockedSensorFieldApi.preview).toHaveBeenCalledWith({
+        edge_device_id: 10,
+        selector: 'temperature_1',
+        comparator: 'gt',
+        threshold: 30,
+        window_hours: 24,
+        duration_sec: 30,
+      })
+      const result = wrapper.find('[data-test="preview-result"]')
+      expect(result.exists()).toBe(true)
+      expect(result.text()).toContain('满足 3/5 帧')
+      expect(result.text()).toContain('最长连续满足 1m')
+      expect(result.text()).toContain('会触发')
+      expect(result.text()).not.toContain('不会触发')
+    })
+
+    it('duration_would_fire=false 且 N>0 ⇒「不会触发（连续时间未达标）」', async () => {
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({ duration_would_fire: false }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      const text = wrapper.find('[data-test="preview-result"]').text()
+      expect(text).toContain('满足 3/5 帧')
+      expect(text).toContain('不会触发（连续时间未达标）')
+    })
+
+    it('samples_considered=0 ⇒「近 24h 没有该字段的数据」', async () => {
+      // status=resolved（选择器合法）但窗口内没有行：这是"设备没上报"，不是"配置错了"，
+      // 文案必须把两者分开说。
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({
+        samples_considered: 0,
+        frames: [],
+        aggregation_trace: [],
+        duration_would_fire: false,
+      }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="preview-result"]').text())
+        .toContain('近 24h 没有该字段的数据（设备可能未上报）')
+    })
+
+    it('status=unbound ⇒「该字段当前解析不到，无法试算」（软失败，不是错误）', async () => {
+      // unbound 是 200 正常响应：字段语法合法但当前解析不到，frames 为空。
+      // 这不是"试算失败"，文案必须说"解析不到"，否则用户会去查网络/服务。
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({
+        status: 'unbound',
+        samples_considered: 0,
+        frames: [],
+        aggregation_trace: [],
+        duration_would_fire: false,
+      }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="preview-result"]').text())
+        .toContain('该字段当前解析不到，无法试算')
+    })
+
+    it('N=0 且样本>0 ⇒ 追加「阈值从未达到（该字段区间 min~max）」', async () => {
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({
+        frames: [
+          { timestamp: '2026-11-12T10:00:00Z', ok: true, satisfied: false, value: 42.8, reason: '', degraded: false },
+          { timestamp: '2026-11-12T10:01:00Z', ok: true, satisfied: false, value: 20, reason: '', degraded: false },
+        ],
+        aggregation_trace: [
+          { field: 'temperature_1', value: 42.8, valid: true, cmp: false },
+          { field: 'temperature_2', value: 20, valid: true, cmp: false },
+          // valid=false 是非数值字段（如 enum）：不得混进区间计算
+          { field: 'running_state', value: 0, valid: false, cmp: false },
+        ],
+        duration_would_fire: false,
+      }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      const text = wrapper.find('[data-test="preview-result"]').text()
+      expect(text).toContain('满足 0/2 帧')
+      expect(text).toContain('阈值从未达到（该字段区间 20~42.8）')
+    })
+
+    it('truncated=true ⇒ 追加「数据量过大，仅分析了前 N 帧」', async () => {
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({ truncated: true }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="preview-result"]').text())
+        .toContain('数据量过大，仅分析了前 5 帧（结论可能偏乐观）')
+    })
+
+    it('duration_sec=0（立即触发）时任一满足帧即「会触发」，不读后端恒 false 的 duration_would_fire', async () => {
+      // 后端在 duration_sec=0 时不做连续判定、恒返回 false；直接照抄会给出错误的
+      // "不会触发"。这里的判据必须回到"有满足帧"本身。
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture({ duration_sec: 0, duration_would_fire: false }))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="field-duration"]').setValue('0')
+      await flushPromises()
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      const text = wrapper.find('[data-test="preview-result"]').text()
+      expect(text).toContain('持续时长 0s ⇒ 会触发')
+      expect(mockedSensorFieldApi.preview).toHaveBeenCalledWith(expect.objectContaining({ duration_sec: 0 }))
+    })
+
+    it('413 ⇒「时间窗数据量超限」且不弹错误提示（只留结论行 + logger）', async () => {
+      mockedSensorFieldApi.preview.mockRejectedValue(new ApiError('payload too large', { status: 413 } as never))
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+
+      const result = wrapper.find('[data-test="preview-result"]')
+      expect(result.exists()).toBe(true)
+      expect(result.text()).toContain('时间窗数据量超限，试算不可用（请缩小范围）')
+      const { ElMessage } = await import('element-plus')
+      // 不打断填写：这是数据量问题，不是用户填错了
+      expect(ElMessage.error).not.toHaveBeenCalled()
+    })
+
+    it('改阈值后上一次结果被清空（旧结论不得挂在新输入上）', async () => {
+      mockedSensorFieldApi.preview.mockResolvedValue(previewFixture())
+      const wrapper = await mountPage()
+      await openCreateReady(wrapper)
+      await wrapper.find('[data-test="preview-button"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="preview-result"]').exists()).toBe(true)
+
+      await wrapper.find('[data-test="field-threshold"]').setValue('45')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="preview-result"]').exists()).toBe(false)
+      // 清结论不等于自动重算：请求次数仍是 1
+      expect(mockedSensorFieldApi.preview).toHaveBeenCalledTimes(1)
+    })
+
+    it('来源组 ⇒ 按钮不出现、说明行出现（组内 active 成员由状态机决定）', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-source-kind"]').setValue('source_group')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="preview-button"]').exists()).toBe(false)
+      const note = wrapper.find('[data-test="preview-unavailable"]')
+      expect(note.exists()).toBe(true)
+      expect(note.text()).toBe('来源组规则不支持试算（组内成员由数据源状态机决定）')
+    })
+
+    it('未选设备 / 未填字段选择器 ⇒ 按钮 disabled，title 说明缺什么', async () => {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      const button = () => wrapper.find('[data-test="preview-button"]')
+
+      expect(button().attributes('disabled')).toBeDefined()
+      expect(button().attributes('title')).toContain('边缘设备')
+      expect(button().attributes('title')).toContain('字段选择器')
+
+      await wrapper.find('[data-test="field-trigger-device"]').setValue('10')
+      await flushPromises()
+      expect(button().attributes('disabled')).toBeDefined()
+      expect(button().attributes('title')).toContain('字段选择器')
+      expect(button().attributes('title')).not.toContain('边缘设备')
+
+      await wrapper.find('[data-test="field-sensor"]').setValue('temperature_1')
+      await flushPromises()
+      expect(button().attributes('disabled')).toBeUndefined()
     })
   })
 })

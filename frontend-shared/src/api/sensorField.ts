@@ -141,6 +141,88 @@ export interface SensorFieldSchema {
   limits: SensorFieldLimits
 }
 
+/**
+ * POST /api/v1/sensor-fields/preview 的请求体（与表单字段一一对应）。
+ *
+ * `window_hours` 省略时后端按 24h；`duration_sec` 与规则的 trigger_duration_sec 同义，
+ * 0 = 不要求连续满足（后端据此跳过连续判定，响应里 duration_would_fire 恒为 false，
+ * 调用方不能把它读成"不会触发"）。
+ */
+export interface SensorFieldPreviewRequest {
+  edge_device_id: number
+  selector: string
+  /**
+   * 与后端 sensorfield.CmpOp 的合法值一致；前端下拉的 AutomationComparator 是它的子集。
+   * 语法错误会 400 + error_code，不会静默降级成某个默认比较符。
+   */
+  comparator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | string
+  threshold: number
+  window_hours?: number
+  duration_sec?: number
+}
+
+/**
+ * 试算逐帧求值结果中的一帧。
+ *
+ * `ok=false` 是"本帧解析不到 / 缺员"（不是阈值不满足）；`satisfied` 只在 ok=true 时有意义。
+ * `value` 是参与比较的值（reducer 为归约值），unbound 帧为 0。
+ */
+export interface SensorFieldPreviewFrame {
+  /** 设备落库时间（RFC3339）；连续段判定按相邻帧时间差计算 */
+  timestamp: string
+  ok: boolean
+  satisfied: boolean
+  value: number
+  reason: string
+  /** min/max 在缺已知成员时仍按本帧求值（后端 degraded 标记） */
+  degraded: boolean
+}
+
+/** aggregation_trace 单项：最近一帧的逐字段比较（展示层，不是判定口径）。 */
+export interface SensorFieldPreviewTraceItem {
+  field: string
+  value: number
+  valid: boolean
+  /** 该字段与阈值的比较结果（valid=false 时无意义） */
+  cmp: boolean
+  reason?: string
+}
+
+/**
+ * POST /api/v1/sensor-fields/preview 的 data（§8.3）。
+ *
+ * 契约要点（与后端 `previewSensorField` 逐项对齐）：
+ *   - `status='unbound'` 是**正常响应**：没有可试算的字段，`frames` 为空数组；
+ *   - `samples_considered` 是窗口内行数（不是帧数），`frames.length` 才是判定过的帧数；
+ *   - `duration_would_fire` 只回答"连续满足是否达到 duration_sec"；duration_sec=0 时
+ *     后端恒为 false（见请求体的说明）；
+ *   - `truncated=true` = 命中帧预算（由旧到新截断），结论偏乐观；
+ *   - `data_source` 决定 `frame_semantics` 的口径（帧表 vs unified_data 过渡回落）。
+ */
+export interface SensorFieldPreview {
+  selector: string
+  status: 'resolved' | 'unbound'
+  kind: SensorSelectorKind
+  aggregate: string
+  matched: string[]
+  samples_considered: number
+  truncated: boolean
+  aggregation_trace: SensorFieldPreviewTraceItem[]
+  /** reducer 型选择器的归约值；非 reducer / 最近一帧无法求值时为 null */
+  reduced: number | null
+  /** reducer 型选择器在最近一帧缺失的已知成员（unified_data 口径下 ≠ 设备缺报） */
+  missing_known: string[]
+  /** 逐帧求值；unbound / 无数据时为空数组 */
+  frames: SensorFieldPreviewFrame[]
+  duration_sec: number
+  duration_would_fire: boolean
+  /** 连续判定受采样周期近似（duration_sec>0 时为 true） */
+  approx: boolean
+  sparse_frames: boolean
+  frame_semantics: string
+  data_source: 'telemetry_frame' | 'unified_data'
+}
+
 /** 降级链第二级的候选：只有 code + unit，无类型、无中文名、无最近上报。 */
 export interface SensorFieldFallbackCategory {
   code: string
@@ -182,6 +264,19 @@ export const sensorFieldApi = {
         params: { edge_device_id: edgeDeviceId, selector },
       }),
     )
+  },
+  /**
+   * 保存前试算（**只读**）：用最近 `window_hours`（默认 24）的真实数据逐帧重放这条规则。
+   *
+   * 为什么是 POST 且必须由用户显式触发：后端要扫帧表（24h 窗口在生产可达数十万帧），
+   * 每次输入阈值都打一次 = 把"填表单"变成"压测"。UI 只在点「用近 24h 数据试算」时调用。
+   *
+   * 只读、**不落审计**（后端 handler 注释：§8.3 末句）：无论结论是什么都不得阻止保存 ——
+   * 阈值先填、设备后接入是正常流程。unbound 也是正常响应（frames 为空），不是错误；
+   * 语法错误 400 + error_code、帧预算超限 413，调用方据此区分"配置问题"与"数据量问题"。
+   */
+  async preview(req: SensorFieldPreviewRequest): Promise<SensorFieldPreview> {
+    return unwrap<SensorFieldPreview>(client.post('/api/v1/sensor-fields/preview', req))
   },
   /** 选择器契约表（聚合词表 / 默认聚合 / 别名 / 错误码 / 上限）。与设备无关，可全局缓存。 */
   async getSchema(): Promise<SensorFieldSchema> {
