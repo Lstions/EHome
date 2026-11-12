@@ -1,0 +1,19 @@
+/* 监控页族共享样式（拆分后由两个子组件分别引入）。
+ *
+ * 为什么单列：.card-header 同时被「控制面健康」卡与「详细面板」六张卡使用。拆成子组件后
+ * 父组件的 scoped 样式**不会作用到子组件内部 DOM**，两处各留一份必然漂移，故收进这份
+ * 「页面族」样式表，由各子组件以 <style scoped src> 引入 —— 作用域仍按组件隔离
+ * （引入方各拿一份 scoped 副本），不会外溢到全站其它页面。
+ *
+ * 引入方必须把本文件放在**最后一个** style 块：原单文件里 .card-header 位于业务规则
+ * 之后，放在最后才能保持拆分前的层叠顺序。
+ *
+ * 页面 Monitor.vue 不引入本文件：它已不再渲染任何带 .card-header 的卡片。
+ */
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: bold;
+}

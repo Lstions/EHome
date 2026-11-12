@@ -5,7 +5,37 @@ import { createPinia, setActivePinia } from 'pinia'
 import { Window } from 'happy-dom'
 import { parse, compileStyleAsync } from '@vue/compiler-sfc'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import Monitor from '../Monitor.vue'
+
+/**
+ * 纯搬移式拆分（2026-11-12）后，源码门禁的「页面源码」= 页面 + 拆分产物。
+ *
+ * 断言本身一字未改：只是把读取范围**机械地**扩到新的存放位置（页面 → 两个子组件 →
+ * 共享样式表 → 展示口径模块 → 组合式函数），顺序固定 —— 个别断言按「先出现」定位
+ * （fetchMetrics 的定义、<template> 切片的起点都只在一处出现）。
+ *
+ * 为什么不能只读页面：拆分把同一份口径分散到了不同文件，但被测契约没有变 ——
+ *   ① 页面仍保留 PageHeader、统计卡四张、三态链、根容器的 aria-busy/data-test
+ *      （390px 真实级联与 P2 图标避让两条门禁仍只编译 Monitor.vue 的 <style>）；
+ *   ② 控制面健康卡 → components/MonitorControlHealth.vue（「累计计数」tooltip 随卡片走）；
+ *   ③ 详细面板六卡 → components/MonitorDetailPanels.vue（4 处 var(--color-*) 配色随卡片走）；
+ *   ④ 取数/轮询/派生 → composables/useMonitor.ts（fetchMetrics 与 ref(UNKNOWN) 在这里）；
+ *   ⑤ 展示口径 → monitorDisplay.ts（import { UNKNOWN, metricOrDash } 这一行在这里）。
+ * 任何一处文件缺失都会让 readFileSync 直接抛错 ⇒ 本文件加载失败（fail-closed，不静默跳过）。
+ */
+const MONITOR_SOURCE_FILES = [
+  'src/views/monitor/Monitor.vue',
+  'src/views/monitor/components/MonitorControlHealth.vue',
+  'src/views/monitor/components/MonitorDetailPanels.vue',
+  'src/views/monitor/components/monitor.shared.css',
+  'src/views/monitor/monitorDisplay.ts',
+  'src/views/monitor/composables/useMonitor.ts',
+] as const
+
+/** 页面 + 拆分产物拼接后的全文（顺序见上）。 */
+const monitorSourceText = () =>
+  MONITOR_SOURCE_FILES.map(file => readFileSync(resolve(process.cwd(), file), 'utf8')).join('\n')
 
 // Mock API
 vi.mock('@/api/monitor', () => ({
@@ -585,7 +615,7 @@ describe('Monitor.vue', () => {
   })
 
   it('源码不再引用 getThemeColors/THEME_COLORS（F17：进度条配色已完全交给 CSS 变量）', async () => {
-    const src = (await import('../Monitor.vue?raw')).default as string
+    const src = monitorSourceText()
     expect(src).not.toContain('getThemeColors')
     expect(src).not.toContain('THEME_COLORS')
     // 反向守卫：必须真的用了语义 token，否则上面的 not.toContain 在「整个删掉配色」时也会通过
@@ -679,7 +709,7 @@ describe('Monitor.vue', () => {
   })
 
   it('源码不再用 -- 作未知占位（§3.4.5 统一为 —）', async () => {
-    const monitorSource = (await import('../Monitor.vue?raw')).default as string
+    const monitorSource = monitorSourceText()
     expect(monitorSource).not.toMatch(/ref\('--'\)/)
     expect(monitorSource).not.toMatch(/lastUpdateTime\s*=\s*'--'/)
     // 未拉取到指标前，「最后更新」不得伪造成一个具体时刻
@@ -853,7 +883,7 @@ describe('Monitor.vue', () => {
     })
 
     it('源码守卫：模板里不得再出现「指标值 || 0」兜底（缺陷本体）', async () => {
-      const src = (await import('../Monitor.vue?raw')).default as string
+      const src = monitorSourceText()
       // 指标取值一律经 metric()/metricText()，模板中不再有 || 0
       // 注意：文件内含 <template #header>/<template #title> 等内层插槽，
       // 首个 '</template>' 只是最早那个内层块的闭合 —— 必须切到**最后一个**。
@@ -1040,7 +1070,7 @@ describe('Monitor.vue', () => {
     })
 
     it('源码守卫：根容器同时绑定 aria-busy 与 data-test 刷新标记', async () => {
-      const src = (await import('../Monitor.vue?raw')).default as string
+      const src = monitorSourceText()
       expect(src).toContain(":aria-busy=\"isRefreshing\"")
       expect(src).toContain("'monitor-refreshing'")
       // 反向守卫：置真必须发生在 fetchMetrics 内（否则任何异步都会点亮标记）
@@ -1077,7 +1107,7 @@ describe('Monitor.vue C-ops 修复契约（控制面口径 / KPI 图标避让 / 
     expect(wrapper.findAll('.control-metric.attention')).toHaveLength(2)
     expect(wrapper.find('[data-test="monitor-control-alert"]').text()).toContain('2 项')
     // 口径说明必须可追溯：tooltip 文案 + 计算属性只累加三个待处置条件
-    const src = readFileSync('src/views/monitor/Monitor.vue', 'utf8')
+    const src = monitorSourceText()
     expect(src).toContain('累计计数')
     expect(src).toMatch(/controlAttention = computed\(\(\) =>\s*\(metrics\.value\?\.control\?\.unresolved_unknown/)
   })
