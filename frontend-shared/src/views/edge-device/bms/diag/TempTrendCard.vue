@@ -1,37 +1,6 @@
-<!--
-  温度趋势卡（diag #8）—— 生产实现。
-
-  ── 只渲染内容 ──────────────────────────────────────────────────────────────
-  外壳 / 折叠头（标题+摘要）由父页统一渲染；本组件只出内容区。
-  内容区高度目标 ≤217px（不含父页折叠头）：
-    工具行 28 + 折线 160 + 说明 16 + 间距 12 ≈ 216px
-
-  ── 为什么这张图有价值（不是把瞬时值换个画法）─────────────────────────────
-  页面上的「温度探头」只给 3 个瞬时数字。要判断"某一探头是否单独偏高
-  （局部发热/探头故障）"必须看时间维：3 路一起升 = 环境升温；
-  只有 1 路升 = 该测点异常。这是截面数据回答不了的问题。
-
-  ── 45℃ 告警线怎么画 ────────────────────────────────────────────────────────
-  复用项目 LineChart 组件（它注册的 ECharts 模块里**没有 MarkLineComponent**，
-  所以不能传 markLine）。这里用 CSS 绝对定位虚线 + 图外文字说明：
-    · 显式给 yAxisMin=20 / yAxisMax=50，让量程固定、虚线位置可计算；
-    · 位置按 LineChart 的 grid 约定换算（top 取 ECharts 默认 60，底部留 X 轴标签位）；
-    · 同时用文字给出精确结论（"当前最高 28.1℃，距告警 16.9℃"），
-      即使虚线有 1~2px 视觉偏差，读者也不会误判。
--->
 <template>
   <div class="diag-body">
-    <div class="diag-toolbar">
-      <span class="diag-tip" v-if="maxTemp !== null">最高 {{ maxTemp.toFixed(1) }} ℃</span>
-      <TimeRangeSelector
-        v-model="timeRange"
-        v-model:custom-range="customTimeRange"
-        class="range-ctl"
-        @change="onRangeChange"
-      />
-    </div>
-
-    <!-- 固定 160px 的画布区：loading/empty/error 都占同高，父页高度不抖 -->
+    <!-- 固定画布区：loading/empty/error/离线 都占同高，父页高度不抖（H5 契约） -->
     <div class="diag-plot" :style="{ '--plot-h': PLOT_H + 'px' }">
       <div v-if="!online" class="state-line">
         <el-icon :size="14"><WarningFilled /></el-icon>
@@ -46,22 +15,42 @@
       <div v-else-if="!hasData" class="state-line is-muted">暂无温度历史数据</div>
 
       <template v-else>
+        <!--
+          全宽出血档（2026-11-12）：
+            · legend-position="none" —— 图例移出画布，改由下方 HTML 读数条承担（同时是当前值）；
+            · density="compact" —— 不再依赖「高度 ≤220 自动判定」（那条判据历史上被 Vue 的
+              Boolean 铸型短路，导致 160px 小图跑桌面几何）；
+            · mark-line —— 45℃ 告警线由 ECharts 画，位置永远与刻度对齐（原来是 CSS 绝对定位，
+              按 gridTop=60 / bottom=22 换算，实测偏高 ≈9px）。
+        -->
         <LineChart
           :series="chartSeries"
           :y-axis-min="Y_MIN"
           :y-axis-max="Y_MAX"
           :show-area="false"
-          height="160px"
+          :height="PLOT_H + 'px'"
+          density="compact"
+          legend-position="none"
+          :y-tick-count="3"
+          :x-max-interval-ms="tickIntervalMs"
+          :mark-line="warnMarkLine"
         />
-        <!-- 45℃ 告警线（CSS 定位：LineChart 未注册 MarkLine 模块） -->
-        <span class="warn-line" :style="{ top: warnLineTop + 'px' }" aria-hidden="true"></span>
-        <span class="warn-tag" :style="{ top: warnLineTop - 7 + 'px' }">45℃</span>
       </template>
+    </div>
+
+    <!-- 读数条：色点 + 探头名 + 当前值（26px，非交互 —— 不占用 44px 触摸目标预算） -->
+    <div v-if="hasData && !errorMsg && online" class="chips" aria-label="各探头当前温度">
+      <span v-for="(s, i) in series" :key="s.name" class="chip">
+        <i class="chip-dot" :style="{ background: seriesColor(i) }"></i>
+        <span class="chip-name">{{ s.name }}</span>
+        <b class="chip-value">{{ lastValue(s) }}</b>
+      </span>
     </div>
 
     <p class="diag-foot">
       <template v-if="maxTemp !== null">
-        虚线为 45℃ 告警线 · 当前最高 {{ maxTemp.toFixed(1) }}℃（距告警 {{ (TEMP_WARN - maxTemp).toFixed(1) }}℃）
+        最高 {{ maxTemp.toFixed(1) }}℃（{{ hottestName }}），距 <b>45℃</b> 告警 {{ (TEMP_WARN - maxTemp).toFixed(1) }}℃
+        <template v-if="series.length > 1">· 三路同步升降＝环境温度，单路独升＝该测点异常</template>
       </template>
       <template v-else>判定口径：高于 45℃ 视为偏高</template>
     </p>
@@ -69,43 +58,88 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue'
 import LineChart from '@/components/charts/LineChart.vue'
-import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
-import { useTimeRange } from '@/composables/useTimeRange'
+import { resolveTimeRange } from '@/composables/useTimeRange'
 import { useDiagHistory } from './useDiagHistory'
 
 const props = defineProps<{
   deviceId: number | string
   online: boolean
+  /**
+   * 时间窗上移到页面级（2026-11-12）：两张趋势卡共享同一个窗口。
+   * 类型与 useTimeRange 保持一致（customRange 是 [string, string]）。
+   */
+  timeRange?: string
+  customRange?: [string, string] | null
 }>()
 
 /** 折叠态摘要上抛给父页的折叠头（§3.2） */
 const emit = defineEmits<{ (e: 'summary', text: string): void }>()
 
-/** 图高（与 CSS 的 --plot-h 保持一致，虚线定位要用它换算） */
-const PLOT_H = 160
-/** 显式量程：固定后 45℃ 线的位置可计算，也让 26~30℃ 的变化不被压平 */
+/** 画布高（px）：全宽出血后这里只给「4 条网格 + 一行时刻」留位置 */
+const PLOT_H = 180
+/** 显式量程：固定后 45℃ 告警线的位置由 ECharts 自己算，也让 26~31℃ 的变化不被压平 */
 const Y_MIN = 20
 const Y_MAX = 50
 const TEMP_WARN = 45
-/**
- * 45℃ 线在画布上的 y 坐标：
- *   LineChart 的 grid 未指定 top ⇒ ECharts 默认 60px（其 legend 在 top:30 占了上方）；
- *   底部 containLabel 后 X 轴时刻标签约 22px。
- * 换算：y = plotTop + (1 - (v - min)/(max - min)) * plotHeight
- * 若日后 LineChart 改了 grid，此处需同步（虚线只是近似指示，下方文字给精确结论）。
- */
-const GRID_TOP = 60
-const GRID_BOTTOM = 22
-const warnLineTop = computed(() => {
-  const plotHeight = Math.max(PLOT_H - GRID_TOP - GRID_BOTTOM, 1)
-  const ratio = 1 - (TEMP_WARN - Y_MIN) / (Y_MAX - Y_MIN)
-  return GRID_TOP + ratio * plotHeight
+
+const rangeMode = computed(() => props.timeRange || '24h')
+/** 24h → 6h 一个刻度；7d → 1 天；1h → 15min（轴级 maxInterval，单位毫秒） */
+const tickIntervalMs = computed(() => {
+  switch (rangeMode.value) {
+    case '1h': return 15 * 60 * 1000
+    case '7d': return 24 * 3600 * 1000
+    default: return 6 * 3600 * 1000
+  }
 })
 
-const { timeRange, customTimeRange, getTimeRange, handleTimeRangeChange } = useTimeRange(() => load())
+/**
+ * Canvas 里不能直接用 CSS 变量（ECharts 把颜色写进 canvas 的 fillStyle，
+ * 浏览器不会解析 var(...)）—— 必须用 getComputedStyle 取真实色值。
+ * 主题切换时重取（H6：画布颜色必须跟着主题走）。
+ */
+const warnColor = ref('#e6a23c')
+const readThemeColor = () => {
+  if (typeof window === 'undefined') return
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--color-warning').trim()
+  warnColor.value = v || getComputedStyle(document.documentElement).getPropertyValue('--el-color-warning').trim() || '#e6a23c'
+}
+
+/** 告警线：颜色取主题色，暗/亮主题都跟着走 */
+const warnMarkLine = computed(() => ({
+  silent: true,
+  symbol: 'none',
+  lineStyle: { color: warnColor.value, type: 'dashed', width: 1, opacity: 0.85 },
+  label: {
+    position: 'insideEndTop',
+    formatter: '45℃ 告警',
+    fontSize: 10,
+    color: warnColor.value,
+  },
+  data: [{ yAxis: TEMP_WARN }],
+}))
+
+/** 读数条色点必须与 LineChart 的调色板同序（primary / danger / warning），否则「色点对不上线」 */
+const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c']
+const seriesColor = (i: number): string => {
+  const names = ['--color-primary', '--color-danger', '--color-warning']
+  if (typeof window === 'undefined') return SERIES_COLORS[i % 3]
+  const v = getComputedStyle(document.documentElement).getPropertyValue(names[i % 3]).trim()
+  return v || SERIES_COLORS[i % 3]
+}
+
+let themeObserver: MutationObserver | null = null
+onMounted(() => {
+  readThemeColor()
+  themeObserver = new MutationObserver(readThemeColor)
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
+})
+onUnmounted(() => {
+  themeObserver?.disconnect()
+  themeObserver = null
+})
 
 const { loading, loaded, fetchRange } = useDiagHistory({
   nameMap: { temperature_1: '探头 1', temperature_2: '探头 2', temperature_3: '探头 3' },
@@ -117,6 +151,7 @@ const hasData = ref(false)
 const errorMsg = ref('')
 
 const chartSeries = computed(() => series.value)
+
 /** 当前最高温：从已取到的点位推导（不另发请求） */
 const maxTemp = computed<number | null>(() => {
   let max: number | null = null
@@ -130,6 +165,22 @@ const maxTemp = computed<number | null>(() => {
   return max
 })
 
+/** 最高温所在探头（结论句要说清「哪一路」，用户才知道是不是单点异常） */
+const hottestName = computed(() => {
+  let name = ''
+  let max = -Infinity
+  for (const s of series.value) {
+    const last = s.data.length ? s.data[s.data.length - 1].value : -Infinity
+    if (typeof last === 'number' && last > max) { max = last; name = s.name }
+  }
+  return name
+})
+
+const lastValue = (s: { data: Array<{ value: number }> }) => {
+  const last = s.data.length ? s.data[s.data.length - 1].value : null
+  return typeof last === 'number' ? `${last.toFixed(1)}℃` : '—'
+}
+
 /** 折叠头摘要：「当前 xx℃」是这一块最该被先看到的一个数字 */
 const summaryText = computed(() => {
   if (errorMsg.value) return ''
@@ -139,10 +190,6 @@ const summaryText = computed(() => {
 })
 watch(summaryText, (t) => emit('summary', t), { immediate: true })
 
-function onRangeChange() {
-  handleTimeRangeChange()
-}
-
 async function load() {
   errorMsg.value = ''
   if (!props.online) {
@@ -150,7 +197,7 @@ async function load() {
     hasData.value = false
     return
   }
-  const [start, end] = getTimeRange()
+  const [start, end] = resolveTimeRange(rangeMode.value, props.customRange ?? null)
   const { series: result, error } = await fetchRange(
     props.deviceId,
     ['temperature_1', 'temperature_2', 'temperature_3'],
@@ -176,7 +223,7 @@ async function load() {
 }
 
 onMounted(load)
-watch(() => [props.deviceId, props.online], load)
+watch(() => [props.deviceId, props.online, props.timeRange, props.customRange], load)
 </script>
 
 <style scoped>
@@ -186,27 +233,20 @@ watch(() => [props.deviceId, props.online], load)
   gap: 6px;
   min-width: 0;
 }
-
-.diag-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  flex-wrap: wrap;
-}
-.diag-tip {
-  font-size: 12px;
-  color: var(--el-text-color-regular);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.range-ctl { margin-left: auto; min-width: 0; }
-
-/* 固定高度画布区 + 相对定位承载告警线 */
 .diag-plot {
   position: relative;
-  height: var(--plot-h, 160px);
+  height: var(--plot-h, 180px);
   min-width: 0;
+}
+
+/*
+  仅窄屏的「全宽出血」：BmsDetailPage 把 .diag-card 变成全宽条（左右内距 0），
+  于是卡片内的文字块要自己补回 12px，画布则用负 margin 抵消这 12px 贴到视口边缘。
+  桌面（>768px）卡片仍有 20px 内距，这段规则不生效 —— 桌面像素基线不变。
+*/
+@media (max-width: 768px) {
+  .diag-body { padding: 0 var(--diag-text-pad, 12px); }
+  .diag-plot { margin: 0 calc(-1 * var(--diag-text-pad, 12px)); }
 }
 .state-line {
   display: flex;
@@ -223,33 +263,34 @@ watch(() => [props.deviceId, props.online], load)
 .state-line.is-error { color: var(--el-color-danger); align-items: flex-start; padding-top: 8px; }
 .err-text { flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
 
-/* 45℃ 告警虚线：绝对定位，覆盖在折线之上但不拦事件 */
-.warn-line {
-  position: absolute;
-  /* top 由模板内联 style 提供（warnLineTop 计算值） */
-  left: 3%;
-  right: 12%;
-  height: 0;
-  border-top: 1px dashed var(--el-color-warning);
-  pointer-events: none;
-  opacity: 0.75;
-}
-.warn-tag {
-  position: absolute;
-  right: 2px;
-  font-size: 9px;
+/* 读数条：图例 + 当前值合体，26px（低于 10px 字号是硬下限，这里 11px） */
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color, var(--el-border-color));
+  border-radius: 13px;
+  background: var(--bg-color-overlay, var(--el-bg-color-overlay));
+  font-size: 11px;
   line-height: 1;
-  color: var(--el-color-warning);
-  background: var(--card-bg);
-  padding: 1px 2px;
-  pointer-events: none;
+  color: var(--text-color-regular, var(--el-text-color-regular));
   white-space: nowrap;
+}
+.chip-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.chip-value {
+  color: var(--text-color-primary, var(--el-text-color-primary));
+  font-weight: 600;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .diag-foot {
   margin: 0;
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--el-text-color-secondary);
   overflow-wrap: anywhere;
 }

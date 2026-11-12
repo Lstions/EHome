@@ -32,7 +32,8 @@
             </div>
           </div>
         </el-popover>
-        <span class="head-right">
+        <!-- 时间窗已上移页面级（页面下发时不重复渲染第二个控件） -->
+        <span v-if="!useExternalRange" class="head-right">
           <TimeRangeSelector v-model="cellRange" v-model:custom-range="cellCustom" @change="onCellRange" />
         </span>
       </div>
@@ -60,8 +61,24 @@
             :y-axis-min="cellY.min"
             :y-axis-max="cellY.max"
             :show-area="false"
-            :height="isMobileViewport ? '160px' : '280px'"
+            :height="isMobileViewport ? '180px' : '280px'"
+            :density="isMobileViewport ? 'compact' : 'auto'"
+            :legend-position="isMobileViewport ? 'none' : 'inside'"
+            :y-tick-count="3"
+            :x-max-interval-ms="useExternalRange ? externalTickMs : undefined"
           />
+        </div>
+        <!--
+          16 条序列的图例必须离开画布（2026-11-12）：原先把 16 项画在画布里要折 3 行、压住
+          Y 轴刻度（真机截图「3.383.16 (V)」糊成一团），绘图区只剩 27px。现在改成图下的
+          4 列读数网格：色点 + 编号 + 当前值，既是图例也是读数，且不占绘图区。
+        -->
+        <div v-if="isMobileViewport && cellShown.length" class="cell-readout" aria-label="各电芯当前电压">
+          <span v-for="(s, i) in cellShown" :key="s.name" class="cell-ro">
+            <i :style="{ background: seriesColor(i) }"></i>
+            <span class="cell-ro-name">{{ s.name }}</span>
+            <b>{{ lastValue(s, 'V') }}</b>
+          </span>
         </div>
       </template>
     </div>
@@ -76,7 +93,7 @@
         <span class="card-hint">按量纲分组（总电压 / 单体电压 / 电流 / 电池状态 / 温度），状态量未纳入</span>
         <span class="head-right">
           <el-button v-if="metricError" size="small" text type="primary" class="retry-btn" @click="fetchMetrics">重试</el-button>
-          <TimeRangeSelector v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
+          <TimeRangeSelector v-if="!useExternalRange" v-model="metricRange" v-model:custom-range="metricCustom" @change="onMetricRange" />
         </span>
       </div>
       <!-- 桌面契约：恒定 5 个分组槽位，组数不随数据到达而变，页面高度稳定
@@ -131,8 +148,20 @@
             :y-axis-max="mobileGroup.yAxisMax"
             :show-area="false"
             height="196px"
+            density="compact"
+            legend-position="none"
+            :y-tick-count="3"
+            :x-max-interval-ms="useExternalRange ? externalTickMs : undefined"
           />
           <div v-else class="trend-sub-state">暂无该项历史数据</div>
+        </div>
+        <!-- 读数条放在固定高度容器**外面**：.trend-mobile-chart 是 196px 定高，塞进去会被裁掉 -->
+        <div v-if="mobileGroup && mobileGroup.series.length" class="cell-readout trend-readout horizon">
+          <span v-for="(s, i) in mobileGroup.series" :key="s.name" class="cell-ro">
+            <i :style="{ background: seriesColor(i) }"></i>
+            <span class="cell-ro-name">{{ s.name }}</span>
+            <b>{{ lastValue(s, s.unit || '') }}</b>
+          </span>
         </div>
       </div>
     </div>
@@ -144,11 +173,44 @@ import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { useHistoryData } from '@/composables/useHistoryData'
 import { withHistorySlot } from '@/composables/useHistoryQueue'
-import { useTimeRange } from '@/composables/useTimeRange'
+import { resolveTimeRange, useTimeRange } from '@/composables/useTimeRange'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import type { SeriesData } from '@/types/chart'
 
-const props = withDefaults(defineProps<{ deviceId: number; cellCount?: number; online?: boolean }>(), { cellCount: 16, online: true })
+const props = withDefaults(defineProps<{
+  deviceId: number
+  cellCount?: number
+  online?: boolean
+  /**
+   * 页面级时间窗（2026-11-12 第二轮一致性）：与「温度趋势 / SOC 与电流」共用同一个窗口。
+   * 传了就用外部窗口并隐藏卡内选择器；不传（其它调用方）仍用组件自己的选择器 —— 行为不变。
+   */
+  timeRange?: string
+  customRange?: [string, string] | null
+}>(), { cellCount: 16, online: true })
+
+/** 是否由页面下发时间窗 */
+const useExternalRange = computed(() => !!props.timeRange)
+/** X 轴刻度间隔随窗口（1h→15min / 24h→6h / 7d→1 天） */
+const externalTickMs = computed(() => {
+  switch (props.timeRange) {
+    case '1h': return 15 * 60 * 1000
+    case '7d': return 24 * 3600 * 1000
+    default: return 6 * 3600 * 1000
+  }
+})
+/** 读数条配色必须与 LineChart 调色板同序（line-chart 按 series 下标取色） */
+const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399', '#9c27b0', '#06b6d4', '#f97316']
+const seriesColor = (i: number) => {
+  const names = ['--color-primary', '--color-danger', '--color-warning', '--color-success', '--color-info', '--color-adc', '--terminal-accent', '--terminal-warning']
+  if (typeof window === 'undefined') return SERIES_COLORS[i % 8]
+  const v = getComputedStyle(document.documentElement).getPropertyValue(names[i % 8]).trim()
+  return v || SERIES_COLORS[i % 8]
+}
+const lastValue = (s: { data: Array<{ value: number }> }, unit: string) => {
+  const last = s.data.length ? s.data[s.data.length - 1].value : null
+  return typeof last === 'number' ? `${last.toFixed(3)}${unit}` : '—'
+}
 
 /* ---- 视口判定（≤768px 走移动端布局）----
  * 为什么用 JS 判定而不是纯 CSS：窄屏要**结构**变化（5 子图 → 单图 + 量纲切换器、
@@ -197,7 +259,16 @@ async function fetchCells() {
     .filter((s) => s.data.length > 0)
   if (cellPicked.value.length === 0) pickAll()
 }
-const { timeRange: cellRange, customTimeRange: cellCustom, getTimeRange: getCellRange, handleTimeRangeChange: cellRangeChanged } = useTimeRange(fetchCells)
+const { timeRange: cellRange, customTimeRange: cellCustom, getTimeRange: cellOwnRange, handleTimeRangeChange: cellRangeChanged } = useTimeRange(fetchCells)
+/** 取数区间：页面下发时用页面的窗口，否则用卡内选择器 */
+const getCellRange = (): [Date, Date] => useExternalRange.value
+  ? resolveTimeRange(props.timeRange!, props.customRange ?? null)
+  : cellOwnRange()
+// 页面切窗 ⇒ 两张图各自重取（组件不持有选择器时也能跟随）
+watch(() => [props.timeRange, props.customRange], () => {
+  if (!useExternalRange.value) return
+  void fetchCells()
+})
 function onCellRange() {
   cellRangeChanged()
   if (cellRange.value === 'custom' && cellCustom.value) void fetchCells()
@@ -217,7 +288,14 @@ function invertPick() {
 const cellY = computed(() => {
   const vals = cellShown.value.flatMap((s) => s.data.map((d) => d.value)).filter((v) => typeof v === 'number' && v > 0)
   if (vals.length === 0) return { min: 2.5, max: 4.0 }
-  return computeAdaptiveYAxisRange(vals, { minBound: 2.0, maxBound: 4.5 })
+  /*
+   * 2026-11-12：电芯电压差异只有 10~20mV，默认参数（minSpan 0.1 / flatPadding 0.05）会把
+   * 3.31~3.33V 画成 3.26~3.38V —— 16 条线挤在中间一条细带上（实测纵向利用率 26%）。
+   * 这里按「数据跨度 × 0.4」加边、最小跨度 0.02、保留 3 位小数。
+   */
+  return computeAdaptiveYAxisRange(vals, {
+    minBound: 2.0, maxBound: 4.5, minSpan: 0.02, paddingRatio: 0.4, flatPadding: 0.006, decimals: 3,
+  })
 })
 const cellHint = computed(() => '已选 ' + cellShown.value.length + '/' + cellAll.value.length + ' 串')
 /** 窄屏弹层触发器文案：不带「串」后缀，控制触发器宽度（≤44px 高，文案单行不截断）。 */
@@ -275,7 +353,14 @@ async function fetchMetrics() {
   if (controller.signal.aborted) return
   metricAll.value = res.map((s) => ({ name: s.name, unit: s.unit, category: s.category, data: s.data }))
 }
-const { timeRange: metricRange, customTimeRange: metricCustom, getTimeRange: getMetricRange, handleTimeRangeChange: metricRangeChanged } = useTimeRange(fetchMetrics)
+const { timeRange: metricRange, customTimeRange: metricCustom, getTimeRange: metricOwnRange, handleTimeRangeChange: metricRangeChanged } = useTimeRange(fetchMetrics)
+const getMetricRange = (): [Date, Date] => useExternalRange.value
+  ? resolveTimeRange(props.timeRange!, props.customRange ?? null)
+  : metricOwnRange()
+watch(() => [props.timeRange, props.customRange], () => {
+  if (!useExternalRange.value) return
+  void fetchMetrics()
+})
 function onMetricRange() {
   metricRangeChanged()
   if (metricRange.value === 'custom' && metricCustom.value) void fetchMetrics()
@@ -474,10 +559,39 @@ defineExpose({ fetchCells, fetchMetrics })
      静态说明文字（按量纲分组说明、已选 N/16 串）信息已分别由切换器选项与触发器承载，
      不是数据本身 —— 数值/保护名称等业务数据一律不隐藏。 */
   .card-hint { display: none; }
-  .chart-box { height: 160px; }
-  .chart-state { height: 160px; }
+  /* 2026-11-12：图高 160 → 180，与两张诊断卡一致（同页图表统一 180） */
+  .chart-box { height: 180px; }
+  .chart-state { height: 180px; }
+
+  /* 画布贴边：带内文字 12px 内距，图表用负 margin 抵消（与诊断卡同一写法） */
+  .chart-box,
+  .trend-mobile-chart { margin-left: -12px; margin-right: -12px; }
+
+  /* 图例改成图下读数网格（4 列）：16 条序列放进画布要折 3 行并压住 Y 刻度，实测绘图区只剩 27px */
+  .cell-readout {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 3px 6px;
+    margin-top: 6px;
+  }
+  .trend-readout { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cell-ro {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--el-text-color-regular);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .cell-ro i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .cell-ro .cell-ro-name { color: var(--el-text-color-secondary); }
+  .cell-ro b { color: var(--el-text-color-primary); font-weight: 600; }
   .trend-dim-bar { margin-bottom: 4px; }
-  .trend-dim-select :deep(.el-select__wrapper) { min-height: 44px; font-size: 14px; }
+  /* 与同页其它「工具栏控件」同档：36px（44 是表单输入档，图表卡里的查看型控件用 36） */
+  .trend-dim-select :deep(.el-select__wrapper) { min-height: 36px; font-size: 13px; }
   /* 触发器/弹层勾选框：窄屏触摸目标 ≥44px（高密度弹层勾选框允许 36px，间距补足） */
   .cell-picker-trigger { min-height: 44px; }
   .cell-picker-pop :deep(.el-checkbox) { min-height: 36px; }

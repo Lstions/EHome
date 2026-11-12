@@ -4,6 +4,7 @@ import tempTrendSource from '@/views/edge-device/bms/diag/TempTrendCard.vue?raw'
 import {
   COMPACT_DEFAULT_GRID_TOP_PX,
   computeChartTopLayout,
+  resolveCompactLayout,
 } from '@/components/charts/LineChart.vue'
 
 /**
@@ -49,10 +50,14 @@ describe('LineChart 紧凑图排版（轴名不得压图例）', () => {
     expect(lineChartSource).toContain('hideOverlap: isCompactChart.value,')
   })
 
-  it('不得覆盖 grid.top —— 温度趋势卡的 45℃ 虚线依赖默认 60', () => {
+  it('兼容紧凑档（内置图例）不得覆盖 grid.top —— 既有调用方按默认 60 对齐', () => {
     expect(lineChartSource).not.toContain('top: isCompactChart.value ? 40')
-    // 该耦合的另一半：TempTrendCard 的注释里写明按默认 60 换算（改这里必须同步改那边）
-    expect(tempTrendSource).toContain('默认 60')
+    // 2026-11-12：温度卡的 45℃ 线改由 ECharts markLine 画（不再按 60/22 换算），
+    // 因此这里从「必须含『默认 60』」改为反向守卫：不得再出现 CSS 换算常量。
+    expect(tempTrendSource).not.toMatch(/GRID_TOP|GRID_BOTTOM|PLOT_H\s*=\s*160/)
+    // 告警线必须仍然存在，且走 markLine
+    expect(tempTrendSource).toContain(':mark-line="warnMarkLine"')
+    expect(tempTrendSource).toContain('yAxis: TEMP_WARN')
   })
 })
 
@@ -99,13 +104,54 @@ describe('LineChart compact prop：排版档与像素高度正交', () => {
     expect(layout.gridTop).toBeGreaterThanOrEqual(56)
   })
 
-  it('组件内 compact 优先于高度判定，并透传给 computeChartTopLayout', () => {
-    expect(lineChartSource).toContain('const isCompactChart = computed(() => props.compact ?? isCompactHeight(props.height))')
+  it('组件内用纯函数判定排版档，并把算好的档位传给 computeChartTopLayout', () => {
+    // 2026-11-12 回归修复：判据从 props.compact ?? isCompactHeight(...) 改为纯函数
+    // （Boolean casting 会把「未传」铸成 false，?? 永远短路 ⇒ 小图跑桌面几何）
+    expect(lineChartSource).toContain('const isCompactChart = computed(() => resolveCompactLayout(')
     expect(lineChartSource).toContain('compact?: boolean')
-    expect(lineChartSource).toMatch(/compact: props\.compact,/)
+    expect(lineChartSource).toContain('compact: isCompactChart.value,')
+    expect(lineChartSource).not.toContain('props.compact ?? isCompactHeight')
   })
 
   it('height / compact 变化会触发重绘（窄屏切换时排版档必须跟着变）', () => {
-    expect(lineChartSource).toMatch(/props\.height, props\.compact, props\.reserveRightAxes\]/)
+    expect(lineChartSource).toMatch(/props\.height, props\.compact, props\.reserveRightAxes/)
+    // 排版档相关的新 prop 也必须进 watch，否则切换密度不重绘
+    expect(lineChartSource).toMatch(/props\.density, props\.legendPosition/)
+  })
+})
+/**
+ * G1 门禁（2026-11-12）：排版档判定的行为型用例。
+ *
+ * 为什么必须新增：既有 2300+ 条用例里没有任何一条在「真实组件 + 未传 compact + height=160」
+ * 上取值，于是「小图跑桌面几何」的回归能带着全绿上线（绘图区只剩画布 16.67%）。
+ */
+describe('resolveCompactLayout：小图不得走桌面几何（G1）', () => {
+  it('只给高度：<=220px 判紧凑（160px 是最常见的诊断图高）', () => {
+    expect(resolveCompactLayout({ height: '160px' })).toBe(true)
+    expect(resolveCompactLayout({ height: 150 })).toBe(true)
+    expect(resolveCompactLayout({ height: '220px' })).toBe(true)
+    expect(resolveCompactLayout({ height: '221px' })).toBe(false)
+  })
+
+  it('窄屏宽画布也判紧凑（手机全宽出血后 393px，但高度 320px）', () => {
+    expect(resolveCompactLayout({ height: '320px', containerWidth: 393 })).toBe(true)
+    expect(resolveCompactLayout({ height: '320px', containerWidth: 519 })).toBe(true)
+    expect(resolveCompactLayout({ height: '320px', containerWidth: 520 })).toBe(false)
+    // 宽度未知（未布局）时退回高度判据，不擅自改档
+    expect(resolveCompactLayout({ height: '320px', containerWidth: 0 })).toBe(false)
+  })
+
+  it('显式 density 优先于一切', () => {
+    expect(resolveCompactLayout({ density: 'comfortable', height: '160px', containerWidth: 300 })).toBe(false)
+    expect(resolveCompactLayout({ density: 'compact', height: '400px', containerWidth: 1200 })).toBe(true)
+  })
+
+  it('兼容旧 compact:true（HistoryChartSection 的 320px 窄屏图靠它）', () => {
+    expect(resolveCompactLayout({ compact: true, height: '400px', containerWidth: 1200 })).toBe(true)
+  })
+
+  it('两个诊断卡的实测参数必须判为紧凑（回归现场）', () => {
+    expect(resolveCompactLayout({ height: '180px', containerWidth: 393 })).toBe(true)
+    expect(resolveCompactLayout({ height: '196px', containerWidth: 393 })).toBe(true)
   })
 })

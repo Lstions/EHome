@@ -193,7 +193,8 @@ describe('窄屏：电芯电压历史趋势（592 → ≤300）', () => {
     expect(trigger.text()).toContain('已选 16/16')
     expect(cellCard.findAll('.cell-picker-pop .el-checkbox')).toHaveLength(16)
     const chart = cellCard.find('.line-chart-stub')
-    expect(chart.attributes('data-height')).toBe('160px')
+    // 2026-11-12：窄屏图高统一 180（与两张诊断卡一致）
+    expect(chart.attributes('data-height')).toBe('180px')
   })
 })
 
@@ -271,7 +272,8 @@ describe('源码契约：移动端样式只在窄屏生效', () => {
 
   it('新增移动端样式全部写在 @media (max-width: 768px) 内', () => {
     const media = source.slice(source.indexOf('@media (max-width: 768px)'))
-    for (const marker of ['.chart-box { height: 160px; }', '.chart-state { height: 160px; }', '.trend-dim-bar', '.cell-picker-trigger { min-height: 44px; }']) {
+    // 2026-11-12：窄屏图高 160 → 180（与两张诊断卡统一），断言同步
+    for (const marker of ['.chart-box { height: 180px; }', '.chart-state { height: 180px; }', '.trend-dim-bar', '.cell-picker-trigger { min-height: 44px; }']) {
       expect(media, marker).toContain(marker)
     }
     const beforeMedia = source.slice(0, source.indexOf('@media (max-width: 768px)'))

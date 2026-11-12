@@ -74,7 +74,9 @@ describe('图表绘图区几何必须跨分组一致', () => {
   })
 
   it('reserveRightAxes 变化会触发重绘（否则异步数据到达后仍用旧预留）', () => {
-    expect(LINE_CHART).toMatch(/props\.reserveRightAxes\]/)
+    // 2026-11-12：watch 依赖串后面追加了 density/legendPosition 等新 prop，
+    // 因此不再以 'reserveRightAxes]' 收尾；判据改为「reserveRightAxes 在依赖里」。
+    expect(LINE_CHART).toMatch(/props\.reserveRightAxes/)
   })
 })
 

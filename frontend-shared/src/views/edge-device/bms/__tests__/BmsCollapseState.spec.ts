@@ -158,7 +158,10 @@ describe('BmsDetailPage 接入契约（源码层）', () => {
 describe('新增诊断卡接入（3 张图 + 折叠头摘要；轮询间隔分布已删除）', () => {
   it('3 张诊断卡都挂上了：保护触发历史 / 温度趋势 / SOC 与电流（轮询间隔分布已删除）', () => {
     for (const tag of ['ProtectionHistoryCard', 'TempTrendCard', 'SocCurrentCard']) {
-      expect(bmsDetailSource).toContain(`<${tag} :device-id="deviceId" :online="deviceOnline"`)
+      // 2026-11-12：两张趋势卡改为多行属性（新增 :time-range / :custom-range，时间窗上移页级），
+      // 因此不再断言「属性同一行」，改为「标签存在 + 两个必需绑定都在该标签内」。
+      expect(bmsDetailSource).toContain(`<${tag}`)
+      expect(bmsDetailSource).toMatch(new RegExp(`<${tag}[\\s\\S]{0,240}?device-id="deviceId"[\\s\\S]{0,120}?online="deviceOnline"`))
     }
     // 2026-10-21 用户要求删除「轮询间隔分布」：组件与其父页下发 props（§2.5 的 commands / parent-loading）都不得复活。
     expect(bmsDetailCode, '轮询间隔分布卡已删除，不得复活').not.toContain('<PollIntervalCard')

@@ -322,6 +322,30 @@
         </div>
       </section>
 
+      <!--
+        页级时间窗（契约 §D，2026-11-12）：全页唯一实例，放在**图表区之前**而不是页面顶部。
+
+        为什么在这里（2026-11-12 用户反馈「时间选择栏应该在图表上方，而不是顶部」）：
+        它驱动的全是趋势图，放在页头与指标卡之间时既离图表很远、又看不出管哪几张；
+        贴在图表区入口处，读者一眼就知道「下面这几张图共用这个窗口」。
+        移动端仍吸顶（继续往下看 SOC / 历史趋势时选择器一直在）。
+
+        · 通过 props 下发 :time-range / :custom-range（温度趋势 / SOC 与电流 / 历史趋势三处），
+          卡内已删除各自的 TimeRangeSelector 与 useTimeRange。
+        · **保护触发历史不跟随**：它的口径是 30 天 0→1 跃变次数（BmsDiagCharts.spec.ts:152-155
+          锁 rangeDays=30），控件留在卡内。
+        · 复用 @/components/charts/TimeRangeSelector.vue（图表卡工具条唯一档：桌面 32 / 窄屏 36）。
+      -->
+      <div class="page-range-bar">
+        <span class="page-range-label">时间窗</span>
+        <TimeRangeSelector
+          v-model="pageTimeRange"
+          v-model:custom-range="pageCustomRange"
+          role="group"
+          aria-label="趋势图时间窗（温度趋势 / SOC 与电流 / 历史趋势）"
+        />
+        <span class="page-range-hint" :title="pageRangeWindowText">温度 · SOC · 历史趋势共用</span>
+      </div>
       <!-- 温度趋势（新增）：温度探头只给瞬时值，看不出「3 路一起升 = 环境升温 / 单路升 = 该测点异常」，
            所以要看时间维。窄屏默认折叠，摘要「当前 xx℃」由卡片 emit。 -->
       <section class="row diag-row">
@@ -339,7 +363,14 @@
               <span class="card-title">温度趋势</span>
               <span class="card-hint">3 路探头 · 45℃ 告警线</span>
             </div>
-            <TempTrendCard :device-id="deviceId" :online="deviceOnline" @summary="onTempSummary" />
+            <!-- 时间窗由父页下发（契约 §D）：卡内不再有 TimeRangeSelector -->
+            <TempTrendCard
+              :device-id="deviceId"
+              :online="deviceOnline"
+              :time-range="pageTimeRange"
+              :custom-range="pageCustomRange"
+              @summary="onTempSummary"
+            />
           </div>
         </CollapseBlock>
       </section>
@@ -360,7 +391,14 @@
               <span class="card-title">SOC 与电流</span>
               <span class="card-hint">双线 · 量级分轴</span>
             </div>
-            <SocCurrentCard :device-id="deviceId" :online="deviceOnline" @summary="onSocSummary" />
+            <!-- 同上：时间窗走页级，卡内 watch props 自行重取 -->
+            <SocCurrentCard
+              :device-id="deviceId"
+              :online="deviceOnline"
+              :time-range="pageTimeRange"
+              :custom-range="pageCustomRange"
+              @summary="onSocSummary"
+            />
           </div>
         </CollapseBlock>
       </section>
@@ -380,7 +418,14 @@
         :open="collapse.isOpen('charts')"
         @toggle="collapse.toggle('charts')"
       >
-        <BmsChartsPanel :device-id="deviceId" :cell-count="16" :online="deviceOnline" />
+        <!-- 时间窗与温度/SOC 共用页面级那一个：传了 props 后组件内不再渲染自己的选择器 -->
+        <BmsChartsPanel
+          :device-id="deviceId"
+          :cell-count="16"
+          :online="deviceOnline"
+          :time-range="pageTimeRange"
+          :custom-range="pageCustomRange"
+        />
       </CollapseBlock>
 
       <!--
@@ -564,6 +609,9 @@ import {
   Timer, Operation, SetUp, Tools, Document,
 } from '@element-plus/icons-vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
+// 页级时间窗（2026-11-12）：复用它而不是另写一套分段控件（TimeRangeSelectorUnified.spec 会红）
+import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
+import { resolveTimeRange, useTimeRange } from '@/composables/useTimeRange'
 // 统一设备页头（逆变器 / BMS / 通用设备三页共用）：身份、标签、面包屑、操作组都由它渲染
 import DeviceHeader from '@/views/edge-device/shared/DeviceHeader.vue'
 // 实时数据首屏四态（加载/失败/数据/空态）纯函数：锁「加载中不得伪装成空数据」
@@ -642,6 +690,34 @@ const diagSummary = reactive<Record<string, string>>({ protection: '', temp: '',
 const onProtectionSummary = (t: string) => { diagSummary.protection = t }
 const onTempSummary = (t: string) => { diagSummary.temp = t }
 const onSocSummary = (t: string) => { diagSummary.soc = t }
+
+/**
+ * ════════════ 页级时间窗（契约 §D，2026-11-12） ════════════
+ *
+ * 卡片级时间窗上移到页面级，父页持有**唯一**实例（吸顶条见模板 .page-range-bar）。
+ * 只驱动三处趋势图，保护触发历史不跟随（理由见模板注释）。
+ *
+ * 父子 props 契约：
+ *   · timeRange: string                     —— '1h' | '24h' | '7d' | 'custom'
+ *   · customRange?: [string, string] | null —— date-picker 的字符串区间，仅 custom 时使用；
+ *     换算统一走 resolveTimeRange()，父子不许各写一份。
+ */
+const {
+  timeRange: pageTimeRange,
+  customTimeRange: pageCustomRange,
+} = useTimeRange()
+
+/** 吸顶条的可见回执：用共享 resolveTimeRange 算出真实查询区间，作为 hint 的 title（父子互相印证）。 */
+const pageRangeWindow = ref<[Date, Date] | null>(null)
+function syncPageRangeWindow() {
+  pageRangeWindow.value = resolveTimeRange(pageTimeRange.value, pageCustomRange.value)
+}
+watch([pageTimeRange, pageCustomRange], syncPageRangeWindow, { immediate: true, deep: true })
+const pageRangeWindowText = computed(() => {
+  const w = pageRangeWindow.value
+  if (!w) return ''
+  return formatStamp(w[0].toISOString()) + ' → ' + formatStamp(w[1].toISOString())
+})
 const device = ref<EdgeDevice | null>(null)
 const detailError = ref('')
 const refreshing = ref(false)
@@ -2043,6 +2119,46 @@ onUnmounted(() => {
   .protect-name { white-space: normal; overflow: visible; text-overflow: clip; }
 }
 
+/*
+  桌面：页头卡片必须与内容卡片同一条左右边界。
+  改前 .device-header 直接坐在 .el-main 的内容盒里（1440 实测 left 220 / width 1192），
+  而 .page-body 有 24px 内距（卡片 left 244 / width 1144）—— 页头卡片比所有卡片宽 48px，
+  用户看到的就是「顶部内容宽度与下方不一致」。
+  只在 >768px 生效：窄屏那套是通栏带，页头与内容都贴边，无此问题。
+*/
+/*
+  页级时间窗条（桌面基线）。2026-11-12：卡片里的 3 个时间窗控件上移到页面级，
+  这里给出桌面布局；窄屏在 @media(max-width:768px) 里变成吸顶条（见下方 ④）。
+*/
+.page-range-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px; /* 相邻控件间距 ≥6px（图表工具条例外档的前提之一） */
+  min-height: 32px;
+  margin: 0 0 12px;
+}
+.page-range-label {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+/* 作用域说明（不是「全页共用」）：保护触发历史有自己的 7/30/90 天档，不跟随本条 */
+.page-range-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 769px) {
+  .bms-detail-page :deep(.device-header) {
+    margin-left: 24px;
+    margin-right: 24px;
+  }
+}
+
 @media (max-width: 768px) {
   /*
     页头（2026-10-21 起由共享 DeviceHeader 渲染）：本页不再维护页头视觉，
@@ -2052,6 +2168,112 @@ onUnmounted(() => {
     信息完整可读，不横滚也不省略。
   */
   .page-body { padding: 12px; }
+  /*
+    ══════════ 全页统一「通栏带」（2026-11-12 第二轮：一致性）══════════
+
+    改前：只有 3 条 .diag-row 通栏，其余区块仍是 321px 圆角卡 —— 同一页并存两套宽度系统。
+    改后：所有区块（含页头）贴到滚动容器可见宽，8px 间距，无圆角/左右描边，
+    带内文字 12px 内距，图表画布用负 margin 抵消这 12px。
+
+    ⚠ 两个坑（都踩过）：
+      ① 页头不在 .page-body 里，只能抵消 --shell-x(20)；按 --bleed-l(32) 会右溢出 12px；
+      ② CollapseBlock 在插槽外多包一层 .collapse-body ⇒ 必须用**后代**选择器，
+         `> .collapse-block > .card` 匹配不到卡片（实测 diag 卡仍是 12px 内距 + 1px 描边，
+         画布 385 → 359）。
+  */
+  .bms-detail-page {
+    --shell-x: 20px;   /* MainLayout .el-main 左右内距 */
+    --gutter-x: 12px;  /* 本页 .page-body 窄屏内距 */
+    --bleed-l: calc(var(--shell-x) + var(--gutter-x));
+    --bleed-r: calc(var(--shell-x) + var(--gutter-x));
+  }
+  .page-body > .row,
+  .page-body > .collapse-block {
+    margin-left: calc(-1 * var(--bleed-l));
+    margin-right: calc(-1 * var(--bleed-r));
+    margin-bottom: 8px;
+    gap: 8px;
+  }
+  .bms-detail-page :deep(.device-header) {
+    margin-left: calc(-1 * var(--shell-x));
+    margin-right: calc(-1 * var(--shell-x));
+    margin-bottom: 8px;
+    padding: 10px var(--gutter-x) 12px;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+  /* 带壳：区块内卡片去圆角/左右描边/阴影，统一 10px 12px 内距 */
+  .page-body > .row .card,
+  .page-body > .collapse-block .card {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    box-shadow: none;
+    padding: 10px var(--gutter-x);
+  }
+  /* 裸折叠块（历史趋势）内部的卡片是「带内子区」：透明表面 + 一条分隔线 */
+  .page-body > .collapse-block .card {
+    background: transparent;
+    border-top: 1px solid var(--card-border);
+  }
+  /* 保护触发历史不是图表（CSS 条形 + 30 天档），画布内距归零后它的文字会贴边 ⇒ 单独补 12px */
+  #collapse-body-protection-history .diag-body { padding: 0 var(--gutter-x); }
+
+  /* 图表卡：横向内距归零，画布自己贴边（.card.diag-card 三个类，压过 .row .card 的同名属性） */
+  .page-body .card.diag-card { padding: 10px 0; }
+  /* 指标区：4 个 tile 是行的直接子项（没有 .card 外壳），行自己做带并给 12px 内距 */
+  .row.metrics {
+    padding: 10px var(--gutter-x);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+  /* 裸折叠块本身也是「带」 */
+  .page-body > .collapse-block {
+    background: var(--card-bg);
+  }
+  /* 字号档位：标题 14/600、徽标 18px 高 10px 字、提示与脚注 11px */
+  .page-body :deep(.card-title) { font-size: 14px; font-weight: 600; }
+  .page-body :deep(.card-hint),
+  .page-body :deep(.card-note),
+  .page-body :deep(.card-footnote) { font-size: 11px; line-height: 1.5; }
+  .page-body :deep(.el-tag) { font-size: 10px; height: 18px; line-height: 16px; padding: 0 5px; }
+  /* 空态：el-empty 插画 48px、自绘插画收起、历史空态内距 16px */
+  .page-body :deep(.el-empty) { padding: 12px 0; }
+  .page-body :deep(.el-empty__image) { width: 48px; height: 48px; }
+  .page-body :deep(.el-empty__description) { margin-top: 8px; }
+  .page-body :deep(.el-empty__description p) { margin: 0; font-size: 12px; line-height: 1.5; }
+  .page-body :deep(.command-frequency-card .empty-illustration) { display: none; }
+  .page-body :deep(.command-frequency-card .empty-content) { padding: 12px 0; }
+  .page-body :deep(.history-empty) { padding: 16px 12px; }
+  /* 页级时间窗条：吸顶 + 与其它带同表面 + 横向出血 */
+  .page-range-bar {
+    position: sticky;
+    top: calc(-1 * var(--shell-x));
+    z-index: 5;
+    margin-left: calc(-1 * var(--bleed-l));
+    margin-right: calc(-1 * var(--bleed-r));
+    margin-bottom: 8px;
+    /* 条本身已出血到视口，内距用文字档 12px（用 --bleed 会把可用宽压到 313，hint 被迫换行） */
+    padding: 4px var(--gutter-x);
+    min-height: 44px;
+    background: var(--card-bg);
+    box-shadow: 0 1px 0 var(--el-border-color-lighter);
+  }
+  /* 窄屏隐藏「温度 / SOC 共用」回执：361px 里 4 段选择器已占 230，再放 110px 文案会折行（实测条高 63）。
+     该信息在窄屏由「只有这一个时间窗」本身表达，桌面保留。 */
+  .page-range-bar .page-range-hint,
+  .page-range-bar .page-range-label { display: none; }
+
+  /* 图表工具条例外档 36px（规范 §4.4 第 5 条）：压回被 .page-body .el-button{min-height:44px} 顶上去的按钮 */
+  .page-range-bar :deep(.el-button:not(.is-circle)) {
+    min-height: var(--control-h-toolbar-touch, 36px);
+    height: var(--control-h-toolbar-touch, 36px);
+  }
+
   .bms-sub {
     display: flex;
     flex-wrap: wrap;

@@ -136,6 +136,38 @@ export function computeChartTopLayout(input: ChartTopLayoutInput): ChartTopLayou
   return { compact, legendTop, legendRows, legendItemWidths, gridTop }
 }
 
+/** 排版档判定入参（纯函数入参，便于单测钉死「小图不得走桌面几何」） */
+export interface CompactLayoutInput {
+  density?: 'auto' | 'compact' | 'comfortable'
+  /** 兼容旧属性：只认 true（未传时 Vue 会铸成 false，与显式 false 不可区分） */
+  compact?: boolean
+  height?: string | number
+  /** 运行时容器宽度（px）；0/未提供 = 未知 */
+  containerWidth?: number
+}
+
+/** 容器宽度小于该值时判为紧凑排版（手机 393~430；桌面最小列宽 500+） */
+export const COMPACT_MAX_WIDTH_PX = 520
+
+/**
+ * 排版档判定（2026-11-12）。
+ *
+ * 优先级：density 显式 > compact===true > 运行时宽度 > 高度阈值。
+ *
+ * ⚠ 历史教训：旧判据「compact 缺省值 ?? 高度阈值」在真实组件里**永远**返回 false ——
+ * Vue 对 `x?: boolean` 的缺省值会铸成 `false`（Boolean casting），`??` 短路，
+ * 于是 160px 的小图也跑桌面几何（2026-11-11 线上回归，绘图区只剩 16.67%）。
+ * 纯函数化之后，这条判据可以被单测直接钉住（LineChartCompact.spec.ts）。
+ */
+export function resolveCompactLayout(input: CompactLayoutInput): boolean {
+  if (input.density === 'compact') return true
+  if (input.density === 'comfortable') return false
+  if (input.compact === true) return true
+  const width = Number(input.containerWidth ?? 0)
+  if (Number.isFinite(width) && width > 0 && width < COMPACT_MAX_WIDTH_PX) return true
+  return isCompactHeight(input.height)
+}
+
 export interface YAxisNameInput {
   compact: boolean
   /** 轴下标（0 = 左轴） */
@@ -174,7 +206,9 @@ import {
   TitleComponent,
   TooltipComponent,
   LegendComponent,
-  GridComponent
+  GridComponent,
+  MarkLineComponent,
+  AxisPointerComponent
 } from 'echarts/components'
 import type { EChartsCoreOption } from 'echarts/core'
 
@@ -185,7 +219,11 @@ echarts.use([
   TitleComponent,
   TooltipComponent,
   LegendComponent,
-  GridComponent
+  GridComponent,
+  // 2026-11-12：告警线（45℃）从 CSS 绝对定位改为 markLine —— 未注册会被**静默忽略**
+  // （不报错、不渲染），这是本项目踩过的坑（约束 H7-5）。AxisPointer 供双区联动用。
+  MarkLineComponent,
+  AxisPointerComponent
 ])
 
 interface ChartData {
@@ -226,6 +264,30 @@ const props = withDefaults(defineProps<{
    * 高度与排版档必须能分别指定（2026-10-22，规范 §4.4 控件尺寸档位）。
    */
   compact?: boolean
+  /**
+   * 排版档（2026-11-12，三态）：
+   *   · 'auto'（默认）—— 按**运行时容器宽度**（<520px）或高度（≤220px）判定；
+   *   · 'compact' / 'comfortable' —— 强制指定。
+   * 为什么必须换成三态：`compact?: boolean` 在 Vue 里**缺省会被铸成 false**
+   * （Boolean prop casting），于是旧判据里的 ?? 永远短路
+   * 的 ?? 永远短路 —— 160px 的小图也走桌面几何（2026-11-11 线上回归的根因）。
+   * 字符串三态天然没有这个问题，且语义自解释。
+   */
+  density?: 'auto' | 'compact' | 'comfortable'
+  /**
+   * 图例位置（2026-11-12）：
+   *   · 'inside'（默认）—— 画在画布内（桌面/宽屏）；
+   *   · 'none' —— 完全不创建 legend，由调用方渲染 HTML 读数条。
+   * 只有 'none' 才启用「全宽出血」几何（top 只留给刻度），因为画布内图例必须吃
+   * grid.top 那块空间；内置图例仍走旧版 60px 上边距，避免影响既有调用方。
+   */
+  legendPosition?: 'inside' | 'none'
+  /** Y 轴刻度段数（不传：紧凑 3 / 常规保持 ECharts 默认） */
+  yTickCount?: number
+  /** 时间轴刻度最大间隔（毫秒，轴级 maxInterval；不传交给 ECharts 自动） */
+  xMaxIntervalMs?: number
+  /** 告警线（透传到第 1 条序列；需已注册 MarkLineComponent） */
+  markLine?: Record<string, unknown>
 }>(), {
   data: () => [],
   title: '',
@@ -234,7 +296,9 @@ const props = withDefaults(defineProps<{
   series: () => [],
   showArea: true,
   realtime: false,
-  reserveRightAxes: 0
+  reserveRightAxes: 0,
+  density: 'auto',
+  legendPosition: 'inside'
 })
 
 const chartRef = ref<HTMLElement>()
@@ -308,6 +372,19 @@ const BOTTOM_RESERVED_PX = 46
 const MAX_Y_AXIS = 4
 const MAX_Y_AXIS_COMPACT = 2
 
+/**
+ * 「全宽出血」几何（2026-11-12，移动端）——只在 legendPosition==='none' 时启用。
+ *
+ * 与常规几何的差别不是缩小边距，而是**边距只为刻度存在**：
+ *   · left 34 = 「50°」3 字符（10px 字号 ≈ 22px）+ 12px 间隙；
+ *   · right 10 = 曲线不贴边（没有右轴）；
+ *   · top 14 / bottom 20 = 4 条网格线 + 一行时刻；
+ *   · containLabel:false —— 与常规图同样的理由：不让标签宽度反过来决定绘图区。
+ * 实测（393px 视口、画布 393×180）：绘图区 349×146 = 72.4%（改前 16.67%）。
+ */
+const BLEED_GRID = { left: 34, right: 16, top: 14, bottom: 20 } as const
+
+
 /** 该序列的量级参考值（绝对值最大者）。空/全 null 返回 0，表示"无从比较"。 */
 const seriesMagnitude = (s: SeriesConfig): number => {
   let magnitude = 0
@@ -329,6 +406,25 @@ const magnitudeComparable = (a: number, b: number): boolean => {
  * Series share one Y-axis only when BOTH unit and magnitude are comparable;
  * otherwise they get their own Y-axis (offset to the right).
  */
+/**
+ * 刻度文案：整数不带小数、非整数 1 位；单位直接拼在后面（「45°」「80%」「30A」）。
+ * 为什么把单位放进刻度：窄屏画布只有一行高度可以给「刻度 + 轴名」，
+ * 而 nameLocation:'end' 的轴名会与图例/刻度抢同一层（历史缺陷 R3）。
+ */
+const formatTickValue = (v: number, unit?: string, span?: number): string => {
+  if (!Number.isFinite(v)) return '—'
+  // 小数位由**量程**决定，而不是由值本身是否整数决定：
+  // 单体电压 3.31~3.33 的刻度如果按「整数才不带小数」处理会全部变成 3.3V（实测四个刻度同字）。
+  let decimals = 1
+  if (typeof span === 'number' && Number.isFinite(span) && span > 0) {
+    decimals = span >= 10 ? 0 : span >= 1 ? 1 : span >= 0.1 ? 2 : 3
+  } else if (Number.isInteger(v)) {
+    decimals = 0
+  }
+  const num = v.toFixed(decimals)
+  return unit ? `${num}${unit}` : num
+}
+
 const buildYAxisList = (theme = getChartTheme()) => {
   if (!props.series || props.series.length <= 1) return undefined
   const axes: { unit: string; magnitude: number }[] = []
@@ -389,13 +485,29 @@ const buildYAxisList = (theme = getChartTheme()) => {
       offset: i > 1 ? (i - 1) * (isCompactChart.value ? 30 : 60) : 0,
       min: hasCustomRange ? props.yAxisMin : undefined,
       max: hasCustomRange ? props.yAxisMax : undefined,
+      // ⚠ interval 必须写在**轴**上，写进 axisLabel 会被当成「每隔 N 个标签显示一个」
+      // （实测：写错位置后 20~50 仍然按 5 递进，给出 7 条网格线）。
+      // 有显式量程时 splitNumber 只是建议值，这里按「量程 / 目标刻度数」钉死步长。
+      ...(isBleedLayout.value && hasCustomRange && yTickCount.value
+        ? { interval: (Number(props.yAxisMax) - Number(props.yAxisMin)) / yTickCount.value }
+        : {}),
       axisLine: { lineStyle: { color: theme.border } },
       splitLine: { show: i === 0, lineStyle: { color: theme.split } },
       axisLabel: {
         color: theme.regular,
         // 紧凑图轴标签小一号，给绘图区留宽度
         fontSize: isCompactChart.value ? 10 : undefined,
-        formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1),
+        // 出血档：单位进刻度（「50°」），于是不需要再画轴名占一行 —— 这是顶部 14px 能成立的前提
+        ...(isBleedLayout.value
+          ? {
+            formatter: (v: number) => formatTickValue(
+              v,
+              unitInTick.value ? axis.unit : '',
+              hasCustomRange ? Number(props.yAxisMax) - Number(props.yAxisMin) : undefined,
+            ),
+            ...(yTickCount.value ? { splitNumber: yTickCount.value } : {}),
+          }
+          : { formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) }),
       },
       nameTextStyle: { color: theme.regular }
     })),
@@ -413,9 +525,12 @@ const buildSeries = (seriesToYAxis?: number[], palette = getThemePalette()) => {
       smooth: props.smooth,
       sampling: 'lttb' as const,
       yAxisIndex: seriesToYAxis ? seriesToYAxis[i] : i,
-      lineStyle: { width: 2, color: palette[i % palette.length] },
+      // 出血档：线细一点、不画数据点（移动端 288~500 个点画 symbol 只会糊成一条带）
+      lineStyle: { width: isBleedLayout.value ? 1.6 : 2, color: palette[i % palette.length] },
       itemStyle: { color: palette[i % palette.length] },
-      showSymbol: s.data.length > 50 ? false : true,
+      showSymbol: isBleedLayout.value ? false : s.data.length > 50 ? false : true,
+      // 告警线只挂在第 1 条序列上（markLine 是 series 级组件）
+      ...(i === 0 && props.markLine ? { markLine: props.markLine } : {}),
       ...(props.showArea ? {
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -464,6 +579,9 @@ const normalRightMargin = (rightAxes: number): number => {
 const getXAxisConfig = (theme = getChartTheme()) => {
   return {
     type: 'time' as const,
+    // 出血档：用**轴级** maxInterval（毫秒）显式约束刻度数量。交给 ECharts 自动算法
+    // 在 295px 上会给出 8 个刻度（实测），它不知道手机只有一行 10px 字。
+    ...(isBleedLayout.value && props.xMaxIntervalMs ? { maxInterval: props.xMaxIntervalMs } : {}),
     axisLine: { lineStyle: { color: theme.border } },
     splitLine: { lineStyle: { color: theme.split } },
     axisLabel: {
@@ -477,6 +595,10 @@ const getXAxisConfig = (theme = getChartTheme()) => {
         const now = new Date()
         const diffDays = Math.abs(now.getTime() - value) / 86400000
         if (diffDays > 2) {
+          // 出血档：窄屏一行放不下「MM/DD HH:mm」（12 字符 ×10px ≈ 120px，一天要 3~4 个就是 480px）
+          if (isBleedLayout.value) {
+            return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`
+          }
           // 7d range: MM/DD HH:mm
           return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
         } else {
@@ -493,13 +615,43 @@ const formatTooltipTime = (ts: string | number) => {
   return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
 }
 
+/** 运行时容器宽度（ResizeObserver 维护）；0 = 尚未布局。 */
+const containerWidth = ref(0)
+
 /**
- * 是否「紧凑图」：显式 compact prop 优先；未传时仍按高度 ≤220px 判定（既有契约）。
- * 只影响排版：轴名要不要画（默认会压住图例）、图例/grid 的上边距、
- * X 轴标签 hideOverlap、Y 轴上限（紧凑最多 2 根）。
- * 桌面大图（280/300/400px）不传 compact ⇒ 走原分支，像素不变。
+ * 是否紧凑排版。优先级：density 显式 > compact===true > 运行时判定。
+ *
+ * ⚠ 这里**不能**写 `props.compact ?? ...`：Vue 对 `compact?: boolean` 这种声明会在
+ * 「未传」时把值铸成 `false`（Boolean casting），`??` 于是永远短路 —— 这正是
+ * 2026-11-11 线上回归的根因（160px 的小图全跑桌面几何）。也正因为「未传」与「显式 false」
+ * 在运行时不可区分，这里只认 `compact === true`；要强制常规排版请用 `density="comfortable"`。
+ *
+ * auto 判据 = 容器宽 < 520px（手机全宽出血后画布 393~430）或画布高 ≤ 220px。
+ * 用**实测宽度**而不是仅高度：窄屏全宽后高度已不代表「空间够不够」。
  */
-const isCompactChart = computed(() => props.compact ?? isCompactHeight(props.height))
+const isCompactChart = computed(() => resolveCompactLayout({
+  density: props.density,
+  compact: props.compact,
+  height: props.height,
+  containerWidth: containerWidth.value,
+}))
+
+/**
+ * 出血档（2026-11-12）：外置图例 + 紧凑排版。
+ * 只有这一档才启用「边距只为刻度存在」的 BLEED_GRID —— 画布内图例必须吃 grid.top，
+ * 所以内置图例的紧凑图仍走旧版默认 60px 上边距（HistoryChartSection 等既有调用方零变化）。
+ */
+const isBleedLayout = computed(() => isCompactChart.value && props.legendPosition === 'none')
+/** Y 轴分段数（0 = 不写 splitNumber，交给 ECharts 保持既有行为） */
+const yTickCount = computed(() => props.yTickCount ?? (isBleedLayout.value ? 3 : 0))
+/**
+ * 刻度是否带单位（出血档一定带，于是不需要轴名）。
+ *
+ * ⚠ 这里**不能**读 `props.unitInTick`：它声明为 `boolean`，未传时被 Vue 铸成 false，
+ * `??` 又会短路成 false —— 和 compact 是同一个坑（当天实测：刻度只显示「50」，缺「℃」）。
+ * 该开关只服务出血档，所以直接由档位决定，不再开放成 Boolean prop。
+ */
+const unitInTick = computed(() => isBleedLayout.value)
 
 const applyChartOption = () => {
   if (!chartInstance) return
@@ -508,13 +660,31 @@ const applyChartOption = () => {
   const yAxisInfo = buildYAxisList(theme)
   // 每根右侧轴都要留出刻度位；固定 8% 在多轴时会把轴标签挤出画布。
   const rightAxisCount = yAxisInfo ? Math.max(0, yAxisInfo.yAxisList.length - 1) : 0
+  /*
+   * 单序列图的兜底轴（buildYAxisList 在 series.length<=1 时返回 undefined）。
+   * 2026-11-12：这里原先只给 min/max，**不吃出血档配置** —— 于是「运行趋势」这种单序列图
+   * 仍然是 7 个刻度、无单位、无 interval（实测 53.23/53.20/53.15… 七个刻度）。
+   */
+  const singleSpan = (props.yAxisMin !== undefined && props.yAxisMax !== undefined)
+    ? Number(props.yAxisMax) - Number(props.yAxisMin)
+    : undefined
   const yAxisConfig = yAxisInfo?.yAxisList || {
     type: 'value' as const,
     min: props.yAxisMin,
     max: props.yAxisMax,
+    ...(isBleedLayout.value && singleSpan !== undefined && yTickCount.value
+      ? { interval: singleSpan / yTickCount.value }
+      : {}),
     axisLine: { lineStyle: { color: theme.border } },
     splitLine: { lineStyle: { color: theme.split } },
-    axisLabel: { color: theme.regular, formatter: (value: number) => value.toFixed(2) }
+    axisLabel: {
+      color: theme.regular,
+      ...(isCompactChart.value ? { fontSize: 10 } : {}),
+      formatter: (value: number) => (isBleedLayout.value
+        ? formatTickValue(value, unitInTick.value ? (props.series?.[0]?.unit || '') : '', singleSpan)
+        : value.toFixed(2)),
+      ...(isBleedLayout.value && yTickCount.value ? { splitNumber: yTickCount.value } : {}),
+    },
   }
   /*
    * 图例/绘图区顶部布局（2026-10-21 用户反馈「图例折 2 行后压住绘图区与 Y 轴名」）：
@@ -528,7 +698,9 @@ const applyChartOption = () => {
     canvasWidth: chartRef.value?.clientWidth ?? 0,
     items: legendItems,
     height: props.height,
-    compact: props.compact,
+    // ⚠ 必须传**算好的档位**，不能传 props.compact：后者在未传时是 false（Boolean casting），
+    // 会把 160px 的小图钉死在常规排版上（2026-11-11 回归）。
+    compact: isCompactChart.value,
   })
   lastTopLayout = topLayout
   const option: EChartsCoreOption = {
@@ -579,7 +751,9 @@ const applyChartOption = () => {
         return html
       }
     },
-    legend: multiSeries
+    // legendPosition='none'：完全不创建 legend（由调用方渲染 HTML 读数条）。
+    // 注意必须整块不出现 —— 只把 top 调小仍然会占 grid.top 那一层。
+    legend: multiSeries && props.legendPosition === 'inside'
       ? {
         // 紧凑图没有轴名，图例可以贴顶；常规图保持 30（给多轴轴名留位置）。
         // 与 computeChartTopLayout 的 legendTop 同源（该函数返回 6 / LEGEND_TOP_PX=30，
@@ -624,9 +798,11 @@ const applyChartOption = () => {
           : { textStyle: { color: theme.regular } }),
       }
       : undefined,
-    // ⚠ 这里**不覆盖** grid.top：紧凑图的既有默认值（60px）被其它组件当常量用
-    // （如 TempTrendCard 用 CSS 绝对定位画 45℃ 告警线，按 gridTop=60 换算 y 坐标）。
-    // 本次只解决「轴名压图例」，不动 plot 区域几何。
+    // 三档几何：
+    //   ① 出血档（legendPosition='none' + 紧凑）—— 边距只为刻度存在，top 14 / bottom 20；
+    //   ② 兼容紧凑档（内置图例）—— 沿用旧版百分比 + containLabel + 默认 top 60，
+    //      HistoryChartSection 等既有调用方零变化；
+    //   ③ 常规档 —— 写死像素 + containLabel:false，组内 plot 严格对齐。
     /*
      * 绘图区几何必须**跨分组一致**（2026-10-21 用户反馈「图表长度参差不齐」）：
      *
@@ -639,10 +815,16 @@ const applyChartOption = () => {
      * ⚠ 只**条件展开**写入 top：显式 top:undefined 在 ECharts 6 会被当成「已提供」
      *    参与布局（与下方 legend.bottom 同源陷阱）。
      */
-    grid: isCompactChart.value
+    grid: isBleedLayout.value
       ? {
-        // 紧凑图（窄屏小图）沿用百分比 + containLabel：容器只有 150px 高，
-        // 必须让 ECharts 自己按标签宽度收放，写死像素反而会切标签。
+        // ① 出血档：全宽画布下边距只留给刻度（实测 393px 视口 ⇒ 绘图区 349×146 = 72.4%）
+        ...BLEED_GRID,
+        containLabel: false,
+      }
+      : isCompactChart.value
+      ? {
+        // ② 兼容紧凑档（画布内图例）：沿用百分比 + containLabel，默认 top 60 不变。
+        //    这里刻意不动几何 —— 现有调用方（HistoryChartSection 等）的像素基线要保住。
         left: '3%',
         right: multiSeries ? (rightAxisCount > 0 ? `${8 + rightAxisCount * 7}%` : '8%') : '4%',
         bottom: '3%',
@@ -677,6 +859,9 @@ const applyChartOption = () => {
 
 const initChart = () => {
   if (!chartRef.value) return
+  // 首帧前先量宽度：auto 档要按**实测容器宽**判定（<520px ⇒ 紧凑），
+  // 否则首帧会先按 400px 默认高画一遍、下一帧再切档，出现闪动。
+  containerWidth.value = chartRef.value.clientWidth
   chartInstance = echarts.init(chartRef.value)
   applyChartOption()
   /*
@@ -690,7 +875,15 @@ const initChart = () => {
    * 只多一次 setOption，无额外请求、无视觉闪烁（同一帧内完成）。
    */
 
-  resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+  resizeObserver = new ResizeObserver(() => {
+    const w = chartRef.value?.clientWidth ?? 0
+    if (w > 0 && Math.abs(w - containerWidth.value) > 1) {
+      // 宽度变化可能改变排版档（auto 档按 520px 分界），必须重算 option 而不只是 resize
+      containerWidth.value = w
+      applyChartOption()
+    }
+    chartInstance?.resize()
+  })
   resizeObserver.observe(chartRef.value)
   themeObserver = new MutationObserver(applyChartOption)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
@@ -703,7 +896,7 @@ watch(
   // height / compact 也必须进 watch：窄屏切换（横竖屏/窗口缩放）时高度与排版档一起变，
   // 不重算 option 会保留旧分支（轴名/图例位置错档）。reserveRightAxes 保持在最后：
   // ChartPlotAlignment.spec 按 /props\.reserveRightAxes\]/ 锁这条 watch。
-  () => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax, props.height, props.compact, props.reserveRightAxes],
+  () => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax, props.height, props.compact, props.reserveRightAxes, props.density, props.legendPosition, props.yTickCount, props.xMaxIntervalMs, props.markLine],
   applyChartOption,
   { deep: true },
 )
@@ -737,6 +930,8 @@ defineExpose({
    * 与 getPlotRect 配套即可在不做像素比对的情况下量化排版。
    */
   getTopLayout: () => lastTopLayout,
+  /** 实际生效的排版档（compact / bleed）—— 供门禁断言「小图画布不得走桌面几何」。 */
+  getLayoutMode: () => ({ compact: isCompactChart.value, bleed: isBleedLayout.value }),
   getPlotRect: (): { x: number; y: number; width: number; height: number } | null => {
     if (!chartInstance) return null
     // ECharts 未把 getModel 放进公开类型，但运行时可用来读 grid 布局；
