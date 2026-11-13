@@ -21,9 +21,19 @@
 | [评审/](评审/) | 评审报告（设计/架构/UI 审计） | 历史 |
 | [发布/](发布/) | 版本发布报告 | 历史 |
 | [分析/](分析/) | 分析报告、功能基线与技术债台账 | 参考 |
+| [analysis/](analysis/) | 专项全景分析（按需求单独立目录；入口见下方变更清单） | 参考 |
 | [archive/](archive/) | 历史归档（已取代/已实施，不再更新） | 已过时 |
 
 ## 变更清单
+
+### 2026-11-13（**自动化策略全景分析** —— 功能定义 / 实现现状 / 用户交互 / 数据依赖）
+
+- **新增文档**：[analysis/自动化策略-功能定义与现状全景-2026-11-13.md](analysis/自动化策略-功能定义与现状全景-2026-11-13.md)。代码基线 `2fbdecce`（已推送），生产镜像 `main-86d253f2`（落后 29 个提交，本轮创建体验改造尚未上线）。
+- **核心结论**：① 三类触发器（`sensor_threshold` / `time_window` / `sun_event`）全链路可用，`event` 仍为占位（仅常量 + 禁用 UI + 创建 400）；② 生产零使用（`automation_rules` / `automation_events` / `automation_rule_actions` / `alert_rules` 全 0 行，`sensor_field_obs` 71 行）；③ 三张表撑起语义：`automation_rules` + `automation_rule_actions`（子表权威、单动作列降级为只读镜像）+ `automation_events`（17 个结果码）。
+- **语义缺口（P0，文档 §2.3 / §4.8）**：`literal` 选择器绕过 `value_type` 门禁（与 family 路径口径分裂）；动作级 `enabled` 只存不用（禁用动作仍执行）；保存期不校验 `conditions_json`；`time_window` / `sun_event` 的附加条件不在触发期求值，仅执行前复核。
+- **交互现状**：26 个表单项中 6 项「系统内有权威候选却要手打」全部接上（字段目录 / 词表 / 试算 / 动作目录 / 参数 schema / 时区）；保存链路 = 前端校验 → precheck → `blocking_errors` 全量 + `warnings` 内容指纹二次确认 + 风险清单；事件历史仍缺 3 个 `source_*` 筛选项。
+- **数据链路**：帧驱动（`databus/consumers_heavy.go:508-515` → `automationSink` → `Evaluate` → `Planner` → `commandexec` / `notify` → `automation_events`），时钟规则由 1 分钟 ticker 驱动；12 条链路断点按影响列在文档 §4.8（含保留白名单外诊断码永不清理、`resolve_count` 等统计列无写入）。
+- **建议**：P0 先修语义（类型门禁下沉 / 动作开关生效 / 条件校验 / 时钟条件口径），P1 修运维可见性（保留白名单 / 事件时间筛选 / 结果码单一事实源 / 保存错误透传），P2 事件驱动 v1（前置 1 页语义冻结稿，估 3–4 人日）。
 
 ### 2026-11-11（**长窗图表全坏事故修复** —— rollup 回填帧预算选错常量）
 
