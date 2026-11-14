@@ -56,6 +56,26 @@ func TestLatestValuesAndLatestData_ShareFrameSource(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
 	seedFramesOnlyFields(t, db, dev, start, start.Add(2*time.Minute), dict, want, 10*time.Second)
 
+	// 单位来自 sensor_field_obs（帧表没有 unit 列）。本用例断言字段完整，
+	// 因此必须显式投影单位；不投影时 unitMapForDevice 只能返回空串。
+	if err := db.AutoMigrate(&models.SensorFieldObs{}); err != nil {
+		t.Fatalf("migrate sensor_field_obs: %v", err)
+	}
+	db.Exec("DELETE FROM sensor_field_obs")
+	for _, name := range want {
+		unit := "A"
+		if name == "rsoc" {
+			unit = "%"
+		}
+		if err := db.Create(&models.SensorFieldObs{
+			DeviceID: uint(dev), SensorName: name, Unit: unit,
+			FirstSeen: start, LastSeen: start.Add(2 * time.Minute), Samples: 13,
+		}).Error; err != nil {
+			t.Fatalf("seed sensor_field_obs %s: %v", name, err)
+		}
+	}
+	ResetDeviceUnitCache()
+
 	rows, err := latestValuesMissRowsFromFramesOrDB(t.Context(), db, dev)
 	if err != nil {
 		t.Fatalf("miss rows: %v", err)

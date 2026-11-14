@@ -248,44 +248,37 @@ func TestRollupTableNotCreated_Postgres(t *testing.T) {
 	}
 }
 
-// TestRetentionTask_PartitionDrop covers 11370650 的 PG-only 分支:
-// unified_data 已分区时, retention 到期先整分区 DROP, 未整月到期的行
-// 仍走 DELETE 批次。SQLite/未分区 PG 均跳过。
+// TestRetentionTask_PartitionDrop — 全库分区清扫把整月过期的 telemetry_frame
+// 分区 DROP，窗口内的行保留（2026-11-14：unified_data 退役后改为覆盖帧表）。
 func TestRetentionTask_PartitionDrop(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
-	dropUnifiedDataFlat(t, db)
-	if err := MigrateUnifiedDataToPartitioned(db); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := MigrateTelemetryFrameToPartitioned(db); err != nil {
+		t.Fatalf("migrate frame: %v", err)
 	}
 
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
 
-	// 手工建历史分区 (窗口外) 与近期分区 (窗口内)。
 	oldStart := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	pm := NewPartitionManager(db)
-	if err := pm.createPartitionIfNotExists("unified_data_202501", partitionedTable, oldStart, addMonths(oldStart, 1)); err != nil {
+	if err := pm.createPartitionIfNotExists(partitionName(TelemetryFrameTable, oldStart), TelemetryFrameTable, oldStart, addMonths(oldStart, 1)); err != nil {
 		t.Fatalf("create old partition: %v", err)
 	}
 
 	dev := seedDevice(t, db, "rp", "bms_jbd", "rp-hw", false)
-	// 分区滚动窗口按真实时钟创建 (EnsurePartitions -1..+3 月); 本用例固定
-	// now=2026-08-01, recent 行 (now-48h) 的月份可能已漂出该窗口, 此处显式
-	// 补建其月份分区, 否则 INSERT 报 no partition of relation found。
 	recentMonth := monthStart(now.Add(-48 * time.Hour))
-	if err := pm.createPartitionIfNotExists(partitionName(partitionedTable, recentMonth), partitionedTable, recentMonth, addMonths(recentMonth, 1)); err != nil {
+	if err := pm.createPartitionIfNotExists(partitionName(TelemetryFrameTable, recentMonth), TelemetryFrameTable, recentMonth, addMonths(recentMonth, 1)); err != nil {
 		t.Fatalf("create recent-month partition: %v", err)
 	}
 
-	// 到期行 (落在 202501 分区) 与未到期行 (落在 recent 分区)。
-	for _, row := range []models.UnifiedData{
-		{DeviceID: dev.ID, SensorName: "voltage", Value: 1, Timestamp: oldStart.Add(48 * time.Hour)},
-		{DeviceID: dev.ID, SensorName: "voltage", Value: 2, Timestamp: now.Add(-48 * time.Hour)},
+	for _, row := range []models.TelemetryFrame{
+		{DeviceID: dev.ID, TS: oldStart.Add(48 * time.Hour), FrameKind: 0, SlotID: 1, Payload: []byte{0}},
+		{DeviceID: dev.ID, TS: now.Add(-48 * time.Hour), FrameKind: 0, SlotID: 1, Payload: []byte{1}},
 	} {
 		if err := db.Create(&row).Error; err != nil {
-			t.Fatalf("seed row: %v", err)
+			t.Fatalf("seed frame: %v", err)
 		}
 	}
 
@@ -296,13 +289,11 @@ func TestRetentionTask_PartitionDrop(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// 整月到期分区被 DROP (O(1) 路径)。
-	if tableExistsInSchema(t, db, "unified_data_202501", "r") != 0 {
-		t.Error("expired partition unified_data_202501 must be dropped")
+	if tableExistsInSchema(t, db, partitionName(TelemetryFrameTable, oldStart), "r") != 0 {
+		t.Error("expired partition must be dropped")
 	}
-	// 未到期的行保留。
 	var recentCount int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ? AND timestamp > ?", dev.ID, now.Add(-30*24*time.Hour)).Count(&recentCount)
+	db.Model(&models.TelemetryFrame{}).Where("device_id = ? AND ts > ?", dev.ID, now.Add(-30*24*time.Hour)).Count(&recentCount)
 	if recentCount != 1 {
 		t.Errorf("recent rows after retention = %d, want 1", recentCount)
 	}
@@ -310,38 +301,35 @@ func TestRetentionTask_PartitionDrop(t *testing.T) {
 
 // TestRetention_PartitionDropUsesSystemWindow — 分区清扫按系统级窗口执行。
 //
-// 2026-10-23: cutoff 不再是「所有逻辑设备中最长 retention」（那是 per-identity
-// retention 的产物），而是一条系统级窗口。要钉死两条性质，缺一不可：
-//   - 窗口内的分区必须保留（不能因为清扫而丢数据）；
-//   - 整月都已过期的分区必须 DROP（防「假修复」: 把清扫关掉）。
+// 2026-11-14：改以 telemetry_frame 为载体（unified_data 已退役）。
+// 要钉死两条性质：窗口内分区保留；整月过期的分区必须 DROP。
 func TestRetention_PartitionDropUsesSystemWindow(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
-	dropUnifiedDataFlat(t, db)
-	if err := MigrateUnifiedDataToPartitioned(db); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := MigrateTelemetryFrameToPartitioned(db); err != nil {
+		t.Fatalf("migrate frame: %v", err)
 	}
 
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	SetSystemRetentionDays(90)
 	defer SetSystemRetentionDays(90)
-	keepStart := monthStart(now)                    // 2026-08: 窗口内
-	dropStart := monthStart(now).AddDate(0, -14, 0) // 2025-06: 整月都早于 cutoff
+	keepStart := monthStart(now)
+	dropStart := monthStart(now).AddDate(0, -14, 0)
 
 	pm := NewPartitionManager(db)
 	for _, s := range []time.Time{keepStart, dropStart} {
-		if err := pm.createPartitionIfNotExists(partitionName(partitionedTable, s), partitionedTable, s, addMonths(s, 1)); err != nil {
-			t.Fatalf("create partition %s: %v", partitionName(partitionedTable, s), err)
+		if err := pm.createPartitionIfNotExists(partitionName(TelemetryFrameTable, s), TelemetryFrameTable, s, addMonths(s, 1)); err != nil {
+			t.Fatalf("create partition %s: %v", partitionName(TelemetryFrameTable, s), err)
 		}
 	}
 
 	dev := seedDevice(t, db, "win", "bms_jbd", "win-hw", false)
-	for _, row := range []models.UnifiedData{
-		{DeviceID: dev.ID, SensorName: "voltage", Value: 7, Timestamp: keepStart.Add(24 * time.Hour)},
-		{DeviceID: dev.ID, SensorName: "voltage", Value: 8, Timestamp: dropStart.Add(24 * time.Hour)},
+	for _, row := range []models.TelemetryFrame{
+		{DeviceID: dev.ID, TS: keepStart.Add(24 * time.Hour), FrameKind: 0, SlotID: 1, Payload: []byte{7}},
+		{DeviceID: dev.ID, TS: dropStart.Add(24 * time.Hour), FrameKind: 0, SlotID: 1, Payload: []byte{8}},
 	} {
 		if err := db.Create(&row).Error; err != nil {
-			t.Fatalf("seed row: %v", err)
+			t.Fatalf("seed frame: %v", err)
 		}
 	}
 
@@ -352,14 +340,13 @@ func TestRetention_PartitionDropUsesSystemWindow(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// (1) 窗口内分区未被 DROP。
-	if tableExistsInSchema(t, db, partitionName(partitionedTable, keepStart), "r") == 0 {
+	if tableExistsInSchema(t, db, partitionName(TelemetryFrameTable, keepStart), "r") == 0 {
 		t.Errorf("partition %s must NOT be dropped: it is inside the 90-day window",
-			partitionName(partitionedTable, keepStart))
+			partitionName(TelemetryFrameTable, keepStart))
 	}
 	var kept int64
-	if err := db.Model(&models.UnifiedData{}).
-		Where("device_id = ? AND timestamp >= ? AND timestamp < ?",
+	if err := db.Model(&models.TelemetryFrame{}).
+		Where("device_id = ? AND ts >= ? AND ts < ?",
 			dev.ID, keepStart, addMonths(keepStart, 1)).
 		Count(&kept).Error; err != nil {
 		t.Fatalf("count kept rows: %v", err)
@@ -367,9 +354,8 @@ func TestRetention_PartitionDropUsesSystemWindow(t *testing.T) {
 	if kept != 1 {
 		t.Errorf("kept rows = %d, want 1", kept)
 	}
-	// (2) 正向断言: 整月都已过期的分区必须被 DROP。
-	if tableExistsInSchema(t, db, partitionName(partitionedTable, dropStart), "r") != 0 {
+	if tableExistsInSchema(t, db, partitionName(TelemetryFrameTable, dropStart), "r") != 0 {
 		t.Errorf("all-expired partition %s must be dropped",
-			partitionName(partitionedTable, dropStart))
+			partitionName(TelemetryFrameTable, dropStart))
 	}
 }
