@@ -496,6 +496,7 @@ func (p *Planner) recordActionFailure(rule models.AutomationRule, at time.Time, 
 		CreatedAt:   at,
 	}
 	applySourceColumns(&ev, src)
+	applyEventAt(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -545,6 +546,7 @@ func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value
 			CreatedAt:   at,
 		}
 		applySourceColumns(&ev, src)
+		applyEventAt(&ev, src)
 		if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 			ev.TriggerValue = &value
 		}
@@ -859,6 +861,17 @@ func canonicalActionParams(raw string) string {
 	return string(canonical)
 }
 
+// applyEventAt 把时钟驱动事件的**事件时刻**写进审计行（2026-11-13）。
+//
+// 口径：sun_event 的 src.EventAt = 当日日出/日落 + 偏移（fireAt），不是 tick 的
+// at。两者最多差一个 tick，但只有前者能回答"这次触发对应哪一次日出/日落"。
+// nil = 非时钟事件（传感器阈值 / 手动触发 / 抑制审计），列保持 NULL。
+func applyEventAt(ev *models.AutomationEvent, src *TriggerEvent) {
+	if src != nil && src.EventAt != nil {
+		ev.EventAt = src.EventAt
+	}
+}
+
 // recordPendingConfirm 落 pending_confirm 事件（含动作集合哈希快照，Y5）。
 func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time, value float64,
 	actions []models.AutomationRuleAction, src *TriggerEvent) uint {
@@ -871,6 +884,7 @@ func (p *Planner) recordPendingConfirm(rule models.AutomationRule, at time.Time,
 		CreatedAt:   at,
 	}
 	applySourceColumns(&ev, src)
+	applyEventAt(&ev, src)
 	// Y5 + D-8：pending 期间来源可能切换，confirm 必须能证明"来源没变"。
 	// 存量单设备规则 source_hash 为空（不启用比对，保持兼容）。
 	if src != nil && src.SourceKind != "" {
@@ -907,6 +921,7 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 	}
 	// 来源归因（方案 §4.4）：group 规则的事件必须能回答"谁供的数"。
 	applySourceColumns(&ev, src)
+	applyEventAt(&ev, src)
 	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
 		ev.TriggerValue = &value
 	}
@@ -914,6 +929,23 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
 		logger.Warn("automation: failed to record event", "rule_id", rule.ID, "error", err)
 		return 0
+	}
+	// 2026-11-13：成功/失败触发此前**没有任何日志**（只有 DB 行），现场只能查库；
+	// 在唯一收口补一条结构化日志。抑制类降为 debug，避免高频刷量。
+	eventAt := ""
+	if ev.EventAt != nil {
+		eventAt = ev.EventAt.Format(time.RFC3339)
+	}
+	switch {
+	case strings.HasPrefix(result, "suppressed"):
+		logger.Debugf("automation: event rule_id=%d type=%s result=%s event_at=%s detail=%q",
+			rule.ID, rule.TriggerType, result, eventAt, detail)
+	case strings.HasPrefix(result, "failed"), result == models.AutomationResultPartialFailure:
+		logger.Warnf("automation: event rule_id=%d type=%s result=%s command_id=%s event_at=%s detail=%q",
+			rule.ID, rule.TriggerType, result, commandID, eventAt, detail)
+	default:
+		logger.Infof("automation: event rule_id=%d type=%s result=%s command_id=%s event_at=%s",
+			rule.ID, rule.TriggerType, result, commandID, eventAt)
 	}
 	p.broadcastAutomationEvent(rule, ev, value, commandID)
 	return ev.ID

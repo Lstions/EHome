@@ -37,6 +37,9 @@ func newIngestGateConsumer(t *testing.T, db *gorm.DB, hub *websocket.Hub, reasse
 	t.Helper()
 	registry := drivers.NewRegistry()
 	registry.Register(&plainTestDriver{})
+	// 2026-11-13：unified_data 已整表退役，本包不再有 DB 写路径。
+	// 两条用例的判据因此改为 **L2 帧旁路是否被调用**（解析成功的唯一落点之一），
+	// 由调用方注入 SetTelemetrySink 计数。
 	return NewSensorParserConsumerWithRegistry(db, hub, reassembler, registry)
 }
 
@@ -93,12 +96,14 @@ func TestSensorParserConsumer_SoftDeletedNodeIngestIsRejected(t *testing.T) {
 
 	reassembler := &recordingReassembler{}
 	consumer := newIngestGateConsumer(t, db, hub, reassembler)
+	frameCalls := 0
+	consumer.SetTelemetrySink(func(uint, time.Time, int64, []telemetry.Reading, []byte) { frameCalls++ })
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 7, RawData: []byte{0x01},
 	})
 
-	if got := countRows(t, db, &models.UnifiedData{}); got != 0 {
-		t.Errorf("unified_data rows = %d, want 0 for a soft-deleted node", got)
+	if frameCalls != 0 {
+		t.Errorf("软删节点触发了 %d 次帧旁路写入, want 0（fail-closed 必须在写/旁路之前）", frameCalls)
 	}
 	// 2026-11-11: 原本还断言 device_data 0 行。该表已整表退役（原始数据退役方案
 	// §2.1），写入点删除后**没有任何代码路径**会写它 —— 断言一张不存在的表只会
@@ -126,13 +131,15 @@ func TestSensorParserConsumer_SoftDeletedNodeIngestIsRejected_LegacyChannelIndex
 	}
 
 	consumer := newIngestGateConsumer(t, db, nil, passthroughReassembler{})
+	frameCalls := 0
+	consumer.SetTelemetrySink(func(uint, time.Time, int64, []telemetry.Reading, []byte) { frameCalls++ })
 	// EdgeDeviceID=0 + ChannelID=0 → 走 0 基通道列表索引回退分支。
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: 0, ChannelID: 0, RequestID: 8, RawData: []byte{0x01},
 	})
 
-	if got := countRows(t, db, &models.UnifiedData{}); got != 0 {
-		t.Errorf("unified_data rows = %d, want 0 for a soft-deleted node via channel-index lookup", got)
+	if frameCalls != 0 {
+		t.Errorf("软删节点（通道索引回退分支）触发了 %d 次帧旁路写入, want 0", frameCalls)
 	}
 	// 同上：device_data 已退役，见上一条用例的说明。
 }
@@ -160,9 +167,7 @@ func TestSensorParserConsumer_LiveNodeIngestStillPersists(t *testing.T) {
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 9, RawData: []byte{0x01},
 	})
 
-	if got := countRows(t, db, &models.UnifiedData{}); got != 1 {
-		t.Fatalf("unified_data rows = %d, want 1 for a live node", got)
-	}
+
 	if frameCalls == 0 {
 		t.Fatal("live node 的帧旁路未被调用 — 对照组要证明链路是活的")
 	}

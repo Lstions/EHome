@@ -126,24 +126,6 @@
       :tag="controlHealthTag"
     />
 
-    <!--
-      历史数据回填进度（契约 §4.6）。
-
-      **位置刻意在此**：启动门禁在 ready=true 时就放行到业务页，而回填恰在 ready
-      之后才真正开跑（生产实测 20~40 分钟）——维护页在那个窗口里早已消失，
-      业务页才是用户唯一能看到进度的地方。
-
-      显示条件见 views/maintenance/backfill.ts 的 shouldShowBackfill：
-        · running  → 进度卡（用户在等这个数）；
-        · failed   → 错误卡（历史数据没迁完，必须告知）；
-        · disabled → 信息卡（运维关阀 ⇒ 老数据永远不会迁移，同样必须告知，
-                     静默隐藏等于让"数据没迁"永不可见）；
-        · done/idle → 整卡不渲染（没有未完成的工作可汇报，不该占首屏）。
-      因此对绝大多数请求零视觉影响。轮询是本组件独立的一条（5s），与页头的
-      指标刷新间隔解耦：指标可以关自动刷新或调到 60s，回填进度不能跟着变慢。
-    -->
-    <BackfillProgressCard />
-
     <!-- 失败时不得渲染「0 项需要关注」——那是把"未知"说成"正常" -->
     <el-alert
       v-if="controlAlertVisible"
@@ -224,7 +206,6 @@
 import { Connection, Monitor, Cpu, DataLine, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
-import BackfillProgressCard from '@/views/maintenance/BackfillProgressCard.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import MonitorControlHealth from './components/MonitorControlHealth.vue'
 import MonitorDetailPanels from './components/MonitorDetailPanels.vue'

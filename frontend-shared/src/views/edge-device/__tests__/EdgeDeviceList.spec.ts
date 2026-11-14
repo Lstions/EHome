@@ -408,11 +408,12 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain("parserBuses.includes((ch.hardware_type || '').toLowerCase())")
   })
 
-  // P0-3: 步骤指示器标题不折行。
-  it('P0-3: wizard step titles do not wrap', () => {
-    expect(source).toContain('width="760px"')
-    expect(source).toContain('.create-device-dialog :deep(.el-step__title) {')
-    expect(source).toContain('white-space: nowrap;')
+  // P0-3（2026-11-14 重设计）：创建向导与规则向导统一为「PC 左侧步骤栏 / 移动端全屏」。
+  it('P0-3: wizard uses the responsive shell (PC rail / mobile fullscreen)', () => {
+    expect(source).toContain(`:width="isMobile ? '100%' : '900px'"`)
+    expect(source).toContain(':fullscreen="isMobile"')
+    expect(source).toContain('edge-wizard__rail')
+    expect(source).toContain('data-test="edge-wizard-mobile-head"')
   })
 
   // P1-1: 编辑模式不走向导——隐藏步骤指示器与前三步,只改基本信息,且不传 type。
@@ -420,7 +421,8 @@ describe('EdgeDeviceList.vue', () => {
   it('P1-1: edit mode bypasses the wizard and never resubmits type', () => {
     // 步骤编号 2026-10-23 整体前移一位（原「历史数据继承」步删除）：
     // 0=型号 1=通道 2=基本信息；编辑模式仍只显示最后一步。
-    expect(source).toContain('v-if="!editingDeviceId" :active="createStep"')
+    expect(source).toContain('v-if="!isMobile && !editingDeviceId"')
+    expect(source).toContain('v-if="isMobile && !editingDeviceId"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 0"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 1"')
     expect(source).toContain('v-show="editingDeviceId || createStep === 2"')
@@ -679,10 +681,13 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).not.toContain('logical_device_id')
   })
 
-  it('创建向导步骤指示器就是三步：型号 / 节点&通道 / 基本信息', () => {
-    expect(source).toContain('<el-step title="选择设备型号" />')
-    expect(source).toContain('<el-step title="选择节点 & 通道" />')
-    expect(source).toContain('<el-step title="基本信息" />')
+  it('创建向导仍是三步：型号 / 节点与通道 / 基本信息', () => {
+    // 2026-11-14：el-steps 换成响应式步骤栏（PC 左侧栏 / 移动端顶部条），
+    // 步骤元数据收敛到 EDGE_WIZARD_STEPS，三项标题必须与改造前一一对应。
+    expect(source).toContain("title: '设备型号'")
+    expect(source).toContain("title: '节点与通道'")
+    expect(source).toContain("title: '基本信息'")
+    expect(source).toContain('EDGE_WIZARD_STEPS.length')
   })
 
   it('编辑模式开放「所属节点 + 通道」并提交 channel_id（契约 §4.1，换节点后历史连续）', () => {

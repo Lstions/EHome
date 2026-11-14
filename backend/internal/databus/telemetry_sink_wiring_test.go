@@ -1,203 +1,164 @@
 package databus
 
-// telemetry_sink_wiring_test.go — L2 双写 / L3 rollup 旁路 sink 的接线门禁
-// （接线 patch: docs/设计/遥测存储-L2双写接线patch-2026-11-06.md §2；
-//   docs/分析/遥测rollup-L3-接线patch-2026-11-06.md §3）。
+// telemetry_sink_wiring_test.go — L2 双写 / L3 rollup / 最新值缓存的接线门禁。
 //
-// # 本文件守什么
+// # 2026-11-13 重写（unified_data 整表退役）
 //
-// 两个 sink **必须挂在「解析成功路径」上**，而不是「写库成功」分支。这条如果写反：
-//   · L2：L1 开启 write_on_change 后被跳过的帧不进帧表 ⇒ 增量链出现空洞，
-//     60s 关键帧窗口内的变化值**永久丢失**（数据损失，不是压缩损失）；
-//   · L3：被跳过的帧不进分钟桶 ⇒ rollup 的 avg/min/max 漏样本，与原始表口径漂移，
-//     而且**没有任何告警**会暴露（图表看起来正常，只是数字偏了）。
+// 原文件的全部用例都以「L1 门禁把某一帧判为 skip，但 sink 仍必须被调用」为构造。
+// unified_data 退役后 L1 门禁与 DB 写入一起删除，那个前提不复存在 —— 但**它要
+// 防止的那类缺陷仍然存在**：sink 被接到某个"写库成功"分支上（写库已不存在，
+// 等价于"接到一个永不进入的分支"）⇒ 图表/rollup 静默无数据。
 //
-// 两种错误接法在「L1 关着」时都**完全看不出来**（每帧都写库，谁接都一样）。
-// 所以用例必须把 L1 打开、让一帧被跳过，再断言 sink 仍被调用 —— 这是唯一能区分
-// 「接对了」与「接反了」的构造。
-//
-// 另外守三条共同不变量：nil 即跳过（默认关闭零成本）、传参口径正确
-// （device.ID / 同一个 now / commandTemplateID）、不因旁路存在而改变落库行为。
+// 因此本文件改为直接断言「解析成功路径」的三个不变量：
+//   1. 每一帧解析成功都必须调用 L2/L3/latest 三个 sink（各一次，不重不漏）；
+//   2. 传参口径：EdgeDevice.ID / 同一个 now / commandTemplateID / 重组后的 raw；
+//   3. nil sink 安全（默认关闭零成本），解析失败不得调用任何 sink。
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/telemetry"
 	"ehome/backend/pkg/parser"
+
+	"gorm.io/gorm"
 )
 
-// TestTelemetryRollupSink_RunsOnSkippedFrame 守 L3：L1 跳过入库的帧仍要进分钟桶。
-func TestTelemetryRollupSink_RunsOnSkippedFrame(t *testing.T) {
-	db := newWriteGateTestDB(t)
-	node, device := seedWriteGateDevice(t, db, "node-sink-rollup")
-
-	consumer, _ := newWriteGateConsumer(t, db, map[string]float64{"voltage": 12})
-	consumer.SetTelemetryHeartbeat(time.Hour)
-
-	var (
-		calls      int
-		gotDevices []uint
-		gotFields  []int
-		gotAts     []time.Time
-	)
-	consumer.SetTelemetryRollupSink(func(edgeDeviceID uint, fields []parser.Field, at time.Time) {
-		calls++
-		gotDevices = append(gotDevices, edgeDeviceID)
-		gotFields = append(gotFields, len(fields))
-		gotAts = append(gotAts, at)
-	})
-
-	consumer.Handle(frame(node.NodeID, device.ID)) // 首帧: 必写库
-	consumer.Handle(frame(node.NodeID, device.ID)) // 同值: 被 L1 跳过
-	consumer.Handle(frame(node.NodeID, device.ID)) // 同值: 被 L1 跳过
-
-	if rows := countUnifiedRows(t, db, device.ID); rows != 1 {
-		t.Fatalf("unified_data 行数 = %d, want 1（L1 应跳过 2 帧）", rows)
-	}
-	if calls != 3 {
-		t.Errorf("rollup sink 调用次数 = %d, want 3 —— 被 L1 跳过的帧仍是真实采样，"+
-			"必须进分钟桶（否则 rollup 的 avg/min/max 漏样本，与原始表口径漂移且无告警）", calls)
-	}
-	for i, id := range gotDevices {
-		if id != device.ID {
-			t.Errorf("第 %d 次调用 deviceID = %d, want %d（必须是 EdgeDevice.ID，"+
-				"即 unified_data.device_id 口径）", i, id, device.ID)
-		}
-	}
-	for i, n := range gotFields {
-		if n != 1 {
-			t.Errorf("第 %d 次调用 fields 数 = %d, want 1（应传本帧解析出的全部物理量）", i, n)
-		}
-	}
-	for i, at := range gotAts {
-		if at.IsZero() {
-			t.Errorf("第 %d 次调用 at 为零值 —— 必须传 unified_data.timestamp 用的同一个 now", i)
-		}
-	}
+// sinkTestDriver 产生一组固定物理量；err 非 nil 时解析失败。
+type sinkTestDriver struct {
+	values map[string]float64
+	err    error
 }
 
-// TestTelemetrySink_RunsOnSkippedFrame 守 L2：被 L1 跳过的帧仍要进帧表。
-func TestTelemetrySink_RunsOnSkippedFrame(t *testing.T) {
-	db := newWriteGateTestDB(t)
-	node, device := seedWriteGateDevice(t, db, "node-sink-dual")
+func (d *sinkTestDriver) DeviceType() string      { return "sink_test" }
+func (d *sinkTestDriver) DeviceName() string      { return "sink test" }
+func (d *sinkTestDriver) OEM() string             { return "test" }
+func (d *sinkTestDriver) Category() string        { return "test" }
+func (d *sinkTestDriver) HardwareTypes() []string { return []string{"UART"} }
+func (d *sinkTestDriver) GetSensorDefinitions() []drivers.SensorData { return nil }
+func (d *sinkTestDriver) GetCommandTemplates() []drivers.CommandTemplate { return nil }
+func (d *sinkTestDriver) ParseData([]byte) ([]drivers.SensorData, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	out := make([]drivers.SensorData, 0, len(d.values))
+	for name, value := range d.values {
+		out = append(out, drivers.SensorData{Name: name, Value: value, Unit: "V"})
+	}
+	return out, nil
+}
 
-	consumer, _ := newWriteGateConsumer(t, db, map[string]float64{"voltage": 12})
-	consumer.SetTelemetryHeartbeat(time.Hour)
+func newSinkTestConsumer(t *testing.T, db *gorm.DB, drv drivers.Driver) (*SensorParserConsumer, models.Node, models.EdgeDevice) {
+	t.Helper()
+	node := models.Node{NodeID: "node-sink", Status: "online"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	ch := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	device := models.EdgeDevice{Name: "sink-dev", NodeID: node.NodeID, ChannelID: ch.ID,
+		Type: "sink_test", Status: "active", Enabled: true}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatalf("create edge device: %v", err)
+	}
+	registry := drivers.NewRegistry()
+	registry.Register(drv)
+	return NewSensorParserConsumerWithRegistry(db, nil, passthroughReassembler{}, registry), node, device
+}
+
+func sinkFrame(nodeID string, deviceID uint) DataEvent {
+	return DataEvent{DeviceID: nodeID, EdgeDeviceID: uint64(deviceID), RequestID: 1, RawData: []byte("response")}
+}
+
+func TestTelemetrySinksCalledOnEveryParsedFrame(t *testing.T) {
+	db := newConsumerTestDB(t)
+	consumer, node, device := newSinkTestConsumer(t, db, &sinkTestDriver{values: map[string]float64{"voltage": 12}})
 
 	var (
-		calls    int
-		gotSeq   []int64
-		gotNames [][]string
+		l2Calls, l3Calls, latestCalls int
+		l2Devices                     []uint
+		l3Devices                     []uint
+		l3Fields                      []int
+		l2Raw                         [][]byte
+		l2Ats, l3Ats                  []time.Time
 	)
 	consumer.SetTelemetrySink(func(deviceID uint, at time.Time, commandTemplateID int64, readings []telemetry.Reading, raw []byte) {
-		calls++
-		if deviceID != device.ID {
-			t.Errorf("telemetry sink deviceID = %d, want %d", deviceID, device.ID)
-		}
-		if at.IsZero() {
-			t.Error("telemetry sink 收到零值 at —— 必须传 unified_data.timestamp 用的同一个 now")
-		}
-		// raw 必须是**重组后**的原始帧（原始数据退役 §4.4 方案 A）：
-		// 关键帧靠它保留「解析成功但数值错误」的追溯能力，传空等于白加这个参数。
-		if len(raw) == 0 {
-			t.Error("telemetry sink 收到空 raw —— 关键帧 raw 落库（telemetry_frame.raw）是 " +
-				"device_data 退役后唯一的原始字节追溯来源")
-		}
-		gotSeq = append(gotSeq, commandTemplateID)
-		names := make([]string, len(readings))
-		for i := range readings {
-			names[i] = readings[i].Name
-		}
-		gotNames = append(gotNames, names)
+		l2Calls++
+		l2Devices = append(l2Devices, deviceID)
+		l2Ats = append(l2Ats, at)
+		l2Raw = append(l2Raw, append([]byte(nil), raw...))
 	})
+	consumer.SetTelemetryRollupSink(func(deviceID uint, fields []parser.Field, at time.Time) {
+		l3Calls++
+		l3Devices = append(l3Devices, deviceID)
+		l3Fields = append(l3Fields, len(fields))
+		l3Ats = append(l3Ats, at)
+	})
+	consumer.SetLatestSink(func(models.UnifiedData) { latestCalls++ })
 
-	consumer.Handle(frame(node.NodeID, device.ID))
-	consumer.Handle(frame(node.NodeID, device.ID))
+	consumer.Handle(sinkFrame(node.NodeID, device.ID))
+	consumer.Handle(sinkFrame(node.NodeID, device.ID))
 
-	if rows := countUnifiedRows(t, db, device.ID); rows != 1 {
-		t.Fatalf("unified_data 行数 = %d, want 1", rows)
+	if l2Calls != 2 || l3Calls != 2 || latestCalls != 2 {
+		t.Fatalf("sink 调用次数 L2=%d L3=%d latest=%d, want 2/2/2（每一帧解析成功都必须到三个 sink，"+
+			"任何一个接到永不进入的分支都会静默少数据）", l2Calls, l3Calls, latestCalls)
 	}
-	if calls != 2 {
-		t.Errorf("telemetry sink 调用次数 = %d, want 2 —— 被 L1 跳过的帧不进帧表会让增量链"+
-			"出现空洞，60s 关键帧窗口内的变化值永久丢失", calls)
-	}
-	for i := range gotSeq {
-		if gotSeq[i] != 0 {
-			t.Errorf("第 %d 次 commandTemplateID = %d, want 0（本用例的 DataEvent 没带模板）", i, gotSeq[i])
+	for i := range l2Devices {
+		if l2Devices[i] != device.ID {
+			t.Errorf("L2 第 %d 次 deviceID = %d, want %d（必须是 EdgeDevice.ID）", i, l2Devices[i], device.ID)
 		}
-		if len(gotNames[i]) != 1 || gotNames[i][0] != "voltage" {
-			t.Errorf("第 %d 次 readings = %v, want [voltage]", i, gotNames[i])
+		if l2Ats[i].IsZero() {
+			t.Errorf("L2 第 %d 次 at 为零值 —— 三处 sink 必须用同一个 now", i)
+		}
+		if len(l2Raw[i]) == 0 {
+			t.Errorf("L2 第 %d 次 raw 为空 —— 关键帧 raw 落库是原始字节的唯一追溯来源", i)
+		}
+	}
+	for i := range l3Devices {
+		if l3Devices[i] != device.ID {
+			t.Errorf("L3 第 %d 次 deviceID = %d, want %d", i, l3Devices[i], device.ID)
+		}
+		if l3Fields[i] != 1 {
+			t.Errorf("L3 第 %d 次 fields 数 = %d, want 1（应传本帧全部物理量）", i, l3Fields[i])
+		}
+		if l3Ats[i].IsZero() {
+			t.Errorf("L3 第 %d 次 at 为零值", i)
 		}
 	}
 }
 
-// TestTelemetrySinks_NilSinksAreSafe 守「旁路未接线时不得 panic、主路径照常收窄」。
-//
-// 2026-11-07 起 L1 收窄**无条件生效**（契约 §1），所以本用例的落库断言从
-// 「3 帧 3 行」改成「3 帧 1 行」—— 这不是回归，正是「删开关」应有的结果。
-// 仍然要守的是两件事:
-//  1. sink 为 nil 时 Handle 不 panic（两个旁路都在解析成功路径上被调用）；
-//  2. latestSink 不受收窄影响，三帧都要更新（否则实时值会冻结）。
-func TestTelemetrySinks_NilSinksAreSafe(t *testing.T) {
-	db := newWriteGateTestDB(t)
-	node, device := seedWriteGateDevice(t, db, "node-sink-nil")
+// nil sink 安全：默认关闭时不得 panic，也不得影响 latestSink。
+func TestTelemetrySinksNilAreSafe(t *testing.T) {
+	db := newConsumerTestDB(t)
+	consumer, node, device := newSinkTestConsumer(t, db, &sinkTestDriver{values: map[string]float64{"voltage": 12}})
 
-	consumer, _ := newWriteGateConsumer(t, db, map[string]float64{"voltage": 12})
-	consumer.SetTelemetryHeartbeat(time.Hour)
-	// 刻意不调用 SetTelemetrySink / SetTelemetryRollupSink：两个旁路保持 nil。
+	latestCalls := 0
+	consumer.SetLatestSink(func(models.UnifiedData) { latestCalls++ })
+	consumer.Handle(sinkFrame(node.NodeID, device.ID)) // 不应 panic
 
-	var latest int
-	consumer.SetLatestSink(func(models.UnifiedData) { latest++ })
-
-	for i := 0; i < 3; i++ {
-		consumer.Handle(frame(node.NodeID, device.ID))
-	}
-	if rows := countUnifiedRows(t, db, device.ID); rows != 1 {
-		t.Errorf("unified_data 行数 = %d, want 1（三帧同值 + 心跳 1h ⇒ 只有首帧落库；"+
-			"L1 收窄已无条件生效，写 3 行说明开关没删干净）", rows)
-	}
-	if latest != 3 {
-		t.Errorf("latestSink 调用次数 = %d, want 3（收窄只影响入库，实时值必须每帧更新）", latest)
+	if latestCalls != 1 {
+		t.Fatalf("latestSink 调用次数 = %d, want 1（nil 的 L2/L3 不得拖累最新值缓存）", latestCalls)
 	}
 }
 
-// TestTelemetrySinks_DoNotRescueFailedWrite 守「旁路不改变主写入语义」：
-// 写库失败时旁路照常被调用（它记录的是设备真实采样），但不得因为旁路存在
-// 而推进 L1 的收窄状态（否则该值会永久不落库）。
-func TestTelemetrySinks_DoNotRescueFailedWrite(t *testing.T) {
-	db := newWriteGateTestDB(t)
-	node, device := seedWriteGateDevice(t, db, "node-sink-fail")
+// 解析失败不得调用任何 sink：否则会在帧表里写入"半帧"或让 rollup 吃到空样本。
+func TestTelemetrySinksNotCalledOnParseError(t *testing.T) {
+	db := newConsumerTestDB(t)
+	consumer, node, device := newSinkTestConsumer(t, db, &sinkTestDriver{err: errors.New("bad frame")})
 
-	consumer, driver := newWriteGateConsumer(t, db, map[string]float64{"voltage": 12})
-	consumer.SetTelemetryHeartbeat(time.Hour)
+	calls := 0
+	consumer.SetTelemetrySink(func(uint, time.Time, int64, []telemetry.Reading, []byte) { calls++ })
+	consumer.SetTelemetryRollupSink(func(uint, []parser.Field, time.Time) { calls++ })
+	consumer.SetLatestSink(func(models.UnifiedData) { calls++ })
 
-	var rollupCalls int
-	consumer.SetTelemetryRollupSink(func(uint, []parser.Field, time.Time) { rollupCalls++ })
+	consumer.Handle(sinkFrame(node.NodeID, device.ID))
 
-	consumer.Handle(frame(node.NodeID, device.ID)) // 首帧写库成功（voltage=12 已入库）
-
-	if err := db.Migrator().DropTable(&models.UnifiedData{}); err != nil {
-		t.Fatalf("drop unified_data: %v", err)
-	}
-	// 值变了（12 → 42）⇒ L1 会尝试写库，但表已删 ⇒ Create 失败。
-	// 旁路记录的是设备真实采样，与主写入成败无关，所以仍必须被调用。
-	driver.values = map[string]float64{"voltage": 42}
-	consumer.Handle(frame(node.NodeID, device.ID))
-
-	if rollupCalls != 2 {
-		t.Errorf("写库失败时 rollup sink 调用次数 = %d, want 2 —— "+
-			"旁路记录的是设备真实采样，与主写入成败无关", rollupCalls)
-	}
-	// 关键断言：写库失败 ⇒ 收窄状态**不得**推进 ⇒ 同值 42 下一帧仍判 write_changed
-	// （若被判成 skip，说明状态被错误推进，该值将永久不落库）。
-	now := time.Now()
-	_, stat := consumer.writeGate.filter(device.ID,
-		[]models.UnifiedData{{DeviceID: device.ID, SensorName: "voltage", Value: 42, Timestamp: now}},
-		now.Add(time.Second))
-	if stat.Changed != 1 {
-		t.Errorf("写库失败后收窄状态被推进了（%+v，want Changed=1）—— "+
-			"新值被记成已落库，该值将永久不落库（方案 §3.3 缓存一致性）", stat)
+	if calls != 0 {
+		t.Fatalf("解析失败仍调用了 %d 次 sink —— 帧表/rollup 会吃到不存在的样本", calls)
 	}
 }

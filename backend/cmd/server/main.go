@@ -17,7 +17,6 @@ import (
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
-	"ehome/backend/internal/backfill"
 	"ehome/backend/internal/bootstrap"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
@@ -194,8 +193,8 @@ func main() {
 	//
 	// 删掉它有两个理由，第二个才是决定性的：
 	//
-	//  ① 该表已停写（EHOME_TELEMETRY_UNIFIED_WRITE=false），不再产生新数据，
-	//     分区维护没有意义；
+	//  ① 该表已整表退役（2026-11-13：写入/读取/回填删除，运维用
+	//     ehomectl retire-unified-data 显式 DROP），不再产生新数据，分区维护没有意义；
 	//
 	//  ② **更危险的是它会把 DROP 掉的表重新建出来**。MigrateTableToPartitioned 的
 	//     判定链是：IsTablePartitioned(relkind='p') → 否；flatExists(relkind='r') → 否；
@@ -1030,78 +1029,13 @@ func main() {
 	// 「/readyz 变 200」与「全量引擎开始服务」是同一时刻，不会出现"路由已是全量、
 	// 探针仍 503"（K8s 会把正在接客的实例摘掉）或反之的窗口。
 	// ════════════════════════════════════════════════════════════════════════
-	// 老数据回填（契约 docs/设计/老数据迁移到帧表-分析与契约-2026-11-07.md §4）
+	// 老数据回填（unified_data → telemetry_frame）已于 2026-11-13 **整包删除**。
 	//
-	// **后台 goroutine，绝不阻塞 ready**：生产 3.42M 帧 / 20~40 分钟，同步做会让
-	// 维护页挂 40 分钟。这里只启动 goroutine 就返回，服务照常 ready。
-	//
-	// 失败语义：回填失败**不影响服务**（它是历史数据的派生表示，主写入
-	// unified_data 照常）。只打日志 + 在进度里可见。崩了下次启动从 watermark
-	// 继续 —— 这就是状态表存在的意义。
-	//
-	// 位置要求：必须在 telemetry_frame 分区迁移（第 11 步）与 slot 字典 WarmUp
-	// 之后；放在 StepStartupTasks 的 Done 之前是因为它属于「后台任务启动」这一
-	// 步的一部分（只是启动的是长任务而不是 ticker）。
-	// ════════════════════════════════════════════════════════════════════════
-	{
-		backfillCfg, backfillEnabled, backfillWarns := backfill.ConfigFromEnv()
-		for _, w := range backfillWarns {
-			logger.Warnf("backfill: %s", w)
-		}
-		if err := datalifecycle.EnsureBackfillProgressTable(db); err != nil {
-			// 状态表建不出来 ⇒ 回填无法断点续跑。不 Fatal（不挡主写入），只跳过回填。
-			logger.Warnf("backfill: 建状态表失败，跳过回填（不阻塞启动）: %v", err)
-			backfillEnabled = false
-		}
-		backfillRunner := backfill.NewRunner(db, telemetryDict, backfillCfg, !backfillEnabled, backfillWarns)
-		// ── 回填进度接口注入（契约 §4.6：GET /api/v1/system/backfill，免鉴权）──
-		//
-		// 为什么在这里注册而不是塞进 api.SetupRoutes：
-		//   SetupRoutes 的 option 机制按**具体类型**做 switch 匹配，加一个新 option
-		//   要改路由主文件；而本端点只需要一个"读进度"的函数值。更关键的是，
-		//   这里是**同时拿得到 Runner 与 gin.Engine 的唯一位置** —— 把"谁提供进度"
-		//   和"谁注册路由"放在同一视野内，读代码时不用在 main.go 与 api 之间来回跳。
-		//
-		// ⚠ 必须在 rootHandler.SetEngine(r) 之前完成（本块位于其上方若干行）：
-		//   gin 的路由树没有读锁，Serve 期间 AddRoute 是数据竞争 —— 与维护页契约 §2
-		//   的红线是同一条。
-		//
-		// ⚠ 注册在 r 上（不是 v1 鉴权组）：免鉴权。载荷只有阶段/计数/耗时，
-		//   没有任何业务数据或凭据（与 /api/v1/system/maintenance 同级别）。
-		//
-		// ETA 由 API 侧跟踪器外推（引擎侧的 Progress.ETASeconds 恒 0 —— 引擎没有
-		// "总量"概念，见 backfill_status.go 的论证）：每次轮询喂一个
-		// (rowsDone, percent, now) 样本，按**行速率**外推，比帧速率稳。
-		backfillETA := api.NewBackfillETATracker()
-		api.RegisterBackfillStatus(r, api.BackfillSourceFunc(func() api.BackfillSnapshot {
-			prog := backfillRunner.Progress()
-			return api.BackfillSnapshot{
-				State:              prog.State,
-				Percent:            prog.Percent,
-				CurrentPartition:   prog.CurrentPartition,
-				FramesDone:         prog.FramesDone,
-				FramesTotal:        prog.FramesTotal,
-				ETASeconds:         backfillETA.Observe(prog.State, prog.RowsDone, prog.Percent, time.Now()),
-				RetentionPermanent: prog.RetentionPermanent,
-				Errors:             prog.Errors,
-			}
-		}))
-		if backfillRunner.Enabled() {
-			go func() {
-				logger.Infof("backfill: 老数据回填已启动（batch=%d frames, keyframe=%s）—— 后台执行，不阻塞服务",
-					backfillCfg.BatchFrames, backfillCfg.KeyFrameInterval)
-				prog, err := backfillRunner.RunOnce(context.Background())
-				if err != nil {
-					logger.Warnf("backfill: 回填中断（下次启动将从 watermark 继续）: %v", err)
-					return
-				}
-				logger.Infof("backfill: 回填完成 state=%s frames=%d rows=%d percent=%.1f",
-					prog.State, prog.FramesDone, prog.RowsDone, prog.Percent)
-			}()
-		} else {
-			logger.Infof("backfill: 已关闭（EHOME_BACKFILL_ENABLED=false）或不可用，跳过")
-		}
-	}
+	// 原因：unified_data 退役后没有源表可读；全新部署从不创建该表，旧部署由
+	// ehomectl retire-unified-data --yes 一次性 DROP。留着这个后台任务只会
+	// 在每次启动时 probe 一张不存在的表并打印 42P01。历史迁移的生产实测
+	//（3.42M 帧）与回滚窗口都已完成，不存在"还没迁完"的部署。
+	// 进程内 slot 字典（telemetryDict）仍被 L2 双写与 rollup 回填使用，未受影响。
 	// ============ 存量 device_data sensors 剥离任务已删除（2026-11-11 整表退役）============
 	//
 	// 这里原本跑 datalifecycle.NewDeviceDataSensorStripper（task-21）：把 device_data 里

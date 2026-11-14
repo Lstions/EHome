@@ -116,11 +116,9 @@ func cachedPointsStored(db *gorm.DB) int64 {
 		if pointsStoredPrimed {
 			return pointsStoredValue
 		}
-		// 首次就失败：退化为行数（旧口径）。偏小但不会让面板转圈。
-		var rows int64
-		if e := db.Model(&models.UnifiedData{}).Count(&rows).Error; e == nil {
-			return rows
-		}
+		// 2026-11-13：unified_data 整表退役，原先"首次失败就退化为 unified_data 行数"
+		// 的兜底没有表可查了。首次失败直接返回 0（面板显示 0 而不是转圈），
+		// 下一次轮询会重试；不要把一张已删除的表加回来。
 		return 0
 	}
 	pointsStoredValue = frames

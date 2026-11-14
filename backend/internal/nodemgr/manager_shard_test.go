@@ -3,11 +3,13 @@ package nodemgr
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/telemetry"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -17,7 +19,11 @@ import (
 // production registration path: NewManager with parser shards registered on
 // the real DataEventBus, concurrent multi-device DataReports flowing through
 // Publish → fanout → shard workers → SensorParserConsumer, and every sample
-// landing in unified_data exactly once with per-device ordering intact.
+// reaching the L2 frame sink exactly once with per-device attribution intact.
+//
+// 2026-11-13：unified_data 整表退役后，判据从"每个样本写一行"改为
+// "每个样本恰好进入一次帧旁路"（sink 的 readings 计数）。后者才是分片并发
+// 真正要守的不变量：样本既不能丢，也不能被两个分片重复处理。
 func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 	// File-backed temp DB with WAL + busy timeout. Plain ":memory:" gives
 	// every pool connection its own empty database; "cache=shared" fixes that
@@ -72,14 +78,30 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 	mgr := NewManager(db, nil, nil, nil, nil, nil)
 	defer mgr.Stop()
 
+	// 每设备累计的解析值条数（由帧旁路计数，2026-11-13 起代替 unified_data 行数）。
+	var mu sync.Mutex
+	readings := make(map[uint]int)
+	mgr.SetTelemetrySink(func(deviceID uint, _ time.Time, _ int64, rs []telemetry.Reading, _ []byte) {
+		mu.Lock()
+		readings[deviceID] += len(rs)
+		mu.Unlock()
+	})
+	readingsTotal := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		total := 0
+		for _, n := range readings {
+			total += n
+		}
+		return total
+	}
+	readingsFor := func(deviceID uint) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return readings[deviceID]
+	}
+
 	// 4-byte lk_th01 payload: temperature+humidity (driver parses 2 fields).
-	//
-	// ⚠ 2026-11-07（L1 值不变不入库无条件生效）：**每一波必须变值**。
-	// 旧写法是固定 4 字节、20 波完全相同 ⇒ 首个字段值在全 20 波里不变，L1 会
-	// 只写首帧 2 行、后 19 波全部跳过（实测每设备 2 行 / 期望 40 行）。
-	// 那不是回归，而是收窄生效的正确结果 —— 本用例要考的是「分片并发下每个样本
-	// 恰好落库一次」，因此必须让样本**彼此不相等**，否则测的就不是分片而是 L1。
-	// 做法：低字节随波次变化（temperature 与 humidity 都会变）。
 	payloadForWave := func(w int) []byte {
 		return []byte{0x11, byte(w + 1), 0x1F, byte(w + 1)}
 	}
@@ -90,7 +112,7 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 	// correctness of sharded persistence, not backpressure, while still
 	// exercising all shard workers concurrently every wave.
 	const waves = samplesPerDevice
-	wantUnified := 0
+	wantReadings := 0
 	deadline := time.Now().Add(30 * time.Second)
 	for w := 0; w < waves; w++ {
 		for i := 0; i < devices; i++ {
@@ -103,31 +125,27 @@ func TestManagerShardedIngest_ParallelDevicesAllPersisted(t *testing.T) {
 				ReceivedAt:   time.Now(),
 			})
 		}
-		wantUnified += devices * 2 // lk_th01: 2 unified rows per event
+		wantReadings += devices * 2 // lk_th01: 2 readings per event
 		for time.Now().Before(deadline) {
-			var unified int64
-			if err := db.Model(&models.UnifiedData{}).Count(&unified).Error; err != nil {
-				t.Fatalf("count unified: %v", err)
-			}
-			if unified >= int64(wantUnified) {
+			if readingsTotal() >= wantReadings {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+	if got := readingsTotal(); got < wantReadings {
+		t.Fatalf("帧旁路读数 = %d, want %d（分片并发下样本丢失）", got, wantReadings)
 	}
 
 	// Stop the bus before asserting: all shard workers must have exited so
 	// no concurrent DB writer holds a SQLite write lock during assertions.
 	mgr.dataBus.Stop()
 
-	// Per-device completeness: every edge device received every sample.
+	// Per-device completeness: every edge device received every sample exactly once
+	// （多分片重复处理会让计数 > 期望，丢样本会让计数 < 期望，两者都必须红）。
 	for i := 0; i < devices; i++ {
-		var n int64
-		if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", edgeIDs[i]).Count(&n).Error; err != nil {
-			t.Fatalf("count per device: %v", err)
-		}
-		if n != samplesPerDevice*2 {
-			t.Errorf("device %d: unified rows = %d, want %d", edgeIDs[i], n, samplesPerDevice*2)
+		if n := readingsFor(edgeIDs[i]); n != samplesPerDevice*2 {
+			t.Errorf("device %d: readings = %d, want %d", edgeIDs[i], n, samplesPerDevice*2)
 		}
 	}
 

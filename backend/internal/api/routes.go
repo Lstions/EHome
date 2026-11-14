@@ -202,6 +202,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// 未注入领域服务时注册 503 占位。
 		registerSourceGroupRoutes(v1, db, sourceGroupSvc)
 
+		// 坐标来源（2026-11-14）：日出日落规则的地理位置/时区解析。
+		registerGeoRoutes(v1)
+
 		// 数据字段解析层 (设计/数据字段解析层-方案-2026-10-21.md §8.1–§8.4):
 		// /sensor-fields、/resolve、/preview、/schema 四条只读+试算端点。
 		// 未注入 resolver 时注册 503 占位（测试/API-only 部署路径）。

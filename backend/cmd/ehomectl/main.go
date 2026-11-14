@@ -43,6 +43,10 @@ func main() {
 		// **不**接到启动流程里 —— 它必须由人在维护窗口显式执行，且默认只校验。
 		// 语义见 retire_device_data.go 的文件头。
 		runRetireDeviceDataCLI()
+	case "retire-unified-data":
+		// unified_data 整表退役（2026-11-13）：写入/读取/回填路径均已删除，
+		// 本命令只做「只读复核 + 显式 DROP」，默认不执行。
+		runRetireUnifiedDataCLI()
 	case "command-intervals":
 		runCommandIntervalsCleanupCLI()
 	default:

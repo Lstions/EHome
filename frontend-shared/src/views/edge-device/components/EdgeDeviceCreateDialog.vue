@@ -16,32 +16,59 @@
   <el-dialog
     v-model="showCreateDialog"
     :title="editingDeviceId ? '编辑边缘设备' : '创建边缘设备'"
-    width="760px"
+    :width="isMobile ? '100%' : '900px'"
+    :fullscreen="isMobile"
+    :top="isMobile ? '0' : '6vh'"
     :close-on-click-modal="false"
     :close-on-press-escape="!submitting"
     :show-close="!submitting"
     :before-close="handleCreateDialogClose"
     class="create-device-dialog"
   >
-    <!-- 步骤指示器(仅创建模式;编辑模式只改基本信息,不走向导) -->
-    <el-steps v-if="!editingDeviceId" :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
-      <el-step title="选择设备型号" />
-      <el-step title="选择节点 & 通道" />
-      <el-step title="基本信息" />
-    </el-steps>
+    <div class="edge-wizard" :class="{ 'is-mobile': isMobile }">
+      <!-- PC：左侧步骤导航（只允许回看已完成步骤；前进仍走「下一步」的 canGoNext 门禁） -->
+      <nav v-if="!isMobile && !editingDeviceId" class="edge-wizard__rail" aria-label="创建设备步骤">
+        <button
+          v-for="step in EDGE_WIZARD_STEPS"
+          :key="step.id"
+          type="button"
+          class="edge-wizard__step"
+          :class="{ 'is-active': createStep === step.id, 'is-done': createStep > step.id }"
+          :disabled="step.id > createStep"
+          :aria-current="createStep === step.id ? 'step' : undefined"
+          :data-test="`edge-wizard-step-${step.id}`"
+          @click="createStep = step.id"
+        >
+          <span class="edge-wizard__num">{{ createStep > step.id ? '✓' : step.id + 1 }}</span>
+          <span class="edge-wizard__meta">
+            <b>{{ step.title }}</b>
+            <small>{{ step.desc }}</small>
+          </span>
+        </button>
+      </nav>
+
+      <div class="edge-wizard__main">
+        <div v-if="isMobile && !editingDeviceId" class="edge-wizard__mobile-head" data-test="edge-wizard-mobile-head">
+          <div class="edge-wizard__mobile-title">
+            <span>步骤 {{ createStep + 1 }}/{{ EDGE_WIZARD_STEPS.length }}</span>
+            <b>{{ EDGE_WIZARD_STEPS[createStep].title }}</b>
+          </div>
+          <el-progress :percentage="((createStep + 1) / EDGE_WIZARD_STEPS.length) * 100" :show-text="false" :stroke-width="6" />
+        </div>
+        <div class="edge-wizard__scroll">
 
     <!-- Step 0: 选择设备型号(仅创建模式)
          （2026-10-23 逻辑设备移除：原「历史数据继承」步骤整体删除 ——
           承接历史数据改由设备页的「恢复已删除设备」「合并历史数据」两个
           显式入口完成，创建流程不再做身份选择。） -->
-    <div v-show="!editingDeviceId && createStep === 0">
-      <div class="step-tip">
-        <el-icon><InfoFilled /></el-icon>
-        <span>选择此设备使用的<strong>设备型号</strong>，设备型号决定了原始字节到物理量的解析方式</span>
-      </div>
+    <div v-show="!editingDeviceId && createStep === 0" class="edge-wizard__panel" data-test="edge-wizard-panel-model">
+      <header class="edge-wizard__panel-head">
+        <h3>选择设备型号</h3>
+        <p>设备型号决定原始字节到物理量的解析方式；可先套用配置模板自动带出型号与推荐解析器。</p>
+      </header>
 
       <!-- 型号选择步（模板快捷选择 + 解析器卡片）在 components/EdgeDeviceCreateModelStep.vue：
-           它是向导里唯一不碰表单状态的一步；步骤外壳（v-show + .step-tip）留在本对话框，
+           它是向导里唯一不碰表单状态的一步；步骤外壳（v-show + 面板头）留在本对话框，
            因为三步共用同一套骨架样式。 -->
       <EdgeDeviceCreateModelStep
         v-model:selected-template-id="selectedTemplateId"
@@ -55,12 +82,12 @@
     </div>
     
     <!-- Step 1: 选择/创建通道(仅创建模式) -->
-    <div v-show="!editingDeviceId && createStep === 1">
+    <div v-show="!editingDeviceId && createStep === 1" class="edge-wizard__panel" data-test="edge-wizard-panel-channel">
+      <header class="edge-wizard__panel-head">
+        <h3>节点与通道</h3>
+        <p>选择数据从哪个节点、哪条通道进入；也可以为这台设备新建通道。</p>
+      </header>
       <el-form :model="deviceForm" :rules="deviceRules">
-      <div class="step-tip">
-        <el-icon><InfoFilled /></el-icon>
-        <span>选择数据传输的<strong>通道</strong>，或为此设备创建新通道</span>
-      </div>
       
       <!-- 已选解析器显示 -->
       <div class="selected-parser-badge" v-if="selectedParser">
@@ -70,7 +97,7 @@
       
       <!-- 节点选择（Step 2） -->
       <el-form-item label="所属节点" prop="node_id" style="margin-bottom: 16px;">
-        <el-select v-model="deviceForm.node_id" placeholder="选择节点" style="width: 100%;" @change="handleNodeChange">
+        <el-select v-model="deviceForm.node_id" placeholder="选择节点" style="width: 100%;" data-test="create-node" @change="handleNodeChange">
           <el-option 
             v-for="c in onlineCollectors" 
             :key="c.id" 
@@ -113,14 +140,14 @@
         <el-tab-pane label="创建新通道" name="create">
           <el-form :ref="setChannelFormRef" :model="newChannel" label-position="top" style="margin-top: 12px;">
             <el-row :gutter="16">
-              <el-col :span="12">
+              <el-col :xs="24" :sm="12">
                 <el-form-item label="硬件类型" prop="hardware_type">
                   <el-select v-model="newChannel.hardware_type" style="width: 100%;" @change="onNewChannelBusTypeChange">
                     <el-option v-for="bus in selectedParserBusTypes" :key="bus" :label="getHardwareLabel(bus)" :value="bus" />
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :xs="24" :sm="12">
                 <el-form-item label="硬件ID" prop="hardware_id">
                   <!-- D6：选项来自**设备上报的能力**（nodes.capabilities.buses[type] 的 resource.id，
                        0 基，与设备一致）；未上报时不再列出硬编码的虚假资源。 -->
@@ -160,15 +187,15 @@
     </div>
     
     <!-- Step 2: 基本信息(创建模式 createStep===2;编辑模式直接显示) -->
-    <div v-show="editingDeviceId || createStep === 2">
-      <div class="step-tip">
-        <el-icon><InfoFilled /></el-icon>
-        <span>{{ editingDeviceId ? '修改设备基本信息与绑定位置（换到别的节点/通道后，历史数据仍然连续可查）' : '填写设备基本信息并确认配置' }}</span>
-      </div>
+    <div v-show="editingDeviceId || createStep === 2" class="edge-wizard__panel" data-test="edge-wizard-panel-basic">
+      <header class="edge-wizard__panel-head">
+        <h3>{{ editingDeviceId ? '设备信息' : '基本信息与确认' }}</h3>
+        <p>{{ editingDeviceId ? '修改设备基本信息与绑定位置；换节点/通道后历史数据仍然连续。' : '填写设备名称，确认解析器、通道与轮询间隔后创建。' }}</p>
+      </header>
 
       <el-form :ref="setDeviceFormRef" :model="deviceForm" :rules="deviceRules" label-position="top">
         <el-form-item label="边缘设备名称" prop="name">
-          <el-input v-model="deviceForm.name" placeholder="请输入边缘设备名称" />
+          <el-input v-model="deviceForm.name" placeholder="请输入边缘设备名称" data-test="edge-device-name" />
         </el-form-item>
 
         <!--
@@ -278,13 +305,33 @@
       </div>
     </div>
 
+        </div>
+      </div>
+    </div>
+
     <template #footer>
       <template v-if="!editingDeviceId">
-        <el-button v-if="createStep > 0" @click="createStep--">上一步</el-button>
-        <el-button v-if="createStep < 2" type="primary" :disabled="!canGoNext" @click="createStep++">
+        <el-button
+          v-if="createStep > 0"
+          :style="isMobile ? { minHeight: '44px' } : undefined"
+          @click="createStep--"
+        >上一步</el-button>
+        <el-button
+          v-if="createStep < 2"
+          type="primary"
+          :disabled="!canGoNext"
+          :style="isMobile ? { minHeight: '44px' } : undefined"
+          @click="createStep++"
+        >
           下一步
         </el-button>
-        <el-button v-if="createStep === 2" type="primary" :loading="submitting" @click="handleCreate">
+        <el-button
+          v-if="createStep === 2"
+          type="primary"
+          :loading="submitting"
+          :style="isMobile ? { minHeight: '44px' } : undefined"
+          @click="handleCreate"
+        >
           创建边缘设备
         </el-button>
       </template>
@@ -297,8 +344,9 @@
 
 <script setup lang="ts">
 import type { PropType } from 'vue'
-import { Check, InfoFilled } from '@element-plus/icons-vue'
+import { Check } from '@element-plus/icons-vue'
 import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
+import { useResponsive } from '@/composables/useResponsive'
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import type { EdgeDeviceCreateDialogCtl } from '../composables/useEdgeDeviceCreate'
 import EdgeDeviceCreateModelStep from './EdgeDeviceCreateModelStep.vue'
@@ -307,6 +355,16 @@ const props = defineProps({
   /** 创建 / 编辑向导的控制器：页面 setup 的同一批 ref + 提交事务，见 useEdgeDeviceCreate.ts。 */
   ctl: { type: Object as PropType<EdgeDeviceCreateDialogCtl>, required: true },
 })
+
+/** 与规则创建向导同断点（<768px）：全屏 + 顶部步骤条 + 单列。 */
+const { isMobile } = useResponsive()
+
+// 步骤元数据：PC 左侧栏与移动端顶部条共用（id 与 createStep 同域：0/1/2）。
+const EDGE_WIZARD_STEPS = [
+  { id: 0, title: '设备型号', desc: '配置模板或解析器' },
+  { id: 1, title: '节点与通道', desc: '数据入口与总线参数' },
+  { id: 2, title: '基本信息', desc: '名称、轮询间隔与确认' },
+] as const
 
 // 解构一次：ctl 是页面 setup 里创建的稳定对象，字段都是同一批 ref；
 // 模板里由编译器逐处 unref / 写回 .value，写法与搬移前完全一致。
@@ -336,25 +394,6 @@ const {
 /* 对话框 */
 .create-device-dialog :deep(.el-dialog__body) {
   padding-top: 10px;
-}
-
-/* P0-3: 步骤指示器标题不折行——"选择节点 & 通道"含空格和 & 在窄 dialog
-   下会 wrap 成两行,破坏对齐。强制单行。 */
-.create-device-dialog :deep(.el-step__title) {
-  white-space: nowrap;
-}
-
-/* 向导相关样式 */
-.step-tip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background: var(--el-color-success-light-9);
-  border-radius: 6px;
-  color: var(--el-color-success);
-  font-size: 14px;
-  margin-bottom: 20px;
 }
 
 .channel-selected-badge {
@@ -475,5 +514,106 @@ const {
   align-items: center;
   gap: 6px;
   color: var(--el-text-color-primary);
+}
+
+/* ============================================================================
+   创建设备向导（2026-11-14 与规则向导统一）
+   —— 对话框 teleport 到 body，用 :global 挂壳样式；PC 左侧栏 / 移动端全屏+顶部步骤条。
+   ========================================================================== */
+:global(.create-device-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  margin-bottom: 0;
+}
+:global(.create-device-dialog .el-dialog__body) {
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+:global(.create-device-dialog.is-fullscreen) {
+  /* 解除 theme.css 的全局 .el-dialog { max-width: 92vw } 限制（否则全屏少 31px）。 */
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  height: 100vh;
+  max-height: 100vh;
+}
+
+.edge-wizard { display: flex; height: 100%; min-height: 520px; }
+.edge-wizard__rail {
+  width: 220px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 12px;
+  border-right: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-blank);
+}
+.edge-wizard__step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--el-text-color-primary);
+  transition: background-color .15s ease;
+}
+.edge-wizard__step:hover:not(:disabled) { background: var(--el-fill-color-light); }
+.edge-wizard__step:disabled { cursor: not-allowed; opacity: .55; }
+.edge-wizard__step.is-active { background: var(--el-color-primary-light-9); }
+.edge-wizard__step.is-active .edge-wizard__num {
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  color: var(--text-on-fill);
+}
+.edge-wizard__step.is-done .edge-wizard__num {
+  border-color: var(--el-color-success);
+  color: var(--el-color-success);
+}
+.edge-wizard__num {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--el-border-color);
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.edge-wizard__meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.edge-wizard__meta b { font-size: 14px; }
+.edge-wizard__meta small { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.4; }
+.edge-wizard__main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.edge-wizard__scroll { flex: 1; overflow-y: auto; padding: 20px 24px; max-height: 62vh; }
+.edge-wizard__panel-head { margin-bottom: 14px; }
+.edge-wizard__panel-head h3 { margin: 0 0 4px; font-size: 16px; }
+.edge-wizard__panel-head p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--el-text-color-secondary); }
+.edge-wizard__mobile-head { padding: 14px 16px 2px; }
+.edge-wizard__mobile-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.edge-wizard__mobile-title b { font-size: 15px; color: var(--el-text-color-primary); }
+
+@media (max-width: 768px) {
+  .edge-wizard { min-height: 100%; }
+  .edge-wizard__scroll { padding: 8px 16px 24px; max-height: none; }
+  .edge-wizard__panel-head { margin-bottom: 10px; }
+  .channel-list { max-height: none; }
 }
 </style>

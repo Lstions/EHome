@@ -206,40 +206,49 @@
       </div>
       <div class="hint-block">范围 -720 ~ 720 分钟；负值 = 日出/日落之前，正值 = 之后，0 = 正点</div>
     </el-form-item>
-    <!-- 坐标/时区继承状态（用户裁决 O-3: 节点级权威 + 规则级可空覆盖）。
-         为什么必须在界面上说清"留空=继承"以及"节点没配会被后端拒绝保存"：
-         后端按 O-7 fail-closed，用户在节点页配坐标前保存日出规则会拿到 400 ——
-         把这层因果提前说出来，用户才不会以为页面坏了。 -->
-    <el-form-item label="坐标与时区">
+    <!-- 坐标来源（2026-11-14 用户裁决）：只有「外网 IP 自动定位」与「手动选择设备城市」
+         两种；纬度/经度/时区由定位结果回填，时区**没有输入框**（随位置自动填充）。 -->
+    <el-form-item label="位置来源" required>
       <div class="sun-location" data-test="sun-location">
-        <div class="sun-location__state" :data-state="sunLocationState(form)" data-test="sun-location-state">
-          {{ sunLocationText(form) }}
+        <div class="sun-location__source" data-test="field-location-source">
+          <el-radio-group v-model="form.location_source" @change="onLocationSourceChange">
+            <el-radio-button value="ip">自动定位（外网 IP）</el-radio-button>
+            <el-radio-button value="city">手动选择城市</el-radio-button>
+          </el-radio-group>
         </div>
-        <div class="sun-location__fields">
-          <el-input :model-value="sunLatitudeText" placeholder="纬度，如 31.23" data-test="field-latitude" aria-label="规则级纬度（留空 = 继承节点）" @update:model-value="onLatitudeUpdate" />
-          <el-input :model-value="sunLongitudeText" placeholder="经度，如 121.47" data-test="field-longitude" aria-label="规则级经度（留空 = 继承节点）" @update:model-value="onLongitudeUpdate" />
-          <!-- 时区：文本 → 下拉。手输 "Asia/Shangai"（少一个 h）后端按 O-7 fail-closed
-               拒绝保存，运行期解析失败则规则不触发 —— 而 IANA 全表是**浏览器内置**的
-               （Intl.supportedValuesOf('timeZone')），没有任何理由让人背拼写。
-               首项显式给出「继承节点（留空）」：空值是一个有语义的选项，不是"没选"。 -->
-          <el-select
-            v-model="form.timezone"
-            filterable
-            clearable
-            :allow-create="timezoneAllowCreate"
-            placeholder="选择时区（留空 = 继承节点）"
-            aria-label="规则级 IANA 时区（留空 = 继承节点）"
-            data-test="field-timezone"
-            @change="onTimezoneChange"
-          >
-            <el-option label="继承节点（留空）" value="" />
-            <el-option v-for="tz in timezoneOptions" :key="tz" :label="tz" :value="tz" />
-          </el-select>
+        <div class="sun-location__picker">
+          <template v-if="form.location_source === 'ip'">
+            <el-button size="small" :loading="ipLoading" data-test="locate-by-ip" @click="locateByIP">获取当前位置</el-button>
+            <span class="hint" data-test="ip-status">{{ ipStatus }}</span>
+          </template>
+          <template v-else-if="form.location_source === 'city'">
+            <el-select
+              v-model="cityName"
+              filterable
+              remote
+              clearable
+              :remote-method="onCitySearch"
+              :loading="cityLoading"
+              placeholder="搜索城市（中文或拼音）"
+              data-test="field-city"
+              @update:model-value="onCityChange"
+            >
+              <el-option
+                v-for="c in cityOptions"
+                :key="c.country_code + '-' + c.name + '-' + c.latitude"
+                :label="c.name + '（' + c.country + '）'"
+                :value="c.name"
+              />
+            </el-select>
+          </template>
         </div>
-        <!-- 与改造前同一条因果：留空 = 继承节点；节点也没配时后端会拒绝保存。
-             不让用户以为"留空 = 一个安全的默认值"。 -->
-        <div class="hint-block" data-test="timezone-hint">
-          留空 = 继承节点时区；节点也没有配置时，后端会拒绝保存日出/日落规则（fail-closed）。
+        <div v-if="hasLocation" class="sun-location__meta" data-test="location-summary">
+          <span class="sun-location__label">{{ form.location_label || '已选择位置' }}</span>
+          <span class="mono">{{ form.latitude }}, {{ form.longitude }}</span>
+          <el-tag size="small" type="info">{{ form.timezone }}</el-tag>
+        </div>
+        <div class="hint-block" data-test="sun-location-hint">
+          坐标与时区由位置自动填充（时区不可手动设置）。
         </div>
       </div>
     </el-form-item>
@@ -259,15 +268,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import SensorFieldPicker from '@/components/sensor/SensorFieldPicker.vue'
+import { geoApi, type GeoCity } from '@/api/geo'
 import type { SensorField } from '@/api/sensorField'
 import type { EdgeDevice } from '@/api/edgeDevice'
 import type { SourceGroup } from '@/api/sourceGroup'
 import type { AutomationTriggerType, SunEventKind } from '@/api/automation'
 import {
-  SUN_KIND_OPTIONS, SUN_OFFSET_MIN, SUN_OFFSET_MAX,
-  sunOffsetText, sunLocationState, sunLocationText,
+  SUN_KIND_OPTIONS, SUN_OFFSET_MIN, SUN_OFFSET_MAX, sunOffsetText,
 } from '../sunEvent'
 import { comparators } from '../automationFormat'
 import type { RuleFormModel } from '../composables/useRuleForm'
@@ -297,8 +306,6 @@ const props = defineProps<{
   windowEndFixNote: string
   isOvernightWindow: boolean
   isSunTrigger: boolean
-  sunLatitudeText: string
-  sunLongitudeText: string
   conditionRows: ConditionRow[]
   conditionsRawMode: boolean
   conditionsRawInvalid: boolean
@@ -314,9 +321,6 @@ const emit = defineEmits<{
   (e: 'sensor-field-change', field: SensorField | null): void
   (e: 'source-kind-change', kind: 'edge_device' | 'source_group'): void
   (e: 'source-group-change'): void
-  (e: 'update:sunLatitudeText', value: string): void
-  (e: 'update:sunLongitudeText', value: string): void
-  (e: 'timezone-change', value: unknown): void
   (e: 'preview'): void
   (e: 'add-condition'): void
   (e: 'remove-condition', uid: number): void
@@ -341,17 +345,6 @@ function onSourceKindChange(kind: 'edge_device' | 'source_group') {
 function onSourceGroupChange() {
   emit('source-group-change')
 }
-// 经纬度文本层在页面（见 useRuleForm 的 sunLatitudeText 注释：清空必须落成空串，
-// 而不是 number 字段里的 ""）。这里只转发文本。
-function onLatitudeUpdate(value: string | number) {
-  emit('update:sunLatitudeText', typeof value === 'string' ? value : String(value))
-}
-function onLongitudeUpdate(value: string | number) {
-  emit('update:sunLongitudeText', typeof value === 'string' ? value : String(value))
-}
-function onTimezoneChange(value: unknown) {
-  emit('timezone-change', value)
-}
 function onPreview() {
   emit('preview')
 }
@@ -371,45 +364,101 @@ function groupSummary(g: SourceGroup): string {
   return `复合组 · ${COMBINE_LABELS[g.combine || ''] ?? g.combine ?? '—'} · 最少 ${n} 个成员 · 缺员 ${degrade}`
 }
 
-// ── 时区：浏览器内置的 IANA 全表（文档 §4.5）──
+// ── 坐标来源：外网 IP 自动定位 / 手动选择设备城市（2026-11-14）──
+//
+// 时区**不在这里选**：它随 IP/城市结果一起回来，直接写进 form.timezone。
+// 组件持有的是"取数过程"的临时状态（loading / 搜索候选 / 提示），位置结果本身
+// 仍在页面持有的 form 上 —— 与字段组的既有边界一致。
 
-/**
- * `Intl.supportedValuesOf('timeZone')` 是现代浏览器的内置 IANA 全表。
- *
- * 本仓 tsconfig 的 lib 是 ES2022，可能还没有该方法的类型声明，故按"可选函数"取；
- * 取不到（老浏览器 / 被策略拦截）时退化到最小候选 + allow-create，功能不消失。
- */
-const INTL_SUPPORTED_VALUES = Intl as unknown as { supportedValuesOf?: (key: string) => string[] }
+const ipLoading = ref(false)
+const ipStatus = ref('点击获取部署机出口位置')
+const cityLoading = ref(false)
+const cityName = ref('')
+const cityOptions = ref<GeoCity[]>([])
+/** 只用于丢弃过期响应：用户快速输入时，先发的请求可能后到。 */
+let citySearchSeq = 0
+let citySearchTimer: ReturnType<typeof setTimeout> | undefined
 
-/**
- * 降级候选：**只**在没有全表时使用。
- *
- * 故意只给最小集合：有全表时这条分支不生效，避免前端另存一份完整时区词表与
- * 浏览器/后端各说各话（与"不要复用 sensorUnitMap"是同一条理由）。
- */
-const TIMEZONE_FALLBACK = ['Asia/Shanghai', 'UTC', 'America/New_York', 'Europe/London']
+/** 当前是否已有完整位置（纬度/经度/时区都在）。 */
+const hasLocation = computed(() => (
+  typeof props.form.latitude === 'number' && Number.isFinite(props.form.latitude)
+  && typeof props.form.longitude === 'number' && Number.isFinite(props.form.longitude)
+  && typeof props.form.timezone === 'string' && props.form.timezone.trim() !== ''
+))
 
-/** 浏览器给的 IANA 全表；空数组 = 拿不到（此时下拉必须保留手输）。 */
-const timezoneVocabulary = (() => {
+function locationLabel(city: string, country?: string): string {
+  return city && country ? `${city}（${country}）` : (city || '已定位')
+}
+
+/** 把定位结果写进表单；时区由来源给出，不接受手填。 */
+function applyLocation(latitude: number, longitude: number, timezone: string, label: string) {
+  props.form.latitude = Number(latitude.toFixed(4))
+  props.form.longitude = Number(longitude.toFixed(4))
+  props.form.timezone = timezone
+  props.form.location_label = label
+}
+
+/** 切换来源必须清掉旧位置：否则会出现"上海坐标 + 北京标签"的组合。 */
+function onLocationSourceChange(source: string | number | boolean | undefined) {
+  props.form.latitude = undefined
+  props.form.longitude = undefined
+  props.form.timezone = ''
+  props.form.location_label = ''
+  cityName.value = ''
+  ipStatus.value = '点击获取部署机出口位置'
+  if (source === 'city') void loadCityOptions('')
+}
+
+async function loadCityOptions(query: string) {
+  const seq = ++citySearchSeq
+  cityLoading.value = true
   try {
-    const list = INTL_SUPPORTED_VALUES.supportedValuesOf?.('timeZone')
-    if (Array.isArray(list)) return list.filter(item => typeof item === 'string' && item.length > 0)
+    const items = await geoApi.searchCities(query, 20)
+    if (seq !== citySearchSeq) return // 过期响应：用更新的那次
+    cityOptions.value = items
   } catch {
-    // 方法存在但抛错（策略/实现差异）：与"没有该方法"同样处理，只降级、不阻塞表单
+    if (seq === citySearchSeq) cityOptions.value = []
+  } finally {
+    if (seq === citySearchSeq) cityLoading.value = false
   }
-  return []
-})()
+}
 
-/** 没有全表 ⇒ 允许手输（否则用户只能从 4 条候选里选，比改造前还差）。 */
-const timezoneAllowCreate = timezoneVocabulary.length === 0
+/** 远端搜索带 250ms 防抖：输入框每敲一个字都打后端既浪费也不必要。 */
+function onCitySearch(query: string) {
+  if (citySearchTimer) clearTimeout(citySearchTimer)
+  citySearchTimer = setTimeout(() => { void loadCityOptions(query) }, 250)
+}
 
-const timezoneOptions = computed<string[]>(() => {
-  const base = timezoneVocabulary.length > 0 ? timezoneVocabulary : TIMEZONE_FALLBACK
-  const current = (props.form.timezone ?? '').trim()
-  // 编辑存量规则：当前值可能不在浏览器的 IANA 表里（历史值 / 浏览器版本差异）。
-  // 不补一条，el-select 就显示空白，用户看不出这条规则绑的是哪个时区。
-  return current && !base.includes(current) ? [current, ...base] : base
-})
+function onCityChange(name: string | number | boolean | undefined) {
+  const picked = cityOptions.value.find(c => c.name === String(name ?? ''))
+  if (!picked) return
+  applyLocation(picked.latitude, picked.longitude, picked.timezone, locationLabel(picked.name, picked.country))
+}
+
+async function locateByIP() {
+  ipLoading.value = true
+  ipStatus.value = '正在定位…'
+  try {
+    const loc = await geoApi.resolveIP()
+    applyLocation(loc.latitude, loc.longitude, loc.timezone, locationLabel(loc.city ?? '', loc.country))
+    props.form.location_source = 'ip'
+    ipStatus.value = `已定位：${props.form.location_label}`
+  } catch (e) {
+    ipStatus.value = '自动定位不可用，请改用手动选择城市'
+    // 保留底层原因便于排查（不弹窗：定位失败是预期分支，不是页面错误）。
+    console.warn('[automation] IP 定位失败:', e)
+  } finally {
+    ipLoading.value = false
+  }
+}
+
+// 编辑规则时来源可能是 city：立刻准备默认候选（人口最多的前 20 个），
+// 用户不用先敲字才能看到选项。
+watch(() => props.form.location_source, (source) => {
+  if (source === 'city' && cityOptions.value.length === 0) void loadCityOptions('')
+}, { immediate: true })
+
+onBeforeUnmount(() => { if (citySearchTimer) clearTimeout(citySearchTimer) })
 </script>
 
 <style scoped>
@@ -441,25 +490,16 @@ const timezoneOptions = computed<string[]>(() => {
 .sun-offset-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* 提示行与输入框同排时 margin-left:8px（.hint 既有口径），此处不需要额外偏移 */
 .sun-offset-row .hint { margin-left: 0; }
-.sun-location { width: 100%; }
-.sun-location__state {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 6px;
-}
-/* 部分填写是**错误状态**（后端必拒），用 warning 色提前告警；仅靠颜色不够，
-   文案本身已说明"必须同时填写"（见 sunLocationText）。 */
-.sun-location__state[data-state="partial"] { color: var(--el-color-warning); font-weight: 600; }
-.sun-location__fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-/* 时区下拉在网格单元里必须撑满（EP 的 .el-select 是 inline-flex，默认按内容宽收缩），
-   否则它与左边两个经纬度输入框不对齐。同 .action-meta dd :deep(.el-select) 的既有口径。 */
-.sun-location__fields :deep(.el-select) { width: 100%; min-width: 0; }
+.sun-location { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.sun-location__picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sun-location__picker :deep(.el-select) { width: 320px; max-width: 100%; }
+.sun-location__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.sun-location__label { font-weight: 600; }
 
 /* ============================================================================
    窄屏：768px 主断点（与 theme.css / useResponsive 同源）
    ========================================================================== */
 @media (max-width: 768px) {
-  .sun-location__fields { grid-template-columns: 1fr; }
+  .sun-location__picker :deep(.el-select) { width: 100%; }
 }
 </style>

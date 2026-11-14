@@ -290,4 +290,14 @@ void loadCommands()
   gap: 12px;
   justify-content: space-between;
 }
+
+/* 2026-11-14 移动端：行内「名称 200px + 描述 + 150px 数字框 + 开关」在 390px 下
+   会把数字框与开关裁掉（overflow: hidden）。窄屏改为两行：信息一行、控件一行。 */
+@media (max-width: 768px) {
+  .cmd-item { flex-wrap: wrap; overflow: visible; }
+  .cmd-info { width: auto; flex: 1 1 100%; }
+  .cmd-desc { flex: 1 1 100%; white-space: normal; overflow: visible; text-overflow: clip; }
+  .cmd-controls { width: 100%; justify-content: flex-end; }
+  .cmd-controls :deep(.el-input-number) { width: 120px; flex: none; }
+}
 </style>

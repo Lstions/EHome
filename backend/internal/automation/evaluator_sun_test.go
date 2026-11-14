@@ -30,9 +30,13 @@ type sunFixture struct {
 	tz        *time.Location
 	eventDate string
 	eventAt   time.Time
+	lat, lon  float64
 }
 
-// buildSunFixture 造夹具: 节点带权威坐标与时区, 一条 sun_event 规则挂在其边缘设备上。
+// buildSunFixture 造夹具: 一条带**规则级**坐标/时区的 sun_event 规则挂在边缘设备上。
+//
+// 2026-11-13 起坐标只来自规则行（节点位置已废除）。节点故意**不配**坐标/时区，
+// 这样任何"又偷偷去读节点"的回归都会让本文件的全部用例失败。
 func buildSunFixture(t *testing.T, triggerKind string, offsetMin int) *sunFixture {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
@@ -42,8 +46,7 @@ func buildSunFixture(t *testing.T, triggerKind string, offsetMin int) *sunFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := models.Node{NodeID: "node-sun-1", Name: "sun-node", Status: "online",
-		Latitude: &lat, Longitude: &lon, Timezone: &tzName}
+	node := models.Node{NodeID: "node-sun-1", Name: "sun-node", Status: "online"}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -69,12 +72,14 @@ func buildSunFixture(t *testing.T, triggerKind string, offsetMin int) *sunFixtur
 		ActionType:          models.AutomationActionNotification,
 		ActionLevel:         "info",
 		CooldownSec:         0,
+		// 规则级坐标/时区（唯一来源）
+		Latitude: &lat, Longitude: &lon, Timezone: &tzName,
 	}
 	if err := db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
 	}
 	return &sunFixture{db: db, node: node, edge: edge, rule: rule, tz: tz,
-		eventDate: date.Format("2006-01-02"), eventAt: eventAt}
+		eventDate: date.Format("2006-01-02"), eventAt: eventAt, lat: lat, lon: lon}
 }
 
 // ── A-1: 日出事件只在**到达后**触发 (前后各 1 秒) ─────────────────────────
@@ -114,6 +119,15 @@ func TestA1SunEventFiresOnlyAfterReached(t *testing.T) {
 	got := rec.events[0].At
 	if got.Sub(fx.eventAt) != time.Second {
 		t.Fatalf("触发时刻 %v 与事件 %v 之差应为 1s", got, fx.eventAt)
+	}
+	// 2026-11-13：TriggerEvent 必须带**事件时刻**（fireAt），供 planner 写入
+	// automation_events.event_at —— UI 的「事件时刻」列读的就是它。
+	if rec.events[0].EventAt == nil {
+		t.Fatal("sun_event 的 TriggerEvent 必须带 EventAt（事件时刻），got nil")
+	}
+	if !rec.events[0].EventAt.Equal(fx.eventAt) {
+		t.Fatalf("EventAt = %v, want %v（必须是日出时刻，不是 tick 的 now）",
+			rec.events[0].EventAt, fx.eventAt)
 	}
 }
 
@@ -179,7 +193,7 @@ func TestA3RestartFirstTickDoesNotBackfire(t *testing.T) {
 	// 但**次日**的日出必须能正常触发 —— 保守不等于永久失效。
 	// (次日事件由同一规则在下一个本地日重新求值。)
 	nextDay := fx.eventAt.Add(24 * time.Hour)
-	nextAt, status, err := sun.SunEvent(*fx.node.Latitude, *fx.node.Longitude, fx.tz, nextDay, sun.Sunrise)
+	nextAt, status, err := sun.SunEvent(fx.lat, fx.lon, fx.tz, nextDay, sun.Sunrise)
 	if err != nil || status != sun.StatusOK {
 		t.Fatalf("次日事件求解失败: %s %v", status, err)
 	}
@@ -211,8 +225,7 @@ func TestA14PolarDayNightSuppressedWithAudit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			node := models.Node{NodeID: "node-polar", Name: "polar", Status: "online",
-				Latitude: &lat, Longitude: &lon, Timezone: &tzName}
+			node := models.Node{NodeID: "node-polar", Name: "polar", Status: "online"}
 			if err := db.Create(&node).Error; err != nil {
 				t.Fatal(err)
 			}
@@ -231,6 +244,7 @@ func TestA14PolarDayNightSuppressedWithAudit(t *testing.T) {
 				TriggerSunKind:      c.wantKind,
 				ActionType:          models.AutomationActionNotification,
 				ActionLevel:         "info",
+				Latitude:            &lat, Longitude: &lon, Timezone: &tzName,
 			}
 			if err := db.Create(&rule).Error; err != nil {
 				t.Fatal(err)
@@ -344,7 +358,7 @@ func TestA17WindowStatesClearedOnContentChange(t *testing.T) {
 	}
 }
 
-// ── A-18: 坐标变更使缓存失效 (调用计数断言) ─────────────────────────────
+// ── A-18: **规则坐标**变更使缓存失效 (调用计数断言) ───────────────────────
 //
 // 反向验证: 缓存键去掉坐标 → 计数不增 → 变红。
 func TestA18CoordinateChangeInvalidatesCache(t *testing.T) {
@@ -352,8 +366,7 @@ func TestA18CoordinateChangeInvalidatesCache(t *testing.T) {
 	tzName := "Asia/Shanghai"
 	lat, lon := 39.9042, 116.4074
 	tz, _ := time.LoadLocation(tzName)
-	node := models.Node{NodeID: "node-cache", Name: "n", Status: "online",
-		Latitude: &lat, Longitude: &lon, Timezone: &tzName}
+	node := models.Node{NodeID: "node-cache", Name: "n", Status: "online"}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -371,6 +384,7 @@ func TestA18CoordinateChangeInvalidatesCache(t *testing.T) {
 		TriggerEdgeDeviceID: edge.ID,
 		TriggerSunKind:      models.AutomationSunKindSunrise,
 		ActionType:          models.AutomationActionNotification, ActionLevel: "info",
+		Latitude:            &lat, Longitude: &lon, Timezone: &tzName,
 	}
 	if err := db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -393,28 +407,27 @@ func TestA18CoordinateChangeInvalidatesCache(t *testing.T) {
 		t.Fatalf("同坐标同日应命中缓存, 计算次数 %d → %d", calls1, got)
 	}
 
-	// 改坐标: 必须重算。
+	// 改**规则**坐标: 必须重算（节点已不参与解析，改节点不会触发重算）。
 	newLat := 31.23
-	if err := db.Model(&models.Node{}).Where("id = ?", node.ID).
+	if err := db.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
 		Update("latitude", newLat).Error; err != nil {
 		t.Fatal(err)
 	}
 	ev.LoadRules()
 	ev.evalTimeWindows(at.Add(2 * time.Minute))
 	if got := ev.sunCache.ComputeCalls(); got <= calls1 {
-		t.Fatalf("节点坐标变更后必须重算 (A-18), 计算次数仍为 %d", got)
+		t.Fatalf("规则坐标变更后必须重算 (A-18), 计算次数仍为 %d", got)
 	}
 }
 
-// ── 归日口径: 必须按**节点时区**归日, 不是后端进程时区 ────────────────────
-func TestSunEventUsesNodeTimezoneForDayBoundary(t *testing.T) {
+// ── 归日口径: 必须按**规则时区**归日, 不是后端进程时区 ────────────────────
+func TestSunEventUsesRuleTimezoneForDayBoundary(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	// 乌鲁木齐几何位置配 Asia/Shanghai: 当地钟面日落约 21:56, 与后端 UTC 差 8 小时。
 	tzName := "Asia/Shanghai"
 	lat, lon := 43.83, 87.62
 	tz, _ := time.LoadLocation(tzName)
-	node := models.Node{NodeID: "node-tz", Name: "n", Status: "online",
-		Latitude: &lat, Longitude: &lon, Timezone: &tzName}
+	node := models.Node{NodeID: "node-tz", Name: "n", Status: "online"}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +445,7 @@ func TestSunEventUsesNodeTimezoneForDayBoundary(t *testing.T) {
 		TriggerEdgeDeviceID: edge.ID,
 		TriggerSunKind:      models.AutomationSunKindSunset,
 		ActionType:          models.AutomationActionNotification, ActionLevel: "info",
+		Latitude:            &lat, Longitude: &lon, Timezone: &tzName,
 	}
 	if err := db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -448,18 +462,21 @@ func TestSunEventUsesNodeTimezoneForDayBoundary(t *testing.T) {
 	ev.evalTimeWindows(dayStart) // 首 tick
 	ev.evalTimeWindows(eventAt.Add(1 * time.Second))
 	if rec.count() != 1 {
-		t.Fatalf("按节点时区求值的日落应触发 1 次, got %d", rec.count())
+		t.Fatalf("按规则时区求值的日落应触发 1 次, got %d", rec.count())
 	}
-	// 触发时刻必须落在节点本地日的当日 (归日口径 = 节点时区)。
+	// 触发时刻必须落在规则本地日的当日 (归日口径 = 规则时区)。
 	if ld := rec.events[0].At.In(tz).Format("2006-01-02"); ld != "2026-06-21" {
-		t.Fatalf("触发归日错误: %s (必须按节点时区归日)", ld)
+		t.Fatalf("触发归日错误: %s (必须按规则时区归日)", ld)
 	}
 }
 
 // ── 运行期缺坐标: 不触发 + 审计 (fail-closed, 绝不回落 UTC) ──────────────
+//
+// 2026-11-13 起"节点有坐标"不再能救这条规则 —— 本用例的规则行没有坐标，
+// 无论节点配什么都不会触发。
 func TestSunEventMissingLocationFailsClosedWithAudit(t *testing.T) {
 	db := testutil.OpenTestDB(t)
-	node := models.Node{NodeID: "node-nocoord", Name: "n", Status: "online"} // 无坐标无时区
+	node := models.Node{NodeID: "node-nocoord", Name: "n", Status: "online"}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -488,13 +505,13 @@ func TestSunEventMissingLocationFailsClosedWithAudit(t *testing.T) {
 	ev.evalTimeWindows(at)
 	ev.evalTimeWindows(at.Add(time.Minute))
 	if rec.count() != 0 {
-		t.Fatalf("无坐标/时区时不得触发 (fail-closed), got %d", rec.count())
+		t.Fatalf("规则无坐标/时区时不得触发 (fail-closed), got %d", rec.count())
 	}
 	var cnt int64
 	db.Model(&models.AutomationEvent{}).
 		Where("rule_id = ? AND result = ?", rule.ID, models.AutomationResultSuppressedNoSolarEvent).
 		Count(&cnt)
 	if cnt == 0 {
-		t.Fatal("无坐标/时区时必须落显式审计 (不得静默失败)")
+		t.Fatal("规则无坐标/时区时必须落显式审计 (不得静默失败)")
 	}
 }

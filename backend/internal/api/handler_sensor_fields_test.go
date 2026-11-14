@@ -10,6 +10,7 @@ import (
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
+	"ehome/backend/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -24,7 +25,8 @@ func newSensorFieldsAPI(t *testing.T, enabled bool) (*gin.Engine, *gorm.DB, *sen
 	db := setupTestDB(t)
 	// api 包的 setupTestDB 维护一份自己的迁移清单（历史原因，非 testutil.allModels）；
 	// 本域两张新表在此就地补齐，避免改共享夹具（写入范围纪律）。
-	if err := db.AutoMigrate(&models.SensorFieldObs{}, &models.SensorFieldMeta{}); err != nil {
+	if err := db.AutoMigrate(&models.SensorFieldObs{}, &models.SensorFieldMeta{},
+		&models.TelemetryFrame{}, &models.TelemetrySlot{}); err != nil {
 		t.Fatalf("migrate sensor field tables: %v", err)
 	}
 	reg := sensorfield.New(sensorfield.Config{Enabled: enabled})
@@ -168,7 +170,7 @@ func seedDeclaredAndObserved(t *testing.T, db *gorm.DB, reg *sensorfield.Registr
 	}); err != nil {
 		t.Fatalf("set aliases: %v", err)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
 	obs := []models.SensorFieldObs{
 		{DeviceID: dev.ID, SensorName: "rsoc", Unit: "%", FirstSeen: now.Add(-2 * time.Hour), LastSeen: now, Samples: 100},
 		{DeviceID: dev.ID, SensorName: "current", Unit: "A", FirstSeen: now.Add(-time.Hour), LastSeen: now, Samples: 50},
@@ -184,14 +186,25 @@ func seedDeclaredAndObserved(t *testing.T, db *gorm.DB, reg *sensorfield.Registr
 	if err := db.Create(&metas).Error; err != nil {
 		t.Fatalf("seed meta: %v", err)
 	}
+	// 2026-11-13：unified_data 退役，preview 只读帧表 —— 编码 3 个关键帧。
+	dict := telemetry.NewMemorySlots()
+	SetHistoryFrameDictionary(dict)
+	t.Cleanup(func() { SetHistoryFrameDictionary(nil) })
+	enc := telemetry.NewEncoder(telemetry.EncoderConfig{KeyFrameInterval: time.Second}, dict)
 	for i := 0; i < 3; i++ {
 		ts := now.Add(time.Duration(i) * 10 * time.Second)
-		rows := []models.UnifiedData{
-			{DeviceID: dev.ID, SensorName: "temperature_1", Value: float64(21 + i), Unit: "°C", Timestamp: ts},
-			{DeviceID: dev.ID, SensorName: "temperature_2", Value: float64(22 + i), Unit: "°C", Timestamp: ts},
+		f, err := enc.EncodeFrame(dev.ID, ts, 0, []telemetry.Reading{
+			{Name: "temperature_1", Value: float64(21 + i)},
+			{Name: "temperature_2", Value: float64(22 + i)},
+		})
+		if err != nil {
+			t.Fatalf("encode frame %d: %v", i, err)
 		}
-		if err := db.Create(&rows).Error; err != nil {
-			t.Fatalf("seed unified_data: %v", err)
+		if err := db.Create(&models.TelemetryFrame{
+			DeviceID: f.DeviceID, TS: f.TS, Seq: f.Seq,
+			FrameKind: f.FrameKind, SlotID: f.SlotID, Payload: f.Payload,
+		}).Error; err != nil {
+			t.Fatalf("seed telemetry_frame: %v", err)
 		}
 	}
 }

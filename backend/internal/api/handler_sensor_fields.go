@@ -374,14 +374,14 @@ func previewSensorField(db *gorm.DB, resolver *sensorfield.Registry) gin.Handler
 			rows = fromFrames
 			usedFrames = true
 		} else {
-			// ── 回落：unified_data（过渡期 / 帧表不可用）──
-			q := db.Model(&models.UnifiedData{}).
-				Where("device_id = ? AND timestamp >= ? AND sensor_name IN ?", req.EdgeDeviceID, since, matched).
-				Order("timestamp ASC")
-			if err := q.Limit(maxSamples + 1).Find(&rows).Error; err != nil {
-				Error(c, http.StatusInternalServerError, "failed to query unified_data")
-				return
-			}
+			// 2026-11-13：unified_data 整表退役，**不再有回落**。
+			//
+			// 原实现会去查 unified_data 作为"帧表不可用"的过渡回落；表删除后这条
+			// SQL 必然 42P01，表现为 500 —— 比"明确告知数据源不可用"差得多。
+			// 帧表是本接口唯一数据源（2026-11-08 硬切换），不可用时必须显式失败，
+			// 让调用方知道是"读不了"而不是"没有数据"。
+			Error(c, http.StatusServiceUnavailable, "history frame source unavailable (unified_data retired)")
+			return
 		}
 		truncated := false
 		if len(rows) > maxSamples {

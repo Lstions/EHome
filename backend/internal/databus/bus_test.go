@@ -3,8 +3,6 @@ package databus
 import (
 	"encoding/hex"
 	"errors"
-	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +12,6 @@ import (
 	"ehome/backend/pkg/metrics"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -25,7 +22,20 @@ func newSensorParserTestConsumer(db *gorm.DB, reassembler Reassembler, testDrive
 	for _, driver := range testDrivers {
 		registry.Register(driver)
 	}
+	// 2026-11-13：unified_data 整表退役，L1 写入收窄门禁随之删除；
+	// 本包的用例断言改为「解析成功 ⇒ sink/latestSink 被调用」。
 	return NewSensorParserConsumerWithRegistry(db, nil, reassembler, registry)
+}
+
+// captureParsed 用 latestSink 记录解析结果。
+//
+// 2026-11-13：unified_data 整表退役后，"解析成功"不能再靠数 DB 行来证明
+// （没有写入路径了）。latestSink 是同一批解析值的唯一去处之一，用它做判据
+// 既保留了断言语义，也不再依赖一张已删除的表。
+func captureParsed(consumer *SensorParserConsumer) *[]models.UnifiedData {
+	out := make([]models.UnifiedData, 0, 8)
+	consumer.SetLatestSink(func(rec models.UnifiedData) { out = append(out, rec) })
+	return &out
 }
 
 func counterValue(t *testing.T, collector prometheus.Collector) float64 {
@@ -206,17 +216,19 @@ func TestSensorParserConsumerUsesPersistedBMP280CalibrationAfterRestart(t *testi
 	// A fresh consumer has no initialization-process memory. Successful parsing
 	// therefore proves calibration survives and is reloaded from persistence.
 	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, &drivers.BMP280Driver{})
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1,
 		RawData: []byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00},
 	})
 
-	var rows []models.UnifiedData
-	if err := db.Where("device_id = ?", device.ID).Order("sensor_name").Find(&rows).Error; err != nil {
-		t.Fatal(err)
+	if len(*captured) != 2 {
+		t.Fatalf("persisted calibration produced %d sensor values, want 2", len(*captured))
 	}
-	if len(rows) != 2 {
-		t.Fatalf("persisted calibration produced %d sensor rows, want 2", len(rows))
+	for _, rec := range *captured {
+		if rec.DeviceID != device.ID {
+			t.Errorf("解析值 device_id = %d, want %d", rec.DeviceID, device.ID)
+		}
 	}
 }
 
@@ -550,134 +562,13 @@ func TestDataMetricsConsumerCountsSuccessfulAndFailedReports(t *testing.T) {
 	}
 }
 
-// TestDBPersistConsumerCountsWriteFailure 已删除（2026-11-11）。
+// TestDBPersistConsumerCountsWriteFailure / TestSensorParserConsumerCountsUnifiedDataWriteFailure
+// / TestDataConsumerDBWriteFailuresPrometheusExposition 均已于 2026-11-13 删除：
 //
-// DBPersistConsumer 整个类型随 device_data 整表退役删除（原始数据退役方案 §2.1），
-// 本用例测的是它写库失败时的指标自增 —— 被测对象不存在，用例失去意义。
-//
-// ⚠ 这条指标（ehome_data_consumer_db_write_failures_total）本身**仍然存在且仍在用**：
-// sensor_parser 写 unified_data 失败时照样自增，由下面的
-// TestSensorParserConsumerCountsUnifiedDataWriteFailure 覆盖。所以删的是"db_persist
-// 这个消费者"的用例，不是指标能力的回归。
-
-func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
-	db := newConsumerTestDB(t)
-	node := models.Node{NodeID: "node-write-fail"}
-	if err := db.Create(&node).Error; err != nil {
-		t.Fatal(err)
-	}
-	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
-	if err := db.Create(&channel).Error; err != nil {
-		t.Fatal(err)
-	}
-	device := models.EdgeDevice{Name: "write-fail-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "plain_test", Status: "active"}
-	if err := db.Create(&device).Error; err != nil {
-		t.Fatal(err)
-	}
-	db.Callback().Create().Before("gorm:create").Register("test:fail-unified-data", func(tx *gorm.DB) {
-		if tx.Statement.Table == "unified_data" {
-			tx.AddError(errors.New("forced unified_data write failure"))
-		}
-	})
-	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data")
-	before := counterValue(t, counter)
-
-	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
-		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
-	})
-
-	if got := counterValue(t, counter) - before; got != 1 {
-		t.Fatalf("unified_data write failure metric delta = %v, want 1", got)
-	}
-}
-
-// TestSensorParserConsumerCountsDeviceDataWriteFailure 已删除（2026-11-11）。
-//
-// sensor_parser 不再写 device_data（写点已删，原始数据退役方案 §2.1），
-// 因此"它写 device_data 失败时指标自增"这条用例没有可触发的路径。
-//
-// ⚠ 不要为了"保留指标覆盖面"而把它改写成"人为让某张表失败"：那些指标标签
-// (consumer="sensor_parser", table="device_data") 已经不会再产出，断言它们等于
-// 断言一个不存在的行为。真正的写入失败指标覆盖见
-// TestSensorParserConsumerCountsUnifiedDataWriteFailure。
-
-// TestDataConsumerDBWriteFailuresPrometheusExposition asserts the F6 alerting
-// prerequisite end-to-end: after a DB write failure increments the counter, the
-// promhttp exposition served by the (unauthenticated) /metrics endpoint
-// (routes.go:55) carries the series with its consumer/table labels and counter
-// TYPE declaration — the exact input PromQL rate(...[1m]) consumes.
-func TestDataConsumerDBWriteFailuresPrometheusExposition(t *testing.T) {
-	// 2026-11-11: 标签组合从 ("db_persist","device_data") 改为
-	// ("sensor_parser","unified_data") —— 前者对应的消费者与表都已退役，指标不再
-	// 产出，继续断言它会让本用例永远红。本用例**真正守的东西没变**：
-	// 「写入失败计数器在 /metrics 上有 series + TYPE 声明，且标签完整」。
-	before := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data"))
-
-	db := newConsumerTestDB(t)
-
-	// 先把 fixture 建好，**再**关库 —— 顺序不能反：关库之后任何 Create 都会报
-	// "sql: database is closed"，连 node 都建不出来（第一版就是这么红的）。
-	node := models.Node{NodeID: "exposition-node"}
-	if err := db.Create(&node).Error; err != nil {
-		t.Fatal(err)
-	}
-	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
-	if err := db.Create(&channel).Error; err != nil {
-		t.Fatal(err)
-	}
-	device := models.EdgeDevice{Name: "exposition-device", NodeID: node.NodeID, ChannelID: channel.ID,
-		Type: "plain_test", Status: "active"}
-	if err := db.Create(&device).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	// 制造一次**真实**的 unified_data 写入失败：DROP 掉那张表。
-	//
-	// ⚠ 不能用 sqlDB.Close()（第一版就是这么写的，红得很隐蔽）：consumer 的
-	// Handle 在写库**之前**要先查 edge_devices（设备定位）—— 关库会让那次查询
-	// 就失败并 return，永远走不到写 unified_data 的失败分支，指标自然不涨。
-	// 消息是 "sql: database is closed"、"metric delta = 0"，很难一眼看出是顺序问题。
-	//
-	// DROP 表的做法只破坏写路径，不影响查询路径 —— 这也更贴近生产里那种
-	// "列不存在/表不存在导致写入失败"的真实形态。
-	if err := db.Migrator().DropTable(&models.UnifiedData{}); err != nil {
-		t.Fatal(err)
-	}
-	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
-		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
-	})
-
-	if got := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data")) - before; got != 1 {
-		t.Fatalf("DB write failure metric delta = %v, want 1", got)
-	}
-
-	rec := httptest.NewRecorder()
-	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	body := rec.Body.String()
-
-	if !strings.Contains(body, `ehome_data_consumer_db_write_failures_total{consumer="sensor_parser",table="unified_data"} `) {
-		t.Fatalf("exposition missing labeled counter series; sample:\n%s", sampleMetrics(body))
-	}
-	if !strings.Contains(body, "# TYPE ehome_data_consumer_db_write_failures_total counter") {
-		t.Fatalf("exposition missing counter TYPE declaration; sample:\n%s", sampleMetrics(body))
-	}
-}
-
-// sampleMetrics returns a short excerpt of the exposition around the F6 metric
-// for readable failure output.
-func sampleMetrics(body string) string {
-	lines := strings.Split(body, "\n")
-	var out []string
-	for _, l := range lines {
-		if strings.Contains(l, "db_write_failures") {
-			out = append(out, l)
-		}
-		if len(out) >= 4 {
-			break
-		}
-	}
-	return strings.Join(out, "\n")
-}
+// 前两条的被测对象（device_data 消费者、unified_data 写入）已随整表退役消失；
+// 第三条靠"制造一次 unified_data 写失败"来驱动指标，同样失去可触发路径。
+// 指标 ehome_data_consumer_db_write_failures_total 仍保留给其它消费者（如
+// pending_write / logstream），不再由 sensor_parser 产出。
 
 func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 	db := newConsumerTestDB(t)
@@ -700,6 +591,7 @@ func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 
 	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
 	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, driver)
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 9,
 		CommandIndex:      uint64(template.ID % 256),
@@ -716,12 +608,11 @@ func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 		t.Fatal("CommandAwareDriver was not called")
 	}
 
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
-		t.Fatalf("count unified data: %v", err)
+	if len(*captured) != 1 {
+		t.Fatalf("解析值数量 = %d, want 1", len(*captured))
 	}
-	if count != 1 {
-		t.Fatalf("unified data count = %d, want 1", count)
+	if (*captured)[0].DeviceID != device.ID {
+		t.Fatalf("解析值 device_id = %d, want %d", (*captured)[0].DeviceID, device.ID)
 	}
 }
 
@@ -746,6 +637,7 @@ func TestSensorParserConsumer_CommandAwareDriverFailsClosedWithoutCommandContext
 	}
 	reassembler := &recordingReassembler{}
 	consumer := newSensorParserTestConsumer(db, reassembler, driver)
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 10,
 		RawData: []byte("ambiguous-response"),
@@ -756,12 +648,8 @@ func TestSensorParserConsumer_CommandAwareDriverFailsClosedWithoutCommandContext
 		t.Fatal("command-aware driver fell back to plain ParseData without command context")
 	default:
 	}
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
-		t.Fatalf("count unified data: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("unified data count = %d, want 0", count)
+	if len(*captured) != 0 {
+		t.Fatalf("解析值数量 = %d, want 0（缺少命令上下文必须 fail-closed）", len(*captured))
 	}
 	if !reassembler.consumedRequest(10) {
 		t.Fatal("failed command-aware sample left its reassembly buffer behind")
@@ -793,7 +681,9 @@ func TestSensorParserConsumer_CommandAwareParseErrorDoesNotFallback(t *testing.T
 		commandErr:  errors.New("ambiguous command response"),
 	}
 	reassembler := &recordingReassembler{}
-	newSensorParserTestConsumer(db, reassembler, driver).Handle(DataEvent{
+	consumer := newSensorParserTestConsumer(db, reassembler, driver)
+	captured := captureParsed(consumer)
+	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 12,
 		CommandTemplateID: uint64(template.ID), RawData: []byte("ambiguous-response"),
 	})
@@ -808,12 +698,8 @@ func TestSensorParserConsumer_CommandAwareParseErrorDoesNotFallback(t *testing.T
 		t.Fatal("command-aware parse error fell back to plain ParseData")
 	default:
 	}
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
-		t.Fatalf("count unified data: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("unified data count = %d, want 0", count)
+	if len(*captured) != 0 {
+		t.Fatalf("解析值数量 = %d, want 0（解析失败不得产生样本）", len(*captured))
 	}
 	if !reassembler.consumedRequest(12) {
 		t.Fatal("command-aware parse error left its reassembly buffer behind")
@@ -836,16 +722,13 @@ func TestSensorParserConsumer_ResolvesExplicitEdgeDeviceID(t *testing.T) {
 	}
 
 	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{})
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: 999, EdgeDeviceID: uint64(device.ID),
 		RequestID: 11, RawData: []byte("response"),
 	})
 
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
-		t.Fatalf("count unified data: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("explicit edge device id did not route data; count = %d", count)
+	if len(*captured) != 1 || (*captured)[0].DeviceID != device.ID {
+		t.Fatalf("explicit edge device id did not route data; captured=%+v", *captured)
 	}
 }

@@ -63,6 +63,11 @@ type TriggerEvent struct {
 	At         time.Time
 	WindowEdge string // time_window: enter|exit (sensor_threshold 为 "")
 
+	// EventAt 是时钟驱动事件的**事件时刻**（sun_event: 当日日出/日落 + 偏移）。
+	// nil = 非时钟事件。planner 把它写进 automation_events.event_at，供 UI 展示
+	// "这次触发对应哪一次日出/日落"。
+	EventAt *time.Time
+
 	// ── 来源证据 ──
 	SourceKind         string    // ""=存量单设备；source_group=来源组
 	SourceGroupID      uint      // 来源组 ID（SourceKind=source_group 时非 0）
@@ -655,7 +660,7 @@ func (e *Evaluator) evalTimeWindows(now time.Time) {
 //  3. 极昼/极夜**不静默**: 落一条显式审计 (suppressed_no_solar_event, O-6),
 //     每日本事件只落一条 (防刷量)。
 func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, firstSunTick bool) {
-	resolved, _, err := e.resolveRuleSun(rule)
+	resolved, err := e.resolveRuleSun(rule)
 	if err != nil {
 		// 运行期解析失败 (节点被删/坐标被清空/时区名失效): 不触发 + 审计,
 		// **绝不回落 UTC 或 0 坐标** (选型 §6.2/§6.3: 回落会让窗口静默偏移)。
@@ -739,55 +744,25 @@ func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, 
 	e.mu.Unlock()
 
 	if e.handler != nil {
-		e.handler.HandleTrigger(newTriggerEvent(rule, now, 0, "", nil))
+		ev := newTriggerEvent(rule, now, 0, "", nil)
+		// 把**事件时刻**（而非 tick 的 now）一并带出：UI 的「事件时刻」列展示的是
+		// "哪一次日出/日落"，不是"求值器哪一秒看到了它"。
+		eventAt := fireAt
+		ev.EventAt = &eventAt
+		e.handler.HandleTrigger(ev)
 	}
 }
 
 // sunMaxOffsetMin 是日出日落偏移分钟的取值范围上界 (与 handler V2 校验同源)。
 const sunMaxOffsetMin = 720
 
-// resolveRuleSun 解析规则生效的坐标与时区 (规则覆盖 → 节点权威 → 失败)。
+// resolveRuleSun 解析规则生效的坐标与时区。
 //
-// 归属解析的**唯一实现**在 models.ResolveSunLocation** (保存校验与运行期求值
-// 共用同一套顺序), 本方法只负责"把规则的触发设备/动作设备映射到节点行"。
-func (e *Evaluator) resolveRuleSun(rule models.AutomationRule) (models.SunLocation, models.SunLocationSource, error) {
-	node, err := e.nodeForRule(rule)
-	if err != nil {
-		return models.SunLocation{}, models.SunLocationSource{}, err
-	}
-	return models.ResolveRuleSunLocation(rule, node)
-}
-
-// nodeForRule 找出该规则对应的节点行 (日出日落坐标的权威载体)。
-//
-// 口径 (节点级为权威 + 规则级可空覆盖, O-3):
-//   - 优先用触发设备 (sensor_threshold 语义) 的节点;
-//   - 否则用**动作设备**的节点 —— sun_event 规则通常不配触发设备, 动作设备
-//     (例如某台 BMS) 所在节点才是它的物理安装位置;
-//   - 都取不到时返回 nil (此时只有规则级覆盖值可用; 仍缺则 fail-closed)。
-//
-// 为什么不用规则表新增 node_id 列: 方案的列清单 (§5.1.2) 未含该列, 且引入它
-// 会与"节点级为权威"的推导重复 (设备→节点已可确定)。这符合本批"不过度设计"。
-func (e *Evaluator) nodeForRule(rule models.AutomationRule) (*models.Node, error) {
-	edgeDeviceID := rule.TriggerEdgeDeviceID
-	if edgeDeviceID == 0 {
-		edgeDeviceID = rule.ActionDeviceID
-	}
-	if edgeDeviceID == 0 {
-		return nil, nil
-	}
-	var dev models.EdgeDevice
-	if err := e.db.Select("id", "node_id").First(&dev, edgeDeviceID).Error; err != nil {
-		return nil, fmt.Errorf("lookup edge device %d: %w", edgeDeviceID, err)
-	}
-	if dev.NodeID == "" {
-		return nil, nil
-	}
-	var node models.Node
-	if err := e.db.Where("node_id = ?", dev.NodeID).First(&node).Error; err != nil {
-		return nil, fmt.Errorf("lookup node %q: %w", dev.NodeID, err)
-	}
-	return &node, nil
+// 2026-11-13 用户裁决「不需要节点位置」：坐标/时区**只来自规则行**，节点表不再
+// 参与解析（那三列从来没有写入入口，"继承节点"实际不可用）。归属解析的唯一实现
+// 在 models.ResolveSunLocation，本方法只是转调，保证保存期与求值期同一套判据。
+func (e *Evaluator) resolveRuleSun(rule models.AutomationRule) (models.SunLocation, error) {
+	return models.ResolveRuleSunLocation(rule)
 }
 
 // recordSunNoEvent 落一条"本日无日出/日落事件/无法求值"的显式审计 (O-6)。
@@ -800,7 +775,7 @@ func (e *Evaluator) nodeForRule(rule models.AutomationRule) (*models.Node, error
 // 期间 1440 行/天)。与 recordSuppressed 的同窗节流同旨。
 func (e *Evaluator) recordSunNoEvent(rule models.AutomationRule, now time.Time, reason string) {
 	localDate := now.UTC().Format("2006-01-02")
-	if resolved, _, err := e.resolveRuleSun(rule); err == nil && resolved.Location != nil {
+	if resolved, err := e.resolveRuleSun(rule); err == nil && resolved.Location != nil {
 		localDate = now.In(resolved.Location).Format("2006-01-02")
 	}
 

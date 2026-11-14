@@ -3,6 +3,7 @@ package nodemgr
 import (
 	_ "ehome/backend/pkg/logger"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/telemetry"
 	"ehome/backend/pkg/logger"
 
 	"gorm.io/driver/sqlite"
@@ -111,16 +113,35 @@ type datapipeEventBusTestConsumer struct {
 	consumer *databus.SensorParserConsumer
 	proxy    *datapipeSignalingConsumer
 	posted   int64 // 已发布且 ShouldParse=true 的事件数(按序处理,processed>=posted 即完成)
+
+	// 2026-11-13：unified_data 整表退役后，"解析成功落库"不再可观测。
+	// 改用 L2 帧旁路（telemetrySink）的读数计数作为同一语义的判据。
+	mu       sync.Mutex
+	readings map[uint]int
+}
+
+// readingsFor 返回某台设备累计的解析值条数。
+func (c *datapipeEventBusTestConsumer) readingsFor(deviceID uint) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readings[deviceID]
 }
 
 func newDatapipeEventBusConsumer(db *gorm.DB, deviceActivity ...func(uint)) *datapipeEventBusTestConsumer {
 	registry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(registry)
 	consumer := databus.NewSensorParserConsumerWithRegistry(db, nil, passthroughReassembler{}, registry, deviceActivity...)
+	fc := &datapipeEventBusTestConsumer{readings: make(map[uint]int)}
+	consumer.SetTelemetrySink(func(deviceID uint, _ time.Time, _ int64, readings []telemetry.Reading, _ []byte) {
+		fc.mu.Lock()
+		fc.readings[deviceID] += len(readings)
+		fc.mu.Unlock()
+	})
 	proxy := &datapipeSignalingConsumer{inner: consumer}
 	bus := databus.NewDataEventBus()
 	bus.Register(proxy)
-	return &datapipeEventBusTestConsumer{bus: bus, consumer: consumer, proxy: proxy}
+	fc.bus, fc.consumer, fc.proxy = bus, consumer, proxy
+	return fc
 }
 
 func (c *datapipeEventBusTestConsumer) Close() { c.bus.Stop() }
@@ -165,7 +186,7 @@ func datapipePipelineDB(t *testing.T) *gorm.DB {
 	}
 	// 2026-11-11: &models.DeviceData{} 已移除（device_data 整表退役）。
 	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
-		&models.CalibrationCache{}, &models.UnifiedData{}); err != nil {
+		&models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -195,35 +216,30 @@ func datapipeCreateDevice(db *gorm.DB, name, nodeSerial string, channelID uint, 
 	return dev
 }
 
-func assertUnifiedCount(t *testing.T, db *gorm.DB, want int, ctx string) {
+// assertSinkCount / assertSinkForDevice 是 unified_data 退役后的等价判据：
+// 用 L2 帧旁路收到的解析值条数代替"写了多少行"。
+func assertSinkCount(t *testing.T, fc *datapipeEventBusTestConsumer, want int, ctx string) {
 	t.Helper()
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count unified_data: %v", ctx, err)
+	total := 0
+	fc.mu.Lock()
+	for _, n := range fc.readings {
+		total += n
 	}
-	if int(count) != want {
-		t.Errorf("[%s] unified_data count = %d, want %d", ctx, count, want)
+	fc.mu.Unlock()
+	if total != want {
+		t.Errorf("[%s] parsed readings = %d, want %d", ctx, total, want)
 	}
 }
 
-func assertUnifiedForDevice(t *testing.T, db *gorm.DB, deviceID uint, want int, ctx string) {
+func assertSinkForDevice(t *testing.T, fc *datapipeEventBusTestConsumer, deviceID uint, want int, ctx string) {
 	t.Helper()
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", deviceID).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count unified_data: %v", ctx, err)
-	}
-	if int(count) != want {
-		t.Errorf("[%s] unified_data(device=%d) = %d, want %d", ctx, deviceID, count, want)
+	if got := fc.readingsFor(deviceID); got != want {
+		t.Errorf("[%s] parsed readings(device=%d) = %d, want %d", ctx, deviceID, got, want)
 	}
 }
 
-func countUnifiedForDevice(t *testing.T, db *gorm.DB, deviceID uint, ctx string) int {
-	t.Helper()
-	var count int64
-	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", deviceID).Count(&count).Error; err != nil {
-		t.Fatalf("[%s] count unified_data: %v", ctx, err)
-	}
-	return int(count)
+func countReadingsFor(fc *datapipeEventBusTestConsumer, deviceID uint) int {
+	return fc.readingsFor(deviceID)
 }
 
 // TestDataPipeline_UnknownDevice:通道存在但无设备 → 静默跳过不落库
@@ -240,7 +256,7 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 		DeviceID: node.NodeID, ChannelID: uint64(ch.ID),
 		RequestID: 1, RawData: []byte{1, 2, 3, 4, 5, 6},
 	})
-	assertUnifiedCount(t, db, 0, "unknown device")
+	assertSinkCount(t, fc, 0, "unknown device")
 }
 
 // TestDataPipeline_EmptyRaw:空 payload(ShouldParse→false)不进入消费者处理
@@ -258,7 +274,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 		RequestID: 1, RawData: []byte{},
 	})
 	// 空数据在 bus 分发阶段即被 ShouldParse 过滤,消费者不执行
-	assertUnifiedCount(t, db, 0, "empty raw")
+	assertSinkCount(t, fc, 0, "empty raw")
 }
 
 // TestDataPipeline_EndToEnd:完整链路(未校准 BMP280 fail-closed)
@@ -280,7 +296,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 		RequestID: 1, RawData: rawData,
 	})
 	// 校准缺失 → 拒收:unified_data 与 device_data 均为 0
-	assertUnifiedForDevice(t, db, dev.ID, 0, "uncalibrated bmp280")
+	assertSinkForDevice(t, fc, dev.ID, 0, "uncalibrated bmp280")
 }
 
 // TestDataPipeline_EndToEnd_Calibrated:注入校准后同一负载应成功解析落库
@@ -308,7 +324,7 @@ func TestDataPipeline_EndToEnd_Calibrated(t *testing.T) {
 		RequestID: 1, RawData: rawData,
 	})
 	// BMP280 有 2 个解析字段;device_data 新语义无条件写 1 行
-	assertUnifiedForDevice(t, db, dev.ID, 2, "calibrated bmp280")
+	assertSinkForDevice(t, fc, dev.ID, 2, "calibrated bmp280")
 }
 
 // TestDataPipeline_FormatDecision:请求级校验语义 — 错误码 / 空数据事件
@@ -327,14 +343,14 @@ func TestDataPipeline_FormatDecision(t *testing.T) {
 		DeviceID: node.NodeID, ChannelID: uint64(ch.ID), EdgeDeviceID: uint64(dev.ID),
 		RequestID: 1, ErrorCode: 2, RawData: []byte{1, 2, 3, 4, 5, 6},
 	})
-	assertUnifiedForDevice(t, db, dev.ID, 0, "error code")
+	assertSinkForDevice(t, fc, dev.ID, 0, "error code")
 
 	// 空数据事件:ShouldParse=false,消费者不执行
 	fc.postAndDrain(t, databus.DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(ch.ID), EdgeDeviceID: uint64(dev.ID),
 		RequestID: 2, RawData: []byte{},
 	})
-	assertUnifiedForDevice(t, db, dev.ID, 0, "empty raw")
+	assertSinkForDevice(t, fc, dev.ID, 0, "empty raw")
 }
 
 // TestFindEdgeDeviceByChannelID_C6IndexFallback:寻址语义在新消费者下的等价覆盖。
@@ -408,17 +424,17 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 	allDevices := []uint{d1.ID, d2.ID, d3.ID}
 	unifiedBaseline := map[uint]int{}
 	for _, id := range allDevices {
-		unifiedBaseline[id] = countUnifiedForDevice(t, db, id, "baseline")
+		unifiedBaseline[id] = countReadingsFor(fc, id)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			beforeUnified := map[uint]int{}
 			for _, id := range allDevices {
-				beforeUnified[id] = countUnifiedForDevice(t, db, id, tc.name+" before")
+				beforeUnified[id] = countReadingsFor(fc, id)
 			}
 			fc.postAndDrain(t, tc.evt)
 			for _, id := range allDevices {
-				unifiedDelta := countUnifiedForDevice(t, db, id, tc.name) - beforeUnified[id]
+				unifiedDelta := countReadingsFor(fc, id) - beforeUnified[id]
 				wantU := 0
 				if id == tc.wantDevice {
 					wantU = tc.wantUnified
@@ -467,15 +483,15 @@ func TestDataPipeline_C6ChannelIndexFallback(t *testing.T) {
 	fc.postAndDrain(t, databus.DataEvent{
 		DeviceID: node.NodeID, ChannelID: 0, RequestID: 1, RawData: payload,
 	})
-	assertUnifiedForDevice(t, db, d1.ID, 2, "c6 idx 0 -> ch1")
-	assertUnifiedForDevice(t, db, d2.ID, 0, "c6 idx 0 (ch2 untouched)")
+	assertSinkForDevice(t, fc, d1.ID, 2, "c6 idx 0 -> ch1")
+	assertSinkForDevice(t, fc, d2.ID, 0, "c6 idx 0 (ch2 untouched)")
 
 	// C6 发送 channel_id=1 → 下标 1 → ch2 (real id=101)
 	fc.postAndDrain(t, databus.DataEvent{
 		DeviceID: node.NodeID, ChannelID: 1, RequestID: 2, RawData: payload,
 	})
-	assertUnifiedForDevice(t, db, d1.ID, 2, "c6 idx 1 (ch1 unchanged)")
-	assertUnifiedForDevice(t, db, d2.ID, 2, "c6 idx 1 -> ch2")
+	assertSinkForDevice(t, fc, d1.ID, 2, "c6 idx 1 (ch1 unchanged)")
+	assertSinkForDevice(t, fc, d2.ID, 2, "c6 idx 1 -> ch2")
 }
 
 // ---------------------------------------------------------------------------

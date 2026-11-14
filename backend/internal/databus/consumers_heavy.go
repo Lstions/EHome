@@ -13,7 +13,6 @@ import (
 	"ehome/backend/internal/telemetry"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
-	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
@@ -92,12 +91,6 @@ type SensorParserConsumer struct {
 	// 让本文件不知道「有哪些解析后端」—— 新增后端时本文件零改动（改造目标）。
 	// nil 时退化为 fail-closed（no_adapter 审计），绝不静默丢弃。
 	ingestResolver *ingest.Resolver
-	// writeGate 是 L1「值不变不入库 + 心跳」的决策器与进程内状态表
-	// (设计/遥测存储优化方案-2026-11-06.md §3, 阶段1)。
-	//
-	// nil 安全: 未装配时 filter 退化为「全量写」，与改造前行为逐字节相同
-	// (手工构造 consumer 的测试不会被静默改变语义)。
-	writeGate *telemetryWriteGate
 	// telemetrySink 是 L2 帧级增量编码的双写旁路
 	// (设计/遥测存储-L2双写接线patch-2026-11-06.md; 方案 §7 阶段2 第2步)。
 	//
@@ -107,22 +100,6 @@ type SensorParserConsumer struct {
 	// 类型用 telemetry.Sink (= func(uint, time.Time, int64, []Reading)) 而不是
 	// []parser.Field: 该包不能 import pkg/parser (依赖方向), 转换在本文件做一次。
 	telemetrySink telemetry.Sink
-	// unifiedWriteEnabled 是 **unified_data 历史写入**的停写开关（EHOME_TELEMETRY_UNIFIED_WRITE）。
-	//
-	// 停的**只**是 unified_data 的 INSERT（以及随之的 L1 commit）。L2 帧表、L3 分钟桶、
-	// 最新值缓存、告警/自动化回调**全部照常** —— 它们的调用点在门控之前。
-	//
-	// 为什么门控位置必须在 latestSink 之后、writeGate.filter 之前：
-	//
-	//	A. 只跳 db.Create => writeGate.commit 永不调用 => g.last 不推进
-	//	   => 每帧都被判 First => 指标失真（filter 的统计也失去意义）
-	//	B. 跳 writeGate.filter + db.Create => 缓存/帧表/rollup 全活 => **正确**
-	//	C. 跳过整段（含 telemetrySink/rollupSink/latestSink）=> L2/L3 一起死
-	//	   => **正是优化的意义被干掉**，而症状「图表没数据」看起来像「停写生效了」
-	//
-	// 构造时读取（不运行时可写）：避免运行时热切换引入 data race
-	// （2026-11-07 DualWriter 那个教训：字段被并发读写）。
-	unifiedWriteEnabled bool
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -151,11 +128,6 @@ func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, reas
 		// 因此默认装配内置两个 adapter，main.go 的 SetIngestResolver 只用于
 		// 定制顺序或注入额外 adapter（而非"是否启用"）。
 		ingestResolver: defaultIngestResolver(driverRegistry),
-		// L1 写入收窄 (方案 §7 阶段1): 策略从 config 解析一次 (本仓无热加载)。
-		// 默认 write_on_change=false ⇒ **影子模式**: 照常全量写, 只统计
-		// 「本可跳过多少行」, 升级镜像后写入行为与改造前完全一致。
-		writeGate:           newTelemetryWriteGate(resolveTelemetryWritePolicy()),
-		unifiedWriteEnabled: resolveUnifiedWriteEnabled(),
 	}
 	if len(deviceActivity) > 0 {
 		consumer.deviceActivity = deviceActivity[0]
@@ -226,18 +198,6 @@ func (c *SensorParserConsumer) SetTelemetrySink(sink telemetry.Sink) {
 // nil 表示未接线：consumer 会按 no_adapter 落审计，不会 panic、不会静默丢弃。
 func (c *SensorParserConsumer) SetIngestResolver(r *ingest.Resolver) {
 	c.ingestResolver = r
-}
-
-// SetTelemetryHeartbeat 覆盖 L1 写入收窄的心跳间隔（方案 §3.1）。
-//
-// 为什么既读 config 又留 setter: 生产路径从 config.Load() 取（与
-// nodemgr.parserShardCount 同范式，本仓无热加载）；而这个 setter 让测试能固定
-// 时间语义（包级 override 会跨用例串味）。
-//
-// 没有「关闭收窄」这个入参：2026-11-07 起 L1 无条件生效（契约 §1），收窄没有关闭态。
-// heartbeat <= 0 时回落到 60s（调用方不该靠 0 表达"无心跳"，那会让跳过无上界）。
-func (c *SensorParserConsumer) SetTelemetryHeartbeat(heartbeat time.Duration) {
-	c.writeGate = newTelemetryWriteGate(telemetryWritePolicy{heartbeat: heartbeat})
 }
 
 // HasSourceHealthSink 报告解析成功健康回调是否已注入 (接线测试只读辅助;
@@ -439,66 +399,21 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		c.telemetryRollupSink(device.ID, sensorData, now)
 	}
 
-	records := make([]models.UnifiedData, 0, len(sensorData))
-	for _, sd := range sensorData {
-		records = append(records, models.UnifiedData{
-			DeviceID:   device.ID,
-			SensorName: sd.Name,
-			Value:      sd.Value,
-			Unit:       sd.Unit,
-			Timestamp:  now,
-		})
-	}
-	if len(records) > 0 {
-		// (1) 先更新最新值缓存（与写库结果无关；被跳过的帧也必须更新）。
-		// 注: 原 rollupSink 分支已于 2026-09-15 随 rollup 表退役删除; 注意该分支
-		// 原本还**门控**着 latestSink —— 退役时有意把 latestSink 提为独立条件,
-		// 消除"未注入 rollup ⇒ 最新值缓存永不更新"的隐藏耦合 (裁决见
-		// docs/分析/rollup-退役裁决-2026-09-15.md §5)。
-		if c.latestSink != nil {
-			for i := range records {
-				c.latestSink(records[i])
-			}
-		}
-
-		// ── 停写开关（EHOME_TELEMETRY_UNIFIED_WRITE=false，2026-11-08）──
-		//
-		// 门控位置**必须在 latestSink 之后**：最新值缓存是「运行时状态」，要继续更新，
-		// 否则停写后 /latest-data 会退化成「最后一次上报的值」，而那个值会越来越旧。
-		//
-		// 也**必须**在 telemetrySink / telemetryRollupSink 之后：那两条是 L2 帧表与 L3 分钟桶，
-		// 正是「停掉 unified_data」之后要接手的数据源。把它们一起闸掉就是
-		// 「优化的意义被干掉」，而症状「图表没数据」看起来却像「停写生效了」。
-		//
-		// 同时跳过 writeGate.filter/commit：
-		//	· filter 只产生「要写哪些行」的决策，既然不写就不必算；
-		//	· commit 的语义是「这些行已落库」。不写就不能 commit，
-		//	  否则 g.last 会记下一个从未落库的值 ⇒ 后续同值帧全被判「未变化」。
-		if !c.unifiedWriteEnabled {
-			// 计数器是必须的：否则「按预期停了」与「上游断了」在 unified_data 行数上同形。
-			metrics.UnifiedWritesSkippedTotal.Add(float64(len(records)))
-		} else {
-			// (2) 收窄决策（L1，2026-11-07 起无条件生效）: 返回的就是真正要写库的行。
-			persist, stat := c.writeGate.filter(device.ID, records, now)
-			c.writeGate.record(stat)
-
-			if len(persist) > 0 {
-				if err := c.db.Session(&gorm.Session{}).Create(&persist).Error; err != nil {
-					metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
-					logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
-				} else {
-					// (3) 只有写成功才推进「最后已落库值」（方案 §3.3 缓存一致性）:
-					// 写失败不推进 —— 否则新值被记成"已落库"，后续同值帧全被判成
-					// "未变化"而跳过，该值永久丢失。
-					c.writeGate.commit(device.ID, persist, now)
-				}
-			} else {
-				// "整帧都跳过"是一条**正常**路径（值未变且未到心跳）:
-				// 不写库也不 commit —— 状态时间戳必须保持为上次落库时间，否则心跳
-				// 永远不会到点（commit 会把它推到 now）。
-				logger.Debugf("[%s] telemetry write gate skipped all %d rows (unchanged, heartbeat not due)",
-					evt.DeviceID, stat.Skipped)
-			}
+	// 最新值缓存（运行时状态，/latest-data 与告警/自动化都读它）。
+	//
+	// 2026-11-13：unified_data 整表退役后，这里**不再有任何数据库写入** ——
+	// 解析值只有三个去处：L2 帧表（上面）、L3 分钟桶（上面）、最新值缓存（这里）。
+	// L1「值不变不入库」写入收窄门禁随 unified_data 一起删除：它唯一的产物就是
+	// 决定"这一帧写不写 unified_data"，没有表就没有决策对象。
+	if c.latestSink != nil {
+		for _, sd := range sensorData {
+			c.latestSink(models.UnifiedData{
+				DeviceID:   device.ID,
+				SensorName: sd.Name,
+				Value:      sd.Value,
+				Unit:       sd.Unit,
+				Timestamp:  now,
+			})
 		}
 	}
 

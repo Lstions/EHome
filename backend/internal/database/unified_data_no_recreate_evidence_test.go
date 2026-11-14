@@ -45,13 +45,15 @@ func TestAutoMigrate_ReallyRanAndBuiltOtherTables(t *testing.T) {
 		if !db.Migrator().HasTable(tbl) {
 			t.Fatalf("前置失败：%s 不在测试库里（testutil 的 allModels 应含它）", tbl)
 		}
-		if err := db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE").Error; err != nil {
+		// 用 Migrator 而不是裸 SQL：SQLite 不支持 DROP TABLE ... CASCADE
+		// （方言测试跑 sqlite 时会直接语法错误）；Migrator 按方言生成语句。
+		if err := db.Migrator().DropTable(tbl); err != nil {
 			t.Fatalf("DROP %s: %v", tbl, err)
 		}
 	}
 
 	// 再删 unified_data（本次要守的那张）
-	if err := db.Exec("DROP TABLE IF EXISTS " + unifiedDataTable + " CASCADE").Error; err != nil {
+	if err := db.Migrator().DropTable(unifiedDataTable); err != nil {
 		t.Fatalf("DROP %s: %v", unifiedDataTable, err)
 	}
 

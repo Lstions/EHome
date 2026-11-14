@@ -224,4 +224,9 @@ const onTemplateChange = (id: number | undefined | null) => emit('template-chang
   align-items: center;
   justify-content: center;
 }
+
+@media (max-width: 768px) {
+  .template-pick-row { flex-direction: column; align-items: stretch; }
+  .parser-select-list { max-height: none; }
+}
 </style>

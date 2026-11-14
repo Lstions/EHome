@@ -1,5 +1,5 @@
 <template>
-  <div class="device-page">
+  <div class="device-page" :class="{ 'has-mobile-batch': isMobile && activeBatchBar }">
 <template v-if="loading">
       <div class="stats-row">
         <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
@@ -68,45 +68,58 @@
           prefix-icon="Search"
           clearable
           class="search-input"
+          data-test="search-devices"
         />
-        
-        <el-select v-model="typeFilter" placeholder="设备类型" clearable style="min-width: 130px;">
-          <template #prefix>
-            <el-icon><Grid /></el-icon>
-          </template>
-          <el-option 
-            v-for="type in deviceTypes" 
-            :key="type.value" 
-            :label="type.label" 
-            :value="type.value"
-          >
-            <span>{{ type.label }}</span>
-            <el-icon style="margin-left: 8px;"><component :is="type.icon" /></el-icon>
-          </el-option>
-        </el-select>
-        
-        <el-select v-if="deviceScope === 'active'" v-model="statusFilter" placeholder="状态" clearable style="min-width: 90px;">
-          <el-option label="在线" value="active" />
-          <!-- pending 已是真实后端状态（创建后未收到数据），必须可筛选，
-               否则用户看到「等待数据」却找不到对应筛选项。 -->
-          <el-option label="等待数据" value="pending" />
-          <el-option label="离线" value="offline" />
-          <el-option label="警告" value="warning" />
-          <el-option label="故障" value="error" />
-          <el-option label="已禁用" value="disabled" />
-        </el-select>
-        
-        <el-select v-if="deviceScope === 'active'" v-model="hardwareFilter" placeholder="硬件类型" clearable style="min-width: 120px;">
-          <el-option label="UART" value="uart" />
-          <el-option label="I2C" value="i2c" />
-          <el-option label="SPI" value="spi" />
-          <el-option label="GPIO" value="gpio" />
-          <el-option label="ADC" value="adc" />
-        </el-select>
+
+        <template v-if="!isMobile">
+          <el-select v-model="typeFilter" placeholder="设备类型" clearable style="min-width: 130px;">
+            <template #prefix>
+              <el-icon><Grid /></el-icon>
+            </template>
+            <el-option
+              v-for="type in deviceTypes"
+              :key="type.value"
+              :label="type.label"
+              :value="type.value"
+            >
+              <span>{{ type.label }}</span>
+              <el-icon style="margin-left: 8px;"><component :is="type.icon" /></el-icon>
+            </el-option>
+          </el-select>
+
+          <el-select v-if="deviceScope === 'active'" v-model="statusFilter" placeholder="状态" clearable style="min-width: 90px;">
+            <el-option label="在线" value="active" />
+            <el-option label="等待数据" value="pending" />
+            <el-option label="离线" value="offline" />
+            <el-option label="警告" value="warning" />
+            <el-option label="故障" value="error" />
+            <el-option label="已禁用" value="disabled" />
+          </el-select>
+
+          <el-select v-if="deviceScope === 'active'" v-model="hardwareFilter" placeholder="硬件类型" clearable style="min-width: 120px;">
+            <el-option label="UART" value="uart" />
+            <el-option label="I2C" value="i2c" />
+            <el-option label="SPI" value="spi" />
+            <el-option label="GPIO" value="gpio" />
+            <el-option label="ADC" value="adc" />
+          </el-select>
+        </template>
+
+        <!-- 移动端：筛选收进底部抽屉，避免三个下拉把工具栏撑到 330px 高 -->
+        <el-button
+          v-else
+          class="mobile-filter-btn"
+          data-test="open-device-filters"
+          @click="mobileFiltersVisible = true"
+        >
+          <el-icon><Filter /></el-icon>
+          筛选
+          <span v-if="activeFilterCount" class="filter-count" data-test="filter-count">{{ activeFilterCount }}</span>
+        </el-button>
       </div>
-      
+
       <div class="toolbar-right">
-        <el-button-group v-if="deviceScope === 'active'" style="margin-right: 12px;">
+        <el-button-group v-if="deviceScope === 'active'" class="view-switch">
           <el-button :type="viewMode === 'card' ? 'primary' : ''" aria-label="卡片视图" @click="viewMode = 'card'">
             <el-icon><Grid /></el-icon>
           </el-button>
@@ -114,27 +127,83 @@
             <el-icon><List /></el-icon>
           </el-button>
         </el-button-group>
-        <!-- 卡片视图批量管理开关：开启后卡片出现复选框、点卡片切换选中，批量条出现 -->
         <el-switch
           v-if="deviceScope === 'active' && viewMode === 'card'"
           v-model="batchMode"
           class="batch-mode-switch"
-          active-text="批量管理"
+          :active-text="isMobile ? '批量' : '批量管理'"
           aria-label="批量管理"
           data-test="card-batch-toggle"
         />
-        <!-- 恢复已删除设备（契约 §4.2）：换节点/误删后的首选修复入口 ——
-             复用同一条 edge_devices 记录，历史数据不搬运也连续。两个视图都可打开。 -->
-        <el-button data-test="open-restore" @click="openRestoreDialog">
+        <el-button v-if="!isMobile" data-test="open-restore" @click="openRestoreDialog">
           <el-icon><RefreshLeft /></el-icon>
           恢复已删除设备
         </el-button>
-        <el-button v-if="deviceScope === 'active'" type="primary" @click="showCreateDialog = true">
+        <!-- 移动端把恢复/刷新收进「更多」，让主按钮只有一个 -->
+        <el-dropdown v-else trigger="click" data-test="mobile-more" @command="onMobileMoreCommand">
+          <el-button class="more-btn" circle aria-label="更多操作">
+            <el-icon><MoreFilled /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="restore">恢复已删除设备</el-dropdown-item>
+              <el-dropdown-item command="refresh">刷新列表</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button v-if="deviceScope === 'active'" type="primary" class="create-btn" data-test="create-device" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
-          创建边缘设备
+          <span class="create-label">{{ isMobile ? '新建' : '创建边缘设备' }}</span>
         </el-button>
       </div>
     </div>
+
+    <!-- 移动端筛选抽屉：与桌面共用同一批 v-model，不复制筛选逻辑 -->
+    <el-drawer
+      v-model="mobileFiltersVisible"
+      title="筛选设备"
+      direction="btt"
+      size="auto"
+      class="device-filter-drawer"
+      data-test="device-filter-drawer"
+    >
+      <div class="mobile-filter-form">
+        <label>类型</label>
+        <el-select v-model="typeFilter" placeholder="全部类型" clearable aria-label="类型">
+          <el-option
+            v-for="type in deviceTypes"
+            :key="type.value"
+            :label="type.label"
+            :value="type.value"
+          />
+        </el-select>
+        <template v-if="deviceScope === 'active'">
+          <label>状态</label>
+          <el-select v-model="statusFilter" placeholder="全部状态" clearable>
+            <el-option label="在线" value="active" />
+            <el-option label="等待数据" value="pending" />
+            <el-option label="离线" value="offline" />
+            <el-option label="警告" value="warning" />
+            <el-option label="故障" value="error" />
+            <el-option label="已禁用" value="disabled" />
+          </el-select>
+          <label>硬件类型</label>
+          <el-select v-model="hardwareFilter" placeholder="全部总线" clearable>
+            <el-option label="UART" value="uart" />
+            <el-option label="I2C" value="i2c" />
+            <el-option label="SPI" value="spi" />
+            <el-option label="GPIO" value="gpio" />
+            <el-option label="ADC" value="adc" />
+          </el-select>
+        </template>
+      </div>
+      <template #footer>
+        <div class="mobile-filter-footer">
+          <el-button @click="clearFilters">重置</el-button>
+          <el-button type="primary" @click="mobileFiltersVisible = false">完成</el-button>
+        </div>
+      </template>
+    </el-drawer>
 
     <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
       <span class="active-filters-label">当前筛选：</span>
@@ -368,10 +437,16 @@
         <p v-if="device.last_data" class="card-updated">更新于 {{ formatRelativeTime(device.last_data_time) }}</p>
 
         <div class="card-actions">
-          <el-button size="small" type="primary" :icon="View" @click="goToDetail(device.id)">详情</el-button>
-          <el-button size="small" text :icon="Edit" @click="handleEdit(device)">编辑</el-button>
-          <el-button size="small" text :icon="FolderAdd" data-test="card-merge" @click="openMergeDialog(device)">合并历史</el-button>
-          <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${device.name}`" @click="handleDelete(device)">删除</el-button>
+          <el-button size="small" type="primary" class="card-action card-action--primary" :icon="View" :style="isMobile ? { minHeight: '44px' } : undefined" @click="goToDetail(device.id)">详情</el-button>
+          <el-button size="small" text class="card-action" :icon="Edit" :aria-label="`编辑 ${device.name}`" :style="isMobile ? { minHeight: '44px' } : undefined" @click="handleEdit(device)">
+            <span class="action-label">编辑</span>
+          </el-button>
+          <el-button size="small" text class="card-action" :icon="FolderAdd" data-test="card-merge" :aria-label="`为 ${device.name} 合并历史数据`" :style="isMobile ? { minHeight: '44px' } : undefined" @click="openMergeDialog(device)">
+            <span class="action-label">合并历史</span>
+          </el-button>
+          <el-button size="small" type="danger" text class="card-action" :icon="Delete" :aria-label="`删除 ${device.name}`" :style="isMobile ? { minHeight: '44px' } : undefined" @click="handleDelete(device)">
+            <span class="action-label">删除</span>
+          </el-button>
         </div>
       </el-card>
     </div>
@@ -381,9 +456,10 @@
       v-if="deviceScope === 'active' && !loading && (filteredDevices?.length || 0) === 0"
       icon="Cpu"
       title="暂无边缘设备"
-      description='进入节点详情页，点击“创建边缘设备”按钮开始添加'
+      :description="hasActiveFilters ? '当前筛选条件下没有设备，试试清除筛选。' : '创建边缘设备后，即可在这里查看实时数据与历史。'"
       :quick-actions="[
-        { label: '查看节点', icon: View, type: 'primary', handler: () => router.push('/node') }
+        { label: '创建边缘设备', icon: Plus, type: 'primary', handler: () => { showCreateDialog = true } },
+        { label: '查看节点', icon: View, handler: () => router.push('/node') }
       ]"
     />
 
@@ -539,7 +615,7 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
   Plus, View, Edit, Delete, Check, Warning, Connection, DataLine,
-  List, Download, Location, RefreshLeft, FolderAdd, Timer
+  List, Download, Location, RefreshLeft, FolderAdd, Timer, Filter, MoreFilled
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -575,10 +651,13 @@ import { getHardwareDisplay, getHardwareLabel } from '@/utils/hardwareTag'
 const asDevice = (row: unknown) => row as EdgeDevice
 import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
 import { useDeviceDelete } from '@/composables/useDeviceDelete'
+import { useResponsive } from '@/composables/useResponsive'
 
 const router = useRouter()
 const route = useRoute()
 const edgeDeviceStore = useEdgeDeviceStore()
+/** 与全站同断点（<768px）：工具栏收成「搜索 + 筛选抽屉 + 更多」。 */
+const { isMobile } = useResponsive()
 
 /**
  * 展示映射（状态/型号/图标 → 中文与样式，时间 → 可读文本）来自
@@ -593,6 +672,8 @@ const {
 
 // 视图模式：card | table
 const viewMode = ref<'card' | 'table'>('card')
+/** 移动端筛选抽屉（与桌面共用 typeFilter/statusFilter/hardwareFilter）。 */
+const mobileFiltersVisible = ref(false)
 
 // @ts-ignore - table ref used in template
 const tableRef = ref()
@@ -690,6 +771,11 @@ const loading = ref(!hasInitialCache)
 devices.value = compactEdgeDeviceList(initialCache?.items)
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
+
+/** 筛选徽标只统计三个下拉（搜索框自己可见，不重复计数）。 */
+const activeFilterCount = computed(() =>
+  [typeFilter.value, statusFilter.value, hardwareFilter.value].filter(Boolean).length,
+)
 
 // 路由参数初始化（必须在 useDebouncedSearch 之后）
 if (routeSearch) searchKeyword.value = routeSearch
@@ -854,6 +940,19 @@ const {
   onClearSelection: clearAllSelection,
   reportFailure,
 })
+
+/** 移动端批量条是 fixed 浮层：页面需要底部留白，避免最后一张卡被遮住。 */
+const activeBatchBar = computed(() =>
+  deviceScope.value === 'active'
+  && (selectedDevices.value?.length || 0) > 0
+  && (viewMode.value === 'table' || batchMode.value),
+)
+
+/** 移动端「更多」菜单：恢复已删除设备 / 刷新列表（桌面端是独立按钮）。 */
+function onMobileMoreCommand(command: string | number | object) {
+  if (command === 'restore') openRestoreDialog()
+  if (command === 'refresh') fetchDevices(true)
+}
 
 /** 历史行「恢复」：打开恢复弹窗并预展开该设备（initialDeviceId）。 */
 const restoreInitialDeviceId = ref<number | undefined>(undefined)
@@ -1567,4 +1666,86 @@ button.card-chip:hover { background: var(--el-fill-color-light); color: var(--el
   }
 }
 
+
+/* ============================================================================
+   边缘设备管理页优化（2026-11-14）
+   —— 桌面单行工具栏；移动端「搜索 + 筛选抽屉 + 更多」；卡片操作触控目标；
+      批量条移动端浮动；空态 CTA 指向本页创建。
+   ========================================================================== */
+.toolbar { gap: 12px; flex-wrap: nowrap; }
+.toolbar-left { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; align-items: center; }
+.toolbar-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.search-input { width: 240px; min-width: 180px; flex: 1 1 220px; }
+.view-switch { flex: 0 0 auto; white-space: nowrap; }
+.view-switch :deep(.el-button) { min-height: 32px; flex: none; }
+.mobile-filter-btn { min-height: 44px; }
+.batch-mode-switch { margin-right: 4px; }
+.toolbar-right .el-button { white-space: nowrap; }
+
+.mobile-filter-btn { flex: 0 0 auto; position: relative; }
+.filter-count {
+  margin-left: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--el-color-primary);
+  color: var(--text-on-fill);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 卡片操作：桌面 32px、移动 44px；移动端只留图标（aria-label 保留可访问名） */
+.card-action { min-height: 32px; }
+.card-action .action-label { margin-left: 2px; }
+
+/* 批量条：桌面吸顶，滚动时不丢操作 */
+.batch-bar { position: sticky; top: 8px; z-index: 6; box-shadow: var(--shadow-sm, 0 2px 8px rgba(0,0,0,.08)); }
+
+/* 移动端筛选抽屉 */
+.mobile-filter-form { display: flex; flex-direction: column; gap: 8px; }
+.mobile-filter-form label { font-size: 13px; color: var(--el-text-color-secondary); margin-top: 8px; }
+.mobile-filter-form .el-select { width: 100%; }
+.mobile-filter-footer { display: flex; gap: 8px; }
+.mobile-filter-footer .el-button { flex: 1; min-height: 44px; }
+
+@media (max-width: 768px) {
+  .scope-hint { display: none; }
+  .toolbar { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; flex-wrap: nowrap; }
+  .toolbar-left { width: 100%; gap: 8px; }
+  .toolbar-left .search-input { width: auto; min-width: 0; flex: 1 1 auto; }
+  .toolbar-right { width: 100%; justify-content: space-between; }
+  .batch-mode-switch { margin-right: 0; }
+  .create-btn { flex: 1 1 auto; min-height: 40px; }
+  .create-btn .create-label { margin-left: 2px; }
+  .view-switch :deep(.el-button) { min-height: 40px; min-width: 40px; flex: none; }
+  .more-btn { min-height: 40px; min-width: 40px; }
+
+  .card-action { min-height: 44px; justify-content: center; }
+  /* 子组件根节点的 scoped 属性在个别 EP 版本下匹配不到，用 :deep 提升到容器层，
+     确保覆盖 theme.css 的 .el-button--small { min-height: 36px }。 */
+  .card-actions :deep(.el-button) { min-height: 44px; }
+  .card-action .action-label { display: none; }
+  .card-actions { justify-content: space-between; }
+
+  .device-page.has-mobile-batch { padding-bottom: 88px; }
+  .batch-bar {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    top: auto;
+    z-index: 30;
+    padding: 10px 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+  }
+  .batch-bar .batch-actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .batch-bar .batch-actions .el-button { flex: 0 0 auto; min-height: 36px; }
+}
 </style>

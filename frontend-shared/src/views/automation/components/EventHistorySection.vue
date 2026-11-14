@@ -43,6 +43,14 @@
           <span v-else class="text-muted">-</span>
         </template>
       </el-table-column>
+      <!-- 2026-11-13：时钟驱动事件的"哪一次日出/日落"。与「时间」列不同：
+           时间是求值器看到它的 tick，事件时刻是 fireAt（日出/日落 + 偏移）。 -->
+      <el-table-column label="事件时刻" width="170">
+        <template #default="{ row }">
+          <span v-if="row.event_at" class="mono" data-test="event-at">{{ formatTime(row.event_at) }}</span>
+          <span v-else class="text-muted">-</span>
+        </template>
+      </el-table-column>
       <el-table-column label="来源" width="70">
         <template #default="{ row }">
           <el-tag v-if="row.trigger_source === 'manual'" type="warning" size="small">手动</el-tag>
@@ -107,6 +115,10 @@
               <dt>触发值</dt>
               <dd class="mono">{{ row.trigger_value !== undefined ? formatValue(row.trigger_value) : '-' }}</dd>
             </div>
+            <div v-if="row.event_at">
+              <dt>事件时刻</dt>
+              <dd class="mono" data-test="event-at">{{ formatTime(row.event_at) }}</dd>
+            </div>
             <div v-if="row.command_id">
               <dt>命令 ID</dt>
               <dd class="mono event-card__cmd">
@@ -143,7 +155,7 @@ import type { AutomationEvent, AutomationEventResult, AutomationRule } from '@/a
 import { formatTime, formatValue, resultOptions, resultTagType, resultText } from '../automationFormat'
 
 /**
- * 触发历史区（筛选条 / 桌面 8 列宽表 / 窄屏卡片列表 / 空态 / 分页位置）。
+ * 触发历史区（筛选条 / 桌面 9 列宽表 / 窄屏卡片列表 / 空态 / 分页位置）。
  *
  * 职责：只渲染「触发历史」这张卡片。不加载数据、不调接口、不弹确认框；
  * 筛选值、页码、每页条数仍由页面持有（fetchEvents 是页面级动作）。

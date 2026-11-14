@@ -1,5 +1,5 @@
 import axios, { type AxiosInstance } from 'axios'
-import type { BackfillProgress, MaintenanceSnapshot } from '@/types/system'
+import type { MaintenanceSnapshot } from '@/types/system'
 
 /**
  * 启动期维护态接口（**免鉴权**，契约 §3.3）。
@@ -150,86 +150,3 @@ function isHttpStatus(error: unknown, status: number): boolean {
  * axios 实例就多一份「拦截器会不会被后来人偷偷挂上」的隐患 ——
  * api/__tests__/system.spec.ts 断言「模块加载时 axios.create 恰好被调用 1 次」，
  * 这条断言正是为了防这个。 */
-
-export interface BackfillEnvelope {
-  code: number
-  message?: string
-  data: BackfillProgress
-}
-
-/**
- * 读取历史数据回填进度。
- *
- * ── 为什么复用维护态的独立实例 ─────────────────────────────────────────
- * 表面上这是业务读接口，似乎该走 apiClient。**不行**，三个理由，每个都独立成立：
- *
- * 1. **时机**：回填在 ready 之后才真正开跑，而 ready 的**那一刻**恰好是
- *    RootHandler 切换引擎的时刻（main.go：先 Done 再 SetEngine）。切换前
- *    /api/v1/system/backfill 若还没被全量引擎接管，会落到维护引擎的 NoRoute
- *    ⇒ 503 + Retry-After。apiClient 会把 503 当错误抛出，而我们要的是「还没开始，等下一次轮询」。
- * 2. **鉴权**：它是 /api/v1/system/* 下的接口，走 v1 组的 JWTAuth。
- *    但用户在升级后可能**尚未重新登录**（token 过期是升级后的常见态）；
- *    401 会让 apiClient 的拦截器清 session + 硬跳 /login ——
- *    用户为了看一眼回填进度被踢出登录，是不可接受的副作用。
- *    独立实例拿到 401 时由调用方静默当作「本条不可用」，页面其它部分照常工作。
- * 3. **失败语义**：回填是**辅助信息**（历史数据的派生表示）。它失败不能让
- *    整个 Monitor 页进入错误态 —— 用独立实例才能做到「本卡静默隐藏、页面照常」。
- *
- * ── 为什么不抛「不支持」错误 ──────────────────────────────────────────
- * 维护态用 MaintenanceUnsupportedError 是为了驱动 App.vue 的 fail-open 门禁。
- * 回填进度没有这个职责：任何失败（旧后端 404、未登录 401、引擎切换窗口 503）
- * 都归约为「本卡不显示」，由调用方 null 处理，**不区分**原因。
- * 区分了也没用 —— 用户对这三种情况的动作是同一个：继续用系统。
- *
- * @returns 进度快照；失败时返回 null（**不抛**，见上）。
- */
-export async function getBackfillStatus(): Promise<BackfillProgress | null> {
-  try {
-    const response = await maintenanceClient.get<BackfillEnvelope>('/api/v1/system/backfill')
-    const envelope = response.data
-    // 形状校验 fail-closed：认不出就当作没有这个信息，绝不把 undefined 当 0 渲染。
-    if (!envelope || typeof envelope !== 'object' || typeof envelope.code !== 'number') return null
-    if (envelope.code >= 400) return null
-    if (!isBackfillProgress(envelope.data)) return null
-    return normalizeBackfillProgress(envelope.data)
-  } catch {
-    // 旧后端 404 / 未登录 401 / 引擎切换瞬间 503 / 网络错误 —— 一律「不显示」。
-    return null
-  }
-}
-
-/**
- * 回填进度的形状判据（fail-closed）。
- *
- * 只强制 `state` 与 `percent`：其它字段后端都是 omitempty，且 **0 是合法值**
- * （frames_total=0 表示未知、eta_seconds=0 表示未算出），所以不能拿它们做判据。
- */
-export function isBackfillProgress(value: unknown): value is BackfillProgress {
-  if (!value || typeof value !== 'object') return false
-  const c = value as Record<string, unknown>
-  const states = ['idle', 'running', 'done', 'failed', 'disabled']
-  if (typeof c.state !== 'string' || !states.includes(c.state)) return false
-  if (typeof c.percent !== 'number' || !Number.isFinite(c.percent)) return false
-  return true
-}
-
-/**
- * 归一化：把 Go 零值 / nil slice 的缝隙补成 TS 可安全消费的形状。
- *
- * 两处真实缝隙（都不会被类型系统发现，与 normalizeSnapshot 同理）：
- * · `errors`：Go 的 `[]string` 为 nil 时序列化成 `null`，直接 `.length` 会抛错；
- * · `frames_total` / `eta_seconds`：omitempty ⇒ 缺失；统一成 0 表示「未知」，
- *   由调用方按「0 = 未知」渲染（**不是**「0 帧」）。
- */
-export function normalizeBackfillProgress(raw: BackfillProgress): BackfillProgress {
-  return {
-    ...raw,
-    percent: Number.isFinite(raw.percent) ? raw.percent : 0,
-    frames_done: typeof raw.frames_done === 'number' ? raw.frames_done : 0,
-    frames_total: typeof raw.frames_total === 'number' ? raw.frames_total : 0,
-    eta_seconds: typeof raw.eta_seconds === 'number' ? raw.eta_seconds : 0,
-    retention_permanent: raw.retention_permanent === true,
-    current_partition: raw.current_partition ?? '',
-    errors: Array.isArray(raw.errors) ? raw.errors.filter((e): e is string => typeof e === 'string') : [],
-  }
-}

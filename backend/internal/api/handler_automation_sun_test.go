@@ -70,7 +70,30 @@ func postSunRule(t *testing.T, r *gin.Engine, body map[string]interface{}) (int,
 }
 
 // sunRuleBody 造一条最简 sun_event 规则 (notification 动作, 不涉及风险授权)。
+//
+// 2026-11-13 起坐标与时区是**必填**（节点位置已废除），因此默认带上三项；
+// 需要验证"缺坐标被拒"的用例用 sunRuleBodyNoLocation 或 delete 对应键。
 func sunRuleBody(edgeDeviceID uint, extra map[string]interface{}) map[string]interface{} {
+	body := map[string]interface{}{
+		"name":              "日落规则",
+		"trigger_type":      models.AutomationTriggerSunEvent,
+		"trigger_sun_kind":  models.AutomationSunKindSunset,
+		"action_type":       models.AutomationActionNotification,
+		"action_level":      "info",
+		"action_device_id":  edgeDeviceID,
+		"require_confirmed": false,
+		"latitude":          39.9,
+		"longitude":         116.4,
+		"timezone":          "Asia/Shanghai",
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	return body
+}
+
+// sunRuleBodyNoLocation 造一条**不带坐标/时区**的 sun_event 规则（extra 可补单项）。
+func sunRuleBodyNoLocation(edgeDeviceID uint, extra map[string]interface{}) map[string]interface{} {
 	body := map[string]interface{}{
 		"name":              "日落规则",
 		"trigger_type":      models.AutomationTriggerSunEvent,
@@ -86,31 +109,42 @@ func sunRuleBody(edgeDeviceID uint, extra map[string]interface{}) map[string]int
 	return body
 }
 
-// ── A-13: 无坐标/无时区时保存被拒 (O-7 fail-closed) ─────────────────────
+// ── A-13: 规则缺坐标/时区时保存被拒 (fail-closed) ───────────────────────
 //
-// 反向验证: 把校验改成"回落 Asia/Shanghai / 0 坐标" → 本用例变红。
+// 2026-11-13 用户裁决「不需要节点位置」后，坐标与时区**只来自规则行**：
+// 缺任一项都必须 400，节点上即使配了值也不再继承。
+//
+// 反向验证: 把校验改成"回落默认坐标/UTC" → 本用例变红。
 func TestA13SunEventRejectedWithoutCoordinates(t *testing.T) {
 	cases := []struct {
 		name       string
-		lat, lon   *float64
-		tz         *string
+		drop       []string
 		wantSubstr string
 	}{
-		{"节点缺纬度", nil, f64pv(116.4), strptr("Asia/Shanghai"), "latitude"},
-		{"节点缺经度", f64pv(39.9), nil, strptr("Asia/Shanghai"), "longitude"},
-		{"节点缺时区", f64pv(39.9), f64pv(116.4), nil, "timezone"},
-		{"节点全缺", nil, nil, nil, "latitude"},
+		{"缺三项", []string{"latitude", "longitude", "timezone"}, "latitude"},
+		{"缺纬度", []string{"latitude"}, "latitude"},
+		{"缺经度", []string{"longitude"}, "longitude"},
+		{"缺时区", []string{"timezone"}, "timezone"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r, db := newSunRouter(t)
-			edgeID := seedSunNode(t, db, "node-a13", c.lat, c.lon, c.tz)
-			code, body := postSunRule(t, r, sunRuleBody(edgeID, nil))
-			if code != 400 {
-				t.Fatalf("无坐标/时区必须 400 拒绝保存 (O-7 fail-closed), got %d: %s", code, body)
+			// 节点**配齐**坐标：用来证明"节点值不再被继承"。
+			lat, lon, tz := 39.9, 116.4, "Asia/Shanghai"
+			edgeID := seedSunNode(t, db, "node-a13", &lat, &lon, &tz)
+			body := sunRuleBody(edgeID, nil)
+			for _, k := range c.drop {
+				delete(body, k)
 			}
-			if !strings.Contains(body, "invalid_automation_rule") {
-				t.Fatalf("错误码应为 invalid_automation_rule, got %s", body)
+			code, resp := postSunRule(t, r, body)
+			if code != 400 {
+				t.Fatalf("规则缺坐标/时区必须 400 拒绝保存 (fail-closed), got %d: %s", code, resp)
+			}
+			if !strings.Contains(resp, "invalid_automation_rule") {
+				t.Fatalf("错误码应为 invalid_automation_rule, got %s", resp)
+			}
+			if !strings.Contains(resp, c.wantSubstr) {
+				t.Fatalf("错误信息应指出缺少 %q, got %s", c.wantSubstr, resp)
 			}
 			// 关键反向断言: **不得**静默回落到默认时区/默认坐标。
 			var n int64
@@ -119,6 +153,20 @@ func TestA13SunEventRejectedWithoutCoordinates(t *testing.T) {
 				t.Fatalf("被拒的规则不得落库, got %d 行 —— 说明校验只是告警没拦住", n)
 			}
 		})
+	}
+}
+
+// 节点配了坐标也不能再"救活"一条没填坐标的规则（O-3 继承路径已废除）。
+func TestA13bNodeLocationNoLongerInherited(t *testing.T) {
+	r, db := newSunRouter(t)
+	lat, lon, tz := 39.9, 116.4, "Asia/Shanghai"
+	edgeID := seedSunNode(t, db, "node-inherit", &lat, &lon, &tz)
+	code, resp := postSunRule(t, r, sunRuleBodyNoLocation(edgeID, nil))
+	if code != 400 {
+		t.Fatalf("节点有坐标但规则没填，仍必须 400（不再继承节点）, got %d: %s", code, resp)
+	}
+	if !strings.Contains(resp, "节点位置已废除") {
+		t.Fatalf("错误信息必须说明节点位置已废除（否则用户会去节点页找配置）, got %s", resp)
 	}
 }
 
@@ -286,19 +334,19 @@ func TestSunRuleLevelOverrideSatisfiesMissingNodeConfig(t *testing.T) {
 	}
 }
 
-// ── 只给一半覆盖值必须被拒 (避免"规则纬度 + 节点经度"的非法组合) ──────────
+// ── 只给一半坐标必须被拒 (避免"规则纬度 + 默认经度"的非法组合) ──────────
 func TestSunRuleHalfCoordinateOverrideRejected(t *testing.T) {
 	r, db := newSunRouter(t)
 	lat, lon, tzName := 39.9, 116.4, "Asia/Shanghai"
 	edgeID := seedSunNode(t, db, "node-half", &lat, &lon, &tzName)
 
 	for _, c := range []map[string]interface{}{
-		{"latitude": 31.23},
-		{"longitude": 121.47},
+		{"latitude": 31.23, "timezone": "Asia/Shanghai"},
+		{"longitude": 121.47, "timezone": "Asia/Shanghai"},
 	} {
-		code, resp := postSunRule(t, r, sunRuleBody(edgeID, c))
+		code, resp := postSunRule(t, r, sunRuleBodyNoLocation(edgeID, c))
 		if code != 400 {
-			t.Fatalf("只给一半坐标覆盖必须 400 (避免物理上不存在的组合), got %d: %s", code, resp)
+			t.Fatalf("只给一半坐标必须 400 (避免物理上不存在的组合), got %d: %s", code, resp)
 		}
 		if !strings.Contains(resp, "同时提供") {
 			t.Fatalf("错误信息应说明需要同时提供, got %s", resp)

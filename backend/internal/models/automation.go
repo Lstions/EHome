@@ -222,20 +222,31 @@ type AutomationRule struct {
 	// CooldownSec 那种"显式零值无法表达"的陷阱 (该陷阱的成因是默认值 != 零值)。
 	TriggerSunOffsetMin int `gorm:"not null;default:0" json:"trigger_sun_offset_min"`
 
-	// ── 坐标与时区 (节点级为权威, 规则级可选覆盖; 用户裁决 O-3) ──
+	// ── 坐标与时区（规则必填；2026-11-13 节点位置废除，2026-11-14 来源改为
+	// 「IP 定位 / 手动城市」）──
 	//
-	// 三列均可空, NULL = **继承节点值**。为什么用指针而不是零值: 经纬度 0 是
-	// 合法坐标 (几内亚湾), 用 0 表达"未配置"会让"赤道上的节点"与"没配坐标的
-	// 节点"不可区分 —— 前者应正常求值, 后者必须 fail-closed 拒绝保存 (O-7)。
-	// 时区同理: 空字符串不是合法 IANA 名, 但指针让"未配置"与"配了空串"在
-	// 类型层面就无法混淆。
+	// 为什么用指针而不是零值: 经纬度 0 是合法坐标（几内亚湾），用 0 表达"未配置"
+	// 会让"赤道上的规则"与"没填坐标的规则"不可区分 —— 前者应正常求值，后者必须
+	// fail-closed 拒绝保存。时区同理：空字符串不是合法 IANA 名，指针让"未配置"与
+	// "配了空串"在类型层面无法混淆。
 	//
-	// 权威归属: 节点级 (nodes.latitude/longitude/timezone) 是物理安装位置的
-	// 事实源; 规则级仅在"同节点下某条规则需要特例"时覆盖。解析顺序
-	// 规则值 → 节点值 → 缺失即 fail-closed (见 ResolveSunLocation, 唯一实现)。
+	// 时区不由用户手填：它随坐标一起由 geo（IP 定位/城市目录）带出，见
+	// internal/geo。这三列是**解析后的落库快照**，不是用户输入框。
 	Latitude  *float64 `json:"latitude,omitempty"`
 	Longitude *float64 `json:"longitude,omitempty"`
 	Timezone  *string  `gorm:"size:64" json:"timezone,omitempty"`
+
+	// LocationSource / LocationLabel 记录坐标的来源与展示名（2026-11-14）。
+	//
+	//   · LocationSource: "ip" | "city"；空串 = 2026-11-14 之前保存的旧规则
+	//     （那时坐标是手工输入的，没有来源概念）。
+	//   · LocationLabel: 人类可读位置，如 "上海（中国）"、"San Jose（美国）"；
+	//     自动定位时由 IP 服务返回的城市名 + 国家拼出。
+	//
+	// 为什么要落库而不是每次现算：规则详情/编辑页需要显示"这条规则的位置是怎么来的"，
+	// 而 IP 定位结果会随时间漂移（换出口、服务商改库）—— 保存时的快照才可审计。
+	LocationSource string `gorm:"size:8" json:"location_source,omitempty"`
+	LocationLabel  string `gorm:"size:128" json:"location_label,omitempty"`
 
 	// ── Conditions (全部 AND) ──
 	ConditionsJSON string `gorm:"type:text" json:"conditions_json,omitempty"`
@@ -334,6 +345,16 @@ type AutomationEvent struct {
 	TriggeredAt   time.Time `gorm:"not null;index" json:"triggered_at"`
 	TriggerValue  *float64  `json:"trigger_value,omitempty"`                                  // sensor_threshold 触发时值
 	TriggerSource string    `gorm:"size:8;not null;default:auto;index" json:"trigger_source"` // auto|manual
+	// EventAt 是**时钟驱动事件**的实际事件时刻（2026-11-13 新增）。
+	//
+	// 为什么需要单独一列而不是塞进 TriggerValue：trigger_value 是 float64，只能
+	// 表达数值型触发值；sun_event 的语义是"哪一次日出/日落"，塞成 unix 秒既不可读
+	// 也无法在 UI 上按时间展示/筛选。NULL = 该事件没有时钟时刻（传感器阈值、手动
+	// 触发、抑制类审计）。
+	//
+	// 值口径：sun_event 写"当日计算出的日出/日落时刻 + 偏移"（fireAt），不是 tick
+	// 的 now —— 两者相差最多一个 tick（2s~60s），但它才是用户配置因果里的"事件"。
+	EventAt *time.Time `gorm:"index" json:"event_at,omitempty"`
 	Result        string    `gorm:"size:32;not null;index" json:"result"`
 	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
 	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因

@@ -85,7 +85,7 @@ func TestAutoMigrate_DoesNotRecreateDroppedUnifiedData(t *testing.T) {
 	}
 
 	// ② DROP（模拟运维动作）
-	if err := db.Exec("DROP TABLE IF EXISTS " + unifiedDataTable + " CASCADE").Error; err != nil {
+	if err := db.Migrator().DropTable(unifiedDataTable); err != nil {
 		t.Fatalf("DROP %s: %v", unifiedDataTable, err)
 	}
 	if db.Migrator().HasTable(unifiedDataTable) {

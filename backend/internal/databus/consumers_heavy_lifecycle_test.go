@@ -96,25 +96,23 @@ func TestSensorParserConsumer_DualWriteUsesEdgeDeviceID(t *testing.T) {
 	consumer.SetTelemetrySink(func(deviceID uint, _ time.Time, _ int64, _ []telemetry.Reading, _ []byte) {
 		frameDeviceIDsSeen = append(frameDeviceIDsSeen, deviceID)
 	})
+	// 2026-11-13：unified_data 退役后，解析值的归属改由 latestSink 观测。
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1,
 		RawData: []byte{0x01},
 	})
 
-	var unified []models.UnifiedData
-	if err := db.Find(&unified).Error; err != nil {
-		t.Fatal(err)
+	if len(*captured) == 0 {
+		t.Fatal("no parsed values reached latestSink")
 	}
-	if len(unified) == 0 {
-		t.Fatal("no unified_data rows persisted")
-	}
-	for _, row := range unified {
-		if row.DeviceID != device.ID {
-			t.Errorf("unified_data device_id = %d, want edge device %d", row.DeviceID, device.ID)
+	for _, rec := range *captured {
+		if rec.DeviceID != device.ID {
+			t.Errorf("解析值 device_id = %d, want edge device %d", rec.DeviceID, device.ID)
 		}
 	}
 
-	// 帧旁路的 device_id 口径必须与 unified_data 相同（否则两处历史对不上）。
+	// 帧旁路的 device_id 口径必须与解析值一致（否则两处历史对不上）。
 	if len(frameDeviceIDsSeen) == 0 {
 		t.Fatal("telemetry sink 未被调用 —— L2 帧表旁路没接线，本用例的帧断言会假通过")
 	}
@@ -157,6 +155,7 @@ func TestSensorParserConsumer_DualWriteKeepsDevicesApart(t *testing.T) {
 	consumer.SetTelemetrySink(func(deviceID uint, _ time.Time, _ int64, _ []telemetry.Reading, _ []byte) {
 		sinkDeviceIDs[deviceID]++
 	})
+	captured := captureParsed(consumer)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(devA.ID), RequestID: 1,
 		RawData: []byte{0x01},
@@ -166,22 +165,18 @@ func TestSensorParserConsumer_DualWriteKeepsDevicesApart(t *testing.T) {
 		RawData: []byte{0x02},
 	})
 
-	var rows []models.UnifiedData
-	if err := db.Order("device_id").Find(&rows).Error; err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("no unified_data rows")
+	if len(*captured) == 0 {
+		t.Fatal("no parsed values")
 	}
 	perDevice := map[uint]int{}
-	for _, row := range rows {
-		if row.DeviceID != devA.ID && row.DeviceID != devB.ID {
-			t.Fatalf("unified_data device_id = %d，不属于任何一台测试设备（归属口径被破坏）", row.DeviceID)
+	for _, rec := range *captured {
+		if rec.DeviceID != devA.ID && rec.DeviceID != devB.ID {
+			t.Fatalf("解析值 device_id = %d，不属于任何一台测试设备（归属口径被破坏）", rec.DeviceID)
 		}
-		perDevice[row.DeviceID]++
+		perDevice[rec.DeviceID]++
 	}
 	if perDevice[devA.ID] == 0 || perDevice[devB.ID] == 0 {
-		t.Fatalf("两台设备的行数 = %v，每台都必须有自己的行", perDevice)
+		t.Fatalf("两台设备的解析值数量 = %v，每台都必须有自己的值", perDevice)
 	}
 
 	// 帧旁路同口径：两台设备各一帧，互不串味。

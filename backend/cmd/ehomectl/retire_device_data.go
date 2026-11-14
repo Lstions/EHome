@@ -647,5 +647,6 @@ func humanBytes(n int64) string {
 
 // retireUsage 由 main.go 的 usage() 拼接（避免两处文案漂移）。
 func retireUsageLine() string {
-	return "       ehomectl retire-device-data [--dry-run | --yes]\n"
+	return "       ehomectl retire-device-data [--dry-run | --yes]\n" +
+		"       ehomectl retire-unified-data [--dry-run | --yes]\n"
 }

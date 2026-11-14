@@ -1,0 +1,16 @@
+完整流程验证 — 数据库核验（2026-11-14，ehome_simdemo）
+
+一、edge_devices（创建后、清理前）
+2|UI验收-桌面-034520|lk_th01|1|sim-bms-01
+3|UI验收-移动-034627|sn3001_rain|1|sim-bms-01
+
+二、automation_rules（创建后、清理前）
+4|UI验收-日落通知-034520|sun_event|true|city|上海（中国）|31.2222,121.4581|Asia/Shanghai
+
+三、automation_rule_actions
+4|1|notification|info
+
+四、清理（验证完成后通过 API 删除，列表与 DB 均不再出现）
+DELETE /api/v1/automation-rules/4
+DELETE /api/v1/edge-devices/2
+DELETE /api/v1/edge-devices/3

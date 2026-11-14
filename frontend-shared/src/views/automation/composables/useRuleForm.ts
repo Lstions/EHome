@@ -5,7 +5,7 @@ import type {
 import type { ActionDefinition } from '@/api/deviceOperation'
 import type { SensorField } from '@/api/sensorField'
 import { sourceGroupApi, type SourceGroup } from '@/api/sourceGroup'
-import { SUN_OFFSET_MAX, SUN_OFFSET_MIN, sunLocationState } from '../sunEvent'
+import { SUN_OFFSET_MAX, SUN_OFFSET_MIN, sunLocationComplete } from '../sunEvent'
 import { emptyAction, toSequencedActions, type ActionDraft } from '../actionList'
 import { ruleActions } from '../automationFormat'
 import { requiredMissingText } from './useRuleActions'
@@ -18,7 +18,7 @@ import { useRulePreview } from './useRulePreview'
  * 为什么单独成 composable（第二轮表单区拆分，2026-11-12）：
  *   · 这里的每一条规则都不是"页面排版"，而是**与后端契约绑定的语义** ——
  *     下拉代理值 sunrise/sunset ↔ trigger_type='sun_event'、HH:mm 规范化、
- *     坐标"全有或全无"、来源组的双写/清空、条件行与 JSON 原文的取舍、
+ *     坐标来源（IP/城市）与来源组的双写/清空、条件行与 JSON 原文的取舍、
  *     动作 seq 按下标重排。它们必须与提交体（buildPayload）在同一个作用域里，
  *     否则"界面改了、提交体没改"这类不一致在保存前完全不可见；
  *   · 页面对外仍只暴露 `form`（既有单测直接读 wrapper.vm.form）与 openCreate/openEdit，
@@ -57,6 +57,10 @@ export function emptyForm() {
     // 数据来源（方案 v0.3 §4.3）：edge_device=存量语义；source_group=从来源组取值
     source_kind: 'edge_device' as 'edge_device' | 'source_group',
     source_group_id: undefined as number | undefined,
+    // 位置（2026-11-14 用户裁决）：只有两个来源 —— ip=外网 IP 定位，city=手动城市；
+    // 经纬度/时区由定位结果回填，**时区没有输入框**（随地理位置自动填充）。
+    location_source: 'ip' as 'ip' | 'city' | '',
+    location_label: '',
     latitude: undefined as number | undefined,
     longitude: undefined as number | undefined,
     timezone: '' as string | undefined,
@@ -199,17 +203,6 @@ export function useRuleForm(options: {
     if (g) form.trigger_sensor_name = g.category
   }
 
-  /**
-   * 时区下拉变化：统一收敛成字符串。
-   *
-   * 为什么不裸 v-model：el-select 在「清空」时可能 emit undefined/null，而
-   * `form.timezone` 的三态语义是「空串 = 继承节点」（sunLocationState 按 trim 判定）。
-   * 让 undefined 漏进去，"继承"与"未填"会在状态判定里分叉。
-   */
-  function onTimezoneChange(value: unknown) {
-    form.timezone = typeof value === 'string' ? value : ''
-  }
-
   async function loadSourceGroups() {
     try {
       const res = await sourceGroupApi.list({ page: 1, page_size: 200 })
@@ -219,17 +212,6 @@ export function useRuleForm(options: {
       sourceGroups.value = []
     }
   }
-
-  /**
-   * 规则级经/纬度用文本 ref 承载，而不是直接绑 model 上的 number。
-   *
-   * 为什么必须多这一层：`v-model.number` 在输入框被清空时给出**空串**，写进
-   * 数字字段后 JSON.stringify 会把它序列化成 `""`（后端 float64 直接 400）。
-   * 清空 = "改为继承节点" 是正常用户操作，不能因此报错。故文本层独立，
-   * 只在填写了合法数字时同步到 model。
-   */
-  const sunLatitudeText = ref('')
-  const sunLongitudeText = ref('')
 
   /** 下拉当前值：sun_event 规则展开为 sunrise/sunset 供下拉显示，其余原样。 */
   const triggerSelection = computed<AutomationTriggerType | SunEventKind>({
@@ -249,19 +231,6 @@ export function useRuleForm(options: {
 
   const isSunTrigger = computed(() => form.trigger_type === 'sun_event')
 
-  /** 数字文本 → 有限数字或 undefined（空串/非法一律视为"未填"，即继承节点）。 */
-  function parseCoordinate(text: string): number | undefined {
-    const trimmed = text.trim()
-    if (!trimmed) return undefined
-    const value = Number(trimmed)
-    return Number.isFinite(value) ? value : undefined
-  }
-
-  function syncCoordinates() {
-    form.latitude = parseCoordinate(sunLatitudeText.value)
-    form.longitude = parseCoordinate(sunLongitudeText.value)
-  }
-
   // ── 附加条件：结构化条件行的状态/解析/序列化在 useRuleConditions ──
   const conditions = useRuleConditions(form)
 
@@ -271,8 +240,6 @@ export function useRuleForm(options: {
     // 重开对话框 = 新的一次保存流程：清诊断与已确认指纹，避免上一份内容的确认被复用
     resetSaveDiagnostics()
     Object.assign(form, emptyForm())
-    sunLatitudeText.value = ''
-    sunLongitudeText.value = ''
     // 单位/精度与"时间窗已修复"提示都属于**上一条规则**的状态：不清掉就会挂到新表单上
     // （用户还没选字段就看到一个 °C，或者看到一条与当前内容无关的修复说明）。
     sensorField.value = null
@@ -316,6 +283,12 @@ export function useRuleForm(options: {
       trigger_edge_device_id: rule.trigger_edge_device_id ?? undefined,
       source_kind: (rule.source_kind === 'source_group' ? 'source_group' : 'edge_device') as 'edge_device' | 'source_group',
       source_group_id: rule.source_group_id ?? undefined,
+      // 2026-11-14 之前的规则没有来源概念（坐标手填）：降级为 city + 说明标签，
+      // 保留坐标可用；用户可重新选城市/自动定位覆盖。
+      location_source: (rule.location_source as 'ip' | 'city' | undefined)
+        ?? (typeof rule.latitude === 'number' && typeof rule.longitude === 'number' ? 'city' : ''),
+      location_label: rule.location_label
+        ?? (typeof rule.latitude === 'number' && typeof rule.longitude === 'number' ? '已配置坐标（历史规则）' : ''),
       latitude: rule.latitude,
       longitude: rule.longitude,
       timezone: rule.timezone ?? '',
@@ -334,10 +307,6 @@ export function useRuleForm(options: {
       require_confirmed: rule.require_confirmed,
       enabled: rule.enabled,
     })
-    // 编辑既有规则时下拉必须显示真值（而不是空）—— 用文本层回显规则级覆盖值，
-    // 未配置（undefined）保持空串以表达"继承节点"。
-    sunLatitudeText.value = typeof rule.latitude === 'number' ? String(rule.latitude) : ''
-    sunLongitudeText.value = typeof rule.longitude === 'number' ? String(rule.longitude) : ''
     // 附加条件：合法数组 ⇒ 还原成条件行；**读不懂就自动进源码模式并保留原文**
     //（历史手写 / 被别的工具改坏的数据不能被"解析失败"吞掉，见 parseConditionRows）。
     // 顺序有讲究：先定模式再落行 —— 源码模式下 syncConditionsJson 会直接返回，
@@ -369,8 +338,21 @@ export function useRuleForm(options: {
     windowEndFixNote.value = ''
   }
 
-  function validate(): string | null {
+  // ── 校验：按步骤拆开（2026-11-14 创建规则向导）──
+  //
+  // 为什么拆：向导的「下一步」只能校验当前步骤（否则用户在第一步就被"第 2 个动作缺动作 ID"
+  // 拦住，却看不到那个动作）；而「保存」必须校验全部。两者共用同一组判据，避免第二套规则。
+  //
+  // validate() 的**拼接顺序保持改造前逐字一致**（名称 → 触发器 → 动作 → 条件 → 策略），
+  // 因为"用户先看到哪条错误"是既有行为；分步校验只是把同一批判据重新分组。
+
+  function validateBasic(): string | null {
     if (!form.name.trim()) return '请填写规则名称'
+    return null
+  }
+
+  /** 触发器类型自身的必填项（不含附加条件）。 */
+  function validateTriggerType(): string | null {
     if (form.trigger_type === 'sensor_threshold') {
       if (form.source_kind === 'source_group') {
         if (!form.source_group_id) return '请选择来源组'
@@ -387,15 +369,24 @@ export function useRuleForm(options: {
       if (!HHMM_PATTERN.test(form.trigger_window_start.trim())) return '时间格式必须为 HH:mm'
       if (!HHMM_PATTERN.test(form.trigger_window_end.trim())) return '时间格式必须为 HH:mm'
     } else if (form.trigger_type === 'sun_event') {
-      // V2 的界面侧前置校验：日出/日落必须有 kind，且坐标/时区三项要"全有或全无"。
-      // 全无 = 继承节点（后端会按节点值解析，节点也没有则 400）；部分填写是无意义组合，
-      // 后端必拒，前端提前拦下来说清原因（见 sunLocationText）。
+      // 界面侧前置校验（2026-11-14 用户裁决）：坐标只有两个来源 —— 外网 IP 自动定位
+      // 或手动选择设备城市；时区随位置自动填充，**不允许用户单独设置**。
+      //
+      // 为什么必须拦住"没选位置"：日出/日落规则没有坐标时后端 fail-closed 400，
+      // 但更糟的是如果哪天后端校验退化，存下一条没有坐标的规则会**永不触发**，
+      // 而界面上看不出来。前端在点保存时就给因果，而不是让用户撞 400。
       if (!form.trigger_sun_kind) return '请选择日出或日落'
-      if (sunLocationState(form) === 'partial') return '纬度、经度、时区必须同时填写，或全部留空以继承节点'
+      if (!form.location_source) return '请选择位置来源：自动定位或手动选择城市'
+      if (!sunLocationComplete(form)) return '请先获取当前位置或选择设备城市（坐标与时区会自动填充）'
       if (form.trigger_sun_offset_min < SUN_OFFSET_MIN || form.trigger_sun_offset_min > SUN_OFFSET_MAX) {
         return `偏移分钟必须在 ${SUN_OFFSET_MIN} ~ ${SUN_OFFSET_MAX} 之间`
       }
     }
+    return null
+  }
+
+  /** 动作集合（含参数 JSON 与风险动作必填项）。 */
+  function validateActions(): string | null {
     if (form.actions.length === 0) return '请至少添加一个动作'
     for (const [index, action] of form.actions.entries()) {
       const where = `第 ${index + 1} 个动作`
@@ -424,36 +415,74 @@ export function useRuleForm(options: {
         return `${where}：请选择通知级别`
       }
     }
+    return null
+  }
+
+  /** 附加条件（只有 sensor_threshold 会求值）。 */
+  function validateConditions(): string | null {
     // 附加条件：只有 sensor_threshold 会求值（后端 conditionsSatisfied 只在这条路径上被调用），
     // 所以也只有它需要在这里校验 —— 对一条日出规则拦下"它自己不会读的字段"，用户
     // 既不知道为什么要改、也只能先切触发器类型才能改。
-    if (form.trigger_type === 'sensor_threshold') {
-      if (!conditions.conditionsRawMode.value) {
-        // 行模式：逐行校验，**空行必须报错**。
-        // 为什么不静默丢弃："点了 + 没填完"与"我配了 3 个条件"在界面上一模一样（行还在），
-        // 丢弃后保存成功、用户以为 3 个条件都生效，实际只有 2 个 —— 这是最难发现的配置错。
-        for (const [index, row] of conditions.conditionRows.value.entries()) {
-          const where = `第 ${index + 1} 个条件`
-          if (!row.selector.trim()) return `${where}：请选择字段`
-          // el-input-number 被清空时给 null/undefined（不是 NaN），两者都必须算"没填"。
-          if (typeof row.threshold !== 'number' || !Number.isFinite(row.threshold)) {
-            return `${where}：请填写阈值`
-          }
-        }
-      } else if (form.conditions_json.trim()) {
-        // 源码模式：保持改造前的校验口径（非法 JSON / 非数组在保存前拦下）。
-        // 这段原文可能是用户手写的历史数据，"格式对不对"只能在这里判断。
-        try {
-          const parsed = JSON.parse(form.conditions_json)
-          if (!Array.isArray(parsed)) return '附加条件必须是 JSON 数组'
-        } catch {
-          return '附加条件 JSON 格式错误'
+    if (form.trigger_type !== 'sensor_threshold') return null
+    if (!conditions.conditionsRawMode.value) {
+      // 行模式：逐行校验，**空行必须报错**。
+      // 为什么不静默丢弃："点了 + 没填完"与"我配了 3 个条件"在界面上一模一样（行还在），
+      // 丢弃后保存成功、用户以为 3 个条件都生效，实际只有 2 个 —— 这是最难发现的配置错。
+      for (const [index, row] of conditions.conditionRows.value.entries()) {
+        const where = `第 ${index + 1} 个条件`
+        if (!row.selector.trim()) return `${where}：请选择字段`
+        // el-input-number 被清空时给 null/undefined（不是 NaN），两者都必须算"没填"。
+        if (typeof row.threshold !== 'number' || !Number.isFinite(row.threshold)) {
+          return `${where}：请填写阈值`
         }
       }
+    } else if (form.conditions_json.trim()) {
+      // 源码模式：保持改造前的校验口径（非法 JSON / 非数组在保存前拦下）。
+      // 这段原文可能是用户手写的历史数据，"格式对不对"只能在这里判断。
+      try {
+        const parsed = JSON.parse(form.conditions_json)
+        if (!Array.isArray(parsed)) return '附加条件必须是 JSON 数组'
+      } catch {
+        return '附加条件 JSON 格式错误'
+      }
     }
+    return null
+  }
+
+  /** 运行策略的边界值。 */
+  function validatePolicy(): string | null {
     if (form.cooldown_sec < 0 || form.cooldown_sec > 86400) return '冷却时间必须在 0-86400 秒之间'
     if (form.max_daily_exec < 0 || form.max_daily_exec > 1000) return '每日上限必须在 0-1000 之间'
     return null
+  }
+
+  function validate(): string | null {
+    return validateBasic()
+      ?? validateTriggerType()
+      ?? validateActions()
+      ?? validateConditions()
+      ?? validatePolicy()
+  }
+
+  /**
+   * 向导「下一步」：只校验当前步骤。
+   * 步骤 1 基础 / 2 触发（含条件）/ 3 动作与策略 / 4 检查（无本地校验）。
+   */
+  function validateStep(step: number): string | null {
+    switch (step) {
+      case 1: return validateBasic()
+      case 2: return validateTriggerType() ?? validateConditions()
+      case 3: return validateActions() ?? validatePolicy()
+      default: return null
+    }
+  }
+
+  /** 保存失败时定位到第一个有问题的步骤（4 = 非本地校验，如预检/风险确认）。 */
+  function firstInvalidStep(): number {
+    if (validateBasic()) return 1
+    if (validateTriggerType() || validateConditions()) return 2
+    if (validateActions() || validatePolicy()) return 3
+    return 4
   }
 
   /**
@@ -465,7 +494,6 @@ export function useRuleForm(options: {
    *   ③ 坐标只在整个"全有或全无"组合下提交，否则省略（= 继承节点）。
    */
   function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
-    syncCoordinates()
     // 行模式下提交前再同步一次（防御）：任何绕过 deep watch 的写入都不该让提交体与界面脱节。
     // 源码模式下本函数是空操作（syncConditionsJson 自己 guard），原文原样提交。
     conditions.syncConditionsJson()
@@ -503,16 +531,17 @@ export function useRuleForm(options: {
       payload.trigger_window_end = form.trigger_window_end.trim()
       payload.trigger_window_edge = form.trigger_window_edge
     } else if (form.trigger_type === 'sun_event') {
-      // 后端 fail-closed 的三组字段（方案 §4.1.1）。空串/undefined 一律**省略**，
-      // 而不是发空串 —— 后端用指针区分"未提供"（继承节点）与"提供了空值"。
+      // 三组坐标字段 + 来源元数据在 2026-11-14 后**无条件提交**：
+      // validate() 已保证来源与坐标齐全；时区由定位结果带出（这里仍 trim 一次，
+      // 避免把空白时区发给后端）。
       payload.trigger_type = 'sun_event'
       payload.trigger_sun_kind = form.trigger_sun_kind
       payload.trigger_sun_offset_min = form.trigger_sun_offset_min
-      if (sunLocationState(form) === 'override') {
-        payload.latitude = form.latitude
-        payload.longitude = form.longitude
-        payload.timezone = form.timezone?.trim()
-      }
+      payload.latitude = form.latitude
+      payload.longitude = form.longitude
+      payload.timezone = form.timezone?.trim()
+      payload.location_source = form.location_source || undefined
+      payload.location_label = form.location_label?.trim() || undefined
     }
     return payload
   }
@@ -539,10 +568,7 @@ export function useRuleForm(options: {
     loadSourceGroups,
     onSourceKindChange,
     onSourceGroupChange,
-    onTimezoneChange,
-    // 坐标 / 触发器下拉
-    sunLatitudeText,
-    sunLongitudeText,
+    // 位置 / 触发器下拉
     triggerSelection,
     isSunTrigger,
     // 编辑流程
@@ -551,6 +577,8 @@ export function useRuleForm(options: {
     onTriggerTypeChange,
     // 校验与提交体
     validate,
+    validateStep,
+    firstInvalidStep,
     buildPayload,
     // 附加条件（useRuleConditions）
     conditionRows: conditions.conditionRows,

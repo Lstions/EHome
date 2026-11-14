@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
@@ -86,10 +87,14 @@ type createAutomationRuleRequest struct {
 	TriggerSunKind      string `json:"trigger_sun_kind"`
 	TriggerSunOffsetMin *int   `json:"trigger_sun_offset_min"`
 	// Latitude/Longitude/Timezone 是**规则级覆盖** (可空, NULL=继承节点; O-3)。
-	Latitude         *float64 `json:"latitude"`
-	Longitude        *float64 `json:"longitude"`
-	Timezone         *string  `json:"timezone"`
-	ConditionsJSON   string   `json:"conditions_json"`
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+	Timezone  *string  `json:"timezone"`
+	// LocationSource/LocationLabel 由前端定位控件回填（2026-11-14）：
+	// ip = 外网 IP 自动定位，city = 手动选择城市；时区随坐标一起提交，不单独设置。
+	LocationSource   string `json:"location_source"`
+	LocationLabel    string `json:"location_label"`
+	ConditionsJSON   string `json:"conditions_json"`
 	ActionType       string   `json:"action_type"`
 	ActionDeviceID   *uint    `json:"action_device_id"`
 	ActionID         string   `json:"action_id"`
@@ -134,6 +139,8 @@ type updateAutomationRuleRequest struct {
 	Latitude            *float64 `json:"latitude"`
 	Longitude           *float64 `json:"longitude"`
 	Timezone            *string  `json:"timezone"`
+	LocationSource      *string  `json:"location_source"`
+	LocationLabel       *string  `json:"location_label"`
 	ConditionsJSON      *string  `json:"conditions_json"`
 	ActionType          *string  `json:"action_type"`
 	ActionDeviceID      *uint    `json:"action_device_id"`
@@ -300,7 +307,12 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Longitude:   req.Longitude,
 			Timezone:    req.Timezone,
 		}
-		if msg := validateSunEventRule(db, sunCand, triggerEdgeDeviceID, &first.ActionDeviceID); msg != "" {
+		if msg := validateSunEventRule(sunCand); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
+		// 坐标来源元数据（2026-11-14）：ip|city；旧客户端不传 = 空串，保持兼容。
+		if msg := validateLocationMeta(req.LocationSource, req.LocationLabel); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
@@ -331,6 +343,8 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Latitude:            req.Latitude,
 			Longitude:           req.Longitude,
 			Timezone:            req.Timezone,
+			LocationSource:      req.LocationSource,
+			LocationLabel:       req.LocationLabel,
 			ConditionsJSON:      req.ConditionsJSON,
 			// 镜像列 = seq 最小的动作 (兼容期只读投影, 方案 §3.4 D2)。
 			ActionType:       first.ActionType,
@@ -528,6 +542,20 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		if req.Timezone != nil {
 			sunTZ = req.Timezone
 		}
+		// 坐标来源元数据（2026-11-14）：未提供的字段取库中现值；只校验合并后的结果，
+		// 避免"只改 label 却因 source 为空被误拒"。
+		locSource := rule.LocationSource
+		if req.LocationSource != nil {
+			locSource = *req.LocationSource
+		}
+		locLabel := rule.LocationLabel
+		if req.LocationLabel != nil {
+			locLabel = *req.LocationLabel
+		}
+		if msg := validateLocationMeta(locSource, locLabel); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
 		updateSunCand := sunCandidates{
 			TriggerType: tt,
 			SunKind:     sunKind,
@@ -537,7 +565,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			Timezone:    sunTZ,
 		}
 		// V2/V3/V4: 接在同一条校验链里 (与创建共用同一实现)。
-		if msg := validateSunEventRule(db, updateSunCand, &teid, &first.ActionDeviceID); msg != "" {
+		if msg := validateSunEventRule(updateSunCand); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
@@ -635,6 +663,12 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		}
 		if req.Timezone != nil {
 			updates["timezone"] = *req.Timezone
+		}
+		if req.LocationSource != nil {
+			updates["location_source"] = *req.LocationSource
+		}
+		if req.LocationLabel != nil {
+			updates["location_label"] = *req.LocationLabel
 		}
 		if req.TriggerEdgeDeviceID != nil {
 			updates["trigger_edge_device_id"] = *req.TriggerEdgeDeviceID
@@ -1097,17 +1131,17 @@ type sunCandidates struct {
 	Timezone    *string
 }
 
-// validateSunEventRule 是 sun_event 的第二段校验 (方案 §4.1.1 V2/V3/V4)。
+// validateSunEventRule 是 sun_event 的第二段校验 (V2/V3/V4)。
 //
-// 为什么必须"能解析出坐标+时区"才允许保存 (O-7 fail-closed):
-// 无坐标/无时区的日出规则在运行期只能永不触发 (时钟驱动但求不出时刻), 那正是
-// 任务书 C5 描述的**静默失败**形态 —— 用户配了一条永远不会执行的规则, 而系统
-// 不告诉他。故保存时就拒绝, 让他先补节点坐标。
+// 2026-11-13 用户裁决「不需要节点位置」：日出/日落规则**必须自带**坐标与时区，
+// 不再有「留空 = 继承节点」。理由有三：
+//  1. 节点表的三列从来没有写入入口（无 API / 无 UI），"继承节点"实际不可用；
+//  2. 无坐标的规则在运行期只能永不触发（C5 型静默失败），保存期必须 fail-closed；
+//  3. 规则级坐标是**规则自身可解释**的：换节点/迁移不改变已配置的日出日落语义。
 //
-// 关于 actionDeviceID: sun_event 规则通常不配 trigger_edge_device_id, 而是把
-// 动作挂在某台设备上。节点级坐标是权威 (O-3), 所以解析节点时必须同时考虑
-// **动作设备**所在的节点 —— 否则"只配了动作设备"的合法规则会被误判为无坐标。
-func validateSunEventRule(db *gorm.DB, cand sunCandidates, triggerEdgeDeviceID *uint, actionDeviceID *uint) string {
+// 本函数是**保存期**判据；运行期由 models.ResolveRuleSunLocation 复算同一套规则，
+// 两处共用唯一实现，不允许出现第二份取值顺序。
+func validateSunEventRule(cand sunCandidates) string {
 	if cand.TriggerType != models.AutomationTriggerSunEvent {
 		return ""
 	}
@@ -1123,77 +1157,54 @@ func validateSunEventRule(db *gorm.DB, cand sunCandidates, triggerEdgeDeviceID *
 		return fmt.Sprintf("trigger_sun_offset_min 越界: %d (允许范围 [-%d, %d])",
 			cand.OffsetMin, sunMaxOffsetMinutes, sunMaxOffsetMinutes)
 	}
-	// V3: 规则级覆盖值若给出, 必须在合法范围内。
-	if cand.Latitude != nil || cand.Longitude != nil {
-		lat, lon := 0.0, 0.0
-		if cand.Latitude != nil {
-			lat = *cand.Latitude
-		}
-		if cand.Longitude != nil {
-			lon = *cand.Longitude
-		}
-		if cand.Latitude == nil || cand.Longitude == nil {
-			// 只给一半是极难排查的配置错误 (另一个值会静默继承节点, 得到
-			// "规则级纬度 + 节点级经度"这种物理上不存在的组合)。
-			if cand.Latitude == nil {
-				return "latitude 与 longitude 必须同时提供 (规则级覆盖不能只给一半): 缺 latitude"
-			}
-			return "latitude 与 longitude 必须同时提供 (规则级覆盖不能只给一半): 缺 longitude"
-		}
-		if err := models.ValidateSunCoordinates(lat, lon); err != nil {
-			return err.Error()
+	// V3: 三项必填。只给一半是极难排查的配置错误，必须说清缺哪一个。
+	if cand.Latitude == nil || cand.Longitude == nil {
+		switch {
+		case cand.Latitude == nil && cand.Longitude == nil:
+			return "sun_event 规则必须填写 latitude、longitude、timezone（节点位置已废除，规则不再继承节点）"
+		case cand.Latitude == nil:
+			return "latitude 与 longitude 必须同时提供（不能只给一半）: 缺 latitude"
+		default:
+			return "latitude 与 longitude 必须同时提供（不能只给一半）: 缺 longitude"
 		}
 	}
-	// V4: 规则级时区若给出, 必须能 LoadLocation 成功 (不得回落到 UTC)。
-	if cand.Timezone != nil {
-		if _, err := models.ValidateTimezone(*cand.Timezone); err != nil {
-			return err.Error()
-		}
+	if cand.Timezone == nil || strings.TrimSpace(*cand.Timezone) == "" {
+		return "sun_event 规则必须填写 timezone（节点位置已废除，规则不再继承节点）"
+	}
+	if err := models.ValidateSunCoordinates(*cand.Latitude, *cand.Longitude); err != nil {
+		return err.Error()
+	}
+	// V4: 时区必须能 LoadLocation 成功 (不得回落到 UTC)。
+	if _, err := models.ValidateTimezone(*cand.Timezone); err != nil {
+		return err.Error()
 	}
 
-	// V2 收口: 必须能解析出坐标与时区 (规则值 → 节点值 → 失败)。
-	node := sunNodeForDevices(db, triggerEdgeDeviceID, actionDeviceID)
+	// 收口: 走与运行期同一个解析器，防止保存期与求值期判据分叉。
 	rule := models.AutomationRule{Latitude: cand.Latitude, Longitude: cand.Longitude, Timezone: cand.Timezone}
-	if _, _, err := models.ResolveRuleSunLocation(rule, node); err != nil {
-		return "sun_event 规则必须能解析出坐标与时区 (规则级覆盖或节点级配置): " + err.Error()
+	if _, err := models.ResolveRuleSunLocation(rule); err != nil {
+		return "sun_event 规则必须能解析出坐标与时区: " + err.Error()
+	}
+	return ""
+}
+
+// validateLocationMeta 校验坐标来源元数据（2026-11-14）。
+//
+// 允许空串：2026-11-14 之前的规则没有来源概念（坐标是手填的），更新它们时
+// 未提供该字段不能因此被拒。新客户端必须给 ip 或 city。
+func validateLocationMeta(source, label string) string {
+	switch source {
+	case "", "ip", "city":
+	default:
+		return "location_source 必须是 ip 或 city"
+	}
+	if utf8.RuneCountInString(label) > 128 {
+		return "location_label 过长（最多 128 个字符）"
 	}
 	return ""
 }
 
 // sunMaxOffsetMinutes 是日出日落偏移分钟上界 (与 evaluator 的运行期判据同源)。
 const sunMaxOffsetMinutes = 720
-
-// sunNodeForDevices 找出规则对应的节点行 (触发设备优先, 否则动作设备)。
-//
-// 与 evaluator.nodeForRule 同口径: 触发设备是 sensor_threshold 的概念, sun_event
-// 规则通常只有动作设备, 故两者都要看。查不到节点时返回 nil (此时只能靠规则级
-// 覆盖值; 两者都缺则由 ResolveRuleSunLocation 报错)。
-func sunNodeForDevices(db *gorm.DB, triggerEdgeDeviceID *uint, actionDeviceID *uint) *models.Node {
-	if db == nil {
-		return nil
-	}
-	edgeDeviceID := uint(0)
-	if triggerEdgeDeviceID != nil && *triggerEdgeDeviceID != 0 {
-		edgeDeviceID = *triggerEdgeDeviceID
-	} else if actionDeviceID != nil && *actionDeviceID != 0 {
-		edgeDeviceID = *actionDeviceID
-	}
-	if edgeDeviceID == 0 {
-		return nil
-	}
-	var dev models.EdgeDevice
-	if err := db.Select("id", "node_id").First(&dev, edgeDeviceID).Error; err != nil {
-		return nil
-	}
-	if dev.NodeID == "" {
-		return nil
-	}
-	var node models.Node
-	if err := db.Where("node_id = ?", dev.NodeID).First(&node).Error; err != nil {
-		return nil
-	}
-	return &node
-}
 
 // ── 字段解析层（sensorfield）控制面接入 + 保存前预检（AU-06）──────────────────
 
@@ -1300,14 +1311,14 @@ func precheckAutomationRule(db *gorm.DB, catalog automationCatalogQuerier) gin.H
 		if req.TriggerSunOffsetMin != nil {
 			sunOffset = *req.TriggerSunOffsetMin
 		}
-		if msg := validateSunEventRule(db, sunCandidates{
+		if msg := validateSunEventRule(sunCandidates{
 			TriggerType: req.TriggerType,
 			SunKind:     req.TriggerSunKind,
 			OffsetMin:   sunOffset,
 			Latitude:    req.Latitude,
 			Longitude:   req.Longitude,
 			Timezone:    req.Timezone,
-		}, req.TriggerEdgeDeviceID, &first.ActionDeviceID); msg != "" {
+		}); msg != "" {
 			resp.BlockingErrors = append(resp.BlockingErrors, msg)
 		}
 		if msg := validateActionsCatalog(c.Request.Context(), catalog, actions); msg != "" {

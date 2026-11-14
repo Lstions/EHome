@@ -155,6 +155,11 @@ vi.mock('@/api/sourceGroup', () => ({
 vi.mock('@/api/sensorField', () => ({
   sensorFieldApi: { preview: vi.fn() },
 }))
+
+// 坐标来源（2026-11-14）：页面只消费这两个方法，打桩固定"上海"，
+// 避免单测依赖外网 IP 服务与 2678 条内置城市目录的具体内容。
+const mockedGeoApi = vi.hoisted(() => ({ resolveIP: vi.fn(), searchCities: vi.fn() }))
+vi.mock('@/api/geo', () => ({ geoApi: mockedGeoApi }))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
   return {
@@ -334,6 +339,28 @@ function actionDrafts(wrapper: Awaited<ReturnType<typeof mountPage>>): ActionDra
  *   · 目录里没有的动作（存量规则 / 手输）→ 原生 select 表达不了 allow-create 的自由输入，
  *     直接写表单模型（真实浏览器里这一步由 el-select 的 allow-create 完成）。
  */
+/**
+ * 选「手动选择城市」并在城市下拉里选一个城市（2026-11-14 位置来源）。
+ *
+ * 为什么要走真实控件而不是直接改 form：本文件的判据是"用户操作 → 提交体"，
+ * 直接写 form 会把"城市下拉有没有把坐标/时区回填进表单"这段被测逻辑绕过去。
+ */
+async function chooseCity(
+  wrapper: Awaited<ReturnType<typeof mountPage>>,
+  name = '上海',
+) {
+  // Element Plus 2.14 的 radio-button 渲染成 <button>（没有原生 radio input），
+  // 点击第二个按钮 = 选择「手动选择城市」。
+  const buttons = wrapper.find('[data-test="field-location-source"]').findAll('button.el-radio-button')
+  expect(buttons.length, '位置来源单选组没渲染').toBe(2)
+  await buttons[1].trigger('click')
+  await flushPromises()
+  const select = wrapper.find('[data-test="field-city"]')
+  expect(select.exists(), '切到手动城市后没有城市下拉').toBe(true)
+  await select.setValue(name)
+  await flushPromises()
+}
+
 async function setActionId(
   wrapper: Awaited<ReturnType<typeof mountPage>>,
   index: number,
@@ -428,6 +455,14 @@ beforeEach(() => {
   mockedEdgeApi.getList.mockResolvedValue({ total: 1, items: [{ id: 10, name: 'ESP32-01' } as never] })
   // 默认预检：无风险动作（既有用例大多走普通路径，保持它们的行为不变）
   mockedAutomationApi.precheckRule.mockResolvedValue({ risk_actions: [], blocking_errors: [], warnings: [] })
+  mockedGeoApi.searchCities.mockResolvedValue([
+    { name: '上海', pinyin: 'Shanghai', country: '中国', country_code: 'CN', latitude: 31.2222, longitude: 121.4581, timezone: 'Asia/Shanghai' },
+    { name: '北京', pinyin: 'Beijing', country: '中国', country_code: 'CN', latitude: 39.9075, longitude: 116.3972, timezone: 'Asia/Shanghai' },
+  ])
+  mockedGeoApi.resolveIP.mockResolvedValue({
+    latitude: 31.2222, longitude: 121.4581, timezone: 'Asia/Shanghai',
+    city: '上海', country: '中国', source: 'ip',
+  })
   mockedOperationApi.actions.mockResolvedValue(deviceActionsFixture as never)
   // 来源组列表为空：只影响来源组下拉候选，不改变既有用例（噪声消失见文件顶部 mock 注释）。
   mockedSourceGroupApi.list.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 })
@@ -1081,8 +1116,9 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="field-sun-offset"]').setValue('-30')
       await flushPromises()
       expect(wrapper.find('[data-test="offset-sentence"]').text()).toBe('日落前 30 分钟')
-      // 继承状态说明必须存在（节点级权威 + 规则级覆盖，O-3）
-      expect(wrapper.find('[data-test="sun-location-state"]').text()).toContain('继承节点')
+      // 2026-11-14 裁决：坐标只能来自 IP/城市，时区随位置自动填充（没有时区输入框）。
+      expect(wrapper.find('[data-test="field-location-source"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="sun-location-hint"]').text()).toContain('时区不可手动设置')
     })
 
     it('提交时映射为后端契约 trigger_type=sun_event + trigger_sun_kind（下拉代理值不得泄漏）', async () => {
@@ -1093,6 +1129,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
       await flushPromises()
       await wrapper.find('[data-test="field-sun-offset"]').setValue('-30')
+      await chooseCity(wrapper)
       await wrapper.find('[data-test="action-device-0"]').setValue('10')
       await setActionId(wrapper, 0, 'read_basic_info')
       await wrapper.find('[data-test="save-rule"]').trigger('click')
@@ -1102,9 +1139,191 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(payload.trigger_type).toBe('sun_event')
       expect(payload.trigger_sun_kind).toBe('sunset')
       expect(payload.trigger_sun_offset_min).toBe(-30)
-      // 坐标留空 ⇒ 省略（继承节点），不得发空串/null
-      expect(payload).not.toHaveProperty('latitude')
-      expect(payload).not.toHaveProperty('timezone')
+      // 2026-11-14：坐标/时区/来源全部由"城市选择"回填，无条件提交。
+      expect(payload.latitude).toBe(31.2222)
+      expect(payload.longitude).toBe(121.4581)
+      expect(payload.timezone).toBe('Asia/Shanghai')
+      expect(payload.location_source).toBe('city')
+      expect(payload.location_label).toBe('上海（中国）')
+    })
+
+    it('未选位置时保存被前端拦下（不发 precheck、不发 createRule）', async () => {
+      // 2026-11-14 裁决：坐标只能来自 IP/城市。没选位置 = 没有坐标，
+      // 前端必须在用户点保存时就给因果，而不是让请求打到后端吃 400。
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('缺位置')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await setActionId(wrapper, 0, 'read_basic_info')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.precheckRule).not.toHaveBeenCalled()
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('请先获取当前位置或选择设备城市（坐标与时区会自动填充）')
+    })
+
+    it('自动定位成功时回填坐标/时区且来源=ip', async () => {
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 10 })
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('IP 定位')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await wrapper.find('[data-test="locate-by-ip"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedGeoApi.resolveIP).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('[data-test="location-summary"]').text()).toContain('上海')
+      expect(wrapper.find('[data-test="location-summary"]').text()).toContain('Asia/Shanghai')
+
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await setActionId(wrapper, 0, 'read_basic_info')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(payload.latitude).toBe(31.2222)
+      expect(payload.longitude).toBe(121.4581)
+      expect(payload.timezone).toBe('Asia/Shanghai')
+      expect(payload.location_source).toBe('ip')
+      expect(payload.location_label).toBe('上海（中国）')
+    })
+
+    it('自动定位失败时提示改用手动城市，且不写坐标', async () => {
+      mockedGeoApi.resolveIP.mockRejectedValueOnce(new Error('all providers failed'))
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await wrapper.find('[data-test="locate-by-ip"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="ip-status"]').text()).toContain('手动选择城市')
+      expect(wrapper.find('[data-test="location-summary"]').exists()).toBe(false)
+    })
+
+    it('选择城市后坐标/时区自动填充且可保存（2026-11-14 位置来源回归）', async () => {
+      // 变异自证：删掉 TriggerFields.applyLocation 里的赋值 ⇒ 校验判"缺位置"，
+      // createRule 不被调用（或 payload 缺坐标）⇒ 本条必红。
+      mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 12 })
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-name"]').setValue('城市定位')
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await chooseCity(wrapper)
+
+      expect(wrapper.find('[data-test="location-summary"]').text()).toContain('上海')
+
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await setActionId(wrapper, 0, 'read_basic_info')
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(payload.latitude).toBe(31.2222)
+      expect(payload.longitude).toBe(121.4581)
+      expect(payload.timezone).toBe('Asia/Shanghai')
+      expect(payload.location_source).toBe('city')
+      expect(payload.location_label).toBe('上海（中国）')
+    })
+  })
+
+  // 2026-11-14：创建规则改为 4 步向导（基本信息 → 触发 → 动作策略 → 检查保存）。
+  // 这里守的是**向导行为**：分步校验、保存失败定位、摘要、移动端布局。
+  describe('创建规则向导（2026-11-14）', () => {
+    async function openWizard() {
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await flushPromises()
+      return wrapper
+    }
+
+    it('第 1 步：未填名称时「下一步」被拦下，且仍停在步骤 1', async () => {
+      const wrapper = await openWizard()
+      expect(wrapper.find('[data-test="wizard-step-1"]').classes()).toContain('is-active')
+
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('请填写规则名称')
+      expect(wrapper.find('[data-test="wizard-step-1"]').classes()).toContain('is-active')
+    })
+
+    it('第 2 步：触发器缺必填时不能进入动作页', async () => {
+      const wrapper = await openWizard()
+      await wrapper.find('[data-test="field-name"]').setValue('向导-触发校验')
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-test="wizard-step-2"]').classes()).toContain('is-active')
+
+      // 默认 sensor_threshold：没选边缘设备
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+
+      const { ElMessage } = await import('element-plus')
+      expect(ElMessage.warning).toHaveBeenCalledWith('请选择边缘设备')
+      expect(wrapper.find('[data-test="wizard-step-2"]').classes()).toContain('is-active')
+    })
+
+    it('保存时动作未填完整会自动跳到动作步骤，而不是停在当前页', async () => {
+      const wrapper = await openWizard()
+      await wrapper.find('[data-test="field-name"]').setValue('向导-缺动作')
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await chooseCity(wrapper)
+
+      await wrapper.find('[data-test="save-rule"]').trigger('click')
+      await flushPromises()
+
+      const { ElMessage } = await import('element-plus')
+      // 默认自带 1 张动作卡片（未选择目标设备）⇒ 首条动作错误而不是"至少一个动作"。
+      expect(ElMessage.warning).toHaveBeenCalledWith('第 1 个动作：请选择目标设备')
+      expect(wrapper.find('[data-test="wizard-step-3"]').classes()).toContain('is-active')
+      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
+    })
+
+    it('第 4 步摘要包含触发 / 位置 / 动作 / 策略', async () => {
+      const wrapper = await openWizard()
+      await wrapper.find('[data-test="field-name"]').setValue('向导-摘要')
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+      await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
+      await flushPromises()
+      await chooseCity(wrapper)
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await setActionId(wrapper, 0, 'read_basic_info')
+      await wrapper.find('[data-test="wizard-next"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="wizard-step-4"]').classes()).toContain('is-active')
+      const review = wrapper.find('[data-test="rule-review"]').text()
+      expect(review).toContain('日落正点')
+      expect(review).toContain('上海')
+      expect(review).toContain('read_basic_info')
+      expect(review).toContain('冷却 300s')
+    })
+
+    it('移动端：显示步骤条，footer 不再重复放「取消」', async () => {
+      viewportWidth.value = 390
+      isMobileRef.value = true
+      const wrapper = await openWizard()
+
+      expect(wrapper.find('[data-test="wizard-mobile-head"]').text()).toContain('步骤 1/4')
+      const footer = wrapper.find('.rule-wizard__footer').text()
+      expect(footer).not.toContain('取消')
+      expect(footer).toContain('下一步')
     })
   })
 
@@ -1447,6 +1666,25 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
         expect(tag.exists(), '结果列缺少 el-tag：断言会假绿').toBe(true)
         expect(tag.attributes('data-type')).toBe('warning')
       }
+    })
+  })
+
+  // 2026-11-13：时钟驱动事件的「事件时刻」列（与「时间」列是两个口径）。
+  describe('事件时刻（event_at）', () => {
+    it('有 event_at 的事件显示具体时刻，非时钟事件显示 -', async () => {
+      mockedAutomationApi.listEvents.mockResolvedValue(eventPage([
+        { ...eventFixture, id: 400, event_at: '2026-11-13T15:08:12Z' },
+        { ...eventFixture, id: 401 },
+      ]))
+      const wrapper = await mountWithSlotTable()
+      const rows = wrapper.findAll('[data-test="events-table"] tbody tr')
+      expect(rows).toHaveLength(2)
+      // 列序：时间 / 规则 / 结果 / 触发值 / **事件时刻** / 来源 / 命令 ID / 详情 / 操作
+      const cell = (rowIndex: number) => rows[rowIndex].findAll('td')[4].text()
+      expect(cell(0)).toContain('2026')
+      expect(cell(0)).not.toBe('-')
+      // 传感器阈值 / 手动触发没有时钟语义 ⇒ 列必须留白，不得用 triggered_at 冒充
+      expect(cell(1)).toBe('-')
     })
   })
 
@@ -1877,30 +2115,19 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
     })
 
-    it('时区是下拉：首项「继承节点」= 空串，候选来自浏览器 IANA 全表', async () => {
+    it('位置来源只有「自动定位 / 手动城市」，时区没有输入框（2026-11-14 裁决）', async () => {
       const wrapper = await mountPage()
       await wrapper.find('[data-test="create-rule"]').trigger('click')
       await wrapper.find('[data-test="field-trigger-type"]').setValue('sunset')
       await flushPromises()
 
-      const select = wrapper.find('[data-test="field-timezone"]')
-      expect(select.exists(), '时区仍是文本框：手输 Asia/Shangai 会被后端 fail-closed').toBe(true)
-      const options = select.findAll('option')
-      // 空值必须是**显式的一项**（"继承节点"是有语义的选择，不是"没填"）
-      const inherit = options.filter(option => option.attributes('value') === '' && option.text().includes('继承节点'))
-      expect(inherit.length, '下拉里没有「继承节点」空值项').toBeGreaterThan(0)
-      // 候选是真 IANA 全表（≥2 个带 / 的名字），不是几个写死的近似值
-      expect(options.filter(option => String(option.attributes('value') ?? '').includes('/')).length).toBeGreaterThan(1)
-      // 原有语义必须保留：留空 = 继承节点，节点也没配则后端拒绝保存
-      expect(wrapper.find('[data-test="timezone-hint"]').text()).toContain('留空 = 继承节点')
+      const buttons = wrapper.find('[data-test="field-location-source"]').findAll('button.el-radio-button')
+      expect(buttons.map(b => b.text())).toEqual(['自动定位（外网 IP）', '手动选择城市'])
 
-      await select.setValue('Asia/Shanghai')
-      await flushPromises()
-      expect(formState(wrapper).timezone).toBe('Asia/Shanghai')
-      await select.setValue('')
-      await flushPromises()
-      // clear 可能给 undefined/null，模型必须收敛成空串（继承节点的唯一表达）
-      expect(formState(wrapper).timezone, '选「继承节点」应得到空串（不是 undefined）').toBe('')
+      expect(wrapper.find('[data-test="field-timezone"]').exists(), '时区不应再有输入框').toBe(false)
+      expect(wrapper.find('[data-test="field-latitude"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="field-longitude"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="sun-location-hint"]').text()).toContain('时区不可手动设置')
     })
 
     it('openEdit 把存量 "8:00" 规范为 "08:00" 并留下修复提示', async () => {

@@ -67,142 +67,247 @@
          为什么保存编排（precheck → 诊断 → 风控清单 → 提交）不搬：它是本页唯一的
          "能不能落库"判定入口，诊断状态、warnings 内容指纹与风险勾选状态必须在同一作用域，
          否则"已确认的那一份 warnings"会跨对话框/跨规则被复用（见 resetSaveDiagnostics）。 -->
-    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑规则' : '创建规则'" width="640px" data-test="rule-dialog">
-      <el-form :model="form" label-width="110px" data-test="rule-form">
-        <el-form-item label="名称" required>
-          <el-input v-model="form.name" placeholder="如：高温自动开窗" data-test="field-name" />
-        </el-form-item>
+    <el-dialog
+      v-model="dialogVisible"
+      :title="editingId ? '编辑规则' : '创建规则'"
+      :width="isMobile ? '100%' : '980px'"
+      :fullscreen="isMobile"
+      :top="isMobile ? '0' : '5vh'"
+      class="rule-wizard-dialog"
+      data-test="rule-dialog"
+    >
+      <div class="rule-wizard" :class="{ 'is-mobile': isMobile }">
+        <!-- PC：左侧步骤导航（可点击回看/跳转，不阻断；保存时统一校验全部步骤）。 -->
+        <nav v-if="!isMobile" class="rule-wizard__rail" aria-label="创建规则步骤">
+          <button
+            v-for="step in WIZARD_STEPS"
+            :key="step.id"
+            type="button"
+            class="rule-wizard__step"
+            :class="{ 'is-active': wizardStep === step.id, 'is-done': wizardStep > step.id }"
+            :aria-current="wizardStep === step.id ? 'step' : undefined"
+            :data-test="`wizard-step-${step.id}`"
+            @click="goStep(step.id)"
+          >
+            <span class="rule-wizard__num">{{ wizardStep > step.id ? '✓' : step.id }}</span>
+            <span class="rule-wizard__meta">
+              <b>{{ step.title }}</b>
+              <small>{{ step.desc }}</small>
+            </span>
+          </button>
+        </nav>
 
-        <!-- 触发器字段组（选择器契约 / 时间窗 HH:mm / 日出日落坐标时区 / 附加条件 / 试算） -->
-        <TriggerFields
-          v-model:trigger-selection="triggerSelection"
-          v-model:sun-latitude-text="sunLatitudeText"
-          v-model:sun-longitude-text="sunLongitudeText"
-          :form="form"
-          :devices="devices"
-          :source-group-options="sourceGroupOptions"
-          :selected-source-group="selectedSourceGroup"
-          :threshold-unit="thresholdUnit"
-          :threshold-precision="thresholdPrecision"
-          :window-start-fix-note="windowStartFixNote"
-          :window-end-fix-note="windowEndFixNote"
-          :is-overnight-window="isOvernightWindow"
-          :is-sun-trigger="isSunTrigger"
-          :condition-rows="conditionRows"
-          :conditions-raw-mode="conditionsRawMode"
-          :conditions-raw-invalid="conditionsRawInvalid"
-          :preview-loading="previewLoading"
-          :preview-disabled="previewDisabled"
-          :preview-hint="previewHint"
-          :preview-result="previewResult"
-          @trigger-type-change="onTriggerTypeChange"
-          @sensor-field-change="onSensorFieldChange"
-          @source-kind-change="onSourceKindChange"
-          @source-group-change="onSourceGroupChange"
-          @timezone-change="onTimezoneChange"
-          @preview="runPreview"
-          @add-condition="addCondition"
-          @remove-condition="removeCondition"
-          @toggle-conditions-raw="toggleConditionsRaw"
-        />
+        <div class="rule-wizard__main">
+          <!-- 移动端：顶部步骤条（全屏对话框里没有左侧栏的位置）。 -->
+          <div v-if="isMobile" class="rule-wizard__mobile-head" data-test="wizard-mobile-head">
+            <div class="rule-wizard__mobile-title">
+              <span>步骤 {{ wizardStep }}/{{ WIZARD_STEPS.length }}</span>
+              <b>{{ currentStepTitle }}</b>
+            </div>
+            <el-progress :percentage="wizardStep * 25" :show-text="false" :stroke-width="6" />
+          </div>
 
-        <!-- 多动作卡片（R7）：顺序即执行顺序，风险徽标读后端下发的 requires_confirmation -->
-        <ActionCards
-          :actions="form.actions"
-          :devices="devices"
-          :risky-count="riskyActions.length"
-          :helpers="cardHelpers"
-          @add="addAction"
-          @remove="removeAction"
-          @move="moveCard"
-          @type-change="onCardTypeChange"
-          @device-change="onCardDeviceChange"
-          @action-id-change="onCardActionIdChange"
-          @open-params="openParams"
-          @open-json-params="openJsonParams"
-        />
+          <el-form
+            :model="form"
+            :label-width="isMobile ? '92px' : '104px'"
+            :label-position="isMobile ? 'top' : 'right'"
+            class="rule-wizard__form"
+          >
+            <div class="rule-wizard__scroll" data-test="rule-form">
+              <!-- ① 基本信息 -->
+              <section v-show="wizardStep === 1" class="rule-wizard__panel" data-test="wizard-panel-basic">
+                <header class="rule-wizard__panel-head">
+                  <h3>基本信息</h3>
+                  <p>先给规则起个名字；保存后名称会在列表与触发历史里回链。</p>
+                </header>
+                <el-form-item label="名称" required>
+                  <el-input v-model="form.name" placeholder="如：高温自动开窗" data-test="field-name" />
+                </el-form-item>
+                <el-form-item label="启用">
+                  <el-switch v-model="form.enabled" data-test="field-enabled" />
+                  <span class="hint">关闭后规则保留配置但不会触发</span>
+                </el-form-item>
+              </section>
 
-        <!-- R9: 「需人工确认」是**规则级**开关（触发后是否要人确认），与动作级风险徽标
-             语义不同，二者并存不合并（设计稿 §9 O-3）。
-             提示文案把后端 V7 的组合条件说清楚：风险动作 + 关掉本开关时，保存必须
-             同时带 risk_acknowledged（即下面的风险清单弹窗逐项确认）。 -->
-        <el-form-item label="需人工确认">
-          <el-switch v-model="form.require_confirmed" data-test="field-require-confirmed" />
-          <span class="hint">
-            开启则规则触发后只生成「待确认」通知，人工确认后才下发；关闭则触发即执行
-          </span>
-        </el-form-item>
-        <div v-if="!form.require_confirmed && riskyActions.length" class="ack-hint" data-test="ack-hint">
-          本规则含 {{ riskyActions.length }} 个风险动作且已关闭人工确认：保存时会要求逐项勾选确认
-          （后端按规则级授权放行，授权在动作集合变化后自动失效并需重新确认）。
+              <!-- ② 触发条件：复用既有字段组（含附加条件与试算），语义零改动 -->
+              <section v-show="wizardStep === 2" class="rule-wizard__panel" data-test="wizard-panel-trigger">
+                <header class="rule-wizard__panel-head">
+                  <h3>触发条件</h3>
+                  <p>选择什么情况下触发；日出/日落规则的坐标来自「外网 IP」或「手动城市」。</p>
+                </header>
+                <TriggerFields
+                  v-model:trigger-selection="triggerSelection"
+                  :form="form"
+                  :devices="devices"
+                  :source-group-options="sourceGroupOptions"
+                  :selected-source-group="selectedSourceGroup"
+                  :threshold-unit="thresholdUnit"
+                  :threshold-precision="thresholdPrecision"
+                  :window-start-fix-note="windowStartFixNote"
+                  :window-end-fix-note="windowEndFixNote"
+                  :is-overnight-window="isOvernightWindow"
+                  :is-sun-trigger="isSunTrigger"
+                  :condition-rows="conditionRows"
+                  :conditions-raw-mode="conditionsRawMode"
+                  :conditions-raw-invalid="conditionsRawInvalid"
+                  :preview-loading="previewLoading"
+                  :preview-disabled="previewDisabled"
+                  :preview-hint="previewHint"
+                  :preview-result="previewResult"
+                  @trigger-type-change="onTriggerTypeChange"
+                  @sensor-field-change="onSensorFieldChange"
+                  @source-kind-change="onSourceKindChange"
+                  @source-group-change="onSourceGroupChange"
+                  @preview="runPreview"
+                  @add-condition="addCondition"
+                  @remove-condition="removeCondition"
+                  @toggle-conditions-raw="toggleConditionsRaw"
+                />
+              </section>
+
+              <!-- ③ 动作与运行策略 -->
+              <section v-show="wizardStep === 3" class="rule-wizard__panel" data-test="wizard-panel-actions">
+                <header class="rule-wizard__panel-head">
+                  <h3>动作与运行策略</h3>
+                  <p>按顺序添加要执行的动作，并决定触发后是直接执行还是等待人工确认。</p>
+                </header>
+                <ActionCards
+                  :actions="form.actions"
+                  :devices="devices"
+                  :risky-count="riskyActions.length"
+                  :helpers="cardHelpers"
+                  @add="addAction"
+                  @remove="removeAction"
+                  @move="moveCard"
+                  @type-change="onCardTypeChange"
+                  @device-change="onCardDeviceChange"
+                  @action-id-change="onCardActionIdChange"
+                  @open-params="openParams"
+                  @open-json-params="openJsonParams"
+                />
+
+                <el-form-item label="需人工确认">
+                  <el-switch v-model="form.require_confirmed" data-test="field-require-confirmed" />
+                  <span class="hint">
+                    开启则规则触发后只生成「待确认」通知，人工确认后才下发；关闭则触发即执行
+                  </span>
+                </el-form-item>
+                <div v-if="!form.require_confirmed && riskyActions.length" class="ack-hint" data-test="ack-hint">
+                  本规则含 {{ riskyActions.length }} 个风险动作且已关闭人工确认：保存时会要求逐项勾选确认
+                  （后端按规则级授权放行，授权在动作集合变化后自动失效并需重新确认）。
+                </div>
+
+                <el-form-item label="冷却时间">
+                  <div class="number-field">
+                    <div class="number-field__main">
+                      <el-input-number v-model="form.cooldown_sec" :min="0" :max="86400" :step="60" data-test="field-cooldown" />
+                      <span class="hint">秒，0-86400</span>
+                    </div>
+                    <div class="chip-row" data-test="cooldown-chips">
+                      <button
+                        v-for="chip in COOLDOWN_CHIPS"
+                        :key="chip.value"
+                        type="button"
+                        class="chip"
+                        :class="{ 'is-active': form.cooldown_sec === chip.value }"
+                        :aria-pressed="form.cooldown_sec === chip.value ? 'true' : 'false'"
+                        :aria-label="`冷却时间设为 ${chip.text}`"
+                        :data-test="`cooldown-chip-${chip.value}`"
+                        @click="form.cooldown_sec = chip.value"
+                      >{{ chip.label }}</button>
+                    </div>
+                  </div>
+                </el-form-item>
+                <el-form-item label="每日上限">
+                  <div class="number-field">
+                    <div class="number-field__main">
+                      <el-input-number v-model="form.max_daily_exec" :min="0" :max="1000" data-test="field-max-daily" />
+                      <span class="hint">0 = 不限，最大 1000</span>
+                    </div>
+                    <div class="chip-row" data-test="daily-limit-chips">
+                      <button
+                        v-for="chip in DAILY_LIMIT_CHIPS"
+                        :key="chip.value"
+                        type="button"
+                        class="chip"
+                        :class="{ 'is-active': form.max_daily_exec === chip.value }"
+                        :aria-pressed="form.max_daily_exec === chip.value ? 'true' : 'false'"
+                        :aria-label="`每日上限设为 ${chip.text}`"
+                        :data-test="`daily-limit-chip-${chip.value}`"
+                        @click="form.max_daily_exec = chip.value"
+                      >{{ chip.label }}</button>
+                    </div>
+                  </div>
+                </el-form-item>
+              </section>
+
+              <!-- ④ 检查与保存：摘要 + 后端预检诊断（诊断状态仍由本页 onSave 持有） -->
+              <section v-show="wizardStep === 4" class="rule-wizard__panel" data-test="wizard-panel-review">
+                <header class="rule-wizard__panel-head">
+                  <h3>检查与保存</h3>
+                  <p>核对下面四项；保存时还会执行后端预检（选择器解析、风险动作等）。</p>
+                </header>
+                <dl class="rule-review" data-test="rule-review">
+                  <div class="rule-review__item">
+                    <dt>触发</dt>
+                    <dd data-test="review-trigger">{{ reviewTrigger }}</dd>
+                  </div>
+                  <div v-if="form.trigger_type === 'sun_event'" class="rule-review__item">
+                    <dt>位置</dt>
+                    <dd data-test="review-location">{{ reviewLocation }}</dd>
+                  </div>
+                  <div class="rule-review__item">
+                    <dt>动作</dt>
+                    <dd data-test="review-actions">{{ reviewActions }}</dd>
+                  </div>
+                  <div class="rule-review__item">
+                    <dt>策略</dt>
+                    <dd data-test="review-policy">{{ reviewPolicy }}</dd>
+                  </div>
+                </dl>
+                <SaveDiagnostics :blocking-errors="saveBlockingErrors" :warnings="saveWarnings" />
+              </section>
+            </div>
+          </el-form>
         </div>
+      </div>
 
-        <!-- 冷却 / 每日上限（文档 §4.5「数字框旁加快捷 chips」）。
-             chips 只是把值写回 v-model（不改控件类型）：现场最常用的就是这几个档位，
-             手敲 300/1800 时要先换算，换算错就是"冷却比想象中短/长一个量级"。
-             为什么不换成下拉：0-86400 的连续值域里，任何枚举都会缺档，数字框才是兜底。 -->
-        <el-form-item label="冷却时间">
-          <div class="number-field">
-            <div class="number-field__main">
-              <el-input-number v-model="form.cooldown_sec" :min="0" :max="86400" :step="60" data-test="field-cooldown" />
-              <span class="hint">秒，0-86400</span>
-            </div>
-            <div class="chip-row" data-test="cooldown-chips">
-              <button
-                v-for="chip in COOLDOWN_CHIPS"
-                :key="chip.value"
-                type="button"
-                class="chip"
-                :class="{ 'is-active': form.cooldown_sec === chip.value }"
-                :aria-pressed="form.cooldown_sec === chip.value ? 'true' : 'false'"
-                :aria-label="`冷却时间设为 ${chip.text}`"
-                :data-test="`cooldown-chip-${chip.value}`"
-                @click="form.cooldown_sec = chip.value"
-              >{{ chip.label }}</button>
-            </div>
-          </div>
-        </el-form-item>
-        <el-form-item label="每日上限">
-          <div class="number-field">
-            <div class="number-field__main">
-              <el-input-number v-model="form.max_daily_exec" :min="0" :max="1000" data-test="field-max-daily" />
-              <span class="hint">0 = 不限，最大 1000</span>
-            </div>
-            <div class="chip-row" data-test="daily-limit-chips">
-              <button
-                v-for="chip in DAILY_LIMIT_CHIPS"
-                :key="chip.value"
-                type="button"
-                class="chip"
-                :class="{ 'is-active': form.max_daily_exec === chip.value }"
-                :aria-pressed="form.max_daily_exec === chip.value ? 'true' : 'false'"
-                :aria-label="`每日上限设为 ${chip.text}`"
-                :data-test="`daily-limit-chip-${chip.value}`"
-                @click="form.max_daily_exec = chip.value"
-              >{{ chip.label }}</button>
-            </div>
-          </div>
-        </el-form-item>
-        <el-form-item label="启用">
-          <el-switch v-model="form.enabled" data-test="field-enabled" />
-        </el-form-item>
-      </el-form>
-      <!-- 保存前诊断（§3.3）：位置**紧跟 footer 之上**，清单与二次确认语义由本页的保存流程持有，
-           子组件只渲染（见 components/SaveDiagnostics.vue）。 -->
-      <SaveDiagnostics :blocking-errors="saveBlockingErrors" :warnings="saveWarnings" />
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <!-- data-acked 是"风险提示已展示过一次"的可测标记（既有测试仍用 data-test="save-rule"，
-             故不换 data-test 值，只加语义属性）。 -->
-        <el-button
-          type="primary"
-          :loading="saving"
-          data-test="save-rule"
-          :data-acked="warningsAcknowledged ? 'true' : 'false'"
-          @click="onSave"
-        >
-          {{ warningsAcknowledged ? '我已了解，仍然保存' : '保存' }}
-        </el-button>
+        <div class="rule-wizard__footer">
+          <!-- 移动端用右上角 X 关闭（全屏弹窗里再放一个"取消"会把底部按钮挤成三层）。 -->
+          <el-button v-if="!isMobile" @click="dialogVisible = false">取消</el-button>
+          <div class="rule-wizard__footer-right">
+            <el-button
+              v-if="wizardStep > 1"
+              data-test="wizard-prev"
+              :style="isMobile ? { minHeight: '44px' } : undefined"
+              @click="goPrev"
+            >上一步</el-button>
+            <el-button
+              v-if="wizardStep < WIZARD_STEPS.length"
+              type="primary"
+              data-test="wizard-next"
+              :style="isMobile ? { minHeight: '44px' } : undefined"
+              @click="goNext"
+            >
+              下一步
+            </el-button>
+            <!-- 保存按钮在每一步都可用（既有的保存链路/测试契约），非最后一步用次要样式，
+                 主操作仍是「下一步」；最后一步变主按钮。 -->
+            <el-button
+              v-if="!isMobile || wizardStep === WIZARD_STEPS.length"
+              :type="wizardStep === WIZARD_STEPS.length ? 'primary' : 'default'"
+              :plain="wizardStep !== WIZARD_STEPS.length"
+              :loading="saving"
+              :style="isMobile ? { minHeight: '44px' } : undefined"
+              data-test="save-rule"
+              :data-acked="warningsAcknowledged ? 'true' : 'false'"
+              @click="onSave"
+            >
+              {{ warningsAcknowledged ? '我已了解，仍然保存' : '保存' }}
+            </el-button>
+          </div>
+        </div>
       </template>
     </el-dialog>
 
@@ -336,7 +441,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -365,7 +470,8 @@ import { logger } from '@/utils/logger'
 //   · ./components/*：规则区、触发历史区、命令执行详情。数据加载与动作（fetchRules /
 //     fetchEvents / onToggle / onDelete / onTrigger / onConfirmEvent / goCommand / WS 订阅）
 //     全部留在本页，子组件只接 props + 抛语义化事件。
-import { resultText } from './automationFormat'
+import { comparators, resultText } from './automationFormat'
+import { sunLocationComplete, sunOffsetText } from './sunEvent'
 import { paramsSummary, riskBadge } from './actionList'
 // ── 表单区拆分（2026-11-12 第二轮，纯搬移）────────────────────────────────────
 //   · ./composables/useRuleForm       表单模型 / 字段组状态 / 校验 / 提交体（内含
@@ -529,11 +635,8 @@ const {
   windowStartFixNote,
   windowEndFixNote,
   isOvernightWindow,
-  sunLatitudeText,
-  sunLongitudeText,
   triggerSelection,
   isSunTrigger,
-  onTimezoneChange,
   sourceGroupOptions,
   selectedSourceGroup,
   loadSourceGroups,
@@ -543,6 +646,8 @@ const {
   openEdit,
   onTriggerTypeChange,
   validate,
+  validateStep,
+  firstInvalidStep,
   buildPayload,
   conditionRows,
   conditionsRawMode,
@@ -585,6 +690,101 @@ const {
   applyFormParams,
   switchParamsToForm,
 } = useRuleActions({ form, devices, catalog })
+
+// ── 创建规则向导（2026-11-14 重设计）────────────────────────────────────────
+//
+// 为什么改成 4 步：原对话框把 20+ 个控件塞进一个 640px 的滚动区，PC 上要滚 2~3 屏，
+// 移动端弹窗只有半个屏幕高；用户看不到"还差什么"，保存失败时也不知道该往上还是往下找。
+// 分步后每一步只有一个问题域，保存失败可以把用户直接带回出错的步骤。
+//
+// 关键取舍：**所有步骤的 DOM 都保留**（v-show，而非 v-if）。原因有两个：
+//   1. 组件内已有大量按 data-test 直接操作的测试；v-if 会让非当前步骤的控件消失，
+//      把"业务校验"测试变成"点不到控件"的假失败；
+//   2. 用户从第 3 步点左侧步骤回第 1 步时，表单状态与滚动位置都在，不需要重新挂载。
+const WIZARD_STEPS = [
+  { id: 1, title: '基本信息', desc: '名称与启用状态' },
+  { id: 2, title: '触发条件', desc: '传感器 / 时间窗 / 日出日落' },
+  { id: 3, title: '动作与策略', desc: '执行动作、冷却与人工确认' },
+  { id: 4, title: '检查与保存', desc: '核对摘要并提交' },
+] as const
+
+const wizardStep = ref(1)
+const currentStepTitle = computed(() => WIZARD_STEPS[wizardStep.value - 1]?.title ?? '')
+
+function goStep(step: number) {
+  // 允许回看/跳到任意步骤：向导不是线性门禁，真正的校验在「下一步」与「保存」上。
+  wizardStep.value = Math.min(WIZARD_STEPS.length, Math.max(1, step))
+}
+function goPrev() {
+  if (wizardStep.value > 1) wizardStep.value--
+}
+function goNext() {
+  const msg = validateStep(wizardStep.value)
+  if (msg) {
+    ElMessage.warning(msg)
+    return
+  }
+  if (wizardStep.value < WIZARD_STEPS.length) wizardStep.value++
+}
+
+// 打开对话框（新建/编辑）必须回到第 1 步：否则会沿用上一条规则停留的步骤，
+// 用户看到的是"编辑对话框打开却停在检查页"。
+watch(dialogVisible, (visible) => {
+  if (visible) wizardStep.value = 1
+})
+
+/** 触发摘要用的设备名（规则可能只存了 id；设备列表尚未加载时退回 #id）。 */
+function reviewDeviceName(): string {
+  const id = form.trigger_edge_device_id
+  if (!id) return '未选择设备'
+  return devices.value.find(d => d.id === id)?.name ?? `设备 #${id}`
+}
+
+const reviewTrigger = computed(() => {
+  if (form.trigger_type === 'sensor_threshold') {
+    const source = form.source_kind === 'source_group'
+      ? (selectedSourceGroup.value?.name ?? '未选择来源组')
+      : reviewDeviceName()
+    const cmp = comparators.find(c => c.value === form.trigger_comparator)?.label ?? form.trigger_comparator
+    const unit = thresholdUnit.value ? ` ${thresholdUnit.value}` : ''
+    const hold = form.trigger_duration_sec > 0 ? `，持续 ${form.trigger_duration_sec}s` : ''
+    return `${source} · ${form.trigger_sensor_name || '未选择字段'} ${cmp} ${form.trigger_threshold}${unit}${hold}`
+  }
+  if (form.trigger_type === 'time_window') {
+    const edge = form.trigger_window_edge === 'enter'
+      ? '进入窗口时'
+      : form.trigger_window_edge === 'exit' ? '离开窗口时' : '窗口内持续'
+    return `每天 ${form.trigger_window_start || '--:--'} ~ ${form.trigger_window_end || '--:--'}（${edge}）`
+  }
+  if (form.trigger_type === 'sun_event') {
+    return sunOffsetText(form.trigger_sun_kind, form.trigger_sun_offset_min)
+  }
+  return '事件驱动（占位）'
+})
+
+const reviewLocation = computed(() => {
+  if (!sunLocationComplete(form)) return '尚未选择位置'
+  return `${form.location_label || '已选择位置'} · ${form.latitude}, ${form.longitude} · ${form.timezone}`
+})
+
+const reviewActions = computed(() => {
+  if (form.actions.length === 0) return '尚未添加动作'
+  const items = form.actions.map((action, index) => {
+    const label = action.action_type === 'device_action'
+      ? (action.action_id || '未选择动作')
+      : `通知（${action.action_level || '未选级别'}）`
+    return `${index + 1}. ${label}`
+  })
+  return `共 ${form.actions.length} 个：${items.join('；')}`
+})
+
+const reviewPolicy = computed(() => {
+  const parts = [form.require_confirmed ? '触发后需人工确认' : '触发即执行']
+  parts.push(form.cooldown_sec > 0 ? `冷却 ${form.cooldown_sec}s` : '不冷却')
+  parts.push(form.max_daily_exec > 0 ? `每日最多 ${form.max_daily_exec} 次` : '每日不限')
+  parts.push(form.enabled ? '已启用' : '未启用')
+  return parts.join(' · ')
+})
 
 /**
  * 冷却 / 每日上限的快捷值（文档 §4.5）。
@@ -731,9 +931,13 @@ async function onSave() {
   saveWarnings.value = []
   const err = validate()
   if (err) {
+    // 向导：把用户带到第一个有问题的步骤，而不是只在 toast 里说一句。
+    wizardStep.value = firstInvalidStep()
     ElMessage.warning(err)
     return
   }
+  // 校验通过 → 进入「检查与保存」：用户能在预检/风险弹窗旁看到完整摘要与诊断。
+  wizardStep.value = WIZARD_STEPS.length
   saving.value = true
   try {
     const payload = buildPayload()
@@ -1204,5 +1408,127 @@ onUnmounted(() => {
   :deep(.el-dialog__footer) { display: flex; flex-wrap: wrap; gap: 8px; }
   :deep(.el-dialog__footer .el-button) { flex: 1 1 auto; min-height: 44px; }
   .ack-progress { flex: 1 1 100%; margin: 0 0 4px; }
+}
+
+/* ============================================================================
+   创建规则向导（2026-11-14 重设计）
+   —— 对话框被 teleport 到 body，scoped 的 :deep 选不中，故用 :global 挂类。
+   PC：左侧步骤栏 + 右侧内容；移动端：全屏 + 顶部步骤条 + 单列。
+   ========================================================================== */
+:global(.rule-wizard-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  margin-bottom: 0;
+}
+:global(.rule-wizard-dialog .el-dialog__body) {
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+:global(.rule-wizard-dialog.is-fullscreen) {
+  /* theme.css 有全局 .el-dialog { max-width: 92vw }，全屏时必须显式解除，
+     否则移动端会变成「左右各留 15px 的全屏」——高度对、宽度不对。 */
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  height: 100vh;
+  max-height: 100vh;
+}
+
+.rule-wizard { display: flex; height: 100%; min-height: 520px; }
+.rule-wizard__rail {
+  width: 232px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 12px;
+  border-right: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-blank);
+}
+.rule-wizard__step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--el-text-color-primary);
+  transition: background-color .15s ease;
+}
+.rule-wizard__step:hover { background: var(--el-fill-color-light); }
+.rule-wizard__step.is-active { background: var(--el-color-primary-light-9); }
+.rule-wizard__step.is-active .rule-wizard__num {
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  color: var(--text-on-fill);
+}
+.rule-wizard__step.is-done .rule-wizard__num {
+  border-color: var(--el-color-success);
+  color: var(--el-color-success);
+}
+.rule-wizard__num {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--el-border-color);
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.rule-wizard__meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rule-wizard__meta b { font-size: 14px; }
+.rule-wizard__meta small { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.4; }
+.rule-wizard__main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.rule-wizard__form { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rule-wizard__scroll { flex: 1; overflow-y: auto; padding: 22px 26px; max-height: 62vh; }
+.rule-wizard__panel-head { margin-bottom: 18px; }
+.rule-wizard__panel-head h3 { margin: 0 0 4px; font-size: 16px; }
+.rule-wizard__panel-head p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--el-text-color-secondary); }
+.rule-review { display: grid; gap: 10px; margin: 0 0 16px; }
+.rule-review__item {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light);
+}
+.rule-review dt { font-size: 12px; color: var(--el-text-color-secondary); }
+.rule-review dd { margin: 0; font-size: 13px; line-height: 1.55; word-break: break-word; }
+.rule-wizard__footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.rule-wizard__footer-right { display: flex; align-items: center; gap: 8px; }
+.rule-wizard__mobile-head { padding: 14px 16px 2px; }
+.rule-wizard__mobile-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.rule-wizard__mobile-title b { font-size: 15px; color: var(--el-text-color-primary); }
+
+@media (max-width: 768px) {
+  .rule-wizard { min-height: 100%; }
+  .rule-wizard__scroll { padding: 10px 16px 24px; max-height: none; }
+  .rule-wizard__panel-head { margin-bottom: 12px; }
+  .rule-wizard__footer { justify-content: flex-end; }
+  .rule-wizard__footer-right { display: flex; width: 100%; gap: 8px; }
+  .rule-wizard__footer-right .el-button { flex: 1; margin-left: 0; min-height: 44px; }
+  /* 弹窗被 teleport 到 body，scoped 选择器在个别 Element Plus 版本下匹配不到
+     子组件根节点；这里用 :global 明确提升优先级，保证 44px 触控目标真的生效。 */
+  :global(.rule-wizard-dialog) .rule-wizard__footer .el-button { min-height: 44px; }
+  .rule-review__item { grid-template-columns: 48px 1fr; padding: 10px 12px; }
 }
 </style>

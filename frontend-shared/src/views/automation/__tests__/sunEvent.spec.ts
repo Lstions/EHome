@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   SUN_KIND_OPTIONS, SUN_OFFSET_MAX, SUN_OFFSET_MIN,
-  sunKindLabel, sunOffsetText, sunLocationState, sunLocationText,
+  sunKindLabel, sunOffsetText, sunLocationComplete,
 } from '../sunEvent'
 
 /**
@@ -46,35 +46,29 @@ describe('F-1 日出/日落触发器', () => {
 })
 
 /**
- * F-1 的坐标/时区继承状态（用户裁决 O-3: 节点级权威 + 规则级可空覆盖）。
+ * F-1 坐标/时区**必填**判据（2026-11-13 用户裁决「不需要节点位置」）。
  *
- * 反向验证：把 filled() 改成真值判断（`if (!value) return false`）→ "纬度 0" 会被
- * 判成未填 → 本用例红。这正是后端 sun_location.go 用指针而非零值的原因
+ * 反向验证：把 Number.isFinite 换成真值判断（`if (!value) return false`）→ "纬度 0"
+ * 会被判成未填 → 本用例红。这正是后端 sun_location.go 用指针而非零值的原因
  * （0 是几内亚湾的合法坐标）。
  */
-describe('F-1 坐标/时区继承状态', () => {
-  it('三项全空 = 继承节点', () => {
-    expect(sunLocationState({})).toBe('inherit')
-    expect(sunLocationState({ latitude: null, longitude: null, timezone: '' })).toBe('inherit')
+describe('F-1 坐标/时区必填', () => {
+  it('三项齐全 = 完整（含纬度/经度 0）', () => {
+    expect(sunLocationComplete({ latitude: 31.23, longitude: 121.47, timezone: 'Asia/Shanghai' })).toBe(true)
+    expect(sunLocationComplete({ latitude: 0, longitude: 0, timezone: 'UTC' })).toBe(true)
   })
 
-  it('三项全填 = 规则级覆盖', () => {
-    expect(sunLocationState({ latitude: 31.23, longitude: 121.47, timezone: 'Asia/Shanghai' })).toBe('override')
+  it('缺任一项都不完整（不再有"留空 = 继承节点"）', () => {
+    expect(sunLocationComplete({})).toBe(false)
+    expect(sunLocationComplete({ latitude: null, longitude: null, timezone: '' })).toBe(false)
+    expect(sunLocationComplete({ latitude: 31.23, timezone: 'Asia/Shanghai' })).toBe(false)
+    expect(sunLocationComplete({ longitude: 121.47, timezone: 'Asia/Shanghai' })).toBe(false)
+    expect(sunLocationComplete({ latitude: 31.23, longitude: 121.47 })).toBe(false)
+    expect(sunLocationComplete({ latitude: 31.23, longitude: 121.47, timezone: '   ' })).toBe(false)
   })
 
-  it('纬度 0 是合法坐标，不得被当成"未填"', () => {
-    expect(sunLocationState({ latitude: 0, longitude: 0, timezone: 'UTC' })).toBe('override')
-  })
-
-  it('部分填写 = partial（后端 V2 必拒，前端提前拦）', () => {
-    expect(sunLocationState({ latitude: 31.23 })).toBe('partial')
-    expect(sunLocationState({ latitude: 31.23, longitude: 121.47 })).toBe('partial')
-  })
-
-  it('继承状态文案说明了 fail-closed 后果，不留白', () => {
-    expect(sunLocationText({})).toContain('继承节点')
-    expect(sunLocationText({})).toContain('拒绝保存')
-    expect(sunLocationText({ latitude: 1 })).toContain('必须同时填写')
-    expect(sunLocationText({ latitude: 1, longitude: 2, timezone: 'UTC' })).toContain('不继承节点')
+  it('非有限数字视为未填（NaN/Infinity 不得混进提交体）', () => {
+    expect(sunLocationComplete({ latitude: Number.NaN, longitude: 1, timezone: 'UTC' })).toBe(false)
+    expect(sunLocationComplete({ latitude: 1, longitude: Number.POSITIVE_INFINITY, timezone: 'UTC' })).toBe(false)
   })
 })

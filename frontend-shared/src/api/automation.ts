@@ -103,11 +103,15 @@ export interface AutomationRule {
   trigger_sun_kind?: SunEventKind
   /** sun_event: 相对日出/日落时刻的偏移分钟, **可负** (负=提前), 范围 [-720, 720] */
   trigger_sun_offset_min?: number
-  /** 规则级坐标覆盖; 缺省 (undefined) = 继承节点值 (用户裁决 O-3: 节点级为权威) */
+  /** 坐标（2026-11-14 起由 location_source 解析后落库；旧规则可能没有来源字段） */
   latitude?: number
   longitude?: number
-  /** 规则级时区覆盖 (IANA 名); 缺省 = 继承节点值 */
+  /** IANA 时区：随位置自动带出，**不接受用户设置** */
   timezone?: string
+  /** 坐标来源：ip=外网 IP 定位，city=手动选择城市；空 = 2026-11-14 之前的旧规则 */
+  location_source?: 'ip' | 'city' | ''
+  /** 位置展示名，如「上海（中国）」 */
+  location_label?: string
   /** 附加条件 AND 列表 JSON (同一解析后字段批内复核) */
   conditions_json?: string
 
@@ -226,10 +230,14 @@ export interface CreateAutomationRuleRequest {
   trigger_sun_kind?: SunEventKind
   /** 偏移分钟, 可负; 缺省 0 (恰好在事件时刻) */
   trigger_sun_offset_min?: number
-  /** 规则级坐标/时区覆盖; 省略 = 继承节点 (null 与省略语义不同, 见后端 V2/V3) */
+  /** 坐标与时区（由前端定位控件解析后提交；时区随位置自动带出） */
   latitude?: number
   longitude?: number
   timezone?: string
+  /** 坐标来源：ip=外网 IP，city=手动城市 */
+  location_source?: 'ip' | 'city'
+  /** 位置展示名，如「上海（中国）」 */
+  location_label?: string
   conditions_json?: string
   action_type?: AutomationActionType
   action_device_id?: number
@@ -267,6 +275,8 @@ export interface UpdateAutomationRuleRequest {
   latitude?: number
   longitude?: number
   timezone?: string
+  location_source?: 'ip' | 'city'
+  location_label?: string
   conditions_json?: string
   action_type?: AutomationActionType
   action_device_id?: number
@@ -290,6 +300,13 @@ export interface AutomationEvent {
   triggered_at: string
   /** sensor_threshold 触发时实际采样值 */
   trigger_value?: number
+  /**
+   * 时钟驱动事件的**事件时刻**（2026-11-13 新增）。
+   *
+   * sun_event：当日计算出的日出/日落时刻 + 偏移（不是求值 tick 的 triggered_at）；
+   * 传感器阈值 / 手动触发 / 抑制审计没有时钟语义 ⇒ 后端给 null（此处 undefined）。
+   */
+  event_at?: string | null
   /** 触发来源: auto=求值器/ticker 自动触发, manual=手动触发 */
   trigger_source?: 'auto' | 'manual'
   /** 触发/执行结果, 取值见 AutomationEventResult */

@@ -83,6 +83,8 @@ func buildSunMOSRule(edgeID uint, kind string, chargeClosed, dischargeClosed boo
 		"discharge_software_closed": dischargeClosed,
 		"priority":                  "operator",
 	})
+	// 2026-11-13：坐标/时区改由**规则行**承载（节点位置已废除）。
+	lat, lon, tz := e2eSunLat, e2eSunLon, e2eSunTZ
 	rule := &models.AutomationRule{
 		Name: "日出日落开关 BMS MOS", Enabled: true,
 		TriggerType:         models.AutomationTriggerSunEvent,
@@ -94,6 +96,7 @@ func buildSunMOSRule(edgeID uint, kind string, chargeClosed, dischargeClosed boo
 		ActionDeviceID:      edgeID,
 		ActionID:            "set_mos_policy",
 		ActionParamsJSON:    string(params),
+		Latitude:            &lat, Longitude: &lon, Timezone: &tz,
 	}
 	if acked {
 		now := time.Now().UTC()
@@ -107,9 +110,8 @@ func TestBMS_SunEventSwitchesMOS(t *testing.T) {
 	pub := &capturePublisher{}
 	c := newE2EChainWithPublisher(t, pub)
 
-	// 节点定位：北京（日出日落时刻可算），时区 Asia/Shanghai
-	setNodeLocation(t, c, 39.9042, 116.4074, "Asia/Shanghai")
-
+	// 规则级坐标：北京（日出日落时刻可算），时区 Asia/Shanghai。
+	// 2026-11-13 起节点不再承载坐标，"北京"这个定位跟着规则走。
 	// 规则：日出 → 关充电 MOS（保留放电），并显式授权（O-2）
 	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false, true)
 	if err := c.db.Create(rule).Error; err != nil {
@@ -237,8 +239,6 @@ func TestBMS_SunEventSwitchesMOS(t *testing.T) {
 func TestBMS_SunEventMOS_RequiresRiskAck(t *testing.T) {
 	pub := &capturePublisher{}
 	c := newE2EChainWithPublisher(t, pub)
-	setNodeLocation(t, c, 39.9042, 116.4074, "Asia/Shanghai")
-
 	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false, false) // 未授权
 	if err := c.db.Create(rule).Error; err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -268,26 +268,22 @@ func TestBMS_SunEventMOS_RequiresRiskAck(t *testing.T) {
 // 辅助
 // ─────────────────────────────────────────────────────────────────────────────
 
-func setNodeLocation(t *testing.T, c *e2eChain, lat, lon float64, tz string) {
-	t.Helper()
-	if err := c.db.Model(&models.Node{}).Where("node_id = ?", c.node.NodeID).
-		Updates(map[string]interface{}{"latitude": lat, "longitude": lon, "timezone": tz}).Error; err != nil {
-		t.Fatalf("set node location: %v", err)
-	}
-	if err := c.db.First(&c.node, c.node.ID).Error; err != nil {
-		t.Fatalf("reload node: %v", err)
-	}
-}
+// 规则级坐标常量：夹具与期望计算必须同源，否则"触发时刻对不上"会变成假绿。
+const (
+	e2eSunLat = 39.9042
+	e2eSunLon = 116.4074
+	e2eSunTZ  = "Asia/Shanghai"
+)
 
 // fireSunEvent 计算当日日出时刻并在事件后 1 分钟 tick 一次，返回事件时刻。
 func fireSunEvent(t *testing.T, c *e2eChain, kind string) time.Time {
 	t.Helper()
-	tz, err := time.LoadLocation("Asia/Shanghai")
+	tz, err := time.LoadLocation(e2eSunTZ)
 	if err != nil {
 		t.Fatalf("load tz: %v", err)
 	}
 	date := time.Date(2026, 6, 21, 12, 0, 0, 0, tz)
-	eventAt, status, err := sun.SunEvent(39.9042, 116.4074, tz, date, sun.Kind(kind))
+	eventAt, status, err := sun.SunEvent(e2eSunLat, e2eSunLon, tz, date, sun.Kind(kind))
 	if err != nil || status != sun.StatusOK {
 		t.Fatalf("sun event fixture failed: %s %v", status, err)
 	}

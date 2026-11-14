@@ -78,6 +78,7 @@ func TestIngest_RejectsCrossNodeEdgeDeviceID(t *testing.T) {
 	}
 
 	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{})
+	captured := captureParsed(consumer)
 
 	// 攻击：主题里的节点是 attacker-node，但携带 victim 设备的 id。
 	consumer.Handle(DataEvent{
@@ -87,11 +88,15 @@ func TestIngest_RejectsCrossNodeEdgeDeviceID(t *testing.T) {
 		RawData:      []byte{0x01, 0x02, 0x03, 0x04},
 	})
 
-	// 断言：victim 设备名下不得产生任何数据。
-	var victimRows int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", victimDev.ID).Count(&victimRows)
+	// 断言：victim 设备名下不得产生任何解析值。
+	victimRows := 0
+	for _, rec := range *captured {
+		if rec.DeviceID == victimDev.ID {
+			victimRows++
+		}
+	}
 	if victimRows != 0 {
-		t.Errorf("跨节点冒用未被拦截：victim 设备(id=%d) 名下出现 %d 条数据 —— "+
+		t.Errorf("跨节点冒用未被拦截：victim 设备(id=%d) 名下出现 %d 条解析值 —— "+
 			"任何能向 nodes/<任意>/up 发布的客户端都能伪造他人设备数据（§4.1b 记载的纵深防御缺口）",
 			victimDev.ID, victimRows)
 	}
@@ -104,8 +109,12 @@ func TestIngest_RejectsCrossNodeEdgeDeviceID(t *testing.T) {
 		RequestID:    2,
 		RawData:      []byte{0x01, 0x02, 0x03, 0x04},
 	})
-	var ownRows int64
-	db.Model(&models.UnifiedData{}).Where("device_id = ?", attackerDev.ID).Count(&ownRows)
+	ownRows := 0
+	for _, rec := range *captured {
+		if rec.DeviceID == attackerDev.ID {
+			ownRows++
+		}
+	}
 	if ownRows == 0 {
 		t.Errorf("同节点上报被误拦：attacker 自己的设备(id=%d) 一条数据都没落 —— "+
 			"校验必须是「节点不匹配才拒」，不能变成「一律拒」", attackerDev.ID)
