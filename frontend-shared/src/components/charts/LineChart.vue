@@ -195,6 +195,50 @@ export function shouldShowYAxisName(input: YAxisNameInput): boolean {
   if (input.index > 0 && input.priorUnits.includes(input.unit)) return false
   return true
 }
+
+/**
+ * X 轴时间刻度标签（2026-11-14 修复「7 天图右侧只剩 00:00 / 看起来像轴被截断」）。
+ *
+ * 旧实现按「该刻度距现在多少天」决定格式（>2 天带日期），于是 7 天图里最右边的
+ * 11/13、11/14 两个 00:00 刻度只显示 `00:00` —— 日期整段消失，用户读成「图表显示不全」。
+ *
+ * 正确判据是**整张图的时间跨度**：跨度 > 2 天 ⇒ 每个刻度都要带日期；
+ * 跨度 ≤ 2 天（1h/24h）⇒ 只显示时刻，保持紧凑。
+ *
+ * @param value   刻度时间戳（ms）
+ * @param spanDays 本图数据的时间跨度（天）
+ * @param bleed   全宽出血档（窄屏一行放不下「MM/DD HH:mm」，只留 MM/DD）
+ */
+export function formatXAxisTick(value: number, spanDays: number, bleed: boolean): string {
+  const d = new Date(value)
+  const p = (n: number) => String(n).padStart(2, '0')
+  if (spanDays > 2) {
+    const md = `${p(d.getMonth() + 1)}/${p(d.getDate())}`
+    return bleed ? md : `${md} ${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+  return `${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 由序列时间戳计算图的时间跨度（天）。不足两个点 / 无数据 ⇒ 0。 */
+export function computeSeriesSpanDays(
+  series: Array<{ data?: Array<{ time: string | number }> }> | undefined,
+  data?: Array<{ time: string | number }>,
+): number {
+  let lo = Infinity
+  let hi = -Infinity
+  const scan = (arr?: Array<{ time: string | number }>) => {
+    for (const p of arr ?? []) {
+      const t = new Date(p.time).getTime()
+      if (!Number.isFinite(t)) continue
+      if (t < lo) lo = t
+      if (t > hi) hi = t
+    }
+  }
+  for (const s of series ?? []) scan(s.data)
+  if (!Number.isFinite(lo)) scan(data)
+  if (!Number.isFinite(lo) || hi <= lo) return 0
+  return (hi - lo) / 86400000
+}
 </script>
 
 <script setup lang="ts">
@@ -590,22 +634,9 @@ const getXAxisConfig = (theme = getChartTheme()) => {
       // 窄屏小图（295px）上 6 个时间刻度会挤成「20:0000:0004:0008:00…」（实测重叠），
       // 交给 ECharts 丢弃重叠标签；大图无重叠时该开关不改变任何东西。
       hideOverlap: isCompactChart.value,
-      formatter: (value: number) => {
-        const d = new Date(value)
-        const now = new Date()
-        const diffDays = Math.abs(now.getTime() - value) / 86400000
-        if (diffDays > 2) {
-          // 出血档：窄屏一行放不下「MM/DD HH:mm」（12 字符 ×10px ≈ 120px，一天要 3~4 个就是 480px）
-          if (isBleedLayout.value) {
-            return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`
-          }
-          // 7d range: MM/DD HH:mm
-          return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
-        } else {
-          // 24h and 1h: HH:mm
-          return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
-        }
-      }
+      // 2026-11-14：按**整图跨度**而不是「刻度距现在多远」决定是否带日期 ——
+      // 旧判据让 7 天图最右边的 11/13、11/14 刻度只剩 00:00（日期整段消失）。
+      formatter: (value: number) => formatXAxisTick(value, seriesSpanDays.value, isBleedLayout.value)
     }
   }
 }
@@ -617,6 +648,14 @@ const formatTooltipTime = (ts: string | number) => {
 
 /** 运行时容器宽度（ResizeObserver 维护）；0 = 尚未布局。 */
 const containerWidth = ref(0)
+
+/**
+ * 本图数据的时间跨度（天）—— X 轴标签是否带日期由它决定（不是「刻度距现在多远」）。
+ *
+ * 2026-11-14：7 天温度图上最右两个 00:00 刻度只显示 `00:00`，日期整段消失；
+ * 根因是旧判据把「近两天」的刻度格式化成时刻。见 formatXAxisTick。
+ */
+const seriesSpanDays = computed(() => computeSeriesSpanDays(props.series, props.data))
 
 /**
  * 是否紧凑排版。优先级：density 显式 > compact===true > 运行时判定。

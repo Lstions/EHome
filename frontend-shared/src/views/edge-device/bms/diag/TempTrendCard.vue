@@ -25,13 +25,13 @@
         -->
         <LineChart
           :series="chartSeries"
-          :y-axis-min="Y_MIN"
+          :y-axis-min="yMin"
           :y-axis-max="Y_MAX"
           :show-area="false"
           :height="PLOT_H + 'px'"
           density="compact"
           legend-position="none"
-          :y-tick-count="3"
+          :y-tick-count="yTick"
           :x-max-interval-ms="tickIntervalMs"
           :mark-line="warnMarkLine"
         />
@@ -63,6 +63,7 @@ import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import { resolveTimeRange } from '@/composables/useTimeRange'
 import { useDiagHistory } from './useDiagHistory'
+import { resolveTempYMin, resolveTempYTickCount, TEMP_Y_MAX } from './tempAxis'
 
 const props = defineProps<{
   deviceId: number | string
@@ -80,9 +81,13 @@ const emit = defineEmits<{ (e: 'summary', text: string): void }>()
 
 /** 画布高（px）：全宽出血后这里只给「4 条网格 + 一行时刻」留位置 */
 const PLOT_H = 180
-/** 显式量程：固定后 45℃ 告警线的位置由 ECharts 自己算，也让 26~31℃ 的变化不被压平 */
-const Y_MIN = 20
-const Y_MAX = 50
+/**
+ * 量程：基准下限 20℃、上限 50℃（45℃ 告警线位置由 ECharts 自己算）。
+ *
+ * 2026-11-14：下限改为**自适应**（见 tempAxis.ts）—— 夜间探头实测到 13.95℃，
+ * 固定 20 会把 15%~24% 的点裁到画布外，看起来像「图表显示不全/丢数据」。
+ */
+const Y_MAX = TEMP_Y_MAX
 const TEMP_WARN = 45
 
 const rangeMode = computed(() => props.timeRange || '24h')
@@ -164,6 +169,25 @@ const maxTemp = computed<number | null>(() => {
   }
   return max
 })
+
+/** 当前最低温：供自适应 Y 下限使用（同样从已取到的点位推导，不另发请求） */
+const minTemp = computed<number | null>(() => {
+  let min: number | null = null
+  for (const s of series.value) {
+    for (const p of s.data) {
+      if (typeof p.value === 'number' && Number.isFinite(p.value)) {
+        if (min === null || p.value < min) min = p.value
+      }
+    }
+  }
+  return min
+})
+
+/** Y 下限：全部 ≥20℃ 就是 20；出现夜间低温时降到 10/0（见 tempAxis.ts） */
+const yMin = computed(() => resolveTempYMin(minTemp.value === null ? [] : [minTemp.value]))
+
+/** 与 Y 上限配套的刻度段数：保证 interval 恒为 10℃ */
+const yTick = computed(() => resolveTempYTickCount(yMin.value, Y_MAX))
 
 /** 最高温所在探头（结论句要说清「哪一路」，用户才知道是不是单点异常） */
 const hottestName = computed(() => {
