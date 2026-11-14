@@ -59,21 +59,21 @@ func init() {
 	})
 	Register(Scenario{
 		ID:     "SIM-DS-004",
-		Title:  "管理员可以停用再重新启用一条来源，启停状态可查回",
+		Title:  "管理员可以手工更新来源元数据，状态仍由领域层拥有（启停路由已随单行组模型移除）",
 		Domain: dsDomain,
-		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DS-004；internal/datasource/service.go（Activate/Deactivate）",
+		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DS-004；2026-10-24 方案 A：activate/deactivate 路由删除，仅保留 POST/PUT",
 		Run:    dsRun004,
 	})
 	Register(Scenario{
 		ID:     "SIM-DS-005",
-		Title:  "来源的手动运维（启停/重置）都会留下健康事件与切换日志",
+		Title:  "来源健康时间线可查，缺失来源返回 404（reset/切换日志路由已移除）",
 		Domain: dsDomain,
 		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DS-005；internal/datasource/service.go（recordHealth/writeFailoverLog）",
 		Run:    dsRun005,
 	})
 	Register(Scenario{
 		ID:     "SIM-DS-006",
-		Title:  "删除来源之后台账为空、幂等删除返回 404，且不会留下悬空引用",
+		Title:  "未登记来源的台账为空、缺失来源返回 404（删除路由已随投影器接管移除）",
 		Domain: dsDomain,
 		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-DS-006；internal/datasource/service.go（Delete 语义）",
 		Run:    dsRun006,
@@ -281,7 +281,7 @@ func dsRun001(e *harness.Env) {
 
 	// 熔断阈值的合法区间是 [1,20]（领域层校验）：越界必须 400，不能被静默接受。
 	bad := dsCreateSource(e, "SIM-DS-001", "越界阈值", map[string]any{
-		"category":       "rainfall",
+		"category":       harness.FixtureLevelCategory,
 		"edge_device_id": int64(fx.A.EdgeDeviceID),
 		"max_fail_count": 21,
 	}, nil).Expect(http.StatusBadRequest)
@@ -324,7 +324,7 @@ func dsRun002(e *harness.Env) {
 
 	// 客户端不能自己"指定"权威状态：请求体里的 status 不是创建 DTO 的字段，必须被忽略。
 	other := dsCreateSource(e, "SIM-DS-002", "注入状态", map[string]any{
-		"category":       "rainfall",
+		"category":       harness.FixtureLevelCategory,
 		"edge_device_id": int64(fx.A.EdgeDeviceID),
 	}, map[string]any{"status": "standby"})
 	other.Expect(http.StatusCreated)
@@ -359,13 +359,9 @@ func dsRun003(e *harness.Env) {
 	}
 	e.Evidence("SIM-DS-003.two_devices", map[string]any{"a": rowsA, "b": rowsB})
 
-	// 停用 A 不得影响 B。
-	e.Admin.Post(fmt.Sprintf("/api/v1/data-sources/%d/deactivate", fx.SourceA), nil).
-		Expect(http.StatusOK)
-	if got := dsGet(e, fx.SourceB); got.Status != "active" {
-		t.Fatalf("停用设备 A 的来源后，设备 B 的来源状态 = %q，期望仍 active", got.Status)
-	}
-	e.Evidence("SIM-DS-003.independent", dsGet(e, fx.SourceB))
+	// 两台设备各自 active、id 不同，已证明组键隔离；activate/deactivate 路由
+	// 随单行组模型删除，不再有跨设备停用动作可做。
+	e.Evidence("SIM-DS-003.independent", map[string]any{"a": rowsA, "b": rowsB})
 }
 
 // ---------------------------------------------------------------------------
@@ -377,22 +373,34 @@ func dsRun004(e *harness.Env) {
 	fx := dsProvision(e, "SIM-DS-004")
 	fx.SourceA = dsCreateForDevice(e, "SIM-DS-004", "来源", fx.A, nil)
 
-	// 停用：组内没有兄弟行可接替 ⇒ 领域层返回 409 并要求先指定接替者（R6）。
-	// 这本身就是「组恒一行」的直接后果：没有候补就不能把权威位空着。
-	conflict := e.Admin.Post(fmt.Sprintf("/api/v1/data-sources/%d/deactivate", fx.SourceA), nil)
-	conflict.Expect(http.StatusConflict)
-	e.Evidence("SIM-DS-004.deactivate_without_successor", conflict.Message)
-	if got := dsGet(e, fx.SourceA); got.Status != "active" {
-		t.Fatalf("409 之后来源状态被改为 %q（冲突路径不得改状态）", got.Status)
+	// 2026-10-24 方案 A 后仍可用的手工写路径是 PUT（名称/描述/优先级/主标记/阈值）。
+	// 组键与 status 不在 DTO 白名单内：改不动，也不会被客户端篡改。
+	updated := e.Admin.Put(fmt.Sprintf("/api/v1/data-sources/%d", fx.SourceA), map[string]any{
+		"name":           e.NS("SIM-DS-004", "改名后的来源"),
+		"priority":       7,
+		"is_primary":     false,
+		"max_fail_count": 9,
+		"status":         "standby", // 不在 update DTO 白名单 → 必须被忽略
+	}).Expect(http.StatusOK)
+	got := dsGet(e, fx.SourceA)
+	if got.Priority != 7 {
+		t.Fatalf("PUT 未更新 priority：%+v", got)
 	}
-
-	// 幂等 activate：已是 active，不报错、不写日志。
-	e.Admin.Post(fmt.Sprintf("/api/v1/data-sources/%d/activate", fx.SourceA), nil).
-		Expect(http.StatusOK)
-	if logs := dsFailoverLogs(e, int64(fx.A.EdgeDeviceID), fx.Category); len(logs) != 0 {
-		t.Fatalf("幂等 activate 不应写切换日志：%+v", logs)
+	// 组内唯一来源必须保持 primary（取消唯一权威会让组无主），因此 is_primary
+	// 即使提交 false 也由领域层守为 true —— 这是产品语义，不是 PUT 失效。
+	if !got.IsPrimary {
+		t.Fatalf("组内唯一来源被取消 primary：%+v", got)
 	}
-	e.Evidence("SIM-DS-004.idempotent_activate", dsGet(e, fx.SourceA))
+	if got.MaxFailCount != 9 {
+		t.Fatalf("PUT 未更新 max_fail_count：%+v", got)
+	}
+	if got.Status != "active" {
+		t.Fatalf("客户端注入 status 后落库状态 = %q，期望 active（状态由领域层拥有）", got.Status)
+	}
+	if got.EdgeDeviceID != int64(fx.A.EdgeDeviceID) || got.Category != fx.Category {
+		t.Fatalf("PUT 改动了组键：%+v", got)
+	}
+	e.Evidence("SIM-DS-004.updated", map[string]any{"put": updated.BodyString(), "row": got})
 }
 
 // ---------------------------------------------------------------------------
@@ -404,40 +412,14 @@ func dsRun005(e *harness.Env) {
 	fx := dsProvision(e, "SIM-DS-005")
 	fx.SourceA = dsCreateForDevice(e, "SIM-DS-005", "来源", fx.A, nil)
 
-	// 起点：干净状态（新来源没有任何切换记录）是断言可读性的前提。
-	if logs := dsFailoverLogs(e, int64(fx.A.EdgeDeviceID), fx.Category); len(logs) != 0 {
-		t.Fatalf("新来源不应已有切换日志：%+v", logs)
-	}
-
-	// 把来源置为 disabled（直接经 API 做不到 —— 没有候补时 deactivate 会 409，
-	// 这正是领域层的正确行为），然后 activate 触发一次真实的「无前任启用」：
-	// 写 failover_logs(reason=manual, from=0) + 健康事件(transition) + 通知。
-	reset := e.Admin.Post(fmt.Sprintf("/api/v1/data-sources/%d/reset", fx.SourceA), nil)
-	// 非 error 状态 reset 必须 400（R9 的输入校验）。
-	reset.Expect(http.StatusBadRequest)
-	e.Evidence("SIM-DS-005.reset_requires_error_state", reset.Message)
-
-	logs := dsFailoverLogs(e, int64(fx.A.EdgeDeviceID), fx.Category)
-	if len(logs) != 0 {
-		t.Fatalf("被拒的 reset 不应留下切换日志：%+v", logs)
-	}
-
-	// 健康时间线可查（新来源尚无事件，接口本身必须 200 且返回数组而非 null）。
+	// reset 路由随单行组模型删除；本场景保留仍可观测的健康时间线契约。
 	health := e.Admin.Get(fmt.Sprintf("/api/v1/data-sources/%d/health", fx.SourceA)).
 		Expect(http.StatusOK)
-	var events []struct {
-		SourceID     uint   `json:"source_id"`
-		EdgeDeviceID uint   `json:"edge_device_id"`
-		Category     string `json:"category"`
-		Status       string `json:"status"`
-		Message      string `json:"message"`
-	}
+	var events []map[string]any
 	health.Decode(&events)
-	if events != nil && len(events) > 0 {
-		for _, ev := range events {
-			if ev.SourceID != uint(fx.SourceA) {
-				t.Fatalf("健康事件 source_id = %d，期望 %d", ev.SourceID, fx.SourceA)
-			}
+	for _, ev := range events {
+		if id, ok := ev["source_id"].(float64); ok && uint(id) != uint(fx.SourceA) {
+			t.Fatalf("健康事件 source_id = %v，期望 %d", ev["source_id"], fx.SourceA)
 		}
 	}
 	e.Evidence("SIM-DS-005.health_timeline", health.BodyString())
@@ -453,36 +435,27 @@ func dsRun005(e *harness.Env) {
 func dsRun006(e *harness.Env) {
 	t := e.T
 	fx := dsProvision(e, "SIM-DS-006")
-	fx.SourceA = dsCreateForDevice(e, "SIM-DS-006", "来源", fx.A, nil)
 
-	if rows := dsList(e, int64(fx.A.EdgeDeviceID), fx.Category); len(rows) != 1 {
-		t.Fatalf("前置条件不成立：建完来源后列表应为 1 条，实际 %+v", rows)
+	// 未登记任何来源时，台账为空（不是 404/500）。
+	if rows := dsList(e, int64(fx.A.EdgeDeviceID), fx.Category); len(rows) != 0 {
+		t.Fatalf("未登记来源时列表应为空，实际 %+v", rows)
 	}
 
-	// 删掉组内唯一来源：该组消失，并应留下「该类别失去来源」的通知语义。
-	e.Admin.Delete(fmt.Sprintf("/api/v1/data-sources/%d", fx.SourceA)).
-		Expect(http.StatusOK)
-	rows := dsList(e, int64(fx.A.EdgeDeviceID), fx.Category)
-	if len(rows) != 0 {
-		t.Fatalf("删除来源后该组应为空，实际 %+v", rows)
+	// 缺失来源的详情与健康时间线都必须 404，且不能留下悬空引用。
+	e.Admin.Get("/api/v1/data-sources/999999999").Expect(http.StatusNotFound)
+	// health 对不存在的来源返回 200 + 空数组（列表语义），而不是 404。
+	health := e.Admin.Get("/api/v1/data-sources/999999999/health").Expect(http.StatusOK)
+	var events []map[string]any
+	health.Decode(&events)
+	if len(events) != 0 {
+		t.Fatalf("缺失来源的健康时间线应为空，实际 %+v", events)
 	}
-	e.Evidence("SIM-DS-006.after_delete", rows)
 
-	// 重复删除同一条来源必须 404（幂等语义由调用方负责，不能假装成功）。
-	e.Admin.Delete(fmt.Sprintf("/api/v1/data-sources/%d", fx.SourceA)).
-		Expect(http.StatusNotFound)
-
-	// 删除后同一组键可以重新登记（不被软删残留挡住）。
-	again := dsCreateSource(e, "SIM-DS-006", "重新登记", map[string]any{
-		"category":       fx.Category,
-		"edge_device_id": int64(fx.A.EdgeDeviceID),
-	}, nil).Expect(http.StatusCreated)
-	againID := again.DataInt("id")
-	e.T.Cleanup(func() {
-		edgeCleanupOK(e.T, "重新登记的数据源", e.Admin.Delete(fmt.Sprintf("/api/v1/data-sources/%d", againID)))
-	})
-	if got := again.DataString("status"); got != "active" {
-		t.Fatalf("重新登记后状态 = %q，期望 active（组内无其它来源）", got)
+	// 手工建行仍可用（投影器不覆盖 managed_by=manual）；建完后可查回。
+	fx.SourceA = dsCreateForDevice(e, "SIM-DS-006", "手工登记", fx.A, nil)
+	row := dsGet(e, fx.SourceA)
+	if row.EdgeDeviceID != int64(fx.A.EdgeDeviceID) || row.Category != fx.Category {
+		t.Fatalf("手工登记的来源归属不正确：%+v", row)
 	}
-	e.Evidence("SIM-DS-006.reregistered", again.BodyString())
+	e.Evidence("SIM-DS-006.manual_source", row)
 }

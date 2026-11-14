@@ -133,8 +133,12 @@ func trigWaitResult(e *harness.Env, ruleID int64, result string, want int, timeo
 			return err
 		}
 		if got := trigCountResult(rows, result); got < want {
-			return fmt.Errorf("策略 %d 目前有 %d 条 result=%s 的事件，期望至少 %d 条",
-				ruleID, got, result, want)
+			counts := map[string]int{}
+			for _, row := range rows {
+				counts[row.Result]++
+			}
+			return fmt.Errorf("策略 %d 目前有 %d 条 result=%s 的事件，期望至少 %d 条；当前结果分布=%v",
+				ruleID, got, result, want, counts)
 		}
 		snapshot = rows
 		return nil

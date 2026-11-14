@@ -15,6 +15,9 @@
 //     （evaluator.go:411-414 的 warn）；
 //  5. device_action 在真正下发之前会用最新值复核触发条件与附加条件，失效则落
 //     condition_changed 且不下发（planner.go:163-197，变异 A5）。
+//     ⚠ 2026-11-14（AU-12）：复核改为按 (device, sensor) 精确最新值；同一帧内
+//     不再有「触发后失效」窗口，该失效分支由 planner 单测覆盖，SIM-COND-005
+//     转为「同一帧不得误拦」的回归护栏。
 //
 // 复用：autoProvisionDevice / autoCreateRule / autoListEvents / autoSensorSample，
 // 以及 trig.go 里的运行时工具（同包跨文件调用；框架 §4.1 只约束声明名前缀）。
@@ -22,6 +25,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -61,9 +65,9 @@ func init() {
 	})
 	Register(Scenario{
 		ID:     "SIM-COND-005",
-		Title:  "触发之后、动作执行之前条件已经失效时不会真的执行动作",
+		Title:  "同一帧内 F4 复核不得误拦：按 (device, sensor) 最新值判定（AU-12）",
 		Domain: DomainCOND,
-		Doc:    "docs/设计/自动化引擎场景仿真验证.md §4 SIM-COND-005（变异 A5）；docs/设计/自动化策略引擎方案.md（F4 执行前复核）",
+		Doc:    "docs/设计/自动化引擎场景仿真验证.md §4 SIM-COND-005（变异 A5，AU-12 后重述）；F4 失效分支由 internal/automation/planner_test.go 单测覆盖",
 		Run:    condRun005,
 	})
 }
@@ -526,26 +530,33 @@ func condRun005(e *harness.Env) {
 	trigWaitSensorValue(e, fx.edgeDeviceID, "illuminance", 250, 25*time.Second)
 	trigWaitSensorValue(e, fx.edgeDeviceID, "temperature", 23.5, 25*time.Second)
 
-	rows := trigWaitResult(e, ruleID, "condition_changed", 1, 25*time.Second)
-
-	// 不变式 1：复核不通过 → 事件落 condition_changed，且必须写明原因。
+	// 2026-11-14（AU-12）重述：F4 触发复核已改为按 (device, sensor) 精确最新值，
+	// 不再复用「每设备最后一条记录」（那会拿到 temperature 去复核 illuminance 阈值，
+	// 属于误拦）。黑盒路径下 planner 与 evaluator 同步执行，同一帧内无法构造
+	// 「触发后失效」窗口；该分支改由 planner 单测覆盖，本场景转为回归护栏：
+	//   · 同一帧的 F4 必须放行（不得出现 condition_changed）；
+	//   · 动作要么执行成功、要么在后续门禁失败（failed_*），且触发值可审计。
+	var rows []autoEventRow
+	var lastErr error
+	e.Eventually(25*time.Second, func() error {
+		rows, lastErr = autoListEvents(e, "?rule_id="+strconv.FormatInt(ruleID, 10))
+		if lastErr != nil {
+			return lastErr
+		}
+		if len(rows) == 0 {
+			return fmt.Errorf("策略 %d 尚无事件", ruleID)
+		}
+		return nil
+	})
 	row := rows[0]
-	if row.Result != "condition_changed" {
-		e.Fatalf("执行前复核失效时应落 condition_changed，实际 %q：%+v", row.Result, row)
+	if row.Result == "condition_changed" {
+		e.Fatalf("同一帧内 F4 误拦（AU-12）：%+v", row)
 	}
-	if row.Detail == "" {
-		e.Fatalf("condition_changed 事件必须写明原因（detail 为空）：%+v", row)
+	if row.Result != "executed" && row.Result != "failed_gate" {
+		e.Fatalf("动作结果应为 executed 或 failed_gate，实际 %q：%+v", row.Result, row)
 	}
-	// 不变式 2：绝不能真的下发动作 —— 没有指令号，也没有 executed 事件。
-	if row.CommandID != "" {
-		e.Fatalf("复核失效却仍然下发了指令 %q —— F4 执行前复核没有生效", row.CommandID)
-	}
-	if trigCountResult(rows, "executed") != 0 {
-		e.Fatalf("复核失效却出现了 executed 事件：%+v", rows)
-	}
-	// 触发值仍是那一帧的读数（用户能看到「当时是多少」）。
 	if row.TriggerValue == nil || *row.TriggerValue != 250 {
-		e.Fatalf("condition_changed 事件的触发值应为 250，实际 %v", row.TriggerValue)
+		e.Fatalf("事件的触发值应为 250，实际 %v", row.TriggerValue)
 	}
 
 	e.Evidence("SIM-COND-005.recheck", map[string]any{

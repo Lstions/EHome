@@ -544,10 +544,21 @@ func edgeRun006(e *harness.Env) {
 	// 数据量估算端点：合并前用户要能看到「目标 + 这些源」大概多少行。
 	summary := e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices/%d/data-summary?source_ids=%d",
 		a.EdgeDeviceID, b.EdgeDeviceID)).Expect(http.StatusOK)
-	if got := summary.DataSlice("items"); len(got) != 2 {
-		t.Fatalf("data-summary 应返回目标 + 1 个源共 2 项，实际 %d：%s", len(got), summary.BodyString())
+	// 2026-11-14：data-summary 已返回 {target, target_rows, sources, source_rows}，
+	// 不再是 items 数组；场景按当前契约核对目标/源两侧的估算行数。
+	var summaryBody map[string]any
+	summary.Decode(&summaryBody)
+	targetRows, _ := summaryBody["target_rows"].(float64)
+	sourceRows, _ := summaryBody["source_rows"].(float64)
+	sources, _ := summaryBody["sources"].([]any)
+	if targetRows <= 0 || sourceRows <= 0 || len(sources) != 1 {
+		t.Fatalf("data-summary 目标/源估算不完整：target_rows=%v source_rows=%v sources=%d body=%s",
+			summaryBody["target_rows"], summaryBody["source_rows"], len(sources), summary.BodyString())
 	}
 	e.Evidence("SIM-EDGE-006.data_summary", summary.BodyString())
+
+	// 合并规则要求源设备已删除（保留数据）：先软删 B，再合并。
+	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", b.EdgeDeviceID)).Expect(http.StatusOK)
 
 	merged := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", a.EdgeDeviceID),
 		map[string]any{"source_ids": []int64{b.EdgeDeviceID}}).Expect(http.StatusOK)
@@ -563,9 +574,14 @@ func edgeRun006(e *harness.Env) {
 		t.Fatalf("合并后目标设备历史 %d 行，期望 ≥ %d（换绑前 %d + 源 %d）",
 			len(mergedRows), len(before)+len(bRows), len(before), len(bRows))
 	}
-	if left := edgeHistoryValues(e, b.EdgeDeviceID, edgeHistorySensor); len(left) != 0 {
-		t.Fatalf("合并后源设备仍有 %d 行历史（迁移未生效）", len(left))
-	}
+	// 合并与最近的 live 上报存在竞态：迁移完成后可能又来一帧（源设备在删除前的
+	// 最后一批数据）。用 Eventually 等它落定，而不是立刻判失败。
+	e.Eventually(10*time.Second, func() error {
+		if left := edgeHistoryValues(e, b.EdgeDeviceID, edgeHistorySensor); len(left) != 0 {
+			return fmt.Errorf("合并后源设备仍有 %d 行历史（迁移未生效或新帧晚到）", len(left))
+		}
+		return nil
+	})
 
 	// 幂等：第二次调用必须迁移 0 行（源已无数据）。
 	again := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", a.EdgeDeviceID),
@@ -576,11 +592,17 @@ func edgeRun006(e *harness.Env) {
 	e.Evidence("SIM-EDGE-006.merge_history_idempotent", again.BodyString())
 
 	// 边界：目标设备必须存活（合并进已软删设备等于把数据埋掉）。
-	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", b.EdgeDeviceID)).Expect(http.StatusOK)
 	deleted := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", b.EdgeDeviceID),
 		map[string]any{"source_ids": []int64{a.EdgeDeviceID}})
 	deleted.Expect(http.StatusNotFound)
 	e.Evidence("SIM-EDGE-006.merge_into_deleted_rejected", deleted.Message)
+
+	// 收尾：把 A 换回自己的节点/通道，恢复夹具的清理顺序前提
+	// （否则 B 的通道仍被在役的 A 引用，清理会 409）。
+	e.Admin.Put(fmt.Sprintf("/api/v1/edge-devices/%d", a.EdgeDeviceID), map[string]any{
+		"node_id":    a.NodeID,
+		"channel_id": a.ChannelID,
+	}).Expect(http.StatusOK)
 }
 
 // ---------------------------------------------------------------------------

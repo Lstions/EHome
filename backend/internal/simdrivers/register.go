@@ -32,8 +32,10 @@ import (
 // 没有控制动作，一切具体行为都由绑定到该型号的 DeviceConfig 描述。
 type parserOnlyDriver struct{ typeID string }
 
-func (d *parserOnlyDriver) DeviceType() string      { return d.typeID }
-func (d *parserOnlyDriver) DeviceName() string      { return "仿真专用型号（解析走 DeviceConfig.Parser）" }
+func (d *parserOnlyDriver) DeviceType() string { return d.typeID }
+func (d *parserOnlyDriver) DeviceName() string {
+	return "仿真专用型号（解析走 DeviceConfig.Parser）"
+}
 func (d *parserOnlyDriver) OEM() string             { return "仿真" }
 func (d *parserOnlyDriver) Category() string        { return "仿真设备" }
 func (d *parserOnlyDriver) HardwareTypes() []string { return []string{"uart", "i2c", "spi", "adc"} }
@@ -49,10 +51,11 @@ func (d *parserOnlyDriver) ParseData([]byte) ([]drivers.SensorData, error) {
 //
 // 口径（2026-09-21 实测，可复跑 .fix4/extract_types.py）：backend/simulation
 // 全目录里出现在**设备型号位**的字面量 ——
-//   · autoProvisionDevice(e, scenarioID, suffix, deviceType) 的第 4 实参；
-//   · edgeDeviceSpec.DeviceType；
-//   · sceneSpec.Type；
-//   · harness/fixture.go 的 fixtureDeviceType（sim_generic）。
+//
+//	· autoProvisionDevice(e, scenarioID, suffix, deviceType) 的第 4 实参；
+//	· edgeDeviceSpec.DeviceType；
+//	· sceneSpec.Type；
+//	· harness/fixture.go 的 fixtureDeviceType（sim_generic）。
 //
 // 减去内置驱动注册表里已有的型号（sn3001_rain / jiabaida_bms 已注册）。
 // 当前共 47 个需要登记。
@@ -73,6 +76,7 @@ var types = []string{
 	"sim_crud_001_sensor", "sim_crud_002_sensor", "sim_crud_003_sensor",
 	"sim_crud_004_sensor", "sim_crud_005_sensor", "sim_crud_006_sensor",
 	"sim_dbln_001_sensor", "sim_dbln_002_sensor", "sim_dbln_003_sensor",
+	"sim_edge_006_sensor", // catalog/edge.go SIM-EDGE-006（edgeParserDeviceType 派生）
 	"sim_err_004_sensor",
 	"sim_manu_001_sensor", "sim_manu_004_sensor",
 	"sim_ntfy_001_sensor", "sim_ntfy_002_sensor", "sim_ntfy_003_sensor",

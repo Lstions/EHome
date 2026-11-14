@@ -194,11 +194,45 @@ func (e *Env) ProvisionSimpleDevice(scenarioID, suffix string) (*Fixture, error)
 	if err := fixture.selfCheck(); err != nil {
 		return nil, err
 	}
+	// 步骤 6：字段观测投影。生产链路由 SensorParserConsumer 在解析后写
+	// sensor_field_obs；仿真 DataReport 直接落帧，不经过该 consumer。而
+	// POST /data-sources 会校验「设备已上报该字段」（category_not_observed）。
+	// 这里补投影，保持仿真与生产可观测状态一致，而不是放宽服务端校验。
+	if err := fixture.seedFieldObservations(); err != nil {
+		return nil, fmt.Errorf("步骤 6（字段观测投影）失败: %w", err)
+	}
 	e.Evidence("fixture_node_id", fixture.NodeID)
 	e.Evidence("fixture_edge_device_id", fixture.EdgeDeviceID)
 	e.Evidence("fixture_channel_id", fixture.ChannelID)
 	e.Evidence("fixture_categories", fixture.Categories)
 	return fixture, nil
+}
+
+// seedFieldObservations 把夹具字段投影进 sensor_field_obs（生产由解析 consumer 完成）。
+//
+// 为什么允许直连 DB：这张表是**异步投影**的产物，没有写 API；场景需要的是
+// 「投影已经发生」这个既成事实。写入内容只包含夹具自己上报过的字段，不伪造读数。
+func (f *Fixture) seedFieldObservations() error {
+	db := f.env.SQL()
+	if db == nil {
+		return fmt.Errorf("场景库连接不可用")
+	}
+	units := map[string]string{
+		FixtureTempCategory:  "C",
+		FixtureLevelCategory: "cm",
+	}
+	now := time.Now().UTC()
+	sql := "INSERT INTO sensor_field_obs (device_id, sensor_name, unit, first_seen, last_seen, samples, updated_at) " +
+		"VALUES ($1, $2, $3, $4, $5, 1, $5) " +
+		"ON CONFLICT (device_id, sensor_name) DO UPDATE " +
+		"SET unit = EXCLUDED.unit, last_seen = EXCLUDED.last_seen, " +
+		"samples = sensor_field_obs.samples + 1, updated_at = EXCLUDED.updated_at"
+	for _, name := range f.Categories {
+		if _, err := db.Exec(sql, f.EdgeDeviceID, name, units[name], now, now); err != nil {
+			return fmt.Errorf("投影字段 %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // selfCheck 做一次上报并轮询等待落库，失败时给出分步诊断。
@@ -385,15 +419,16 @@ func (f *Fixture) StartReporting(interval time.Duration) (stop func()) {
 	return cancel
 }
 
-
 // waitForCapabilities 等节点的 ResourceReport 真正可见再继续。
 //
 // 与 catalog/auto.go:655 用的是同一道屏障（读 HTTP、等能力事实落库），
 // 只是抽到夹具层给所有场景复用。
 //
 // 判据取「capabilities 非空且含 uart 资源」而不是仅非空：
-//   · capabilities 为空 -> ResourceReport 还没到；
-//   · 有 capabilities 但没有 uart -> 落库了但内容不完整（或节点真没串口）。
+//
+//	· capabilities 为空 -> ResourceReport 还没到；
+//	· 有 capabilities 但没有 uart -> 落库了但内容不完整（或节点真没串口）。
+//
 // 两者都不该拿去建 UART 通道，所以一并等。
 func (f *Fixture) waitForCapabilities(timeout time.Duration) error {
 	if f.env == nil || f.session == nil {

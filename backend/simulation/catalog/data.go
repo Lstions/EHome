@@ -598,6 +598,10 @@ func dataScenario006(e *harness.Env) {
 	e.Evidence("before_merge_a", dataValuesOf(dataHistory(e, first.EdgeDeviceID, window), harness.FixtureTempCategory))
 	e.Evidence("before_merge_b", dataValuesOf(dataHistory(e, second.EdgeDeviceID, window), harness.FixtureTempCategory))
 
+	// 合并规则（契约 §4.3）：源设备必须已删除（保留数据）—— 在役设备的历史被
+	// 搬走会让它变成空壳。先把 B 软删，再合并；这不是测试绕过，而是产品语义。
+	e.Admin.Delete(fmt.Sprintf("/api/v1/edge-devices/%d", second.EdgeDeviceID)).Expect(http.StatusOK)
+
 	// 合并历史：把设备 B 的全部历史行迁到设备 A（契约 §4.3）。
 	merged := e.Admin.Post(fmt.Sprintf("/api/v1/edge-devices/%d/merge-history", first.EdgeDeviceID),
 		map[string]any{"source_ids": []int64{int64(second.EdgeDeviceID)}})

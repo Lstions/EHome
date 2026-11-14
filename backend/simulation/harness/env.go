@@ -25,15 +25,15 @@ import (
 
 // Options 是设计 §5.1 冻结的运行选项。
 type Options struct {
-	RunID     string // 缺省 = sim-<UTC 日期>-<4 位随机>
-	DSN       string // 缺省从 EHOME_DB_* 环境变量组装
+	RunID string // 缺省 = sim-<UTC 日期>-<4 位随机>
+	DSN   string // 缺省从 EHOME_DB_* 环境变量组装
 	// DeviceAddr 是后端 3.0 设备监听地址（mTLS），缺省 127.0.0.1:18443。
 	// ⚠ 2026-10-11：取代原 MQTTAddr（broker 地址）。
 	DeviceAddr string
-	AdminUser string // 缺省 "admin"
-	AdminPass string // 缺省随机强口令
-	KeepDB    bool   // 缺省 false：运行结束 DROP 场景库
-	LogLevel  string // 缺省 "info"
+	AdminUser  string // 缺省 "admin"
+	AdminPass  string // 缺省随机强口令
+	KeepDB     bool   // 缺省 false：运行结束 DROP 场景库
+	LogLevel   string // 缺省 "info"
 }
 
 // DefaultOptions 返回设计文档规定的全部缺省值。
@@ -123,8 +123,8 @@ const (
 	credentialTimeout = 30 * time.Second
 	// deviceReadyTimeout 是"服务端开始处理设备上行"的等待上限（原 mqttReadyTimeout）。
 	deviceReadyTimeout = 30 * time.Second
-	buildTimeout      = 10 * time.Minute
-	shutdownGrace     = 12 * time.Second
+	buildTimeout       = 10 * time.Minute
+	shutdownGrace      = 12 * time.Second
 )
 
 // Preflight 在不建立任何持久状态的前提下检查基础设施是否可用：
@@ -160,7 +160,6 @@ func Preflight(opts Options) error {
 	}
 	return nil
 }
-
 
 // Start 完成一次仿真运行的全部准备（设计 §5.1 启动序列 1~9 步）。
 // 任一步失败都以可执行的错误信息终止测试，绝不静默降级。
@@ -207,12 +206,12 @@ func Start(t *testing.T, opts Options) *Env {
 	}
 	e.pki = pki
 	e.summary = &Summary{
-		RunID:     e.RunID,
-		Database:  e.DBName,
+		RunID:      e.RunID,
+		Database:   e.DBName,
 		DeviceAddr: e.DeviceAddr,
-		StartedAt: time.Now().UTC(),
-		Scenarios: []*ScenarioRecord{},
-		path:      filepath.Join(e.runDir, "summary.json"),
+		StartedAt:  time.Now().UTC(),
+		Scenarios:  []*ScenarioRecord{},
+		path:       filepath.Join(e.runDir, "summary.json"),
 	}
 
 	// 步骤 9 提前注册：即使后续任一步 Fatal，收尾仍会杀子进程并 DROP 场景库。
@@ -348,12 +347,12 @@ func (e *Env) startServer(port int) error {
 	// 代码内默认值 + 本函数注入的环境变量，杜绝仓库里的 config.yaml
 	// （它指向开发库 localhost:5434/ehome）影响仿真确定性。
 	childEnv := mergeEnv(os.Environ(), map[string]string{
-		"EHOME_DB_HOST":        cfg.Host,
-		"EHOME_DB_PORT":        fmt.Sprintf("%d", cfg.Port),
-		"EHOME_DB_USER":        cfg.User,
-		"EHOME_DB_PASSWORD":    cfg.Password,
-		"EHOME_DB_NAME":        e.DBName,
-		"EHOME_SERVER_ADDR":    fmt.Sprintf(":%d", port),
+		"EHOME_DB_HOST":     cfg.Host,
+		"EHOME_DB_PORT":     fmt.Sprintf("%d", cfg.Port),
+		"EHOME_DB_USER":     cfg.User,
+		"EHOME_DB_PASSWORD": cfg.Password,
+		"EHOME_DB_NAME":     e.DBName,
+		"EHOME_SERVER_ADDR": fmt.Sprintf(":%d", port),
 		// 3.0 设备监听（mTLS）。MQTT_BROKER/EHOME_MQTT_CLIENT_ID 已随移植删除。
 		// 证书由本进程生成并落盘（harness/pki.go），子进程按路径读取。
 		"EHOME_DEVICE_ENABLED":        "true",
@@ -361,8 +360,8 @@ func (e *Env) startServer(port int) error {
 		"EHOME_DEVICE_CERT_FILE":      e.pki.serverCertFile,
 		"EHOME_DEVICE_KEY_FILE":       e.pki.serverKeyFile,
 		"EHOME_DEVICE_CLIENT_CA_FILE": e.pki.caFile,
-		"EHOME_JWT_SECRET":     randHex(32),
-		"EHOME_ENV":            "development",
+		"EHOME_JWT_SECRET":            randHex(32),
+		"EHOME_ENV":                   "development",
 		// GIN_MODE=debug 是必须的：middleware.go 的 isDevelopmentMode() 是
 		// EHOME_ENV=development **且** GIN_MODE=debug 的与运算（该函数注释
 		// 自称"GIN_MODE unset 也算 dev"，与实现不符，属产品侧注释缺陷）。
@@ -481,15 +480,28 @@ func (e *Env) waitCredential() string {
 // 因此这个探针不产生任何节点记录 —— 不会污染后续场景的节点计数。
 //
 // ⚠ 2026-10-11：原名 waitMQTTReady。探针机制**原样保留**（它本就只调 Device API），
-//   变的只是"上行经什么传输"。这也再次说明移植面确实收敛在 harness 传输层。
+//
+//	变的只是"上行经什么传输"。这也再次说明移植面确实收敛在 harness 传输层。
 func (e *Env) waitDeviceReady() {
 	e.T.Helper()
-	probe := e.Device("warmup")
-	if err := probe.Connect(); err != nil {
-		e.Fatalf("仿真器连接设备端口（%s）失败: %v\n"+
-			"该端口由后端 3.0 mTLS 监听提供，检查：\n"+
-			"  1) harness 是否注入了 EHOME_DEVICE_ENABLED/ADDR/CERT_FILE/KEY_FILE/CLIENT_CA_FILE\n"+
-			"  2) 证书是否有效（见 %s）", e.DeviceAddr, err, e.runDir)
+	// 设备端口就绪可能晚于 API/DB 初始化（本地慢盘实测曾晚 >1s）。
+	// 单次 Dial 在同一毫秒窗口里竞速会让「服务端还没开始监听」被误报成
+	// 「证书/配置错误」；这里轮询到 deviceReadyTimeout，失败才带诊断退出。
+	var probe *Device
+	var connErr error
+	connectDeadline := time.Now().Add(deviceReadyTimeout)
+	for {
+		probe = e.Device("warmup")
+		if connErr = probe.Connect(); connErr == nil {
+			break
+		}
+		if time.Now().After(connectDeadline) {
+			e.Fatalf("仿真器连接设备端口（%s）失败: %v\n"+
+				"该端口由后端 3.0 mTLS 监听提供，检查：\n"+
+				"  1) harness 是否注入了 EHOME_DEVICE_ENABLED/ADDR/CERT_FILE/KEY_FILE/CLIENT_CA_FILE\n"+
+				"  2) 证书是否有效（见 %s）", e.DeviceAddr, connErr, e.runDir)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	defer probe.Close()
 	err := e.EventuallyEveryError(deviceReadyTimeout, 500*time.Millisecond, func() error {
