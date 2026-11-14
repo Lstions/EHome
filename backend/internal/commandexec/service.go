@@ -135,9 +135,16 @@ type ResolveUnknownInput struct {
 
 type CatalogItem struct {
 	Definition deviceaction.Definition `json:"definition"`
-	Available  bool                    `json:"available"`
-	Reason     string                  `json:"reason,omitempty"`
-	ReasonCode string                  `json:"reason_code,omitempty"`
+	// Available 保持旧语义：运行期此刻能否真正执行（全门禁通过）。
+	Available  bool   `json:"available"`
+	Reason     string `json:"reason,omitempty"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	// Configurable 是配置期可选：只包含驱动启用/引擎支持/设备与通道配置等
+	// 非瞬态门禁。设备离线时 Configurable=true、Available=false —— 规则仍可保存。
+	Configurable bool `json:"configurable"`
+	// RuntimeReason/Code 只在"配置期可选、运行期不可执行"时给出。
+	RuntimeReason     string `json:"runtime_reason,omitempty"`
+	RuntimeReasonCode string `json:"runtime_reason_code,omitempty"`
 }
 
 // gateName identifies one availability predicate shared by Catalog and Create.
@@ -225,11 +232,11 @@ func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, defini
 	// gateEdgeNodeID is Create-only (Catalog has no equivalent check): the
 	// edge must reference a node to have a transport.
 	appendResult(gateEdgeNodeID, edge.NodeID != "", "", "")
-	appendResult(gateNodeStatus, edge.Node.Status == "online", "", "")
+	appendResult(gateNodeStatus, edge.Node.Status == "online", "node_offline", "")
 	appendResult(gateActionChannel, channelErr == nil, "", "")
-	appendResult(gateReportedActionChannel, reportedErr == nil, "", "")
-	appendResult(gateAppliedManifest, manifestErr == nil, "", "")
-	appendResult(gateCurrentCapabilities, capabilitiesErr == nil, "", "")
+	appendResult(gateReportedActionChannel, reportedErr == nil, "channel_not_reported", "")
+	appendResult(gateAppliedManifest, manifestErr == nil, "manifest_not_applied", "")
+	appendResult(gateCurrentCapabilities, capabilitiesErr == nil, "capability_unavailable", "")
 	fitsReason := ""
 	fitsPassed := false
 	if capabilitiesErr == nil {
@@ -248,7 +255,7 @@ func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, defini
 			}
 		}
 	}
-	appendResult(gateDefinitionFitsCapabilities, fitsPassed, "", fitsReason)
+	appendResult(gateDefinitionFitsCapabilities, fitsPassed, "capability_mismatch", fitsReason)
 	return results
 }
 
@@ -271,7 +278,7 @@ func evaluatePeriphActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, 
 	appendResult(gateEdgeNodeID, edge.NodeID != "", "", "")
 	appendResult(gateNodeStatus, edge.Node.Status == "online", "", "")
 	periphErr := requirePeriphConfig(tx, edge.NodeID, definition.ID, params)
-	appendResult(gatePeriphConfig, periphErr == nil, "", "")
+	appendResult(gatePeriphConfig, periphErr == nil, "periph_config_unavailable", "")
 	return results
 }
 
@@ -380,6 +387,12 @@ func currentCapabilitiesError(node models.Node, now func() time.Time) (string, c
 }
 
 func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem, error) {
+	return s.CatalogFiltered(ctx, edgeDeviceID, "")
+}
+
+// CatalogFiltered 返回设备动作目录，可按 Exposure 过滤（automation/diagnostic/
+// configuration）。空 purpose = 全部（设备详情页）；规则向导只取 automation。
+func (s *Service) CatalogFiltered(ctx context.Context, edgeDeviceID uint, purpose string) ([]CatalogItem, error) {
 	var edge models.EdgeDevice
 	if err := s.db.WithContext(ctx).Preload("Node").First(&edge, edgeDeviceID).Error; err != nil {
 		return nil, err
@@ -387,26 +400,36 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 	items := make([]CatalogItem, 0)
 	capabilityStale := false
 	for _, definition := range s.actions.List(edge.Type) {
+		if purpose != "" && definition.Exposure != purpose {
+			continue
+		}
 		item := CatalogItem{Definition: definition}
 		// Evaluate every gate without short-circuiting so a channel failure
 		// still annotates capability_stale in the same cases as before.
 		gates := evaluateActionGates(s, s.db.WithContext(ctx), edge, definition, nil)
 		firstFailed := firstFailedGateForCatalog(gates)
+		firstConfig := firstFailedGateByClass(gates, false)
+		firstRuntime := firstFailedGateByClass(gates, true)
 		item.Available = firstFailed == nil
+		item.Configurable = firstConfig == nil
 		if firstFailed != nil {
+			// Reason/ReasonCode 保持旧契约（first-failure-wins），避免改变既有
+			// 客户端与门禁测试的注解语义；Configurable 是新增的独立维度。
 			item.Reason = reasonForGate(firstFailed.name)
 			item.ReasonCode = firstFailed.reasonCode
 			if !s.dispatchEnabled {
-				// The dispatch gate is load-bearing and reported distinctly.
 				item.Reason = "device control v2 is disabled"
 				item.ReasonCode = ""
 			} else if !definition.Enabled && definition.AvailabilityCode != "" {
 				item.Reason = definition.AvailabilityReason
 				item.ReasonCode = definition.AvailabilityCode
 			} else if firstFailed.name == gateDefinitionFitsCapabilities && firstFailed.reason != "" {
-				// Preserve the old fits-gate reason string (compile error).
 				item.Reason = firstFailed.reason
 			}
+		}
+		if firstRuntime != nil {
+			item.RuntimeReason = reasonForGate(firstRuntime.name)
+			item.RuntimeReasonCode = firstRuntime.reasonCode
 		}
 		if firstFailed != nil && firstFailed.name == gateCurrentCapabilities &&
 			(edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > MaxCapabilityAge) {
@@ -414,6 +437,7 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 			// catalog. Keep this machine-readable so the UI never relies on the
 			// presentation text or retries unrelated safety failures.
 			item.ReasonCode = "capability_stale"
+			item.RuntimeReasonCode = "capability_stale"
 			capabilityStale = true
 		}
 		items = append(items, item)
@@ -447,6 +471,33 @@ func firstFailedGateForCatalog(gates []gateResult) *gateResult {
 		if !gates[i].passed {
 			return &gates[i]
 		}
+	}
+	return nil
+}
+
+// gateIsRuntime 区分"配置期可选"与"运行期可执行"。运行期门禁只影响此刻能否
+// 下发，不应阻止用户在规则向导里选择动作（设备离线仍可保存规则）。
+func gateIsRuntime(name gateName) bool {
+	switch name {
+	case gateNodeStatus, gateReportedActionChannel, gateAppliedManifest,
+		gateCurrentCapabilities, gateDefinitionFitsCapabilities:
+		return true
+	default:
+		return false
+	}
+}
+
+// firstFailedGateByClass 返回指定类别（配置期/运行期）的第一个失败门禁。
+// Catalog 不参与 edgeNodeID（Create-only），因此与 firstFailedGateForCatalog 一样跳过。
+func firstFailedGateByClass(gates []gateResult, runtime bool) *gateResult {
+	for i := range gates {
+		if gates[i].name == gateEdgeNodeID {
+			continue
+		}
+		if gates[i].passed || gateIsRuntime(gates[i].name) != runtime {
+			continue
+		}
+		return &gates[i]
 	}
 	return nil
 }

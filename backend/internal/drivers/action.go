@@ -13,6 +13,13 @@ type ControlAction struct {
 	Description string
 	Semantics   string
 	Risk        string
+	// RiskReason is the user-facing reason shown next to the risk badge.
+	// High/critical actions should always provide it.
+	RiskReason string
+	// Exposure scopes the action to a UI surface: automation (rule builder),
+	// diagnostic (device detail reads), configuration (raw parameter writes).
+	// Empty means derive from semantics/ID prefix in deviceaction.Register.
+	Exposure string
 	// ExecutionShape describes the physical workflow required by the action.
 	// single is the currently deployed one-request envelope; bounded_sequence
 	// is reserved for a fixed, server-compiled sequence (readback/finally),
@@ -42,6 +49,10 @@ type ControlAction struct {
 	// protocol_unverified and hardware_evidence_required.
 	AvailabilityCode   string
 	AvailabilityReason string
+	// Presets are one-click parameter bundles for semantically simple actions
+	// (for example BMS charge/discharge MOS). Declarative data only; the driver
+	// still owns the physical plan.
+	Presets []map[string]any
 }
 
 type ControlParameter struct {

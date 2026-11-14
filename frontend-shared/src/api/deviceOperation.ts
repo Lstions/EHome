@@ -7,8 +7,10 @@ export interface ActionParameterSchema { properties?: Record<string, ActionParam
 // 不得再持有任何 4 级字面量（low/medium/high/critical）—— 那是驱动的出厂方言，
 // 由后端在 Register 期归一化。防漂移门禁见 __tests__/riskLiteralGate.spec.ts。
 export type RiskLevel = 'normal' | 'elevated'
-export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; risk_level?: RiskLevel; requires_confirmation?: boolean; execution_shape?: 'single' | 'bounded_sequence'; verification?: 'none' | 'ack' | 'readback' | 'observation'; at_most_once?: boolean; max_steps?: number; availability_code?: string; availability_reason?: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
-export interface EffectiveAction { definition: ActionDefinition; available: boolean; reason?: string; reason_code?: string }
+export type ActionExposure = 'automation' | 'diagnostic' | 'configuration'
+export interface ActionPreset { id: string; label: string; description?: string; params: Record<string, unknown> }
+export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; risk_reason?: string; risk_level?: RiskLevel; requires_confirmation?: boolean; exposure?: ActionExposure; presets?: ActionPreset[]; execution_shape?: 'single' | 'bounded_sequence'; verification?: 'none' | 'ack' | 'readback' | 'observation'; at_most_once?: boolean; max_steps?: number; availability_code?: string; availability_reason?: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
+export interface EffectiveAction { definition: ActionDefinition; available: boolean; reason?: string; reason_code?: string; configurable?: boolean; runtime_reason?: string; runtime_reason_code?: string }
 export interface VerifiedSensorValue { name: string; value: number; unit?: string; string_value?: string }
 export interface ConfirmationGrant { token: string; expires_at: string }
 export type ManualResolutionOutcome = 'CONFIRMED_SUCCEEDED' | 'CONFIRMED_FAILED' | 'ACKNOWLEDGED_UNKNOWN'
@@ -26,7 +28,10 @@ export function newIdempotencyKey(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 export const deviceOperationApi = {
-  actions: async (id: number) => unwrap<EffectiveAction[]>(await client.get<unknown, ApiEnvelope<EffectiveAction[]>>(`/api/v1/edge-devices/${id}/actions`)),
+  actions: async (id: number, purpose?: ActionExposure) => {
+    const query = purpose ? `?purpose=${purpose}` : ''
+    return unwrap<EffectiveAction[]>(await client.get<unknown, ApiEnvelope<EffectiveAction[]>>(`/api/v1/edge-devices/${id}/actions${query}`))
+  },
   list: async (id: number) => unwrap<DeviceOperation[]>(await client.get<unknown, ApiEnvelope<DeviceOperation[]>>(`/api/v1/edge-devices/${id}/operations`)),
   /**
    * 按 command_id 查单次执行（handler_device_operation.go:113 `GET /device-operations/:execution_id`）。

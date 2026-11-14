@@ -22,8 +22,47 @@ import { ruleActions } from '../automationFormat'
 export interface ActionOption {
   value: string
   label: string
+  /** 运行期是否可执行（旧字段，保留兼容）。 */
   available: boolean
+  /** 配置期是否可选：设备离线也为 true，规则仍可保存。 */
+  configurable: boolean
   reason?: string
+  runtimeReason?: string
+  runtimeReasonCode?: string
+}
+
+interface ActionAvailability {
+  available: boolean
+  configurable: boolean
+  reason?: string
+  reasonCode?: string
+  runtimeReason?: string
+  runtimeReasonCode?: string
+}
+
+/** 把后端机器码翻译成用户能读的原因；未知时回退后端文本。 */
+export function runtimeReasonText(code?: string, fallback?: string): string {
+  switch (code) {
+    case 'node_offline': return '设备节点当前离线'
+    case 'channel_not_reported': return '动作通道尚未上报'
+    case 'manifest_not_applied': return '配置清单尚未应用'
+    case 'capability_stale': return '设备能力上报已过期'
+    case 'capability_unavailable': return '设备能力当前不可用'
+    case 'capability_mismatch': return '动作超出当前设备能力'
+    case 'periph_config_unavailable': return '外设配置缺失或未启用'
+    default: return fallback || '设备当前不可执行'
+  }
+}
+
+function configReasonText(code?: string, fallback?: string): string {
+  switch (code) {
+    case 'command_engine_gate': return '当前指令引擎不支持该动作'
+    case 'action_disabled': return '驱动未启用该动作'
+    case 'dispatch_disabled': return '设备控制未启用'
+    case 'device_unavailable': return '设备或节点配置不可用'
+    case 'channel_unavailable': return '动作通道缺失'
+    default: return fallback || '动作当前不可用'
+  }
 }
 
 /**
@@ -64,7 +103,7 @@ export function useActionCatalog() {
    * （catalogDefinition → riskPresentation）。改它的值类型等于改风险判定的输入 —— 本次
    * 一个字都不动风险逻辑；可用性只服务下拉选项的「当前不可用」标注与空态提示文案。
    */
-  const actionAvailability = ref(new Map<string, { available: boolean; reason?: string }>())
+  const actionAvailability = ref(new Map<string, ActionAvailability>())
 
   const catalogState = ref(new Map<number, CatalogLoadState>())
 
@@ -103,14 +142,28 @@ export function useActionCatalog() {
     for (const id of pending) {
       const request = (async () => {
         try {
-          const items = await deviceOperationApi.actions(id)
+          // 规则编排只取 automation 暴露面：read_*/write_* 属于设备详情页的
+          // 诊断/配置能力，不应出现在自动化动作下拉里。
+          const items = await deviceOperationApi.actions(id, 'automation')
           for (const item of items) {
             const def = item.definition
+            // 兼容旧后端（无 exposure）：按 semantics/ID 前缀兜底，避免读取/写入
+            // 动作混进规则编排。
+            if (!def.exposure && (def.semantics === 'read' || def.id.startsWith('write_'))) continue
             const key = `${id}:${def.id}`
             next.set(key, def)
             // available 缺省按"可用"处理（后端字段是 bool，老响应可能没有它）：
             // 没有依据时不要把动作标成不可用，否则用户会以为设备坏了。
-            availability.set(key, { available: item.available !== false, reason: item.reason ?? def.availability_reason })
+            availability.set(key, {
+              available: item.available !== false,
+              // 旧后端没有 configurable：按旧语义（available）兜底，避免把"全部
+              // 不可用"误判成"可配置"而丢掉既有提示。
+              configurable: item.configurable ?? item.available !== false,
+              reason: item.reason ?? def.availability_reason,
+              reasonCode: item.reason_code,
+              runtimeReason: item.runtime_reason,
+              runtimeReasonCode: item.runtime_reason_code,
+            })
           }
           states.set(id, 'ready')
         } catch {
@@ -152,16 +205,25 @@ export function useActionCatalog() {
       if (!key.startsWith(prefix)) continue
       const availability = actionAvailability.value.get(key)
       const available = availability ? availability.available : true
+      const configurable = availability ? availability.configurable : true
       const parts = [def.name || def.id, def.id]
       // 风险文字只是**选项文案**（让用户知道这个动作危险），真正判定仍是后端下发的
       // requires_confirmation（riskBadgeOf / 保存前预检）。这里绝不参与任何风险判定。
+      // 后端下发 risk_reason 后优先显示具体原因，不再只有光秃秃的"风险"。
       const badge = riskBadge(def)
-      if (badge) parts.push(`${badge.icon} ${badge.label}`)
-      // 不可用的动作**照样列出**、只加后缀，不隐藏：动作确实存在，只是此刻下发不了
-      // （电池未接入/驱动未就绪）。隐藏会让下拉看起来"这个动作不存在"，用户转而去查
-      // 驱动声明；而是否可用是**运行期**状态，配置期不据此阻断（执行结果由后端判定）。
-      if (!available) parts.push('当前不可用')
-      options.push({ value: def.id, label: parts.join(' · '), available, reason: availability?.reason })
+      if (badge) parts.push(`${badge.icon} ${def.risk_reason || badge.label}`)
+      // 只有配置期失败才逐项标"不可用 + 原因"；运行期失败（设备离线）由页面
+      // 统一横幅说明，避免 28 个选项后都挂同一句"当前不可用"。
+      if (!configurable) parts.push(`不可用：${configReasonText(availability?.reasonCode, availability?.reason)}`)
+      options.push({
+        value: def.id,
+        label: parts.join(' · '),
+        available,
+        configurable,
+        reason: availability?.reason,
+        runtimeReason: availability?.runtimeReason,
+        runtimeReasonCode: availability?.runtimeReasonCode,
+      })
     }
     // 按显示名排序（数字感知："动作 2" 排在 "动作 10" 前面）：候选多时用户按名字找，不按 ID 找
     options.sort((a, b) => a.label.localeCompare(b.label, 'zh-Hans-CN', { numeric: true }))
@@ -187,7 +249,22 @@ export function useActionCatalog() {
    */
   function catalogAllUnavailable(action: ActionDraft): boolean {
     const options = actionOptions(action)
-    return cardCatalogState(action) === 'ready' && options.length > 0 && options.every(o => !o.available)
+    return cardCatalogState(action) === 'ready' && options.length > 0 && options.every(o => !o.configurable)
+  }
+
+  /**
+   * 配置期可选、但运行期不可执行（典型：设备离线）。返回 true 时 UI 只显示一条
+   * 设备级横幅；动作仍然可选中、可保存。
+   */
+  function catalogRuntimeUnavailable(action: ActionDraft): boolean {
+    if (cardCatalogState(action) !== 'ready') return false
+    return actionOptions(action).some(o => o.configurable && !o.available)
+  }
+
+  /** 运行期不可执行的用户可读原因（第一条）。 */
+  function catalogRuntimeReason(action: ActionDraft): string {
+    const option = actionOptions(action).find(o => o.configurable && !o.available)
+    return runtimeReasonText(option?.runtimeReasonCode, option?.runtimeReason)
   }
 
   /**
@@ -246,6 +323,8 @@ export function useActionCatalog() {
     actionIdPlaceholder,
     catalogEmpty,
     catalogAllUnavailable,
+    catalogRuntimeUnavailable,
+    catalogRuntimeReason,
     catalogMissing,
     catalogDefinition,
     definitionHasSchema,

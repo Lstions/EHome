@@ -84,12 +84,17 @@
             :key="step.id"
             type="button"
             class="rule-wizard__step"
-            :class="{ 'is-active': wizardStep === step.id, 'is-done': wizardStep > step.id }"
+            :class="{
+              'is-active': wizardStep === step.id,
+              'is-done': stepState(step.id) === 'done',
+              'is-warning': stepState(step.id) === 'warning',
+            }"
             :aria-current="wizardStep === step.id ? 'step' : undefined"
+            :aria-label="`${step.title}（${stepStateLabel(step.id)}）`"
             :data-test="`wizard-step-${step.id}`"
             @click="goStep(step.id)"
           >
-            <span class="rule-wizard__num">{{ wizardStep > step.id ? '✓' : step.id }}</span>
+            <span class="rule-wizard__num">{{ stepState(step.id) === 'done' ? '✓' : stepState(step.id) === 'warning' ? '!' : step.id }}</span>
             <span class="rule-wizard__meta">
               <b>{{ step.title }}</b>
               <small>{{ step.desc }}</small>
@@ -182,6 +187,7 @@
                   @type-change="onCardTypeChange"
                   @device-change="onCardDeviceChange"
                   @action-id-change="onCardActionIdChange"
+                  @apply-preset="applyActionPreset"
                   @open-params="openParams"
                   @open-json-params="openJsonParams"
                 />
@@ -670,6 +676,7 @@ const {
   onCardDeviceChange,
   onCardActionIdChange,
   actionNameOf,
+  applyActionPreset,
   deviceName,
   riskReasonOf,
   riskyActions,
@@ -711,9 +718,39 @@ const WIZARD_STEPS = [
 const wizardStep = ref(1)
 const currentStepTitle = computed(() => WIZARD_STEPS[wizardStep.value - 1]?.title ?? '')
 
+const attemptedSteps = ref(new Set<number>())
+// 每一步的有效性（step 4 只是核对页，不产生本地错误）。
+const stepValidity = computed<Record<number, string | null>>(() => ({
+  1: validateStep(1),
+  2: validateStep(2),
+  3: validateStep(3),
+  4: null,
+}))
+
+function stepState(step: number): 'active' | 'done' | 'warning' | 'todo' {
+  if (wizardStep.value === step) return 'active'
+  const invalid = Boolean(stepValidity.value[step])
+  const left = wizardStep.value > step || attemptedSteps.value.has(step)
+  if (invalid) return left ? 'warning' : 'todo'
+  return left ? 'done' : 'todo'
+}
+function stepStateLabel(step: number): string {
+  switch (stepState(step)) {
+    case 'done': return '已完成'
+    case 'warning': return '未完成'
+    case 'active': return '当前步骤'
+    default: return '未开始'
+  }
+}
+
 function goStep(step: number) {
   // 允许回看/跳到任意步骤：向导不是线性门禁，真正的校验在「下一步」与「保存」上。
-  wizardStep.value = Math.min(WIZARD_STEPS.length, Math.max(1, step))
+  // 但跳过未完成步骤时必须留下黄色标记，不能把"位置在前"当成"已完成"。
+  const target = Math.min(WIZARD_STEPS.length, Math.max(1, step))
+  for (let s = 1; s < target; s++) {
+    if (stepValidity.value[s]) attemptedSteps.value.add(s)
+  }
+  wizardStep.value = target
 }
 function goPrev() {
   if (wizardStep.value > 1) wizardStep.value--
@@ -721,6 +758,7 @@ function goPrev() {
 function goNext() {
   const msg = validateStep(wizardStep.value)
   if (msg) {
+    attemptedSteps.value.add(wizardStep.value)
     ElMessage.warning(msg)
     return
   }
@@ -932,6 +970,9 @@ async function onSave() {
   const err = validate()
   if (err) {
     // 向导：把用户带到第一个有问题的步骤，而不是只在 toast 里说一句。
+    for (let s = 1; s <= 3; s++) {
+      if (stepValidity.value[s]) attemptedSteps.value.add(s)
+    }
     wizardStep.value = firstInvalidStep()
     ElMessage.warning(err)
     return
@@ -1472,6 +1513,25 @@ onUnmounted(() => {
 .rule-wizard__step.is-done .rule-wizard__num {
   border-color: var(--el-color-success);
   color: var(--el-color-success);
+}
+.rule-wizard__step.is-warning .rule-wizard__num {
+  border-color: var(--el-color-warning);
+  color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+}
+.rule-wizard__step.is-warning .rule-wizard__meta b {
+  color: var(--el-color-warning);
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.preset-row .hint-block {
+  flex-basis: 100%;
+  margin: 0;
 }
 .rule-wizard__num {
   width: 26px;

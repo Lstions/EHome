@@ -987,6 +987,61 @@ func TestF4GateChangePropagatesToCatalogAndCreate(t *testing.T) {
 // annotation. Note: the F4 design doc's claim that Catalog "evaluates
 // capability after a channel error" does not match the original source — this
 // test pins the source truth (behavior unchanged).
+// TestCatalogDistinguishesConfigurableFromRuntime 钉住 2026-11-14 的拆分：
+// 设备离线属于运行期失败 —— 动作仍可配置（Configurable=true），只是此刻不可执行
+// （Available=false），并给出 node_offline 机器码供前端显示设备级横幅。
+func TestCatalogDistinguishesConfigurableFromRuntime(t *testing.T) {
+	s, edge := setupService(t)
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("status", "offline").Error; err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.Catalog(context.Background(), edge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := catalogAction(items, "read_rainfall")
+	if item == nil {
+		t.Fatalf("catalog missing read_rainfall: %+v", items)
+	}
+	if !item.Configurable {
+		t.Fatalf("offline node must not block configuration, got %+v", item)
+	}
+	if item.Available {
+		t.Fatalf("offline node must make action unavailable, got %+v", item)
+	}
+	if item.RuntimeReasonCode != "node_offline" {
+		t.Fatalf("runtime reason code = %q, want node_offline (%+v)", item.RuntimeReasonCode, item)
+	}
+}
+
+// TestCatalogFilteredByExposure 验证 purpose=automation 只返回方法动作，
+// 诊断动作（read_*）仍可从默认目录读取（设备详情页）。
+func TestCatalogFilteredByExposure(t *testing.T) {
+	s, edge := setupService(t)
+	all, err := s.Catalog(context.Background(), edge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalogAction(all, "read_rainfall") == nil {
+		t.Fatal("default catalog must still include read_rainfall (diagnostic)")
+	}
+	automation, err := s.CatalogFiltered(context.Background(), edge.ID, "automation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range automation {
+		if item.Definition.Exposure != "automation" {
+			t.Fatalf("automation catalog leaked exposure=%q action %s", item.Definition.Exposure, item.Definition.ID)
+		}
+	}
+	if catalogAction(automation, "read_rainfall") != nil {
+		t.Fatalf("automation catalog must exclude diagnostic read_rainfall: %+v", automation)
+	}
+	if catalogAction(automation, "reset_rainfall") == nil {
+		t.Fatalf("automation catalog must still include method actions (reset_rainfall): %+v", automation)
+	}
+}
+
 func TestCatalogChannelFailureMasksCapabilityStale(t *testing.T) {
 	s, edge := setupService(t)
 	if err := s.db.Model(&models.Channel{}).Where("id = ?", edge.ChannelID).Update("enabled", false).Error; err != nil {

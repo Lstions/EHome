@@ -25,7 +25,14 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 			Error(c, http.StatusBadRequest, "invalid edge device id")
 			return
 		}
-		items, err := service.Catalog(c.Request.Context(), uint(id))
+		purpose := c.Query("purpose")
+		switch purpose {
+		case "", "automation", "diagnostic", "configuration":
+		default:
+			Error(c, http.StatusBadRequest, "invalid purpose (automation|diagnostic|configuration)")
+			return
+		}
+		items, err := service.CatalogFiltered(c.Request.Context(), uint(id), purpose)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			Error(c, http.StatusNotFound, "edge device not found")
 			return

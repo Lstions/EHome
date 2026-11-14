@@ -1256,6 +1256,35 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="wizard-step-1"]').classes()).toContain('is-active')
     })
 
+    it('跳过未完成的第 1 步：显示黄色未完成，而不是绿色已完成', async () => {
+      const wrapper = await openWizard()
+      // 名称为空，直接点第 2 步
+      await wrapper.find('[data-test="wizard-step-2"]').trigger('click')
+      await flushPromises()
+
+      const step1 = wrapper.find('[data-test="wizard-step-1"]')
+      expect(step1.classes()).toContain('is-warning')
+      expect(step1.classes()).not.toContain('is-done')
+      expect(step1.find('.rule-wizard__num').text()).toBe('!')
+      expect(step1.attributes('aria-label')).toContain('未完成')
+
+      // 补齐名称后立即转绿（无需离开当前步骤）
+      await wrapper.find('[data-test="field-name"]').setValue('向导-步骤状态')
+      await flushPromises()
+      expect(step1.classes()).toContain('is-done')
+      expect(step1.find('.rule-wizard__num').text()).toBe('✓')
+      expect(step1.attributes('aria-label')).toContain('已完成')
+    })
+
+    it('跳过未完成的第 3 步：动作页显示黄色未完成', async () => {
+      const wrapper = await openWizard()
+      await wrapper.find('[data-test="wizard-step-4"]').trigger('click')
+      await flushPromises()
+      const step3 = wrapper.find('[data-test="wizard-step-3"]')
+      expect(step3.classes()).toContain('is-warning')
+      expect(step3.find('.rule-wizard__num').text()).toBe('!')
+    })
+
     it('第 2 步：触发器缺必填时不能进入动作页', async () => {
       const wrapper = await openWizard()
       await wrapper.find('[data-test="field-name"]').setValue('向导-触发校验')
@@ -2676,6 +2705,99 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(form.attributes('data-prefill')).toBe('{"pin":7,"value":0}')
     })
 
+    it('运行期不可执行（设备离线）：动作仍可选，只显示一条设备级横幅', async () => {
+      mockedOperationApi.actions.mockResolvedValue([
+        {
+          definition: gpioDefinition,
+          available: false,
+          configurable: true,
+          runtime_reason: 'edge device or node is unavailable',
+          runtime_reason_code: 'node_offline',
+        },
+      ] as never)
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+
+      const select = wrapper.find('[data-test="action-id-select-0"]')
+      // 不再逐项重复"当前不可用"；原因在设备级横幅里说一次
+      expect(select.findAll('option').map(option => option.text()).join('|')).not.toContain('不可用')
+      expect(wrapper.find('[data-test="action-runtime-hint-0"]').text()).toContain('设备节点当前离线')
+
+      await select.setValue('gpio_set')
+      await flushPromises()
+      expect(actionDrafts(wrapper)[0].action_id).toBe('gpio_set')
+      // 规则向导只请求 automation 暴露面，read_*/write_* 留在设备详情页
+      expect(mockedOperationApi.actions).toHaveBeenCalledWith(10, 'automation')
+    })
+
+    it('自动化目录不展示 read_*/write_*（诊断/配置动作）', async () => {
+      mockedOperationApi.actions.mockResolvedValue([
+        { definition: gpioDefinition, available: true, configurable: true },
+        { definition: { ...readDefinition, semantics: 'read' }, available: true, configurable: true },
+        { definition: { id: 'write_sn', name: '写入 SN', semantics: 'set' }, available: true, configurable: true },
+      ] as never)
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+
+      const values = wrapper.find('[data-test="action-id-select-0"]').findAll('option').map(option => option.attributes('value'))
+      expect(values).toContain('gpio_set')
+      expect(values).not.toContain('read_basic_info')
+      expect(values).not.toContain('write_sn')
+    })
+
+    it('BMS MOS 一键预设：选择动作后直接写入推荐参数，无需 priority/弹窗', async () => {
+      mockedOperationApi.actions.mockResolvedValue([
+        {
+          definition: {
+            id: 'set_mos_policy',
+            name: '设置充放电 MOS 软件策略',
+            description: '改变充放电 MOS 软件关闭位',
+            risk_level: 'elevated',
+            requires_confirmation: true,
+            risk_reason: '直接控制充放电 MOS；协议一次写两位，误操作会断电或过流',
+            presets: [
+              {
+                id: 'charge_off',
+                label: '关闭充电 MOS',
+                description: '同时将放电 MOS 置为导通（协议一次写两位）',
+                params: { charge_software_closed: true, discharge_software_closed: false, priority: 'user' },
+              },
+            ],
+          },
+          available: true,
+          configurable: true,
+        },
+      ] as never)
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="action-device-0"]').setValue('10')
+      await flushPromises()
+      await waitForActionOptions(wrapper)
+      await wrapper.find('[data-test="action-id-select-0"]').setValue('set_mos_policy')
+      await flushPromises()
+
+      const preset = wrapper.find('[data-test="action-presets-0"]')
+      expect(preset.exists()).toBe(true)
+      const button = preset.findAll('button').find(b => b.text().includes('关闭充电 MOS'))
+      expect(button, '找不到 MOS 一键预设按钮').toBeTruthy()
+      await button!.trigger('click')
+      await flushPromises()
+
+      const params = actionDrafts(wrapper)[0].action_params_json
+      expect(params).toContain('"charge_software_closed":true')
+      expect(params).toContain('"discharge_software_closed":false')
+      expect(params).toContain('"priority":"user"')
+      // 风险原因直接来自后端 risk_reason，不再显示"后端未下发"
+      expect(wrapper.find('[data-test="risk-reason"]').text()).toContain('直接控制充放电 MOS')
+      expect(wrapper.find('[data-test="risk-reason"]').text()).not.toContain('后端未下发')
+    })
+
     it('目录里有动作但全部不可用：仍可选中，提示与「暂无动作」区分开', async () => {
       mockedOperationApi.actions.mockResolvedValue([
         { definition: readDefinition, available: false, reason: '电池未接入' },
@@ -2688,10 +2810,10 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       await waitForActionOptions(wrapper)
 
       const select = wrapper.find('[data-test="action-id-select-0"]')
-      expect(select.findAll('option').map(option => option.text()).some(label => label.includes('当前不可用'))).toBe(true)
+      expect(select.findAll('option').map(option => option.text()).some(label => label.includes('不可用：电池未接入'))).toBe(true)
       // "有 3 个动作但都下发不了" 不能说成 "没有动作"（否则用户会去查驱动声明而不是设备状态）
       expect(wrapper.find('[data-test="action-id-empty-hint-0"]').exists()).toBe(false)
-      expect(wrapper.find('[data-test="action-id-unavailable-hint-0"]').text()).toContain('当前均不可用')
+      expect(wrapper.find('[data-test="action-id-unavailable-hint-0"]').text()).toContain('配置期均不可用')
 
       // 不阻断：仍可先配规则，执行结果由后端判定
       await select.setValue('read_basic_info')

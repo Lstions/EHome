@@ -66,27 +66,34 @@ type Definition struct {
 	Description string `json:"description"`
 	DeviceType  string `json:"device_type"`
 	Semantics   string `json:"semantics"`
+	// Exposure 是动作的暴露面：automation（规则编排）/diagnostic（设备详情读取）/
+	// configuration（原始参数写入）。由 ControlAction.Exposure 显式声明，缺省按
+	// semantics/ID 前缀推导（见 Register），避免每个驱动重复声明。
+	Exposure string `json:"exposure,omitempty"`
 	// Risk 是**驱动出厂方言**的 4 级严重度 (low/medium/high/critical)。
 	// 兼容期保留原样输出, 供既有的严重度文案 ("严重风险" vs "高风险") 与
 	// 仿真断言使用; 新的对外契约是下面的 RiskLevel (方案 §3.4 D1)。
 	Risk string `json:"risk"`
+	// RiskReason 是风险徽标旁的可读原因（例如"设备会重启并短暂离线"）。
+	RiskReason string `json:"risk_reason,omitempty"`
 	// RiskLevel 是归一化后的 2 级系统契约 (normal/elevated), 由 Register 从
 	// Risk 派生 —— 调用方不得手工赋值, 否则就绕过了唯一归一化点 (方案 §3.3.3)。
 	RiskLevel RiskLevel `json:"risk_level"`
 	// RequiresConfirmation 是 RiskLevel 的对外派生字段, 供前端直接消费,
 	// 使前端不必持有任何风险字面量 (方案 §3.4 D1 / §8 F-5)。
-	RequiresConfirmation bool            `json:"requires_confirmation"`
-	ExecutionShape       string          `json:"execution_shape"`
-	Verification         string          `json:"verification"`
-	AtMostOnce           bool            `json:"at_most_once"`
-	MaxSteps             uint8           `json:"max_steps"`
-	Enabled              bool            `json:"enabled"`
-	Transport            string          `json:"transport"`
-	InputSchema          ParameterSchema `json:"input_schema"`
-	AvailabilityCode     string          `json:"availability_code,omitempty"`
-	AvailabilityReason   string          `json:"availability_reason,omitempty"`
-	SingleStep           SingleStep      `json:"-"`
-	Plan                 BoundedPlan     `json:"-"`
+	RequiresConfirmation bool             `json:"requires_confirmation"`
+	ExecutionShape       string           `json:"execution_shape"`
+	Verification         string           `json:"verification"`
+	AtMostOnce           bool             `json:"at_most_once"`
+	MaxSteps             uint8            `json:"max_steps"`
+	Enabled              bool             `json:"enabled"`
+	Transport            string           `json:"transport"`
+	InputSchema          ParameterSchema  `json:"input_schema"`
+	Presets              []map[string]any `json:"presets,omitempty"`
+	AvailabilityCode     string           `json:"availability_code,omitempty"`
+	AvailabilityReason   string           `json:"availability_reason,omitempty"`
+	SingleStep           SingleStep       `json:"-"`
+	Plan                 BoundedPlan      `json:"-"`
 	compiler             Compiler
 	addressCompiler      AddressCompiler
 	planCompiler         PlanCompiler
@@ -630,9 +637,21 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					enabled = false
 				}
 			}
+			exposure := action.Exposure
+			if exposure == "" {
+				switch {
+				case action.Semantics == "read":
+					exposure = "diagnostic"
+				case strings.HasPrefix(action.ID, "write_"):
+					exposure = "configuration"
+				default:
+					exposure = "automation"
+				}
+			}
 			if err := r.Register(Definition{ID: action.ID, Version: action.Version, Name: action.Name,
 				Description: action.Description, DeviceType: deviceType, Semantics: action.Semantics,
-				Risk: action.Risk, ExecutionShape: action.ExecutionShape, Verification: action.Verification,
+				Exposure: exposure, Risk: action.Risk, RiskReason: action.RiskReason, Presets: action.Presets,
+				ExecutionShape: action.ExecutionShape, Verification: action.Verification,
 				AtMostOnce: action.AtMostOnce, MaxSteps: action.MaxSteps, Enabled: enabled, Transport: ChannelCmdV2Adapter,
 				AvailabilityCode: action.AvailabilityCode, AvailabilityReason: action.AvailabilityReason,
 				InputSchema: schema, addressCompiler: addressCompiler, addressVerifier: addressVerifier,

@@ -182,6 +182,42 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 				{Name: "sn", Type: "string", Required: true, MinLength: uint32Ptr(1), MaxLength: uint32Ptr(31)},
 			}},
 	)
+	// RiskReason 是规则创建/风险确认处展示的可读原因。风险等级仍由 Risk 决定，
+	// 这里只补"为什么危险"，避免前端只能显示光秃秃的"风险"。
+	reasons := map[string]string{
+		"set_mos_policy":              "直接控制充放电 MOS；协议一次写两位，误操作会断电或过流",
+		"test_charge_mos":             "强制切换充电 MOS，需负载配合；可能短暂断开回路",
+		"test_discharge_mos":          "强制切换放电 MOS，需负载配合；可能短暂断开回路",
+		"bms_restart":                 "设备会重启并短暂离线，重启期间无法采集/控制",
+		"force_balance":               "强制均衡会改变电芯工作状态",
+		"clear_alarm":                 "会清除告警历史状态，可能掩盖真实故障",
+		"auto_test_edv":               "EDV 测试要求高 SOC，会改变放电策略",
+		"set_discharge_time_limit":    "到期会自动断开放电",
+		"set_charge_time_window":      "会改变充电允许时间窗",
+		"set_report_interval":         "会改变设备上报频率，影响数据时效与功耗",
+		"write_protection_parameters": "会改写 BMS 保护参数；错误值可能导致过充/过放保护失效",
+		"write_system_parameters":     "会改写 BMS 系统参数；错误值会影响容量与保护策略",
+		"write_internal_resistance":   "会改写电芯内阻标定；错误值会污染均衡判断",
+		"write_sn":                    "会改写设备 SN，影响资产识别",
+		"read_protection_parameters":  "读取需进入工厂模式，采集可能短暂中断",
+		"read_system_parameters":      "读取需进入工厂模式，采集可能短暂中断",
+		"read_sn":                     "读取需进入工厂模式，采集可能短暂中断",
+	}
+	for i := range actions {
+		if actions[i].RiskReason == "" {
+			actions[i].RiskReason = reasons[actions[i].ID]
+		}
+		if actions[i].ID == "set_mos_policy" {
+			// 规则创建只展示这四个一键预设；底层双位参数仍保留给高级/手动入口。
+			// Label 明确写出"两位一起写"，避免用户误以为只改一个 MOS。
+			actions[i].Presets = []map[string]any{
+				{"id": "charge_off", "label": "关闭充电 MOS", "description": "同时将放电 MOS 置为导通（协议一次写两位）", "params": map[string]any{"charge_software_closed": true, "discharge_software_closed": false, "priority": "user"}},
+				{"id": "charge_on", "label": "打开充电 MOS", "description": "同时将放电 MOS 置为导通（协议一次写两位）", "params": map[string]any{"charge_software_closed": false, "discharge_software_closed": false, "priority": "user"}},
+				{"id": "discharge_off", "label": "关闭放电 MOS", "description": "同时将充电 MOS 置为导通（协议一次写两位）", "params": map[string]any{"charge_software_closed": false, "discharge_software_closed": true, "priority": "user"}},
+				{"id": "discharge_on", "label": "打开放电 MOS", "description": "同时将充电 MOS 置为导通（协议一次写两位）", "params": map[string]any{"charge_software_closed": false, "discharge_software_closed": false, "priority": "user"}},
+			}
+		}
+	}
 	return actions
 }
 

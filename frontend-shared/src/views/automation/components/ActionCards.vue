@@ -131,7 +131,14 @@
                 class="hint-block"
                 :data-test="`action-id-unavailable-hint-${index}`"
               >
-                该设备的 {{ helpers.options(action).length }} 个动作当前均不可用，可先配置，执行结果由后端判定
+                该设备的 {{ helpers.options(action).length }} 个动作在配置期均不可用，请先检查驱动/通道配置
+              </p>
+              <p
+                v-if="helpers.runtimeUnavailable(action)"
+                class="hint-block action-card__hint--warn"
+                :data-test="`action-runtime-hint-${index}`"
+              >
+                设备当前不可执行（{{ helpers.runtimeReason(action) }}）；规则仍可保存，执行时由后端判定。
               </p>
               <p
                 v-else-if="helpers.missing(action)"
@@ -145,6 +152,25 @@
           <div class="span2">
             <dt>参数</dt>
             <dd>
+              <!-- 一键预设：把"两层弹窗 + 协议参数"收敛成一个按钮（如 BMS 充放电 MOS）。
+                   预设写入的仍是普通 action_params_json，高级参数仍可从「编辑参数」进入。 -->
+              <div
+                v-if="helpers.presets(action).length"
+                class="preset-row"
+                :data-test="`action-presets-${index}`"
+              >
+                <el-button
+                  v-for="preset in helpers.presets(action)"
+                  :key="preset.id"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="emit('apply-preset', action, preset)"
+                >{{ preset.label }}</el-button>
+                <p v-if="helpers.presets(action)[0]?.description" class="hint-block">
+                  {{ helpers.presets(action)[0]?.description }}
+                </p>
+              </div>
               <span class="mono" data-test="action-params-summary">{{ paramsSummary(action.action_params_json) }}</span>
               <!-- 表单之外的「高级」出口：schema 之外的方言键在表单里没有位置，
                    而且表单在不完整时禁提交，用户有时就是要改原文里的一个字符。
@@ -179,6 +205,7 @@
 
 <script setup lang="ts">
 import type { EdgeDevice } from '@/api/edgeDevice'
+import type { ActionPreset } from '@/api/deviceOperation'
 import { NORMAL_BADGE, paramsSummary, type ActionDraft } from '../actionList'
 import type { ActionCardHelpers } from '../composables/useRuleActions'
 
@@ -208,6 +235,7 @@ const emit = defineEmits<{
   (e: 'type-change', action: ActionDraft): void
   (e: 'device-change', action: ActionDraft): void
   (e: 'action-id-change', action: ActionDraft): void
+  (e: 'apply-preset', action: ActionDraft, preset: ActionPreset): void
   (e: 'open-params', uid: number): void
   (e: 'open-json-params', action: ActionDraft): void
 }>()

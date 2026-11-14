@@ -1,7 +1,7 @@
 import { computed, ref, type Ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { EdgeDevice } from '@/api/edgeDevice'
-import type { ActionDefinition } from '@/api/deviceOperation'
+import type { ActionDefinition, ActionPreset } from '@/api/deviceOperation'
 import {
   emptyAction, moveAction, riskBadge, riskPresentation, uidSeed, type ActionDraft,
 } from '../actionList'
@@ -39,6 +39,9 @@ export interface ActionCardHelpers {
   allUnavailable: ReturnType<typeof useActionCatalog>['catalogAllUnavailable']
   missing: ReturnType<typeof useActionCatalog>['catalogMissing']
   hasSchema: ReturnType<typeof useActionCatalog>['hasParamSchema']
+  runtimeUnavailable: ReturnType<typeof useActionCatalog>['catalogRuntimeUnavailable']
+  runtimeReason: ReturnType<typeof useActionCatalog>['catalogRuntimeReason']
+  presets: (action: ActionDraft) => ActionPreset[]
 }
 
 /**
@@ -104,6 +107,7 @@ export function useRuleActions(options: {
   const {
     catalogDefinition, actionOptions, actionIdPlaceholder,
     catalogEmpty, catalogAllUnavailable, catalogMissing, hasParamSchema,
+    catalogRuntimeUnavailable, catalogRuntimeReason,
     ensureActionCatalog, catalogState, actionCatalog,
   } = catalog
 
@@ -193,10 +197,21 @@ export function useRuleActions(options: {
    */
   function riskReasonOf(action: ActionDraft): string {
     const def = catalogDefinition(action)
+    if (def?.risk_reason) return def.risk_reason
     if (def?.description) {
       return `后端未下发风险原因，以下是该动作的操作说明（非危险说明）：${def.description}`
     }
     return '后端未下发风险原因文案，请自行确认该动作对目标设备的影响'
+  }
+
+  /** 该动作的一键预设（如 BMS 充电/放电 MOS）。无预设返回空数组。 */
+  function presetOptionsOf(action: ActionDraft): ActionPreset[] {
+    return catalogDefinition(action)?.presets ?? []
+  }
+
+  /** 应用一键预设：直接写回 action_params_json（仍是 JSON 字符串，落库形态不变）。 */
+  function applyActionPreset(action: ActionDraft, preset: ActionPreset) {
+    action.action_params_json = JSON.stringify(preset.params)
   }
 
   /**
@@ -255,6 +270,12 @@ export function useRuleActions(options: {
   function onCardActionIdChange(action: ActionDraft) {
     const def = catalogDefinition(action)
     if (!def) return
+    // 有预设的动作（如 BMS 充放电 MOS）：预设按钮就是主交互，不能再弹参数表单
+    // 逼用户面对 protocol priority。先清空旧动作参数，用户点预设后一次性写入。
+    if ((def.presets?.length ?? 0) > 0) {
+      action.action_params_json = ''
+      return
+    }
     if (definitionHasSchema(def)) {
       // 不把旧参数带进来：它们属于上一个动作，字段名对不上时只会变成干扰（ActionForm
       // 只认自己 schema 里的字段，提交时也会把它们丢掉）。取消则原样保留旧参数。
@@ -366,6 +387,7 @@ export function useRuleActions(options: {
     riskReasonOf,
     riskyActions,
     actionNameOf,
+    applyActionPreset,
     /** 卡片渲染用的判定映射（单一对象：子组件不重写任何判定）。 */
     cardHelpers: {
       title: actionTitle,
@@ -378,6 +400,9 @@ export function useRuleActions(options: {
       allUnavailable: catalogAllUnavailable,
       missing: catalogMissing,
       hasSchema: hasParamSchema,
+      runtimeUnavailable: catalogRuntimeUnavailable,
+      runtimeReason: catalogRuntimeReason,
+      presets: presetOptionsOf,
     } as ActionCardHelpers,
     // 参数编辑
     paramsDialogVisible,
