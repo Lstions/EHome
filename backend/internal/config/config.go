@@ -15,15 +15,14 @@ type Config struct {
 	Server         ServerConfig         `yaml:"server"`
 	Database       DatabaseConfig       `yaml:"database"`
 	Log            LogConfig            `yaml:"log"`
-	Control        ControlConfig        `yaml:"control"`
 	Ingest         IngestConfig         `yaml:"ingest"`
 	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
 	Device         DeviceConfig         `yaml:"device"`
 	// FieldResolver 是"数据字段解析层"配置段（设计/数据字段解析层-方案-2026-10-21.md v0.2 §11）。
 	// ⚠ 本仓**没有配置热加载**（Load 仅在启动时调用一次，无 fsnotify/viper）：
-	// 所有 field_resolver 配置（含 enabled）变更需**重启进程**生效；灰度用
-	// EHOME_FIELD_RESOLVER_ENABLED 环境变量 + 重启（方案 §11 明示，不新增 watcher）。
+	// 配置变更需**重启进程**生效。2026-11-14 起**不再有 EHOME_FIELD_RESOLVER_* 环境变量**
+	// （11 个），一律走本段的代码默认值 / config.yaml。
 	FieldResolver FieldResolverConfig `yaml:"field_resolver"`
 	// Telemetry 是遥测写入策略（设计/遥测存储优化方案-2026-11-06.md §3 L1）。
 	// ⚠ 与 field_resolver 同理：本仓**没有配置热加载**，改配置必须重启。
@@ -104,8 +103,13 @@ func (c *Config) TelemetrySettings() TelemetryConfig {
 // skipped, because "I enabled it and nothing listens" is indistinguishable
 // from "the device cannot connect" once you are debugging at 3am.
 type DeviceConfig struct {
-	// Enabled turns the 3.0 listener on. Default false.
-	Enabled bool `yaml:"enabled"`
+	// Enabled 表示「本次进程是否启动 3.0 mTLS 监听」。
+	//
+	// **它不是配置项**（yaml:"-"）：2026-11-14 起由「证书三件套是否齐全」推导
+	// （见 Load）。删除了 EHOME_DEVICE_ENABLED 与 device.enabled：
+	// 默认 false + 需要手设 true 的后果是「新部署节点永远离线且无报错」，
+	// 而这恰恰是 11-13 复盘里真实发生过的静默失败。
+	Enabled bool `yaml:"-"`
 
 	// Addr is the listen address, e.g. ":8443" (design §4.1 default port).
 	Addr string `yaml:"addr"`
@@ -127,33 +131,35 @@ type DeviceConfig struct {
 
 // Validate refuses a partially configured listener.
 //
-// Called only when Enabled is true, so an operator who has not opted in is
-// never blocked by 3.0 settings they do not have yet.
+// 2026-11-14：不再由 enabled 开关决定是否校验 —— 开关已删，监听与否由「证书三件套
+// 是否齐全」推导。校验规则变成：**完全没配 ⇒ 合法（不监听）；配了一部分 ⇒ 拒绝**。
+// 后者是关键：有 cert/key 但没 CA 的「半配置 mTLS」会接受任意客户端，比不监听更危险，
+// 而它恰好在「开关默认 false」时代会被静默跳过。
 func (d DeviceConfig) Validate() error {
-	if !d.Enabled {
-		return nil
+	if !d.Enabled && d.CertFile == "" && d.KeyFile == "" && d.ClientCAFile == "" {
+		return nil // 完全没配：不监听（合法）
 	}
 	if d.Addr == "" {
-		return fmt.Errorf("device.addr is required when device.enabled is true")
+		return fmt.Errorf("device.addr is required when device mTLS material is configured")
 	}
 	if d.CertFile == "" || d.KeyFile == "" {
-		return fmt.Errorf("device.cert_file and device.key_file are required when device.enabled is true")
+		return fmt.Errorf("device.cert_file and device.key_file are required when device mTLS material is configured")
 	}
 	if d.ClientCAFile == "" {
-		return fmt.Errorf("device.client_ca_file is required when device.enabled is true " +
+		return fmt.Errorf("device.client_ca_file is required when device mTLS material is configured " +
 			"(a device listener without client verification is not mTLS)")
 	}
 	return nil
 }
 
-type ControlConfig struct {
-	// DeviceControlV2Enabled defaults to true: implemented control actions
-	// are available without an environment-variable allowlist.  Turning it
-	// off stops the ChannelCmdV2 dispatcher entirely (emergency kill switch),
-	// which also makes every operation unavailable.
-	DeviceControlV2Enabled bool `yaml:"device_control_v2_enabled"`
-	RawDiagnosticsEnabled  bool `yaml:"raw_diagnostics_enabled"`
-}
+// ============ ControlConfig 已删除（2026-11-14）============
+//
+// 原来的两个字段都是「急停阀」：DeviceControlV2Enabled（关掉分发器）与
+// RawDiagnosticsEnabled（关掉 raw 诊断读写）。它们在生产的取值从未被切换过
+// （默认 true / 生产 true），却让「功能是否可用」取决于环境变量。
+//
+// 现在：分发器**恒开**；raw 诊断的开关收敛成 api.ControlPolicy 的代码字面量
+// （见 cmd/server/main.go）。要急停时改代码发版，而不是指望有人记得设变量。
 
 // ServerConfig holds HTTP server settings
 type ServerConfig struct {
@@ -343,7 +349,6 @@ func defaultConfig() *Config {
 		Log: LogConfig{
 			Level: "info",
 		},
-		Control:        ControlConfig{DeviceControlV2Enabled: true},
 		Ingest:         IngestConfig{ParserShards: DefaultParserShards},
 		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
@@ -384,6 +389,11 @@ func Load() *Config {
 	// Override with environment variables (highest priority)
 	overrideWithEnv(cfg)
 
+	// 设备监听 = 「证书三件套齐全」。没有 enabled 开关，也就没有「忘了开」：
+	// 部分配置（例如只给 cert/key 没给 CA）会被 Validate 拒绝 —— 半配置的 mTLS
+	// 比不监听更危险。
+	cfg.Device.Enabled = cfg.Device.CertFile != "" && cfg.Device.KeyFile != "" && cfg.Device.ClientCAFile != ""
+
 	return cfg
 }
 
@@ -412,28 +422,12 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
 	}
-	if v := getEnv("EHOME_DEVICE_CONTROL_V2_ENABLED", ""); v != "" {
-		if enabled, err := strconv.ParseBool(v); err == nil {
-			cfg.Control.DeviceControlV2Enabled = enabled
-		}
-	}
-	if v := getEnv("EHOME_RAW_DIAGNOSTICS_ENABLED", ""); v != "" {
-		if enabled, err := strconv.ParseBool(v); err == nil {
-			cfg.Control.RawDiagnosticsEnabled = enabled
-		}
-	}
-	// 3.0 设备监听（mTLS）的环境变量覆盖。
+	// 3.0 设备监听：这里只注入**连接材料**，启不启用由材料是否齐全推导（见 Load 末尾）。
 	//
-	// 为什么需要（2026-10-11，仿真移植）：仿真 harness 刻意让 CONFIG_PATH 指向
-	// 一个不存在的文件，以保证"子进程只用代码默认值 + 注入的环境变量"，
-	// 从而杜绝仓库里的 config.yaml 影响仿真确定性。此前 device 段**只有 YAML**，
-	// 于是 harness 无法启用设备监听 ⇒ 仿真设备没有可用传输。
-	// 补上 env 覆盖后，harness 依旧不需要写 YAML，确定性前提不被破坏。
-	if v := getEnv("EHOME_DEVICE_ENABLED", ""); v != "" {
-		if enabled, err := strconv.ParseBool(v); err == nil {
-			cfg.Device.Enabled = enabled
-		}
-	}
+	// 2026-11-14 删除的三个开关：
+	//   EHOME_DEVICE_ENABLED           默认 false ⇒ 新部署「节点永远离线且无报错」
+	//   EHOME_DEVICE_CONTROL_V2_ENABLED 生产恒 true，从未被切换过
+	//   EHOME_RAW_DIAGNOSTICS_ENABLED   生产恒 true，从未被切换过
 	if v := getEnv("EHOME_DEVICE_ADDR", ""); v != "" {
 		cfg.Device.Addr = v
 	}
@@ -462,71 +456,15 @@ func overrideWithEnv(cfg *Config) {
 			cfg.DataRetention.Days = n
 		}
 	}
-	if v := getEnv("EHOME_PARSER_SHARDS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 64 {
-			cfg.Ingest.ParserShards = n
-		}
-	}
-	// 数据字段解析层 (§11: 灰度/回滚靠 env + 重启, 本仓无热加载)。
+	// ============ 2026-11-14 收敛：以下行为/调参不再接受环境变量覆盖 ============
 	//
-	// 为什么每个标量都留 env 覆盖：kill switch 必须在**不改镜像内 YAML**的前提下
-	// 可切换（回滚预案 §14.3 要求"关闭开关并重启"即可生效），而灰度环境往往
-	// 只有 env 注入能力（docker/k8s）。布尔与时长解析失败时**保持原值**，
-	// 与本文件既有 env 覆盖的静默容错口径一致。
-	if v := getEnv("EHOME_FIELD_RESOLVER_ENABLED", ""); v != "" {
-		if enabled, err := strconv.ParseBool(v); err == nil {
-			cfg.FieldResolver.Enabled = enabled
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_ALIASES_FILE", ""); v != "" {
-		cfg.FieldResolver.AliasesFile = v
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_VIRTUAL_FILE", ""); v != "" {
-		cfg.FieldResolver.VirtualFile = v
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_OBSERVE_INTERVAL", ""); v != "" {
-		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
-			cfg.FieldResolver.ObserveInterval = Duration{Duration: d}
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_SNAPSHOT_TTL", ""); v != "" {
-		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
-			cfg.FieldResolver.SnapshotTTL = Duration{Duration: d}
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_SELECTOR_CHARS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.FieldResolver.MaxSelectorChars = n
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_FAMILY_SIZE", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.FieldResolver.MaxFamilySize = n
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_MAX_VIRTUAL_DEPTH", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.FieldResolver.MaxVirtualDepth = n
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_PREVIEW_MAX_SAMPLES", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.FieldResolver.PreviewMaxSamples = n
-		}
-	}
-	if v := getEnv("EHOME_FIELD_RESOLVER_NEVER_RESOLVED_HOURS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.FieldResolver.NeverResolvedHours = n
-		}
-	}
-	// 遥测心跳参数（方案 §3.2）：这是**参数**不是开关 —— L1 收窄已无条件生效，
-	// 心跳只决定「恒定值多久补写一行」。解析失败时保持默认，与本文件既有 env
-	// 覆盖的静默容错口径一致。
-	if v := getEnv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.Telemetry.HeartbeatSeconds = n
-		}
-	}
+	// 一律写死为代码常量或 config.yaml 默认值。它们曾经唯一的实际作用，是让
+	// 「生产值」与「代码默认值」悄悄分裂 —— 2026-11-14 的长窗事故就是生产 6h、
+	// 代码 1h，重部署丢了变量即全站报错。
+	//
+	//	EHOME_PARSER_SHARDS                → DefaultParserShards (8)
+	//	EHOME_TELEMETRY_HEARTBEAT_SECONDS  → DefaultTelemetryHeartbeatSeconds (60)
+	//	EHOME_FIELD_RESOLVER_*（11 个）    → FieldResolverConfig 默认值 / config.yaml
 }
 
 func getEnv(key, defaultValue string) string {
@@ -543,9 +481,8 @@ func (c *Config) DatabaseURL() string {
 		c.Database.User, c.Database.Password, c.Database.Host,
 		c.Database.Port, c.Database.DBName, c.Database.SSLMode)
 }
-func (c *Config) LogLevel() string             { return c.Log.Level }
-func (c *Config) DBConfig() DatabaseConfig     { return c.Database }
-func (c *Config) ControlConfig() ControlConfig { return c.Control }
+func (c *Config) LogLevel() string         { return c.Log.Level }
+func (c *Config) DBConfig() DatabaseConfig { return c.Database }
 
 // DataRetentionDays returns the system-level retention window in days.
 //

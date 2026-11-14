@@ -456,28 +456,25 @@ func TestStartupMigrationProgressWired(t *testing.T) {
 	}
 }
 
-// TestStartupMaintenancePageEnvSwitch 门禁：排障开关必须存在且默认 true。
+// TestStartupMaintenancePageAlwaysOn 门禁：维护页恒开，且**没有排障开关**。
 //
-// EHOME_STARTUP_MAINTENANCE_PAGE=false 是契约 §3.4/§5 规定的一键回退路径
-// （排障时用来隔离「提前监听」这个变量）。默认值必须为 true —— 否则整个改造
-// 默认不生效，等于白做。
-func TestStartupMaintenancePageEnvSwitch(t *testing.T) {
+// 2026-11-14 删除 EHOME_STARTUP_MAINTENANCE_PAGE：维护页的价值是「升级期间用户
+// 能看见进度」，那不是可选项；「先做完再监听」的排障路径与生产行为不同，
+// 正是环境开关制造分裂的典型案例。
+func TestStartupMaintenancePageAlwaysOn(t *testing.T) {
 	src := readStartupMainSource(t)
-	if !strings.Contains(src, "EHOME_STARTUP_MAINTENANCE_PAGE") {
-		t.Fatalf("main.go 缺少 EHOME_STARTUP_MAINTENANCE_PAGE 开关（契约 §3.4 的一键回退路径）")
+	if strings.Contains(src, "EHOME_STARTUP_MAINTENANCE_PAGE") {
+		t.Fatalf("main.go 不应再出现 EHOME_STARTUP_MAINTENANCE_PAGE（开关已删除）")
 	}
 	if !strings.Contains(src, "func startupMaintenancePageEnabled() bool") {
 		t.Fatalf("main.go 缺少 startupMaintenancePageEnabled 实现")
 	}
-	// 默认 true：函数体里 raw 为空的分支必须 return true（而不是 false）。
 	body := extractFunctionBody(t, src, "func startupMaintenancePageEnabled() bool {")
-	if !strings.Contains(body, "raw == \"\"") {
-		t.Errorf("startupMaintenancePageEnabled 缺少空值分支（默认值必须显式处理）:\n%s", body)
+	if !strings.Contains(body, "return true") {
+		t.Fatalf("startupMaintenancePageEnabled 必须恒为 true:\n%s", body)
 	}
-	emptyIdx := strings.Index(body, "raw == \"\"")
-	firstReturn := strings.Index(body[emptyIdx:], "return true")
-	if emptyIdx < 0 || firstReturn < 0 {
-		t.Errorf("startupMaintenancePageEnabled 默认值必须是 true（契约 §3.4）:\n%s", body)
+	if strings.Contains(body, "Getenv") || strings.Contains(body, "os.") {
+		t.Fatalf("startupMaintenancePageEnabled 不应再读环境变量:\n%s", body)
 	}
 }
 

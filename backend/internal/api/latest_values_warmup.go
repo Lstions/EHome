@@ -34,7 +34,8 @@ package api
 //   warmup 不载入 => 该设备首次请求走 Miss 回落 SQL => **结果相同**，只是慢一次。
 //   所以取小了不会出错，只会少预热几台离线设备；取大了则启动变慢。
 //
-// 调整方式：EHOME_LATEST_WARMUP_LOOKBACK（见 LatestValuesWarmupLookbackFromEnv）。
+// 2026-11-14：窗口写死为 LatestValuesWarmupLookback（24h），删除
+// EHOME_LATEST_WARMUP_LOOKBACK —— 它是性能参数，取小了只慢一次，不值得一个开关。
 
 // ============ 已知限制：没有 created_at 索引，本轮**故意不修** ============
 //
@@ -57,8 +58,6 @@ package api
 // 若将来 unified_data 因故继续长期写入，那时再评估索引，而不是现在。
 
 import (
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -68,24 +67,6 @@ import (
 // 那些设备恰恰最需要预热（它们不会有实时写入来顺带更新缓存）。
 // 为什么不是更长：再长也覆盖不到「离线超过一天」的设备，那类设备本来就该走 Miss 路径。
 const LatestValuesWarmupLookback = 24 * time.Hour
-
-// LatestValuesWarmupLookbackFromEnv 读取 EHOME_LATEST_WARMUP_LOOKBACK。
-//
-// 支持 Go duration 写法（24h / 90m）与纯小时数（24）。非法值回落默认且不报错 ——
-// 预热窗口是性能参数，不该让服务启动失败。
-func LatestValuesWarmupLookbackFromEnv() time.Duration {
-	v := os.Getenv("EHOME_LATEST_WARMUP_LOOKBACK")
-	if v == "" {
-		return LatestValuesWarmupLookback
-	}
-	if d, err := time.ParseDuration(v); err == nil && d > 0 {
-		return d
-	}
-	if h, err := strconv.Atoi(v); err == nil && h > 0 {
-		return time.Duration(h) * time.Hour
-	}
-	return LatestValuesWarmupLookback
-}
 
 // LatestValuesWarmupRows 已删除（2026-11-08，unified_data DROP）。
 //

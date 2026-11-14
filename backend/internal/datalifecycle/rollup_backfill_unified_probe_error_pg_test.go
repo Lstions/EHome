@@ -91,7 +91,7 @@ func TestRollupBackfillUnifiedProbeErrorStillFails(t *testing.T) {
 		t.Fatal("HasTable(unified_data) = false —— 本用例要验的是「表存在但查不动」，前提不成立")
 	}
 
-	cfg := RollupBackfillConfig{Enabled: true, BatchSeconds: 1800}
+	cfg := RollupBackfillConfig{BatchSeconds: 1800}
 	runner := NewRollupBackfillRunner(db, cfg)
 	// RunOnce 对单单元失败不中止（刻意的），所以这里不断言返回 err，
 	// 而是断言「报警机制真的响了」—— 见文件头的 ①②。

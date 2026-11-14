@@ -159,7 +159,7 @@ func TestRollupMatchesUnifiedForLongWindows(t *testing.T) {
 	seedParityUnified(t, db, dev, start, end)
 
 	// 回填（BatchSeconds 取 6h：31 天 × 4 批 = 124 次聚合，比 1h 批快 6 倍）。
-	cfg := datalifecycle.RollupBackfillConfig{Enabled: true, BatchSeconds: 21600}
+	cfg := datalifecycle.RollupBackfillConfig{BatchSeconds: 21600}
 	if err := datalifecycle.RollupBackfillRunOnce(context.Background(), db, cfg); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}

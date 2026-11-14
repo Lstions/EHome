@@ -13,14 +13,13 @@ package api
 //
 // ============ 分段解码（2026-11-08）============
 //
-// 帧解码有硬护栏 frameDecodeMaxWindow。⚠ **这个值有三个，必须一起看**：
+// 帧解码有硬护栏 frameDecodeMaxWindow。⚠ 2026-11-14 起它**只有一个值**：
 //
-//	代码默认   1h    （history_source.go 的 defaultFrameDecodeMaxWindow）
-//	生产       6h    （部署脚本设 EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW=6h）
-//	测试       1h    （不设 env）
+//	6h（history_source.go 的 defaultFrameDecodeMaxWindow 常量）
 //
-// 曾经这里写「默认 6h，测试环境 1h」—— 那句话把**生产值**当成了**默认值**，
-// 读代码的人会以为不设 env 也是 6h。改任何一处都要先想清楚另外两处（见下面 :51 的教训）。
+// 过去它是「代码默认 1h / 生产靠 env 设 6h / 测试不设 env」三份值，于是
+// 重部署丢 env 就全站长窗报错（2026-11-14 事故）。现在没有 env 可丢。
+// 测试若需要更小的分界，用 SetFrameDecodeMaxWindow 显式覆盖。
 //
 // 长窗按段解：
 //

@@ -290,17 +290,17 @@ func TestChangeLongWindowEligibilityAndErrors(t *testing.T) {
 	dict := telemetry.NewMemorySlots()
 	start := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	q := historyPointQuery{EdgeDeviceID: 14, Category: "protection_status", Start: start, End: start.Add(30 * 24 * time.Hour), MaxPoints: 500, Mode: AggModeChange}
-	if !frameReadEligible(true, dict, q) {
+	if !frameReadEligible(dict, q) {
 		t.Fatal("30 天 change 窗口必须合格（rollup 精确预筛路径，task-5）")
 	}
 	q90 := q
 	q90.End = start.Add(90 * 24 * time.Hour)
-	if !frameReadEligible(true, dict, q90) {
+	if !frameReadEligible(dict, q90) {
 		t.Fatal("90 天 change 窗口必须合格（诊断卡最大档位）")
 	}
 	q91 := q
 	q91.End = start.Add(91 * 24 * time.Hour)
-	if frameReadEligible(true, dict, q91) {
+	if frameReadEligible(dict, q91) {
 		t.Fatal(">90 天 change 窗口必须拒绝（没有业务场景，且 rollup 保留期外读不到）")
 	}
 	err := frameReadUnavailableError(dict, q91)
@@ -311,7 +311,7 @@ func TestChangeLongWindowEligibilityAndErrors(t *testing.T) {
 	// avg 的短窗分界不受 change 改造影响（>24h 仍然必须拒绝）。
 	avg := q
 	avg.Mode = AggModeAvg
-	if frameReadEligible(true, dict, avg) {
+	if frameReadEligible(dict, avg) {
 		t.Fatal("avg 30 天窗口不该在帧表短窗解码路径上（avg 走 rollup）")
 	}
 }

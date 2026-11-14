@@ -23,56 +23,32 @@ import (
 	"time"
 )
 
-// TestRollupReadSwitchBindsEnv 守「环境变量能打开开关」。
-//
-// 这条是"接上"的字面核实：不设 env 时 false，设 1/true 时 true。
-// 用 Setter 覆写后再读，验证的是**状态机**；env 解析本身由
-// TestReadBoolEnvDefaultParsing（rollup_read_test.go）覆盖。
-func TestRollupReadSwitchBindsEnv(t *testing.T) {
-	old := RollupReadEnabled()
-	defer SetRollupReadEnabled(old)
-	SetRollupReadEnabled(true)
-	if !RollupReadEnabled() {
-		t.Fatal("SetRollupReadEnabled(true) 后仍为 false —— 开关没接线")
-	}
-	SetRollupReadEnabled(false)
-	if RollupReadEnabled() {
-		t.Fatal("SetRollupReadEnabled(false) 后仍为 true")
-	}
-}
-
 // TestRollupServesLongWindowOnly 守「只有长窗 + avg 才走 rollup」。
 //
-// 与帧表读路径（短窗）正好互补：
+// 与帧表读路径（短窗）互补，且**必须无缝**（2026-11-14）：
 //
-//	· rollup：长窗（> 6h）、avg、开关开；
-//	· 帧表  ：短窗（≤ 1h）、avg 或 change、覆盖则用；
-//	· 中间带（1h ~ 6h）：两者都不满足 ⇒ unified_data 的 SQL 聚合。
+//	· rollup：窗口 > 6h、avg；
+//	· 帧表  ：窗口 ≤ 6h、avg 或 change；
+//	· 没有第三档 —— unified_data 已 DROP，两个源都不服务的窗口 == 用户看到报错。
 //
-// 中间带确实存在，且是有意的 —— 3h 窗口解码要 ~1 万帧（解码成本开始显著），
-// 而 rollup 的 60s 粒度对 3h 太粗（只能给 180 个点）。SQL 聚合在这段最合适。
+// 因此「短窗分界」与「rollup 分界」必须同源（frameDecodeMaxWindow），
+// 否则 (帧窗, rollup 短窗] 会成为死区。
 func TestRollupServesLongWindowOnly(t *testing.T) {
-	start := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
-	short := time.Now().Add(-30 * time.Minute) // 必须用相对 now，RollupShortWindow 是 6h
+	short := time.Now().Add(-30 * time.Minute) // 必须用相对 now，分界是 6h
 	long := short.Add(-7 * time.Hour)
 
-	// 长窗 + avg + 开关开 ⇒ 是。
-	if !shouldUseRollup(true, AggModeAvg, long, short, 14) {
-		t.Fatal("7h 窗口 + avg + 开关开 应当走 rollup")
+	// 长窗 + avg ⇒ 是。
+	if !shouldUseRollup(AggModeAvg, long, short, 14) {
+		t.Fatal("7h 窗口 + avg 应当走 rollup")
 	}
 	// 短窗 ⇒ 否（否则 1 小时图会从 3,600 点变 60 点，静默降级）。
-	if shouldUseRollup(true, AggModeAvg, short.Add(-30*time.Minute), short, 14) {
+	if shouldUseRollup(AggModeAvg, short.Add(-30*time.Minute), short, 14) {
 		t.Fatal("30min 窗口不该走 rollup —— 会把点集从 3,600 砍到 60，属于静默降级")
 	}
 	// change 模式 ⇒ 否（rollup payload 没有翻转信息，重建 0→1 会算错）。
-	if shouldUseRollup(true, AggModeChange, long, short, 14) {
+	if shouldUseRollup(AggModeChange, long, short, 14) {
 		t.Fatal("change 模式不该走 rollup —— payload 无翻转信息，脉冲计数会错")
 	}
-	// 开关关 ⇒ 否。
-	if shouldUseRollup(false, AggModeAvg, long, short, 14) {
-		t.Fatal("开关关闭时不该走 rollup")
-	}
-	_ = start
 }
 
 // TestRollupAndFrameAreComplementary 守两条加速路径**不重叠**。
@@ -91,10 +67,15 @@ func TestRollupAndFrameAreComplementary(t *testing.T) {
 			EdgeDeviceID: 14, Category: "current",
 			Start: now.Add(-d), End: now, MaxPoints: 500, Mode: AggModeAvg,
 		}
-		useRollup := shouldUseRollup(true, AggModeAvg, q.Start, q.End, 14)
-		useFrame := frameReadEligible(true, dict, q)
+		useRollup := shouldUseRollup(AggModeAvg, q.Start, q.End, 14)
+		useFrame := frameReadEligible(dict, q)
 		if useRollup && useFrame {
 			t.Errorf("窗口 %v：rollup 与帧表同时为真 —— 两条加速路径重叠了", d)
+		}
+		// **必须恰好有一个为真**：unified_data 已 DROP，没有第三档。
+		// 这条断言把「分界不同源 ⇒ 死区 ⇒ 用户报错」挡在单测层。
+		if !useRollup && !useFrame {
+			t.Errorf("窗口 %v：rollup 与帧表都不服务 —— 死区（分界必须同源）", d)
 		}
 	}
 }

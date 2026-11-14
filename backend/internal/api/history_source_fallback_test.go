@@ -227,13 +227,8 @@ func TestSelectSourceUnavailableErrorIsActionable(t *testing.T) {
 		want string
 	}{
 		{
-			name: "开关被关",
-			q: historyPointQuery{EdgeDeviceID: 14, Category: "current",
-				Start: time.Now().Add(-time.Hour), End: time.Now(), MaxPoints: 100, Mode: AggModeAvg},
-			set:  func() { SetFrameReadEnabled(false) },
-			want: "打开该开关",
-		},
-		{
+			// 「帧表读路径被关闭」这个状态 2026-11-14 起不存在（开关已删），
+			// 因此这里只留窗口超限这一条 —— 它才是用户真正会遇到的。
 			name: "窗口超过解码上限",
 			q: historyPointQuery{EdgeDeviceID: 14, Category: "current",
 				Start: time.Now().Add(-48 * time.Hour), End: time.Now(), MaxPoints: 100, Mode: AggModeAvg},
@@ -242,10 +237,6 @@ func TestSelectSourceUnavailableErrorIsActionable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.set != nil {
-				tc.set()
-				defer SetFrameReadEnabled(true)
-			}
 			SetHistoryFrameDictionary(telemetry.NewDBSlots(db))
 			defer SetHistoryFrameDictionary(nil)
 

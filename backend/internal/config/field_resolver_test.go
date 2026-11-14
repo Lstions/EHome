@@ -40,40 +40,26 @@ func TestFieldResolverSettings_ZeroValueFallsBack(t *testing.T) {
 	}
 }
 
-// TestFieldResolverConfig_EnvOverrides 覆盖 §11 的 env 灰度/回滚路径（无需改镜像内 YAML）。
-func TestFieldResolverConfig_EnvOverrides(t *testing.T) {
+// TestFieldResolverConfig_EnvIsIgnored 守「字段解析层不再有环境变量」（2026-11-14）。
+//
+// 原 11 个 EHOME_FIELD_RESOLVER_* 已删除：配置只来自 config.yaml / 代码默认值。
+// 灰度回滚改为改配置或改代码 —— 一个「灰度时能用、平时没人看」的 env 面，
+// 正是 2026-11-14 长窗事故的同款风险。
+func TestFieldResolverConfig_EnvIsIgnored(t *testing.T) {
 	t.Setenv("EHOME_FIELD_RESOLVER_ENABLED", "true")
 	t.Setenv("EHOME_FIELD_RESOLVER_ALIASES_FILE", "/etc/ehome/aliases.yaml")
 	t.Setenv("EHOME_FIELD_RESOLVER_OBSERVE_INTERVAL", "15s")
 	t.Setenv("EHOME_FIELD_RESOLVER_MAX_SELECTOR_CHARS", "48")
-	t.Setenv("EHOME_FIELD_RESOLVER_PREVIEW_MAX_SAMPLES", "777")
-	cfg := Load()
-	fr := cfg.FieldResolverSettings()
-	if !fr.Enabled {
-		t.Fatalf("EHOME_FIELD_RESOLVER_ENABLED not applied")
-	}
-	if fr.AliasesFile != "/etc/ehome/aliases.yaml" {
-		t.Fatalf("aliases_file = %q", fr.AliasesFile)
-	}
-	if fr.ObserveInterval.Duration != 15*time.Second {
-		t.Fatalf("observe_interval = %v want 15s", fr.ObserveInterval.Duration)
-	}
-	if fr.MaxSelectorChars != 48 || fr.PreviewMaxSamples != 777 {
-		t.Fatalf("int env overrides not applied: %+v", fr)
-	}
-}
-
-// TestFieldResolverConfig_EnvInvalidIgnored 非法 env 保持原值（与本文件既有静默容错口径一致）。
-func TestFieldResolverConfig_EnvInvalidIgnored(t *testing.T) {
-	t.Setenv("EHOME_FIELD_RESOLVER_ENABLED", "not-a-bool")
-	t.Setenv("EHOME_FIELD_RESOLVER_OBSERVE_INTERVAL", "soon")
 	cfg := Load()
 	fr := cfg.FieldResolverSettings()
 	if fr.Enabled {
-		t.Fatalf("invalid bool env must be ignored")
+		t.Fatalf("env 不应再打开字段解析层（默认关闭）")
+	}
+	if fr.AliasesFile == "/etc/ehome/aliases.yaml" {
+		t.Fatalf("env 不应再覆盖 aliases_file: %q", fr.AliasesFile)
 	}
 	if fr.ObserveInterval.Duration != DefaultFieldResolverObserveInterval {
-		t.Fatalf("invalid duration env must be ignored, got %v", fr.ObserveInterval.Duration)
+		t.Fatalf("env 不应再覆盖 observe_interval: %v", fr.ObserveInterval.Duration)
 	}
 }
 

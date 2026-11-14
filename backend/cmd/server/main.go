@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -118,31 +117,19 @@ func main() {
 		Handler: rootHandler,
 	}
 
-	// httpListenGate 把「起监听」与「何时真正 Accept」解耦（只为 §3.4 的排障开关）：
-	//   · 默认（维护页开启）⇒ 立刻 close ⇒ 立即监听，请求全部由维护引擎应答；
-	//   · EHOME_STARTUP_MAINTENANCE_PAGE=false ⇒ goroutine 在此阻塞，等全量路由装配
-	//     完成后再 close ⇒ 与改造前"先做完再监听"完全等价（排障时用来隔离变量）。
-	httpListenGate := make(chan struct{})
-	// listenOnce 保证门只关一次：默认路径在下面立刻关，排障路径在装配完成后关。
-	// 用 Once 而不是裸 close —— 两处 close 撞车时的 panic 会发生在启动最早期，
-	// 现场只有一行 "close of closed channel"，极难定位。
-	var listenOnce sync.Once
-	listenNow := func() { listenOnce.Do(func() { close(httpListenGate) }) }
+	// 2026-11-14：维护页**恒开**（删除 EHOME_STARTUP_MAINTENANCE_PAGE 与「先做完再监听」
+	// 的排障路径）。启动即监听：DB 连接/迁移在监听之后进行，请求由维护引擎应答，
+	// 进度见 GET /api/v1/system/maintenance。
+	//
+	// 为什么删掉那道门：它唯一的价值是「隔离变量」，代价却是默认行为与生产行为不同 ——
+	// 那正是环境开关最擅长制造的分裂。
 	go func() {
-		<-httpListenGate
 		logger.Infof("API server listening on %s", cfg.APIAddr())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("API server failed: %v", err)
 		}
 	}()
-	if startupMaintenancePageEnabled() {
-		listenNow()
-		logger.Infof("startup maintenance page ENABLED: listening on %s BEFORE database connect (progress: GET /api/v1/system/maintenance)", cfg.APIAddr())
-	} else {
-		logger.Warnf("EHOME_STARTUP_MAINTENANCE_PAGE=false: 回退旧行为 —— 启动完成前不监听（仅供排障）")
-	}
-	// 可选的启动看门狗（默认关闭，EHOME_STARTUP_FAIL_FAST_SECONDS=0）。
-	startupFailFast(startupTracker)
+	logger.Infof("startup maintenance page ENABLED: listening on %s BEFORE database connect (progress: GET /api/v1/system/maintenance)", cfg.APIAddr())
 
 	dbCfg := cfg.DBConfig()
 	startupTracker.Begin(bootstrap.StepDBConnect)
@@ -432,11 +419,11 @@ func main() {
 		}
 	}
 
-	// 3.0 device transport (design 7.3 P0). Disabled by default: with
-	// device.enabled unset this build behaves exactly as before, which is what
-	// makes deploying it safe. A partially configured listener is refused HERE
-	// rather than silently not starting, because "I enabled it" and "the
-	// device cannot connect" would otherwise look identical.
+	// 3.0 device transport (design 7.3 P0).
+	//
+	// 2026-11-14：监听由「证书三件套齐全」推导（config.Load 的派生），不再有
+	// EHOME_DEVICE_ENABLED / device.enabled 开关。半配置（例如有 cert/key 但没 CA）
+	// 在这里被 Validate 拒绝 —— 「我配了」与「设备连不上」否则长得一模一样。
 	if err := cfg.Device.Validate(); err != nil {
 		logger.Fatalf("Invalid device transport configuration: %v", err)
 	}
@@ -559,7 +546,7 @@ func main() {
 	// 契约：docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §1/§3.5。
 	// 写入侧常驻：collector 恒构造、sink 恒注入、60s ticker 恒运行。
 	//
-	// 读侧开关（EHOME_TELEMETRY_ROLLUP_READ）**保留** —— 用户只要求 L1/L2，读切换
+	// 读侧开关已于 2026-11-14 删除（常开）；下面只剩回填与写入接线，
 	// 有独立风险（见 internal/api/rollup_read.go 的 fail-open 约定）。
 	//
 	// 两条旁路都挂在「解析成功路径」上（consumers_heavy.go 的 telemetryRollupSink /
@@ -633,14 +620,14 @@ func main() {
 		logger.Infof("Latest value cache topped up from frame table: %d rows", warmedFromFrames)
 	}
 	startupTracker.Done(bootstrap.StepWarmup, fmt.Sprintf("帧表预热完成: %d 行", warmedFromFrames))
-	telemetryDual, dualErr := telemetry.NewDualWriter(db, telemetryDict, telemetry.ConfigFromEnv())
+	telemetryDual, dualErr := telemetry.NewDualWriter(db, telemetryDict, telemetry.DefaultConfig())
 	if dualErr != nil {
 		abortStartup("telemetry: L2 frame writer construction failed (frames are the main write path; refusing to start with a half-broken telemetry pipeline): %v", dualErr)
 	}
 	defer telemetryDual.Close()
 	nodeMgr.SetTelemetrySink(telemetry.SinkOrNil(telemetryDual))
 	logger.Infof("telemetry: L2 frame encoding ACTIVE (every parsed frame -> telemetry_frame, queue=%d)",
-		telemetry.ConfigFromEnv().QueueSize)
+		telemetry.DefaultConfig().QueueSize)
 	// L3 的分钟级 flush：只落「已结束」的桶（FlushCompleted 内部判定），失败只 Warn
 	// （派生数据，下一轮重试）。与上面 24h 的 partitionStop ticker 各自独立 ——
 	// 不复用同一个变量，避免「关掉一个把另一个也停了」。
@@ -861,7 +848,9 @@ func main() {
 	automationCleanupContext, automationPlannerStopCleanup := context.WithCancel(context.Background())
 	go automationPlanner.StartCleanup(automationCleanupContext)
 	defer automationPlannerStopCleanup()
-	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)
+	// 2026-11-14：删除 EHOME_DEVICE_CONTROL_V2_ENABLED —— 分发器恒开。
+	// 急停改成改代码发版，而不是指望有人记得设变量（生产从未切换过它）。
+	commandService.SetDispatchEnabled(true)
 	nodeMgr.SetCommandExecutionService(commandService)
 	go nodeMgr.Start()
 
@@ -876,7 +865,7 @@ func main() {
 		}
 	})
 
-	if cfg.ControlConfig().DeviceControlV2Enabled {
+	{
 		dispatcherOwner := commandexec.NewDispatcherOwner("server")
 		// MultiTransport 按 action Transport 路由: channel_cmd_v2 → 通道指令,
 		// periph_cmd → GPIO/PWM 外设帧 (PeriphCmd 0x1B)。
@@ -886,8 +875,6 @@ func main() {
 		dispatcher := commandexec.NewDispatcher(db, transport, dispatcherOwner)
 		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
 		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)
-	} else {
-		logger.Infof("ChannelCmdV2 dispatcher disabled by configuration")
 	}
 
 	// Server-startup config push.
@@ -987,7 +974,6 @@ func main() {
 			MaxAge:           12 * time.Hour,
 		}))
 	}
-	controlCfg := cfg.ControlConfig()
 	// notifyDispatcher 一并交给 API 层: POST /notification-channels/:id/test 要用它真发
 	// 一条测试消息 (D-1 步骤 4)。传的是**同一个实例** —— 否则"测试按钮"与真实通知
 	// 走两套客户端/两套 SSRF 判定的风险, 且测试通过不代表线上通道可用。
@@ -1001,8 +987,11 @@ func main() {
 	// 只调了 api.SetRuleSourceGroupService（那是**规则保存期校验**用的另一条通道，
 	// 见 source_group_guard.go），从未作为 option 传给 SetupRoutes ⇒ 来源组 CRUD
 	// 全部 503，而来源组的领域逻辑本身完全正常。两条注入路径互不相通，必须都接。
+	// RawDiagnosticsEnabled 是**代码字面量**，不是环境变量（2026-11-14）：
+	// 生产的取值从未被切换过；保留策略字段只是为了让「未审计的 raw 读写面」
+	// 在源码里显式可见。要关掉它，改这一行并随代码评审。
 	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, sourceGroupSvc, notifyDispatcher, fieldResolver.registry, api.ControlPolicy{
-		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
+		RawDiagnosticsEnabled: true,
 	})
 
 	// P2：静态资源缓存头（/assets immutable、SPA 入口 no-cache）封装在 static.go。
@@ -1072,16 +1061,13 @@ func main() {
 	//   3. 幂等可续跑 —— 已 complete/missing 的 (设备,日) 单元直接跳过，容器重启
 	//      只会从断点继续，不会重复劳动。
 	{
-		rollupBackfillCfg, rollupBackfillWarns := datalifecycle.RollupBackfillConfigFromEnv()
-		for _, w := range rollupBackfillWarns {
-			logger.Warnf("rollup-backfill: %s", w)
-		}
-		rollupBackfillEnabled := rollupBackfillCfg.Enabled
+		rollupBackfillCfg := datalifecycle.DefaultRollupBackfillConfig()
+		rollupBackfillReady := true
 		if err := datalifecycle.EnsureRollupCoverageTable(db); err != nil {
 			// 覆盖元数据表建不出来 ⇒ 读路径永远判"未覆盖"⇒ 长窗永远回落。
 			// 这是**降级**不是故障（服务可用、只是慢），所以 Warn + 跳过，不 Fatal。
 			logger.Warnf("rollup-backfill: 建覆盖元数据表失败，跳过回填（不阻塞启动）: %v", err)
-			rollupBackfillEnabled = false
+			rollupBackfillReady = false
 		}
 		// ── 帧表聚合源注入（P0 残留缺口修复，2026-11-07）──
 		//
@@ -1188,7 +1174,7 @@ func main() {
 				Errors:         p.Errors,
 			}
 		})
-		if rollupBackfillEnabled {
+		if rollupBackfillReady {
 			go func() {
 				logger.Infof("rollup-backfill: L3 历史回填已启动（batch=%ds, sleep=%s）—— 后台执行，不阻塞服务",
 					rollupBackfillCfg.BatchSeconds, rollupBackfillCfg.BatchSleep)
@@ -1240,17 +1226,12 @@ func main() {
 				}
 			}()
 		} else {
-			logger.Infof("rollup-backfill: 已关闭（%s=false）或不可用，跳过", datalifecycle.EnvRollupBackfillEnabled)
+			logger.Infof("rollup-backfill: 不可用（覆盖元数据表建不出来），本轮跳过")
 		}
 	}
 
 	rootHandler.SetEngine(r)
 	logger.Infof("root handler switched to FULL engine (翻转为正式服务，维护页退出): percent=%.1f", startupTracker.Snapshot().Percent)
-
-	// 排障开关 EHOME_STARTUP_MAINTENANCE_PAGE=false 时，监听一直被上面那道门挡着，
-	// 此刻才放行 —— 与改造前"启动完成后才开始 Accept"完全等价。
-	// 默认（true）情况下这道门在 main 顶部就关了，listenNow 是幂等的空操作。
-	listenNow()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -1400,59 +1381,17 @@ const startupFailureGrace = 800 * time.Millisecond
 // 本函数只负责让失败**可见**，退出语义与改造前完全一致（仍是 logger.Fatalf，
 // 仍是非 0 退出）。maintenance page 关掉时同样生效（只是没人看得到）。
 func abortStartup(format string, args ...interface{}) {
-	if startupMaintenancePageEnabled() {
-		time.Sleep(startupFailureGrace)
-	}
+	// 维护页恒开 ⇒ 失败前留出让人看见最后一屏的时间。
+	time.Sleep(startupFailureGrace)
 	logger.Fatalf(format, args...)
 }
 
-// startupMaintenancePageEnabled 读 EHOME_STARTUP_MAINTENANCE_PAGE（默认 true）。
+// startupMaintenancePageEnabled 恒为 true。
 //
-// 默认 true 是刻意的：这条改造的价值全在"升级期间用户能看见进度"，
-// 默认开启才符合契约 §3.4。=false 时退化为旧行为（先做完再监听），只用于排障：
-// 排障时要能一键判断题现的异常是不是"提前监听"引入的。
-func startupMaintenancePageEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("EHOME_STARTUP_MAINTENANCE_PAGE"))
-	if raw == "" {
-		return true
-	}
-	enabled, err := strconv.ParseBool(raw)
-	if err != nil {
-		// 拼错的布尔值不该让运维以为开关生效了：按默认值走并明确告警。
-		logger.Warnf("EHOME_STARTUP_MAINTENANCE_PAGE=%q 不是合法布尔值，按默认 true 处理", raw)
-		return true
-	}
-	return enabled
-}
-
-// startupFailFast 可选看门狗（契约 §3.4 第二行，默认关闭）。
-//
-// EHOME_STARTUP_FAIL_FAST_SECONDS > 0 时：启动超过该秒数仍未就绪 ⇒ 进程以非 0
-// 退出。为什么需要它：提前监听后端口是通的，容器编排与负载均衡会认为"这个实例
-// 起来了"，而实际上它可能卡在一条几十分钟的索引 DDL 上。设置阈值让"卡死"
-// 能被编排层识别并以重启收敛，而不是永远挂着一个不通业务的实例。
-func startupFailFast(tracker *bootstrap.Tracker) {
-	raw := strings.TrimSpace(os.Getenv("EHOME_STARTUP_FAIL_FAST_SECONDS"))
-	if raw == "" {
-		return
-	}
-	seconds, err := strconv.Atoi(raw)
-	if err != nil || seconds <= 0 {
-		logger.Warnf("EHOME_STARTUP_FAIL_FAST_SECONDS=%q 无效或 <=0，启动看门狗关闭", raw)
-		return
-	}
-	go func() {
-		timer := time.NewTimer(time.Duration(seconds) * time.Second)
-		defer timer.Stop()
-		<-timer.C
-		if !tracker.Ready() {
-			snap := tracker.Snapshot()
-			logger.Fatalf("startup exceeded EHOME_STARTUP_FAIL_FAST_SECONDS=%d without becoming ready (percent=%.1f current=%s): failing fast so the orchestrator can restart",
-				seconds, snap.Percent, snap.CurrentStep)
-		}
-	}()
-	logger.Infof("startup fail-fast watchdog armed: %d s", seconds)
-}
+// 2026-11-14 删除 EHOME_STARTUP_MAINTENANCE_PAGE：维护页存在的全部意义就是
+// 「升级期间用户能看见进度」，那不是可选项。保留函数只是为了让两处调用点
+// （启动门与失败宽限）在源码里显式表达这层语义。
+func startupMaintenancePageEnabled() bool { return true }
 
 func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {
 	configs := make(map[string]json.RawMessage)

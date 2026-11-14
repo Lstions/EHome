@@ -52,7 +52,9 @@ services:
       EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
       EHOME_DB_SSLMODE: disable
       # ── 3.0 设备传输（替代 MQTT）──
-      EHOME_DEVICE_ENABLED: "true"
+      # 2026-11-14：不再有 EHOME_DEVICE_ENABLED —— 是否监听由「证书三件套齐全」推导
+      # （CertFile/KeyFile/ClientCAFile 都非空即启用）。忘设开关导致「节点永远离线」
+      # 是静默失败，比多监听一个端口危险得多。
       EHOME_DEVICE_ADDR: ":8443"
       EHOME_DEVICE_CERT_FILE: /certs/server.crt
       EHOME_DEVICE_KEY_FILE: /certs/server.key
@@ -63,7 +65,8 @@ services:
       EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-90}
       EHOME_STATIC_DIR: /app/static/dist
       EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
-      EHOME_RAW_DIAGNOSTICS_ENABLED: ${EHOME_RAW_DIAGNOSTICS_ENABLED:-false}
+      # 2026-11-14：遥测/行为类环境变量全部删除（见 docs/操作/环境变量收敛-2026-11-14.md）。
+      # 长窗图表由代码常量决定：帧解码 ≤6h、>6h 读分钟聚合，没有开关可配。
     healthcheck:
       # /api/v1/health 会被 SPA catch-all 兜住返回 200+HTML（假健康）。
       # 真实端点是 /health，返回 JSON。

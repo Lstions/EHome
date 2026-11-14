@@ -50,9 +50,7 @@ package datalifecycle
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,9 +78,13 @@ const (
 )
 
 // RollupBackfillConfig 是回填的运行配置。
+//
+// ============ 为什么没有 Enabled（2026-11-14）============
+// 回填是幂等的（已 complete/missing 的单元直接跳过），也是长窗 rollup 能服务的
+// 前提。一个「关掉就让长窗永远没覆盖」的开关不是配置，是隐藏的必填项 ——
+// 2026-11-14 的长窗事故就是同一形状（读开关默认 false、生产靠 env 打开）。
+// 因此删掉 Enabled 与三个 EHOME_TELEMETRY_ROLLUP_BACKFILL* 变量，参数写死。
 type RollupBackfillConfig struct {
-	// Enabled 是否启用（默认 true；生产可用环境变量关掉）。
-	Enabled bool
 	// BatchSeconds 单次聚合的时间跨度（秒）。<=0 用默认 3600。
 	BatchSeconds int
 	// BatchSleep 批次间休眠。<=0 用默认 50ms。
@@ -128,7 +130,9 @@ func NewRollupBackfillRunner(db *gorm.DB, cfg RollupBackfillConfig) *rollupBackf
 		db:       db,
 		cfg:      cfg,
 		errorCap: 16,
-		progress: RollupBackfillProgress{Enabled: cfg.Enabled, State: BackfillPending},
+		// Enabled 恒 true：2026-11-14 起回填不可关闭（幂等，且是长窗 rollup 的前提）。
+		// 字段保留只为兼容 /api/v1/system/rollup-backfill 的既有响应形状。
+		progress: RollupBackfillProgress{Enabled: true, State: BackfillPending},
 	}
 }
 
@@ -706,65 +710,16 @@ func (r *rollupBackfillRunner) insertRollupRowsNoClobber(ctx context.Context, de
 	return nil
 }
 
-// EnvRollupBackfillEnabled / EnvRollupBackfillBatchSeconds / EnvRollupBackfillSleep 是回填的环境变量。
-const (
-	EnvRollupBackfillEnabled      = "EHOME_TELEMETRY_ROLLUP_BACKFILL"
-	EnvRollupBackfillBatchSeconds = "EHOME_TELEMETRY_ROLLUP_BACKFILL_BATCH_SECONDS"
-	EnvRollupBackfillSleepMS      = "EHOME_TELEMETRY_ROLLUP_BACKFILL_SLEEP_MS"
-)
-
-// RollupBackfillConfigFromEnv 从环境变量构造配置。
+// DefaultRollupBackfillConfig 返回回填的固定配置（**不可配**）。
 //
-// 默认**开启**：回填是幂等的（已 complete/missing 的单元直接跳过），重复启动无副作用；
-// 而"忘了开"会让长窗永远读不到 rollup ⇒ 12 GB 老分区永远删不掉。
-// 限速默认 50ms/单元，生产若与其它重 IO 任务并发可调大。
-func RollupBackfillConfigFromEnv() (RollupBackfillConfig, []string) {
-	cfg := RollupBackfillConfig{
-		Enabled:      true,
+// 回填必须常开：它是幂等的（已 complete/missing 的单元直接跳过），而"没开"会让
+// 长窗永远读不到 rollup、老分区永远删不掉。限速 50ms/单元是为生产 IO 让路，
+// 属于代码常量而不是运维旋钮。
+func DefaultRollupBackfillConfig() RollupBackfillConfig {
+	return RollupBackfillConfig{
 		BatchSeconds: int(defaultRollupBackfillBatchSeconds),
 		BatchSleep:   defaultRollupBackfillBatchSleep,
 	}
-	var warnings []string
-	if raw, ok := os.LookupEnv(EnvRollupBackfillEnabled); ok {
-		if v, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
-			cfg.Enabled = v
-		} else {
-			warnings = append(warnings, fmt.Sprintf("%s=%q 不是合法布尔值，按 true 处理", EnvRollupBackfillEnabled, raw))
-		}
-	}
-	if raw, ok := os.LookupEnv(EnvRollupBackfillBatchSeconds); ok {
-		if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && v > 0 {
-			cfg.BatchSeconds = int(normalizeRollupBatchSeconds(v) / time.Second)
-		} else {
-			warnings = append(warnings, fmt.Sprintf("%s=%q 不是合法正整数，按默认 %d 处理",
-				EnvRollupBackfillBatchSeconds, raw, cfg.BatchSeconds))
-		}
-	}
-	if raw, ok := os.LookupEnv(EnvRollupBackfillSleepMS); ok {
-		if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && v >= 0 {
-			cfg.BatchSleep = time.Duration(v) * time.Millisecond
-		} else {
-			warnings = append(warnings, fmt.Sprintf("%s=%q 不是合法非负整数，按默认 %v 处理",
-				EnvRollupBackfillSleepMS, raw, cfg.BatchSleep))
-		}
-	}
-	return cfg, warnings
-}
-
-// RunRollupBackfillFromEnv 是 main.go 的接线入口（后台 goroutine 内调用）。
-func RunRollupBackfillFromEnv(ctx context.Context, db *gorm.DB) error {
-	cfg, warnings := RollupBackfillConfigFromEnv()
-	for _, w := range warnings {
-		logger.Warnf("[rollup-backfill] %s", w)
-	}
-	if !cfg.Enabled {
-		logger.Infof("[rollup-backfill] 已关闭（%s=false），跳过", EnvRollupBackfillEnabled)
-		return nil
-	}
-	if err := EnsureRollupCoverageTable(db); err != nil {
-		return fmt.Errorf("ensure rollup coverage table: %w", err)
-	}
-	return NewRollupBackfillRunner(db, cfg).RunOnce(ctx)
 }
 
 // normalizeRollupBatchSeconds 把批次跨度**向上取整到 60 秒的整数倍**。

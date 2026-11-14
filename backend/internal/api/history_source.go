@@ -44,10 +44,7 @@ package api
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,18 +56,20 @@ import (
 )
 
 const (
-	// frameReadEnv 是帧表读路径开关（默认 true —— 与 rollup 不同：帧表是**主路径**，
-	// 且回退判据保守，开着不会让用户看到空图）。
-	frameReadEnv = "EHOME_TELEMETRY_FRAME_READ"
-
-	// frameDecodeMaxWindowEnv 是「短窗解码 / 长窗回落」的分界（默认 1h）。
-	frameDecodeMaxWindowEnv = "EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW"
-
-	// defaultFrameDecodeMaxWindow 是分界默认值。
+	// defaultFrameDecodeMaxWindow 是「短窗逐帧解码 / 长窗分钟聚合」的分界。
 	//
-	// 1 小时的依据：1 Hz 下 3,600 帧（MaxDecodeFrames=32,768 的 11%），解码耗时
-	// 与 unified_data 的索引扫描同量级；再长就该走 rollup 或回落 SQL 聚合。
-	defaultFrameDecodeMaxWindow = time.Hour
+	// ============ 为什么是常量 6h，而不是环境变量（2026-11-14）============
+	//
+	// 这个值曾被 EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW 覆盖：代码默认 1h、
+	// 生产靠 compose 里的 6h。2026-11-14 重部署时 compose 被模板覆盖、变量丢失
+	// ⇒ 所有 >1h 的窗口立刻报「查询窗口 24h 超过帧表单次解码上限 1h」，
+	// BMS 页与 Dashboard 的长窗图表全灭。
+	//
+	// 而 6h **不是环境相关决策**：它由 MaxDecodeFrames(32,768) 推出 ——
+	// 1 Hz × 6h = 21,600 帧（66% 上限），任何部署、任何机器都一样。
+	// 环境变量在这里唯一能做到的事，就是让代码与生产值悄悄分裂。
+	// 因此写死为常量，删掉开关：**代码是唯一事实源**。
+	defaultFrameDecodeMaxWindow = 6 * time.Hour
 
 	// maxChangeDecodeWindow 是 change 模式**纯帧分段解码**的窗口上限（8 天，fallback 用）。
 	//
@@ -96,19 +95,14 @@ const (
 	maxChangeDecodeWindow = maxFrameHistoryWindow
 )
 
-// frameReadEnabled / frameDecodeMaxWindow 是进程级状态（启动读一次 env，测试可覆盖）。
-var (
-	frameReadEnabled     = readBoolEnvDefault(frameReadEnv, true)
-	frameDecodeMaxWindow = readDurationEnv(frameDecodeMaxWindowEnv, defaultFrameDecodeMaxWindow)
-)
+// frameDecodeMaxWindow 是短窗分界。
+//
+// 只有一个生产值（defaultFrameDecodeMaxWindow 常量）；测试可用
+// SetFrameDecodeMaxWindow 覆盖，**不再读任何环境变量** —— 帧表读路径本身也不可关闭
+// （unified_data 已 DROP，关掉它等于全站图表 500）。
+var frameDecodeMaxWindow = defaultFrameDecodeMaxWindow
 
-// SetFrameReadEnabled 覆写帧表读路径开关（测试/启动接线用）。
-func SetFrameReadEnabled(enabled bool) { frameReadEnabled = enabled }
-
-// FrameReadEnabled 报告帧表读路径是否启用。
-func FrameReadEnabled() bool { return frameReadEnabled }
-
-// SetFrameDecodeMaxWindow 覆写短窗分界（测试用）。
+// SetFrameDecodeMaxWindow 覆写短窗分界（**仅测试**；生产恒为常量）。
 func SetFrameDecodeMaxWindow(d time.Duration) {
 	if d > 0 {
 		frameDecodeMaxWindow = d
@@ -117,22 +111,6 @@ func SetFrameDecodeMaxWindow(d time.Duration) {
 
 // FrameDecodeMaxWindow 返回当前短窗分界。
 func FrameDecodeMaxWindow() time.Duration { return frameDecodeMaxWindow }
-
-// readDurationEnv 读时长环境变量（支持 "1h" 与纯秒数），非法值回落默认。
-func readDurationEnv(key string, def time.Duration) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def
-	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-		return d
-	}
-	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	logger.Warnf("[frame-read] invalid %s=%q, fallback to %s", key, raw, def)
-	return def
-}
 
 // ============ 数据源抽象 ============
 
@@ -467,14 +445,14 @@ func HistoryFrameDictionary() telemetry.SlotDictionary {
 //
 // frameReadEligible 是纯函数形式的**前提**判据（不含 DB 查询，可独立单测）。
 //
-// 五条必须同时成立：
-//  1. 开关打开；
-//  2. 有注入的 slot 字典（没字典解不了码）；
-//  3. 是聚合路径（avg/change）—— raw 模式要返回原始行，帧表给不了那个形状；
-//  4. 设备维度有效；
-//  5. 窗口有效且不超过短窗分界，同时不超过 DecodeRange 的硬上限。
-func frameReadEligible(enabled bool, dict telemetry.SlotDictionary, q historyPointQuery) bool {
-	if !enabled || dict == nil || q.EdgeDeviceID == 0 {
+// 四条必须同时成立（**没有「开关打开」这一条**：帧表读路径不可关闭，
+// 2026-11-14 起删除了 EHOME_TELEMETRY_FRAME_READ）：
+//  1. 有注入的 slot 字典（没字典解不了码）；
+//  2. 是聚合路径（avg/change）—— raw 模式要返回原始行，帧表给不了那个形状；
+//  3. 设备维度有效；
+//  4. 窗口有效且不超过短窗分界，同时不超过 DecodeRange 的硬上限。
+func frameReadEligible(dict telemetry.SlotDictionary, q historyPointQuery) bool {
+	if dict == nil || q.EdgeDeviceID == 0 {
 		return false
 	}
 	if q.Mode != AggModeAvg && q.Mode != AggModeChange {
@@ -529,7 +507,7 @@ func frameReadEligible(enabled bool, dict telemetry.SlotDictionary, q historyPoi
 func selectHistorySource(ctx context.Context, db *gorm.DB, q historyPointQuery) (historySource, error) {
 	_ = ctx // 保留签名：调用方可能已有 ctx（未来若要做 ctx 相关的选源逻辑不用改签名）
 	dict := HistoryFrameDictionary()
-	if !frameReadEligible(frameReadEnabled, dict, q) {
+	if !frameReadEligible(dict, q) {
 		return nil, frameReadUnavailableError(dict, q)
 	}
 	return frameSource{db: db, dict: dict}, nil
@@ -543,9 +521,6 @@ func selectHistorySource(ctx context.Context, db *gorm.DB, q historyPointQuery) 
 // 一句笼统的话会让排障的人从零开始猜。
 func frameReadUnavailableError(dict telemetry.SlotDictionary, q historyPointQuery) error {
 	switch {
-	case !frameReadEnabled:
-		return fmt.Errorf("帧表读路径被关闭（EHOME_TELEMETRY_FRAME_READ=false）；硬切换后它是唯一数据源，" +
-			"关闭即意味着所有历史图表不可用 —— 请打开该开关并重启")
 	case dict == nil:
 		return fmt.Errorf("帧表 slot 字典尚未就绪（启动预热未完成）；请等待服务启动完成后重试")
 	case q.EdgeDeviceID == 0:
@@ -891,7 +866,7 @@ func decodeFrameWindowNow(db *gorm.DB, dict telemetry.SlotDictionary, deviceID u
 	// 报错时给出**可执行信息**（缩小窗口 / 提高上限），用户缩小窗口后就能拿到正确数据。
 	if stats.FramesTruncated > 0 {
 		return nil, fmt.Errorf("frame decode truncated: %d oldest frames dropped "+
-			"(window has more than %d frames, limit=%d); 缩小时间窗，或提高 EHOME_TELEMETRY_DECODE_MAX_FRAMES",
+			"(window has more than %d frames, hard limit=%d); 请缩小时间窗（分界以上由分钟聚合服务）",
 			stats.FramesTruncated, stats.FramesSeen+stats.FramesTruncated, telemetry.MaxDecodeFrames)
 	}
 	if !allowEmpty && len(points) == 0 && stats.FramesSeen > 0 {

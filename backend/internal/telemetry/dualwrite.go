@@ -1,8 +1,6 @@
 package telemetry
 
 import (
-	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,8 +23,10 @@ import (
 //
 //	· 不存在「开关关闭 ⇒ 返回 nil」这条路径了；构造失败 ⇒ 调用方 Fatal
 //	  （契约 §3.4：不允许「主写成功但帧表没建」的半残状态）；
-//	· 保留的两个环境变量是**参数**不是开关：
-//	  EnvQueueSize（队列深度）、EnvKeyFrameSeconds（关键帧间隔）。
+//	· **本包不读任何环境变量**（2026-11-14 收敛）。队列深度与关键帧间隔是代码
+//	  常量；测试用 DualWriterConfig 显式注入。
+//	  理由：参数与开关的边界在实践中守不住 —— 一个「可调」的值，没人调，却能让
+//	  生产值与代码默认值悄悄分裂（2026-11-14 长窗事故正是这个形状）。
 //
 // ============ 两条仍在的硬约束 ============
 //
@@ -88,15 +88,14 @@ type dualItem struct {
 	raw []byte
 }
 
-// 配置项名（环境变量）。
+// 固定参数（代码常量）。
 //
-// 这两个是**参数**不是开关（契约 §3.2 明确保留）：删掉的只有那个
-// "是否启用"的开关（名字见契约 §1，本包已不再引用它）。
+// 2026-11-14：连「参数」也不再从环境变量读取（原 EHOME_TELEMETRY_DUAL_WRITE_QUEUE /
+// _HEARTBEAT_SECONDS 已删）。要用非默认值，构造时显式传 DualWriterConfig ——
+// 测试一直就是这么做的。
 const (
-	// EnvKeyFrameSeconds 关键帧间隔，默认 60s（与 L1 心跳同口径，方案 §3.3）。
-	EnvKeyFrameSeconds = "EHOME_TELEMETRY_HEARTBEAT_SECONDS"
-	// EnvQueueSize 队列深度，默认 4096。
-	EnvQueueSize = "EHOME_TELEMETRY_DUAL_WRITE_QUEUE"
+	// defaultQueueSize 是双写队列深度（4096 帧 ≈ 1 Hz × 10 设备 × 400 s 的缓冲）。
+	defaultQueueSize = 4096
 )
 
 // DualWriterConfig 是双写参数。
@@ -139,35 +138,19 @@ type DualWriterConfig struct {
 	FlushInterval time.Duration
 }
 
-// keyFrameIntervalFromEnv 读关键帧间隔（复用 L1 的心跳配置名，两者同口径）。
-func keyFrameIntervalFromEnv() time.Duration {
-	v, ok := os.LookupEnv(EnvKeyFrameSeconds)
-	if !ok {
-		return DefaultKeyFrameInterval
-	}
-	sec, err := strconv.Atoi(v)
-	if err != nil || sec <= 0 {
-		return DefaultKeyFrameInterval
-	}
-	return time.Duration(sec) * time.Second
-}
-
-// ConfigFromEnv 从环境变量组装**参数**（不是开关 —— 启不启用不再可选）。
+// DefaultConfig 返回双写器的固定配置（**不读环境变量**）。
 //
 // 调用方：
 //
-//	w, err := telemetry.NewDualWriter(db, telemetry.NewDBSlots(db), telemetry.ConfigFromEnv())
+//	w, err := telemetry.NewDualWriter(db, telemetry.NewDBSlots(db), telemetry.DefaultConfig())
 //	if err != nil { /* 契约 §3.4：Fatal */ }
 //	defer w.Close()
 //	consumer.SetTelemetrySink(w.Observe)
-func ConfigFromEnv() DualWriterConfig {
-	cfg := DualWriterConfig{KeyFrameInterval: keyFrameIntervalFromEnv()}
-	if v, ok := os.LookupEnv(EnvQueueSize); ok {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.QueueSize = n
-		}
+func DefaultConfig() DualWriterConfig {
+	return DualWriterConfig{
+		KeyFrameInterval: DefaultKeyFrameInterval,
+		QueueSize:        defaultQueueSize,
 	}
-	return cfg
 }
 
 // NewDualWriter 构造双写器并启动后台 worker。

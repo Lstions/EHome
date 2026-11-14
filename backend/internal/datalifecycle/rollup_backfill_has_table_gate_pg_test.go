@@ -198,7 +198,7 @@ func TestRollupBackfill_UnifiedTablePresentStillQueries(t *testing.T) {
 		t.Fatalf("edge_devices 里已有 id=%d —— 无法归因到 unified_data", dev)
 	}
 
-	runner := NewRollupBackfillRunner(db, RollupBackfillConfig{Enabled: true, BatchSeconds: 1800})
+	runner := NewRollupBackfillRunner(db, RollupBackfillConfig{BatchSeconds: 1800})
 	got, err := runner.discoverDevices(context.Background())
 	if err != nil {
 		t.Fatalf("discoverDevices: %v", err)

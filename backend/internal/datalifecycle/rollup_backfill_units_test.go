@@ -108,16 +108,20 @@ func TestNormalizeRollupBatchSecondsAlignsToMinute(t *testing.T) {
 	}
 }
 
-// TestRollupBackfillConfigFromEnvNormalizesBatch 守环境变量入口也做了归一化。
+// TestDefaultRollupBackfillConfigIsFixed 钉住「回填参数是常量」。
 //
-// 只在 env 层校验"正数"是不够的：90 是正数但会静默写错数据。
-func TestRollupBackfillConfigFromEnvNormalizesBatch(t *testing.T) {
-	t.Setenv(EnvRollupBackfillBatchSeconds, "90")
-	cfg, warns := RollupBackfillConfigFromEnv()
-	if cfg.BatchSeconds != 120 {
-		t.Fatalf("BatchSeconds = %d, want 120（90 必须向上取整到 60 的倍数）", cfg.BatchSeconds)
+// 2026-11-14 删除 EHOME_TELEMETRY_ROLLUP_BACKFILL*：回填必须常开（幂等），
+// 限速是代码常量。「90 秒」这类正数但非 60 倍数的输入从此不可能出现 ——
+// 它曾会静默写半个桶（见 normalizeRollupBatchSeconds 注释）。
+func TestDefaultRollupBackfillConfigIsFixed(t *testing.T) {
+	cfg := DefaultRollupBackfillConfig()
+	if cfg.BatchSeconds != int(defaultRollupBackfillBatchSeconds) {
+		t.Fatalf("BatchSeconds = %d, want %d", cfg.BatchSeconds, int(defaultRollupBackfillBatchSeconds))
 	}
-	if len(warns) != 0 {
-		t.Fatalf("合法但需归一化的值不该产生 warning, got %v", warns)
+	if cfg.BatchSleep != defaultRollupBackfillBatchSleep {
+		t.Fatalf("BatchSleep = %s, want %s", cfg.BatchSleep, defaultRollupBackfillBatchSleep)
+	}
+	if cfg.BatchSeconds <= 0 || int(cfg.BatchSeconds)%60 != 0 {
+		t.Fatalf("BatchSeconds = %d 必须是 60 的正整数倍", cfg.BatchSeconds)
 	}
 }

@@ -1,33 +1,26 @@
 package telemetry
 
-// switch_free_gate_test.go — 契约 §3.6 的**源码级门禁**：三个遥测开关必须彻底消失。
+// switch_free_gate_test.go — 遥测「零环境变量」门禁（2026-11-14 重写）。
 //
-// 背景（docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §1/§3.6）：
-// 2026-11-07 用户裁决遥测存储 L1/L2 **无条件启用**，删除三个"是否启用"开关
-// （见下方 deletedTelemetrySwitches 清单；名字用拼接构造，理由见那里的注释）：
+// ============ 历史与升级理由 ============
 //
-//	WRITE_ON_CHANGE  —— L1 值不变不入库
-//	DUAL_WRITE       —— L2 帧级编码
-//	ROLLUP_WRITE     —— L3 分钟聚合写入
+// 2026-11-07 删除了三个「是否启用」开关（WRITE_ON_CHANGE / DUAL_WRITE /
+// ROLLUP_WRITE），当时保留了 DUAL_WRITE_QUEUE 与 HEARTBEAT_SECONDS 作为「参数」，
+// 并留了一条「三个开关名零命中」的门禁。
 //
-// ============ 为什么需要一条"源码扫描"测试 ============
+// 2026-11-14 的结论是：**参数与开关的边界在实践中守不住**。事故链正是
+// ROLLUP_READ（默认 false）+ FRAME_DECODE_MAX_WINDOW（默认 1h）两个变量的生产值
+// 靠 compose 覆盖，重部署丢变量 ⇒ 24h/7d 全灭。于是本轮把遥测的**全部**环境变量
+// 删除（含两个「参数」），改为代码常量 / DualWriterConfig 显式注入。
 //
-// 删开关这件事的失败模式是**静默半删**：config 结构体里删了字段、但 main.go 里
-// 还留着一行 cfg.TelemetrySettings().RollupWrite 判断（编译过得了，因为字段还在），
-// 或者注释/文档里还写着"默认关闭"。等到某天有人照着注释把开关加回来，行为就
-// 悄悄退回到"默认不生效"，而所有单测都还是绿的。
+// 本门禁也从「三个开关名零命中」升级为「EHOME_TELEMETRY_ 前缀零命中」：
+// 只要有人再给遥测加 env，名字必然带这个前缀，门禁立刻红。
 //
-// 这条门禁把"开关不存在"变成可执行断言：全 backend 源码里这三个名字必须**零命中**。
+// ============ 只扫带引号的字面量 ============
 //
-// ============ ⚠ 精确匹配而不是子串匹配 ============
-//
-// `DUAL_WRITE` 这个开关名 **是** `DUAL_WRITE_QUEUE`（队列深度参数）的前缀，
-// 而后者是**保留的参数**（契约 §3.2 明确保留）。用 strings.Contains 做子串匹配
-// 会把合法的 QUEUE 参数判成违规，从而逼着后来的维护者去删掉一个该留的参数，
-// 或者把门禁注释掉。
-//
-// 因此匹配规则是：命中位置之后**不能再接** [A-Z0-9_]（即必须是完整标识符）。
-// 同样的道理适用于未来的 WRITE_ON_CHANGE_XXX 类扩展名。
+// 注释里解释历史（例如「过去叫 EHOME_TELEMETRY_ROLLUP_READ」）不算违规；
+// _test.go 与 _sim.go 里显式出现旧变量名是**故意的**（断言它已失效）。
+// 因此匹配的是 `"EHOME_TELEMETRY_XXX"` 这样的字面量，且跳过测试/仿真文件。
 
 import (
 	"io/fs"
@@ -38,61 +31,10 @@ import (
 	"testing"
 )
 
-// deletedTelemetrySwitches 是契约 §1 要求删除的三个环境变量（名字即断言）。
-//
-// 这张清单**只能变短不能变长**：新增一条就意味着有人又把开关加回来了。
-//
-// ============ 为什么用拼接而不是写完整字面量 ============
-//
-// 契约 §6.2 的验收口径是一条 grep：这三个名字在 backend/ 里必须 0 命中。
-// 如果本文件直接写完整字面量，门禁自身就成了那 12 处命中里的 9 处 —— 验收命令
-// 永远看着是红的，"门禁 존재" 变成了 "验收被自己破坏"。
-//
-// 拼接之后，那条 grep 在 backend/ 里只剩**一处代码命中**：
-//
-//	dualwrite.go: EnvQueueSize = "EHOME_TELEMETRY_DUAL_WRITE_QUEUE"
-//
-// 而那一处**必须**存在 —— 契约 §3.2 明确保留它作为「队列深度」参数。
-// 也就是说：§6.2 的字面 grep 与 §3.2 的保留要求本身冲突（子串匹配无法区分
-// DUAL_WRITE 与 DUAL_WRITE_QUEUE）。真正的判据是本文件这条**精确标识符**门禁，
-// 它把冲突消解成「完整标识符零命中 + 保留参数合法存在」。
-//
-// ============ 🚫 不要把这个门禁改回朴素 grep（Lead 2026-11-07 明确要求留下此警告）============
-//
-// 后来人最可能做的"简化"是把它换成：
-//
-//	if out, _ := exec.Command("grep", "-rn", "EHOME_TELEMETRY_DUAL_WRITE", "..").Output(); len(out) > 0 {
-//	    t.Error("开关还在")
-//	}
-//
-// 这**一定**会红，而且红的原因不是开关回来了，是它同时命中了保留参数
-// EHOME_TELEMETRY_DUAL_WRITE_QUEUE。后续维护者的第一反应只会是把门禁注释掉
-// （"这测试有病"），于是门禁彻底失效 —— 比没有门禁更糟，因为它给了虚假的安全感。
-//
-// 保持"精确标识符"（名字后不得接 [A-Z0-9_]）这一条，是本门禁唯一正确的形态：
-//
-//	· 完整标识符零命中  ⇒ 开关真删了；
-//	· 保留参数合法存在  ⇒ 参数没被过度删（由 TestRetainedTelemetryParamsStillExist 守）。
-//
-// 同理，也**不要**为了"让 grep 全绿"去删掉 dualwrite.go 里的 EnvQueueSize ——
-// 那会删掉一个该留的运行期参数（契约 §3.2），是过度删除。
-const switchPrefix = "EHOME_TELEMETRY_"
+// telemetryEnvPrefix 用拼接构造：否则本文件自己会被门禁扫到。
+const telemetryEnvPrefix = "EHOME_" + "TELEMETRY_"
 
-var deletedTelemetrySwitches = []string{
-	switchPrefix + "WRITE_ON_CHANGE",
-	switchPrefix + "DUAL_WRITE",
-	switchPrefix + "ROLLUP_WRITE",
-}
-
-// TestNoTelemetrySwitchesExist 扫描整个 backend/ 源码树，三个开关名必须零命中。
-//
-// 扫描范围是**整棵树**而不是本包：这些名字散落在 internal/config（字段解析）、
-// internal/databus（consumer 注释）、cmd/server（接线），只扫本包等于什么都没守。
-//
-// 只扫 .go 文件（不含 _test.go 之外的排除 —— 测试文件里的旧名字同样是漂移，
-// 而且本文件自己在 var 清单里写了这三个名字，因此**必须排除本文件**）。
-func TestNoTelemetrySwitchesExist(t *testing.T) {
-	// 从本包目录向上两级到 backend/（internal/telemetry → backend）。
+func TestTelemetryHasNoEnvSurface(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatalf("resolve backend root: %v", err)
@@ -100,23 +42,9 @@ func TestNoTelemetrySwitchesExist(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(root, "go.mod")); statErr != nil {
 		t.Fatalf("backend root %s 不像 backend 目录（没有 go.mod）: %v", root, statErr)
 	}
-	self, err := filepath.Abs("switch_free_gate_test.go")
-	if err != nil {
-		t.Fatalf("resolve self path: %v", err)
-	}
 
-	type hit struct {
-		file string
-		line int
-		text string
-	}
-	var hits []hit
-
-	// 为每个开关构造"完整标识符"正则：名字之后不得接 [A-Z0-9_]。
-	patterns := make([]*regexp.Regexp, len(deletedTelemetrySwitches))
-	for i, name := range deletedTelemetrySwitches {
-		patterns[i] = regexp.MustCompile(regexp.QuoteMeta(name) + "[A-Z0-9_]?")
-	}
+	pattern := regexp.MustCompile(`"` + telemetryEnvPrefix + `[A-Z0-9_]+"`)
+	var hits []string
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -132,8 +60,8 @@ func TestNoTelemetrySwitchesExist(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		if abs, _ := filepath.Abs(path); abs == self {
-			return nil // 本文件就是那张清单，豁免自己
+		if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, "_sim.go") {
+			return nil
 		}
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -141,16 +69,8 @@ func TestNoTelemetrySwitchesExist(t *testing.T) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		for lineNo, line := range strings.Split(string(data), string(byte(10))) {
-			for i, re := range patterns {
-				m := re.FindString(line)
-				if m == "" {
-					continue
-				}
-				// 命中的是完整开关名（而非 _QUEUE 之类保留参数）才算违规。
-				if m != deletedTelemetrySwitches[i] {
-					continue
-				}
-				hits = append(hits, hit{file: rel, line: lineNo + 1, text: strings.TrimSpace(line)})
+			if pattern.MatchString(line) {
+				hits = append(hits, rel+":"+itoaSmall(lineNo+1)+"  "+strings.TrimSpace(line))
 			}
 		}
 		return nil
@@ -160,29 +80,24 @@ func TestNoTelemetrySwitchesExist(t *testing.T) {
 	}
 
 	if len(hits) > 0 {
-		t.Errorf("契约 §1/§3.6 要求这三个遥测开关**彻底删除**，但源码里仍有 %d 处命中：", len(hits))
+		t.Errorf("遥测不读任何环境变量（2026-11-14 裁决），但源码里仍有 %d 处命中：", len(hits))
 		for _, h := range hits {
-			t.Errorf("  %s:%d  %s", h.file, h.line, h.text)
+			t.Errorf("  %s", h)
 		}
-		t.Logf("保留的两个**参数**（不是开关，删了反而是过度删除）：" +
-			EnvQueueSize + "（队列深度）、" + EnvKeyFrameSeconds + "（关键帧间隔）")
 	}
 }
 
-// TestRetainedTelemetryParamsStillExist 守**反向**边界：删开关不能连参数一起删。
-//
-// 契约 §3.2 明确保留两个参数。如果这条红了，说明有人"顺手清理"过度 ——
-// 队列深度与关键帧间隔是运行期可调项，删掉它们会让现场无法在不重编译的情况下
-// 调整 L2 的内存占用与关键帧密度。
-func TestRetainedTelemetryParamsStillExist(t *testing.T) {
-	cases := map[string]string{
-		"EnvQueueSize":       switchPrefix + "DUAL_WRITE_QUEUE",
-		"EnvKeyFrameSeconds": switchPrefix + "HEARTBEAT_SECONDS",
+// itoaSmall 是测试内的最小整数格式化（避免为一行日志引入 strconv）。
+func itoaSmall(n int) string {
+	if n == 0 {
+		return "0"
 	}
-	if EnvQueueSize != cases["EnvQueueSize"] {
-		t.Errorf("EnvQueueSize = %q, want %q（契约 §3.2 保留）", EnvQueueSize, cases["EnvQueueSize"])
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
 	}
-	if EnvKeyFrameSeconds != cases["EnvKeyFrameSeconds"] {
-		t.Errorf("EnvKeyFrameSeconds = %q, want %q（契约 §3.2 保留）", EnvKeyFrameSeconds, cases["EnvKeyFrameSeconds"])
-	}
+	return string(buf[i:])
 }

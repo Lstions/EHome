@@ -82,7 +82,7 @@ func TestRollupLiveTailParity(t *testing.T) {
 	seedFrameFromUnifiedData(t, db, dev, dict)
 
 	// 主体：回填所有**已结束**的日子（今天被排除，由 live collector 负责）。
-	cfg := datalifecycle.RollupBackfillConfig{Enabled: true, BatchSeconds: 21600}
+	cfg := datalifecycle.RollupBackfillConfig{BatchSeconds: 21600}
 	runner := datalifecycle.NewRollupBackfillRunner(db, cfg)
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("backfill: %v", err)
@@ -212,7 +212,7 @@ func TestRollupLiveTailMissingFramesStillServes(t *testing.T) {
 	ensureRollupMonthPartitions(t, db, start, end)
 	seedParityUnified(t, db, dev, start, end)
 
-	cfg := datalifecycle.RollupBackfillConfig{Enabled: true, BatchSeconds: 21600}
+	cfg := datalifecycle.RollupBackfillConfig{BatchSeconds: 21600}
 	if err := datalifecycle.NewRollupBackfillRunner(db, cfg).RunOnce(context.Background()); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}

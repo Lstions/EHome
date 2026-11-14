@@ -321,14 +321,6 @@ func (e *Env) releaseRunLock() {
 // 不变式保有可观测的间隔（tick 2s、冷却 6s ⇒ 支持"隔了 3 个 tick"的证据）。
 const WindowTickInterval = 2 * time.Second
 
-// EdgeOfflineThreshold 是仿真专用的边缘设备离线阈值，注入 EHOME_EDGE_OFFLINE_THRESHOLD。
-//
-// 取 6s：必须大于仿真设备的上报周期（夹具多为 1~5s），否则正常轮询间隙就会被
-// 误判离线 —— 这正是生产侧 EdgeDeviceOfflineThreshold 保持 60s 的同一条理由，
-// 仿真只是不需要那么宽的余量。"掉线→切备源"（SIM-DS-003）必须真等一个阈值，
-// 60s 下白等 61s，6s 下秒级完成。
-const EdgeOfflineThreshold = 6 * time.Second
-
 // CommandDeadline 是仿真专用的命令执行 Deadline，注入 EHOME_COMMAND_DEADLINE。
 //
 // 取 8s：明显大于一次 MQTT 下发 + HTTP 往返（毫秒级），"未超期"的断言不会被逼近；
@@ -355,7 +347,7 @@ func (e *Env) startServer(port int) error {
 		"EHOME_SERVER_ADDR": fmt.Sprintf(":%d", port),
 		// 3.0 设备监听（mTLS）。MQTT_BROKER/EHOME_MQTT_CLIENT_ID 已随移植删除。
 		// 证书由本进程生成并落盘（harness/pki.go），子进程按路径读取。
-		"EHOME_DEVICE_ENABLED":        "true",
+		// 2026-11-14：不再注入 EHOME_DEVICE_ENABLED —— 监听由「证书三件套齐全」推导。
 		"EHOME_DEVICE_ADDR":           e.DeviceAddr,
 		"EHOME_DEVICE_CERT_FILE":      e.pki.serverCertFile,
 		"EHOME_DEVICE_KEY_FILE":       e.pki.serverKeyFile,
@@ -372,15 +364,14 @@ func (e *Env) startServer(port int) error {
 		// 带票据下载场景能直接对该 URL 发真实请求。
 		"EHOME_EXTERNAL_HOST": fmt.Sprintf("127.0.0.1:%d", port),
 		"LOG_LEVEL":           e.Options.LogLevel,
-		// 事件窗口求值周期：生产默认 1 分钟，仿真压到 2s（理由见 WindowTickInterval）。
-		"EHOME_WINDOW_TICK_INTERVAL": WindowTickInterval.String(),
-		// 边缘设备离线阈值：生产默认 60s，仿真 6s（理由见 EdgeOfflineThreshold）。
-		"EHOME_EDGE_OFFLINE_THRESHOLD": EdgeOfflineThreshold.String(),
-		// 命令执行 Deadline：生产默认 2 分钟，仿真 8s（理由见 CommandDeadline）。
-		"EHOME_COMMAND_DEADLINE": CommandDeadline.String(),
-		"CONFIG_PATH":            filepath.Join(e.runDir, "no-config.yaml"),
-		"SEED_TEST_DATA":         "",
-		"EHOME_STATIC_DIR":       "",
+		// 事件窗口求值周期：生产恒 1 分钟，仿真压到 2s（理由见 WindowTickInterval）。
+		// 变量名带 _SIM_ 且只在 -tags=simulation 构建里被读取。
+		"EHOME_SIM_WINDOW_TICK": WindowTickInterval.String(),
+		// 命令执行 Deadline：生产恒 2 分钟，仿真 8s（理由见 CommandDeadline）。
+		"EHOME_SIM_COMMAND_DEADLINE": CommandDeadline.String(),
+		"CONFIG_PATH":                filepath.Join(e.runDir, "no-config.yaml"),
+		"SEED_TEST_DATA":             "",
+		"EHOME_STATIC_DIR":           "",
 		// 空字符串 = 不启用 CORS 中间件（与生产同源部署一致）。
 		"EHOME_ALLOWED_ORIGINS": "",
 	})

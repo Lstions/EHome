@@ -803,10 +803,10 @@ func cmdRun006(e *harness.Env) {
 	// 超时按生效 Deadline 推导（Deadline + 30s 覆盖每秒一轮的 RecoverExpired、
 	// 终态落库与轮询间隔），不写死 190s。
 	//
-	// 用 harness.CommandDeadline 而不是 commandexec.CommandDeadline()：后者读环境
-	// 变量，而环境变量只注入给**子进程**；测试进程里调用它会拿到生产默认 2 分钟，
-	// 从而推导出与真实 Deadline 不符的超时（2026-10-04 在 DS 场景上正是这样翻的车）。
-	// harness 常量就是"注入给子进程的那个值"本身，两边同源。
+	// 用 harness.CommandDeadline 而不是 commandexec.CommandDeadline()：后者是生产
+	// 常量 2 分钟，而仿真子进程通过 EHOME_SIM_COMMAND_DEADLINE 拿到 8s；
+	// 测试进程里调用它会推导出与真实 Deadline 不符的超时（2026-10-04 在 DS 场景
+	// 上正是这样翻的车）。harness 常量就是"注入给子进程的那个值"本身，两边同源。
 	var final struct {
 		Status      string `json:"status"`
 		FinalReason string `json:"final_reason"`

@@ -314,7 +314,7 @@ func TestDualWriterTablesMissingIsFatalError(t *testing.T) {
 	if err := db.Migrator().DropTable(&models.TelemetryFrame{}, &models.TelemetrySlot{}); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	w, err := NewDualWriter(db, NewDBSlots(db), ConfigFromEnv())
+	w, err := NewDualWriter(db, NewDBSlots(db), DefaultConfig())
 	if w != nil {
 		w.Close()
 		t.Fatal("表不存在时不应返回可用的 writer")
@@ -324,19 +324,22 @@ func TestDualWriterTablesMissingIsFatalError(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnvKeepsParamsNotSwitch 钉住「删开关但保留参数」（契约 §3.2）。
+// TestDefaultConfigIsFixed 钉住「双写参数是代码常量，不读环境变量」。
 //
-// 三个被删的开关名都不在本包里；剩下的是两个参数。这条同时挡住
-// "顺手把参数也删了" 的过度删除（心跳/队列深度仍需可调）。
-func TestConfigFromEnvKeepsParamsNotSwitch(t *testing.T) {
-	t.Setenv(EnvQueueSize, "123")
-	t.Setenv(EnvKeyFrameSeconds, "30")
-	cfg := ConfigFromEnv()
-	if cfg.QueueSize != 123 {
-		t.Errorf("QueueSize = %d, want 123（EnvQueueSize 是参数，必须保留）", cfg.QueueSize)
+// 2026-11-14 删除 EHOME_TELEMETRY_DUAL_WRITE_QUEUE 与
+// EHOME_TELEMETRY_HEARTBEAT_SECONDS：参数可调在实践中等于「没人调，但生产值
+// 与代码默认值可能分裂」—— 长窗事故就是这种分裂。这里显式设上旧变量名，
+// 断言它们**不再有任何作用**。
+func TestDefaultConfigIsFixed(t *testing.T) {
+	t.Setenv("EHOME_TELEMETRY_DUAL_WRITE_QUEUE", "123")
+	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "30")
+	cfg := DefaultConfig()
+	if cfg.QueueSize != defaultQueueSize {
+		t.Errorf("QueueSize = %d, want %d（代码常量，环境变量不再生效）", cfg.QueueSize, defaultQueueSize)
 	}
-	if cfg.KeyFrameInterval != 30*time.Second {
-		t.Errorf("KeyFrameInterval = %s, want 30s（EnvKeyFrameSeconds 是参数，必须保留）", cfg.KeyFrameInterval)
+	if cfg.KeyFrameInterval != DefaultKeyFrameInterval {
+		t.Errorf("KeyFrameInterval = %s, want %s（代码常量，环境变量不再生效）",
+			cfg.KeyFrameInterval, DefaultKeyFrameInterval)
 	}
 }
 

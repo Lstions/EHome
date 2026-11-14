@@ -8,19 +8,15 @@ package api
 //   1. 原始表（unified_data / 将来 telemetry_frame 解码）—— 短窗，点级精度；
 //   2. 分钟级宽行预聚合（telemetry_rollup_1m）—— 长窗，1 分钟粒度就够。
 //
-// §5.3 的判据是「短窗解码 / 长窗 rollup」，但**解码器属于 L2（task-3）尚未交付**，
-// 所以本层先只接 rollup 一侧，且默认**关闭**（EHOME_TELEMETRY_ROLLUP_READ=false）：
-//   · 关：走原有路径，一个字节的行为都不变（这是硬约束，见下）；
-//   · 开：窗口 > 阈值且是 avg 语义 ⇒ 读 rollup；否则回落原路径。
-// L2 解码器到位后，在 decodeRollupHistoryPoints 的 TODO 处接上即可（签名已定）。
+// §5.3 的判据是「短窗解码 / 长窗 rollup」，现在是**唯一形态**（2026-11-14）：
+//   · 窗口 > frameDecodeMaxWindow（常量 6h）且 avg ⇒ 读 rollup；
+//   · 否则逐帧解码（≤6h，≤21,600 帧）。
 //
-// ============ 为什么必须默认关闭 ============
-//
-// 生产上 telemetry_rollup_1m 现在是**空表**（写入侧还没接线，见
-// datalifecycle/telemetry_rollup.go 的接线说明）。若默认开启，长窗图表会从
-// "有数据的原始表"切到"空表"，用户看到的是**空图**——比慢更糟。因此开关默认
-// false，且**即使开启**，rollup 返回 0 行时也必须回落原路径（fail-open 到旧数据源，
-// 不是返回空）。这两条都有行为测试（rollup_read_test.go）。
+// 历史上这一层带着两个环境变量（ROLLUP_READ / ROLLUP_SHORT_WINDOW），读路径默认
+// 关闭、生产靠 env 打开。2026-11-14 重部署丢了那两个变量 ⇒ 24h/7d 全灭。
+// 现在两者都删除：**覆盖判据本身就是闸门** —— RollupWindowCovered 判定未覆盖时
+// rollupHistoryPoints 返回 handled=false，调用方回落帧表；表空/坏/不存在同样回落
+// （fail-open）。「没人打开它」比「读错了数据」更接近这次事故的真实原因。
 //
 // ============ 与既有聚合路径的关系 ============
 //
@@ -68,10 +64,7 @@ package api
 
 import (
 	"context"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"ehome/backend/internal/datalifecycle"
@@ -81,9 +74,6 @@ import (
 )
 
 const (
-	// rollupReadEnv 是读路径开关的环境变量名（默认 false）。
-	rollupReadEnv = "EHOME_TELEMETRY_ROLLUP_READ"
-
 	// rollupMinWidthSeconds 是 rollup 能忠实表达的最小桶宽（1 分钟 = 它的原生粒度）。
 	//
 	// rollup 的粒度是 1 分钟，比 1 分钟还细的桶它**无法忠实表达**（不能凭空插值）。
@@ -93,71 +83,33 @@ const (
 	// windowSeconds/60 < maxPoints ⇒ 分钟数 < maxPoints ⇒ 一分钟一个点永远不超
 	// maxPoints，不会把「更快」变成「返回 100 倍数据」。
 	rollupMinWidthSeconds int64 = 60
-
-	// rollupShortWindowEnv 是「短窗/长窗」分界（默认 6h，方案 §5.3）。
-	rollupShortWindowEnv = "EHOME_TELEMETRY_ROLLUP_SHORT_WINDOW"
-
-	// defaultRollupShortWindow 是分界默认值：≤6h 走原路径，>6h 才考虑 rollup。
-	// 依据（方案 §5.1 实测）：24h device14 = 86,342 帧 / 1.0 MB / 解码后 19 MB；
-	// 1h = 3,600 帧 / 43 KB / 0.8 MB。6h 约 4.7 MB、110 MB 内存 —— 仍属"解码可行"，
-	// 而 24h 的 19 MB 已接近单请求可接受上限，故分界取 6h。
-	defaultRollupShortWindow = 6 * time.Hour
 )
 
-// rollupRead 是读路径开关的进程级状态。
+// rollupShortWindow 是「短窗/长窗」分界，**与帧表解码上限同源**。
 //
-// 为什么用可变量 + Setter 而不是每次读 env：既有约定是"启动时读一次、无热加载"
-// （config.go 的注记），测试需要能切换，故用 Setter。
-var rollupReadEnabled = readBoolEnvDefault(rollupReadEnv, false)
-
-// SetRollupReadEnabled 覆写开关（仅供测试与启动接线使用；生产走环境变量）。
-func SetRollupReadEnabled(enabled bool) { rollupReadEnabled = enabled }
-
-// RollupReadEnabled 报告当前是否启用 rollup 读路径。
-func RollupReadEnabled() bool { return rollupReadEnabled }
-
-// RollupShortWindow 返回短窗/长窗分界；非法值回落默认 6h。
-func RollupShortWindow() time.Duration {
-	raw := strings.TrimSpace(os.Getenv(rollupShortWindowEnv))
-	if raw == "" {
-		return defaultRollupShortWindow
-	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-		return d
-	}
-	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	logger.Warnf("[rollup-read] invalid %s=%q, fallback to %s", rollupShortWindowEnv, raw, defaultRollupShortWindow)
-	return defaultRollupShortWindow
-}
-
-// readBoolEnvDefault 读布尔环境变量（1/true/yes/on 视为真），非法值回落默认。
-func readBoolEnvDefault(key string, def bool) bool {
-	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	switch raw {
-	case "":
-		return def
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		logger.Warnf("[rollup-read] invalid %s=%q (want bool), fallback to %v", key, raw, def)
-		return def
-	}
-}
+// ============ 为什么要同源，而不是两个可配值（2026-11-14 事故）============
+//
+// 过去两个分界各自可配：EHOME_TELEMETRY_ROLLUP_SHORT_WINDOW 默认 6h、
+// EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW 默认 1h。一旦两者不相等，
+// **(帧窗, rollup 短窗]** 这段窗口两个数据源都不服务 ⇒ 用户只能看到报错。
+// 生产当年之所以没炸，仅仅是因为有人把帧窗也调成了 6h —— 靠两个独立变量
+// 恰好相等来保证正确性，是最脆的一种正确。
+//
+// 现在：>frameDecodeMaxWindow 走 rollup、≤ 它逐帧解码，**死区在类型层面不存在**。
+// 6h 的依据见 history_source.go 的 defaultFrameDecodeMaxWindow 注释。
+func rollupShortWindow() time.Duration { return frameDecodeMaxWindow }
 
 // shouldUseRollup 是**纯函数**分派判据（可独立单测，不需要 DB/时间窗口以外的东西）。
 //
-// 五条必须同时成立：
-//  1. 开关打开；
-//  2. 聚合模式是 avg —— change 模式要翻转序列，rollup 表达不了；
-//  3. 窗口 > 短窗阈值（否则 1 小时图会从 3600 点变 60 点，是静默降级）；
-//  4. 设备维度有效（deviceID != 0）；
-//  5. 窗口有效（end > start）。
-func shouldUseRollup(enabled bool, mode AggMode, start, end time.Time, deviceID uint) bool {
-	if !enabled || deviceID == 0 {
+// 四条必须同时成立（**没有「读开关打开」这一条**：rollup 读路径常开，
+// 2026-11-14 起删除了 EHOME_TELEMETRY_ROLLUP_READ —— 覆盖判据本身就是闸门，
+// 未覆盖时 rollupHistoryPoints 会 fail-open 回落，不需要一个人肉开关）：
+//  1. 聚合模式是 avg —— change 模式要翻转序列，rollup 表达不了；
+//  2. 窗口 > 短窗阈值（否则 1 小时图会从 3600 点变 60 点，是静默降级）；
+//  3. 设备维度有效（deviceID != 0）；
+//  4. 窗口有效（end > start）。
+func shouldUseRollup(mode AggMode, start, end time.Time, deviceID uint) bool {
+	if deviceID == 0 {
 		return false
 	}
 	if mode != AggModeAvg {
@@ -166,7 +118,7 @@ func shouldUseRollup(enabled bool, mode AggMode, start, end time.Time, deviceID 
 	if !end.After(start) {
 		return false
 	}
-	return end.Sub(start) > RollupShortWindow()
+	return end.Sub(start) > rollupShortWindow()
 }
 
 // rollupHistoryPoints 用 rollup 表填充 avg 模式的图表点。

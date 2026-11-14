@@ -99,25 +99,3 @@ func TestLatestValuesWarmup_DefaultLookbackIs24h(t *testing.T) {
 			LatestValuesWarmupLookback)
 	}
 }
-
-// TestLatestValuesWarmup_LookbackFromEnv 守环境变量解析（非法值不得让服务启动失败）。
-func TestLatestValuesWarmup_LookbackFromEnv(t *testing.T) {
-	cases := []struct {
-		env  string
-		want time.Duration
-	}{
-		{"", 24 * time.Hour},
-		{"48h", 48 * time.Hour},
-		{"90m", 90 * time.Minute},
-		{"12", 12 * time.Hour},      // 纯小时数
-		{"garbage", 24 * time.Hour}, // 非法 => 回落默认，不报错
-		{"-5", 24 * time.Hour},      // 负数 => 回落默认
-		{"0", 24 * time.Hour},       // 0 => 回落默认
-	}
-	for _, c := range cases {
-		t.Setenv("EHOME_LATEST_WARMUP_LOOKBACK", c.env)
-		if got := LatestValuesWarmupLookbackFromEnv(); got != c.want {
-			t.Errorf("env=%q: got %v, want %v", c.env, got, c.want)
-		}
-	}
-}

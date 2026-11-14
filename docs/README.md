@@ -26,6 +26,15 @@
 
 ## 变更清单
 
+### 2026-11-14（**环境变量收敛** —— 只保留部署身份，删除 28 个行为开关）
+
+- **触发**：BMS 页「温度趋势加载失败：查询窗口 24h0m0s 超过帧表单次解码上限 1h0m0s」。数据完全正常（帧表 86,400 帧/天、rollup 1,436 桶/24h、coverage complete/1440）；根因是当天重部署时 `/srv/ehomesystem/docker-compose.yml` 被仓库模板覆盖，丢了 `EHOME_TELEMETRY_ROLLUP_READ=true` 与 `EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW=6h`，而代码默认值分别是 **false / 1h**。
+- **规则**：环境变量只回答「连哪里、用什么身份」（数据库/JWT/证书/监听地址/静态目录/对外 host/保留期/初始管理员）；行为与调参写死为代码常量。新增 env 必须登记白名单，`internal/config/env_surface_gate_test.go` 扫源码守。
+- **删除 28 个**：遥测 8 个（帧表读/rollup 读/短窗分界/rollup 分界/回填+2 参数/心跳/双写队列）、设备与控制 3 个（DEVICE_ENABLED / CONTROL_V2 / RAW_DIAGNOSTICS）、字段解析层 10 个、启动与调参 6 个（维护页/看门狗/预热窗口/tick/命令 Deadline/解析分片）。
+- **行为变化**：帧表读路径常开；rollup 长窗读常开（`RollupWindowCovered` 仍是唯一闸门）；短窗分界 = 常量 **6h** 且与 rollup 分界**同源**（`(1h,6h]` 死区消失）；设备监听由「证书三件套齐全」推导；命令分发恒开；raw 诊断策略收敛为代码字面量。
+- **门禁**：`TestProductionEnvSurfaceIsWhitelisted`（白名单外 env 即红）、`TestTelemetryHasNoEnvSurface`（遥测零 env）、`TestFrameDecodeMaxWindowIsSixHours`（6h 与帧数上限）、`TestRollupAndFrameAreComplementary`（任意窗口恰好一个源，死区即红）。
+- **文档**：[操作/环境变量收敛-2026-11-14.md](操作/环境变量收敛-2026-11-14.md)
+
 ### 2026-11-14（**创建规则四问题修复** —— 步骤状态 / 动作目录 / 风险 / MOS）
 
 - **步骤状态**：跳过未完成步骤显示黄色 !，补齐即转绿；保存前标记全部错误步骤并跳回第一个。修掉"位置在前 = 已完成"的错误。

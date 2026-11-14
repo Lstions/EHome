@@ -73,7 +73,6 @@ func TestRollupBackfillMatchesSQLAggregation(t *testing.T) {
 	seedUnifiedForRollup(t, db, dev, dayStart, minutes)
 
 	cfg := RollupBackfillConfig{
-		Enabled:      true,
 		BatchSeconds: 1800, // 30 分钟一批（回填内部还会再切）
 	}
 	if err := NewRollupBackfillRunner(db, cfg).RunOnce(context.Background()); err != nil {

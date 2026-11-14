@@ -103,7 +103,7 @@ services:
       EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-90}
       EHOME_STATIC_DIR: /app/static/dist
       # 通道终端（未审计 raw 读写）开关。生产默认关闭；仅在受控排障时临时置 true。
-      EHOME_RAW_DIAGNOSTICS_ENABLED: ${EHOME_RAW_DIAGNOSTICS_ENABLED:-false}
+      # 2026-11-14：EHOME_RAW_DIAGNOSTICS_ENABLED 已删除（策略收敛为代码字面量）
     volumes:
       - ./data/firmwares:/app/firmwares
     depends_on:

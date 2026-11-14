@@ -59,7 +59,7 @@ func TestRollupCoverageAdvancesAcrossDays(t *testing.T) {
 		return n
 	}
 
-	cfg := RollupBackfillConfig{Enabled: true, BatchSeconds: 21600}
+	cfg := RollupBackfillConfig{BatchSeconds: 21600}
 	var prev int64
 	for day := 1; day <= 3; day++ {
 		// 模拟第 day 天 00:30 触发每日 rollover

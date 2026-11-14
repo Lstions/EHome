@@ -136,7 +136,7 @@ func TestRollupCoverageEnumerationDoesNotDependOnUnifiedData(t *testing.T) {
 	}
 
 	// 跑回填
-	cfg := RollupBackfillConfig{Enabled: true, BatchSeconds: 3600}
+	cfg := RollupBackfillConfig{BatchSeconds: 3600}
 	if err := RollupBackfillRunOnce(context.Background(), db, cfg); err != nil {
 		t.Fatalf("回填失败: %v", err)
 	}

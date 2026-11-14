@@ -29,8 +29,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level = %q, want info", cfg.Log.Level)
 	}
-	if cfg.Control.RawDiagnosticsEnabled {
-		t.Fatalf("unsafe control defaults: %+v", cfg.Control)
+	// 2026-11-14：Control 段已删除（分发器恒开、raw 诊断策略收敛为代码字面量）。
+	// 这里改为守「没有证书材料时默认不监听」——正是 EHOME_DEVICE_ENABLED 曾经的角色。
+	if cfg.Device.Enabled {
+		t.Fatalf("默认不应启动设备监听（无证书材料），got %+v", cfg.Device)
 	}
 }
 
@@ -152,35 +154,17 @@ func TestEnvPartialOverride(t *testing.T) {
 	}
 }
 
-func TestControlEnvOverridesAreBounded(t *testing.T) {
+// TestControlEnvsAreGone 守「控制面不再有环境开关」（2026-11-14）。
+//
+// EHOME_RAW_DIAGNOSTICS_ENABLED / EHOME_DEVICE_CONTROL_V2_ENABLED 已删除：
+// 分发器恒开（急停 = 改代码发版），raw 诊断策略收敛为 api.ControlPolicy 的代码字面量。
+// 显式设上旧变量名，断言它们既不生效、也不会让 Load() 失败。
+func TestControlEnvsAreGone(t *testing.T) {
 	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "true")
-	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "true")
-	cfg := Load()
-	if !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
-		t.Fatalf("control env override = %+v", cfg.Control)
-	}
-
-	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "not-a-bool")
-	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "not-a-bool")
-	cfg = Load()
-	if cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
-		t.Fatalf("invalid control env was accepted or default was lost: %+v", cfg.Control)
-	}
-}
-
-// TestDeviceControlV2EnabledByDefault verifies the default-enabled principle:
-// the V2 dispatcher runs without any allowlist or environment variable, and
-// can still be turned off as an emergency kill switch.
-func TestDeviceControlV2EnabledByDefault(t *testing.T) {
-	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "")
-	cfg := Load()
-	if !cfg.Control.DeviceControlV2Enabled {
-		t.Fatal("device control v2 must be enabled by default")
-	}
 	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "false")
-	cfg = Load()
-	if cfg.Control.DeviceControlV2Enabled {
-		t.Fatal("device control v2 must be disableable as an emergency kill switch")
+	cfg := Load()
+	if cfg.Device.Enabled {
+		t.Fatalf("设备监听不应受已删除的开关影响（应由证书推导）：%+v", cfg.Device)
 	}
 }
 
@@ -239,35 +223,15 @@ func TestParserShards_Default(t *testing.T) {
 	}
 }
 
-// TestParserShards_EnvOverride verifies EHOME_PARSER_SHARDS handling:
-// valid values pass through; 0/negative normalize to 1; >64 and garbage
-// fall back to the default.
-func TestParserShards_EnvOverride(t *testing.T) {
-	cases := []struct {
-		env  string
-		want int
-	}{
-		{"1", 1},
-		{"8", 8},
-		{"64", 64},
-		{"0", 1},  // legacy single consumer
-		{"-3", 1}, // negative rejected by env gate, default applies → 8
-	}
-	// note: -3 is rejected by the env override gate, leaving the config
-	// default (8), which exercises the "fall back" path rather than clamp.
-	for i, c := range cases {
-		if c.env == "-3" {
-			t.Setenv("EHOME_PARSER_SHARDS", c.env)
-			cfg := Load()
-			if got := cfg.ParserShards(); got != DefaultParserShards {
-				t.Errorf("case %d: env %q → %d, want default %d", i, c.env, got, DefaultParserShards)
-			}
-			continue
-		}
-		t.Setenv("EHOME_PARSER_SHARDS", c.env)
-		cfg := Load()
-		if got := cfg.ParserShards(); got != c.want {
-			t.Errorf("case %d: env %q → %d, want %d", i, c.env, got, c.want)
+// TestParserShards_EnvIsIgnored 守「分片数不可配」（2026-11-14）。
+//
+// EHOME_PARSER_SHARDS 已删除：DefaultParserShards(8) 是代码常量。分片数是
+// 吞吐参数而非环境事实，可调只会让不同部署的并发形状悄悄不同。
+func TestParserShards_EnvIsIgnored(t *testing.T) {
+	for _, v := range []string{"1", "64", "0", "garbage"} {
+		t.Setenv("EHOME_PARSER_SHARDS", v)
+		if got := Load().ParserShards(); got != DefaultParserShards {
+			t.Errorf("env %q 不应再生效：ParserShards = %d, want %d", v, got, DefaultParserShards)
 		}
 	}
 }
@@ -292,15 +256,19 @@ func TestParserShards_ClampUpperBound(t *testing.T) {
 // **不存在**的文件（保证子进程只用默认值 + 注入的环境变量）。而 device 段原本
 // 只能走 YAML ⇒ harness 无法启用设备监听 ⇒ 仿真设备没有可用传输。
 // 补上 env 覆盖后，这条测试钉住"五个变量都能生效"，避免将来有人只删掉其中一个。
-func TestLoadDeviceListenerFromEnv(t *testing.T) {
+// TestLoadDeviceListenerFromCerts 守「监听由证书三件套推导，没有 enabled 开关」。
+//
+// 2026-11-14 删除 EHOME_DEVICE_ENABLED：默认 false + 需要手设 true 的后果是
+// 新部署「节点永远离线且无报错」。现在三件套齐全就监听，少一件就不监听
+// （半配置的 mTLS 由 Validate 拒绝）。
+func TestLoadDeviceListenerFromCerts(t *testing.T) {
 	os.Setenv("CONFIG_PATH", "/nonexistent/sim-no-config.yaml")
-	os.Setenv("EHOME_DEVICE_ENABLED", "true")
 	os.Setenv("EHOME_DEVICE_ADDR", "127.0.0.1:18443")
 	os.Setenv("EHOME_DEVICE_CERT_FILE", "/tmp/x/server.crt")
 	os.Setenv("EHOME_DEVICE_KEY_FILE", "/tmp/x/server.key")
 	os.Setenv("EHOME_DEVICE_CLIENT_CA_FILE", "/tmp/x/ca.crt")
 	defer func() {
-		for _, k := range []string{"CONFIG_PATH", "EHOME_DEVICE_ENABLED", "EHOME_DEVICE_ADDR",
+		for _, k := range []string{"CONFIG_PATH", "EHOME_DEVICE_ADDR",
 			"EHOME_DEVICE_CERT_FILE", "EHOME_DEVICE_KEY_FILE", "EHOME_DEVICE_CLIENT_CA_FILE"} {
 			os.Unsetenv(k)
 		}
@@ -308,7 +276,7 @@ func TestLoadDeviceListenerFromEnv(t *testing.T) {
 
 	cfg := Load()
 	if !cfg.Device.Enabled {
-		t.Errorf("EHOME_DEVICE_ENABLED=true 未生效")
+		t.Errorf("证书三件套齐全时必须监听（不再有 EHOME_DEVICE_ENABLED）")
 	}
 	if cfg.Device.Addr != "127.0.0.1:18443" {
 		t.Errorf("Addr = %q, want 127.0.0.1:18443", cfg.Device.Addr)
@@ -322,10 +290,10 @@ func TestLoadDeviceListenerFromEnv(t *testing.T) {
 	if cfg.Device.ClientCAFile != "/tmp/x/ca.crt" {
 		t.Errorf("ClientCAFile = %q", cfg.Device.ClientCAFile)
 	}
-	// 安全默认：不设 EHOME_DEVICE_ENABLED 时监听必须关闭。
-	os.Unsetenv("EHOME_DEVICE_ENABLED")
+	// 少一件证书 ⇒ 不监听。半配置的 mTLS（有 cert/key 但没 CA）比不监听更危险。
+	os.Unsetenv("EHOME_DEVICE_CLIENT_CA_FILE")
 	if Load().Device.Enabled {
-		t.Errorf("未设 EHOME_DEVICE_ENABLED 时设备监听不应开启")
+		t.Errorf("缺少 client CA 时设备监听不应开启")
 	}
 }
 
@@ -334,14 +302,14 @@ func TestLoadDeviceListenerFromEnv(t *testing.T) {
 // 出处: docs/设计/遥测存储优化方案-2026-11-06.md §3.1 / §7 阶段1；
 //       docs/设计/遥测存储-L1L2无条件启用-契约-2026-11-07.md §3.1。
 //
-// 2026-11-07 起 L1 收窄**无条件生效**，write_on_change / rollup_write 两个开关
-// 已从配置层删除（连同环境变量）。因此这里只剩心跳参数的三条守则:
+// 2026-11-07 起 L1 收窄**无条件生效**；2026-11-14 起连参数也不再可配
+// （EHOME_TELEMETRY_HEARTBEAT_SECONDS 已删除）。因此这里只剩两条守则:
 //  1. 默认 60s，且 Heartbeat() 归一化后与之一致;
-//  2. env 能覆盖，解析失败时静默保持默认（与本文件既有 env 口径一致）;
-//  3. 心跳永远归一化到 (0, 24h] —— 0 / 负数 / 荒谬大值都不得让心跳静默失效。
+//  2. 心跳永远归一化到 (0, 24h] —— 0 / 负数 / 荒谬大值都不得让心跳静默失效。
 //
-// 「开关确实没了」这件事由 databus 包的 TestNoTelemetrySwitchesExist 做源码级
-// 门禁（扫描整个 backend/ 树），不在这里重复。
+// 「开关/参数确实没了」由两处源码级门禁守：
+// internal/config 的 TestProductionEnvSurfaceIsWhitelisted（白名单），
+// 与本文件里 TestTelemetryHeartbeatEnvIsIgnored（旧变量不再生效）。
 
 func TestTelemetryDefaultsToHeartbeat60s(t *testing.T) {
 	// 刻意清空变量: 环境里残留的覆盖会让「默认 60s」的断言失去意义。
@@ -355,37 +323,21 @@ func TestTelemetryDefaultsToHeartbeat60s(t *testing.T) {
 	}
 }
 
-func TestTelemetryHeartbeatEnvOverride(t *testing.T) {
+// TestTelemetryHeartbeatEnvIsIgnored 守「心跳不可配」（2026-11-14）。
+//
+// EHOME_TELEMETRY_HEARTBEAT_SECONDS 已删除、常量 60s。这里显式设上旧变量名并
+// 断言它不再有任何作用 —— 参数可调在实践中等于「没人调，但生产值与代码默认值
+// 可能分裂」，2026-11-14 的长窗事故就是这种分裂。
+func TestTelemetryHeartbeatEnvIsIgnored(t *testing.T) {
 	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "120")
-	cfg := Load()
-	if got := cfg.Telemetry.HeartbeatSeconds; got != 120 {
-		t.Errorf("心跳 = %d, want 120", got)
-	}
-	if got := cfg.Telemetry.Heartbeat(); got != 120*time.Second {
-		t.Errorf("Heartbeat() = %v, want 120s", got)
-	}
-}
-
-// TestTelemetryHeartbeatEnvRejectsGarbage 守「解析失败保持默认」：一个拼写错误
-// 不能把心跳静默变成 0（= 每次必写，等于收窄功能失效）。
-func TestTelemetryHeartbeatEnvRejectsGarbage(t *testing.T) {
-	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "not-a-number")
 	if got := Load().Telemetry.HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
-		t.Errorf("非法心跳被接受为 %d, want 默认 %d", got, DefaultTelemetryHeartbeatSeconds)
-	}
-	// 非正数同样拒绝（Heartbeat() 会把 0 归一成默认，但配置层不该接受这个值）。
-	for _, bad := range []string{"0", "-5"} {
-		t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", bad)
-		if got := Load().Telemetry.HeartbeatSeconds; got != DefaultTelemetryHeartbeatSeconds {
-			t.Errorf("非法心跳 %q 被接受为 %d, want 默认 %d", bad, got, DefaultTelemetryHeartbeatSeconds)
-		}
+		t.Errorf("环境变量不应再生效：心跳 = %d, want %d", got, DefaultTelemetryHeartbeatSeconds)
 	}
 }
 
 // TestTelemetryHeartbeatClamped 守上界钳制: 心跳不得大于 24h。
 func TestTelemetryHeartbeatClamped(t *testing.T) {
-	t.Setenv("EHOME_TELEMETRY_HEARTBEAT_SECONDS", "99999999")
-	cfg := Load()
+	cfg := &Config{Telemetry: TelemetryConfig{HeartbeatSeconds: 99999999}}
 	if got := cfg.Telemetry.Heartbeat(); got != maxTelemetryHeartbeatSeconds*time.Second {
 		t.Errorf("心跳钳制 = %v, want %v", got, maxTelemetryHeartbeatSeconds*time.Second)
 	}

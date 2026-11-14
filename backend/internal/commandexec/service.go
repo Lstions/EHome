@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -34,29 +33,16 @@ var (
 	ErrInvalidRequest       = errors.New("invalid command request")
 )
 
-// commandDeadlineEnvVar 是命令执行 Deadline 的覆盖开关（仿真用）。
-const commandDeadlineEnvVar = "EHOME_COMMAND_DEADLINE"
+// commandDeadline 是新建命令执行的 Deadline（生产恒 2 分钟）。
+//
+// 仿真需要秒级超时来验证「设备不回 Ack/Final ⇒ Deadline 后以明确终态 + 原因收尾」，
+// 且该判据必须真等一次超期（RecoverExpired 每秒实跑，判据是库里的 deadline_at
+// vs now，无法用注入时钟替代）。覆盖走 build tag（command_deadline_sim.go），
+// **生产二进制里不存在这个变量**。
+var commandDeadline = 2 * time.Minute
 
-// CommandDeadline 返回新建命令执行的 Deadline 时长（默认 2 分钟）。
-//
-// 为什么留这个开关（2026-10-04 仿真提速）：
-// SIM-CMD-006 要证明"设备不回 Ack/Final 时，执行记录会在 Deadline 之后以明确
-// 终态 + 原因收尾"。这是**超时语义**的回归锁，必须真等一次 Deadline 过期才能
-// 观测到，无法用注入时钟替代（RecoverExpired 每秒实跑一轮，判据是库里的
-// deadline_at vs now）。2 分钟 Deadline 让该场景白等 121s。
-//
-// 为什么不改判据：走的仍是同一条 Create → RecoverExpired 路径，终态与原因
-// 的判定逻辑一字未动，只是把"多久算超期"这个**时长参数**调短。
-//
-// 非法值（解析失败 / 非正）一律回落默认。
-func CommandDeadline() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv(commandDeadlineEnvVar)); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-			return d
-		}
-	}
-	return 2 * time.Minute
-}
+// CommandDeadline 返回新建命令执行的 Deadline 时长。
+func CommandDeadline() time.Duration { return commandDeadline }
 
 const (
 	ResolutionConfirmedSucceeded  = "CONFIRMED_SUCCEEDED"

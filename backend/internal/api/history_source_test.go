@@ -109,42 +109,41 @@ func TestFrameReadEligible(t *testing.T) {
 		EdgeDeviceID: 14, Category: "rsoc",
 		Start: start, End: start.Add(time.Hour), MaxPoints: 500, Mode: AggModeAvg,
 	}
-	if !frameReadEligible(true, dict, base) {
+	if !frameReadEligible(dict, base) {
 		t.Fatal("1 小时 / avg / 有字典 ⇒ 应该合格")
 	}
-	if frameReadEligible(false, dict, base) {
-		t.Error("开关关闭时必须不合格")
-	}
-	if frameReadEligible(true, nil, base) {
+	// 2026-11-14：「开关关闭」这个状态已不存在（EHOME_TELEMETRY_FRAME_READ 已删），
+	// 判据里也没有 enabled 形参 —— 下面直接验证其余四条。
+	if frameReadEligible(nil, base) {
 		t.Error("没有 slot 字典时必须不合格（解不了码）")
 	}
 
 	noDevice := base
 	noDevice.EdgeDeviceID = 0
-	if frameReadEligible(true, dict, noDevice) {
+	if frameReadEligible(dict, noDevice) {
 		t.Error("device=0 时必须不合格")
 	}
 
 	rawMode := base
 	rawMode.Mode = AggModeRaw
-	if frameReadEligible(true, dict, rawMode) {
+	if frameReadEligible(dict, rawMode) {
 		t.Error("raw 模式必须不合格（帧表给不出原始行形状）")
 	}
 
 	longWindow := base
 	longWindow.End = start.Add(25 * time.Hour)
-	if frameReadEligible(true, dict, longWindow) {
+	if frameReadEligible(dict, longWindow) {
 		t.Error("窗口 > MaxDecodeWindow(24h) 必须不合格 —— 不能静默扫几百万帧")
 	}
 
 	badWindow := base
 	badWindow.End = start
-	if frameReadEligible(true, dict, badWindow) {
+	if frameReadEligible(dict, badWindow) {
 		t.Error("end<=start 必须不合格")
 	}
 }
 
-// TestFrameReadEligibleRespectsDecodeMaxWindow 守短窗分界可被环境/Setter 影响。
+// TestFrameReadEligibleRespectsDecodeMaxWindow 守短窗分界可被 Setter 覆盖（**仅测试**）。
 func TestFrameReadEligibleRespectsDecodeMaxWindow(t *testing.T) {
 	old := FrameDecodeMaxWindow()
 	defer SetFrameDecodeMaxWindow(old)
@@ -155,11 +154,11 @@ func TestFrameReadEligibleRespectsDecodeMaxWindow(t *testing.T) {
 		Start: start, End: start.Add(2 * time.Hour), MaxPoints: 500, Mode: AggModeAvg,
 	}
 	SetFrameDecodeMaxWindow(time.Hour)
-	if frameReadEligible(true, dict, q) {
+	if frameReadEligible(dict, q) {
 		t.Error("2 小时窗口在 1 小时分界下必须不合格")
 	}
 	SetFrameDecodeMaxWindow(3 * time.Hour)
-	if !frameReadEligible(true, dict, q) {
+	if !frameReadEligible(dict, q) {
 		t.Error("2 小时窗口在 3 小时分界下应该合格")
 	}
 }

@@ -105,7 +105,7 @@ func TestRollupBackfillSurvivesUnifiedDrop(t *testing.T) {
 		t.Fatal("unified_data 仍然存在 —— 本用例的前提不成立")
 	}
 
-	cfg := RollupBackfillConfig{Enabled: true, BatchSeconds: 1800}
+	cfg := RollupBackfillConfig{BatchSeconds: 1800}
 	if err := NewRollupBackfillRunner(db, cfg).RunOnce(context.Background()); err != nil {
 		t.Fatalf("unified_data 被 DROP 后回填失败（应当自动改用帧表源）: %v\n"+
 			"这条链断掉的后果：coverage 停止推进 => 长窗读回落 => 回落读的也是不存在的表", err)

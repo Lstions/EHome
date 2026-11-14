@@ -2,9 +2,8 @@ package api
 
 // L3 读路径分派层的单测（SQLite，不需要 PG）。
 //
-// 核心承诺（方案 §5.3 + 本仓「关掉时行为一分不改」的硬约束）：
-//   1. 开关关闭 ⇒ shouldUseRollup 恒 false（旧路径完全不变）；
-//   2. 打开后也只有 **avg + 长窗 + 有效设备** 才走 rollup；change 模式绝不走
+// 核心承诺（方案 §5.3；2026-11-14 起 rollup 读路径常开，旧「开关」已删）：
+//   1. 只有 **avg + 长窗 + 有效设备** 才走 rollup；change 模式绝不走
 //      （rollup 表达不了翻转序列，用 avg/min/max/last 重建 0→1 跃变会算错）；
 //   3. rollup 表空/坏/不存在 ⇒ **回落**旧路径（fail-open），绝不返回空点集
 //      （空图比慢更糟）；
@@ -13,7 +12,6 @@ package api
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -84,59 +82,26 @@ func TestShouldUseRollup(t *testing.T) {
 	long := start.Add(24 * time.Hour)
 
 	cases := []struct {
-		name    string
-		enabled bool
-		mode    AggMode
-		start   time.Time
-		end     time.Time
-		device  uint
-		want    bool
+		name   string
+		mode   AggMode
+		start  time.Time
+		end    time.Time
+		device uint
+		want   bool
 	}{
-		{"开关关闭 ⇒ 恒 false（旧路径不变）", false, AggModeAvg, start, long, 14, false},
-		{"长窗 avg ⇒ 走 rollup", true, AggModeAvg, start, long, 14, true},
-		{"短窗 avg ⇒ 不走（会把 1h 图从 3600 点变 60 点）", true, AggModeAvg, start, short, 14, false},
-		{"change 模式 ⇒ 绝不走（翻转序列无法从 avg/min/max/last 重建）", true, AggModeChange, start, long, 14, false},
-		{"raw 模式 ⇒ 不走", true, AggModeRaw, start, long, 14, false},
-		{"设备维度为 0 ⇒ 不走", true, AggModeAvg, start, long, 0, false},
-		{"空/倒置窗口 ⇒ 不走", true, AggModeAvg, long, start, 14, false},
-		{"窗口正好等于阈值 ⇒ 不走（判据是严格大于）", true, AggModeAvg, start, start.Add(RollupShortWindow()), 14, false},
+		{"长窗 avg ⇒ 走 rollup", AggModeAvg, start, long, 14, true},
+		{"短窗 avg ⇒ 不走（会把 1h 图从 3600 点变 60 点）", AggModeAvg, start, short, 14, false},
+		{"change 模式 ⇒ 绝不走（翻转序列无法从 avg/min/max/last 重建）", AggModeChange, start, long, 14, false},
+		{"raw 模式 ⇒ 不走", AggModeRaw, start, long, 14, false},
+		{"设备维度为 0 ⇒ 不走", AggModeAvg, start, long, 0, false},
+		{"空/倒置窗口 ⇒ 不走", AggModeAvg, long, start, 14, false},
+		{"窗口正好等于阈值 ⇒ 不走（判据是严格大于）", AggModeAvg, start, start.Add(frameDecodeMaxWindow), 14, false},
+		{"窗口比阈值大 1 秒 ⇒ 走", AggModeAvg, start, start.Add(frameDecodeMaxWindow + time.Second), 14, true},
 	}
 	for _, c := range cases {
-		if got := shouldUseRollup(c.enabled, c.mode, c.start, c.end, c.device); got != c.want {
+		if got := shouldUseRollup(c.mode, c.start, c.end, c.device); got != c.want {
 			t.Errorf("%s: shouldUseRollup = %v, want %v", c.name, got, c.want)
 		}
-	}
-}
-
-// 默认值契约：环境变量未设置时，包级开关必须是 false。
-//
-// 为什么用 readBoolEnvDefault 而不是直接断言包级变量: 包级变量在 import 时就已
-// 按当时的环境算好，若本次 test binary 带 EHOME_TELEMETRY_ROLLUP_READ=1 跑
-// （例如灰度验证），断言包级变量会把环境问题当成代码缺陷。这里直接验"未设置 ⇒ 关"。
-func TestRollupReadDefaultIsOff(t *testing.T) {
-	if _, ok := os.LookupEnv(rollupReadEnv); ok {
-		t.Skipf("本次运行显式设置了 %s，默认值契约改由 readBoolEnvDefault 的单测覆盖", rollupReadEnv)
-	}
-	if readBoolEnvDefault(rollupReadEnv, false) {
-		t.Fatal("环境变量未设置时 rollup 读路径必须默认关闭")
-	}
-	if RollupReadEnabled() {
-		t.Fatal("环境变量未设置时包级开关必须为 false")
-	}
-}
-
-func TestReadBoolEnvDefaultParsing(t *testing.T) {
-	t.Setenv(rollupReadEnv, "true")
-	if !readBoolEnvDefault(rollupReadEnv, false) {
-		t.Error(`"true" 必须解析为 true`)
-	}
-	t.Setenv(rollupReadEnv, "0")
-	if readBoolEnvDefault(rollupReadEnv, true) {
-		t.Error(`"0" 必须解析为 false（覆盖默认 true）`)
-	}
-	t.Setenv(rollupReadEnv, "garbage")
-	if !readBoolEnvDefault(rollupReadEnv, true) {
-		t.Error("非法值必须回落默认，而不是猜")
 	}
 }
 

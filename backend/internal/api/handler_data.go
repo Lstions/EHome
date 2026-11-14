@@ -447,7 +447,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		// 命中则直接返回；未启用/无数据/坏行都回落下面的既有路径（fail-open，不是错误）。
 		// 位置必须在降采样聚合之前：降采样仍要扫原始行，rollup 不用。
 		resolvedMode := resolveAggMode(aggMode, sensorName)
-		useRollup := shouldUseRollup(RollupReadEnabled(), resolvedMode, startTime, endTime, uint(devicePK))
+		useRollup := shouldUseRollup(resolvedMode, startTime, endTime, uint(devicePK))
 		if useRollup {
 			if points, handled, rerr := rollupHistoryPoints(c.Request.Context(), db, historyPointQuery{
 				EdgeDeviceID: uint(devicePK),
@@ -594,7 +594,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 				// L3 读路径分派（方案 §5.3，historical 单条同款）：长窗 avg 先试 rollup。
 				// 注意本次是并发 goroutine，用 db.Session(&gorm.Session{}) 隔离 Statement
 				// 状态（下面的既有注释解释了不隔离会串条件）。
-				if shouldUseRollup(RollupReadEnabled(), resolved, startTime, endTime, uint(devicePK)) {
+				if shouldUseRollup(resolved, startTime, endTime, uint(devicePK)) {
 					if points, handled, rerr := rollupHistoryPoints(c.Request.Context(), db.Session(&gorm.Session{}), historyPointQuery{
 						EdgeDeviceID: uint(devicePK),
 						Category:     category,

@@ -16,6 +16,8 @@ const (
 	BackfillStateDone = "done"
 	// BackfillStateFailed 上次失败（断点保留，可重试）。
 	BackfillStateFailed = "failed"
-	// BackfillStateDisabled 被环境变量关闭（运维应急阀）。
+	// BackfillStateDisabled **已废弃**：2026-11-14 起 rollup 回填不可关闭
+	// （EHOME_TELEMETRY_ROLLUP_BACKFILL 已删）。保留字面量只为旧客户端兼容，
+	// 新代码不会再产生这个状态。
 	BackfillStateDisabled = "disabled"
 )
