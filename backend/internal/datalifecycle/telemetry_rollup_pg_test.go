@@ -28,7 +28,8 @@ func TestTelemetryRollupEnsureThenReap_Postgres(t *testing.T) {
 	drop := func() {
 		var names []string
 		if err := db.Raw(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE (c.relname = ? OR c.relname LIKE ?) AND n.nspname = current_schema()`,
+			WHERE (c.relname = ? OR c.relname LIKE ?) AND n.nspname = current_schema()
+			  AND c.relkind IN ('r', 'p')`,
 			TelemetryRollupTable, TelemetryRollupTable+"\\_%").Scan(&names).Error; err != nil {
 			t.Fatalf("list probe relations: %v", err)
 		}
