@@ -29,7 +29,7 @@
 ### 2026-11-14（**创建规则四问题修复** —— 步骤状态 / 动作目录 / 风险 / MOS）
 
 - **步骤状态**：跳过未完成步骤显示黄色 !，补齐即转绿；保存前标记全部错误步骤并跳回第一个。修掉"位置在前 = 已完成"的错误。
-- **动作目录**：新增 Exposure（automation/diagnostic/configuration）、RiskReason、Presets；自动化只保留 12 个方法动作，BMS 的 read_*/write_* 不再出现；风险选项显示具体风险原因。
+- **动作目录**：新增 Exposure（automation/diagnostic/configuration）、RiskReason、Presets；自动化只保留 10 个方法动作（0x0C 产测命令也归入 diagnostic），BMS 的 read_*/write_* 不再出现；风险选项显示具体风险原因。
 - **可用性拆分**：Catalog 增加 Configurable / RuntimeReason；设备离线时动作仍可选、可保存，页面显示一条"设备当前离线"横幅，不再逐项重复"当前不可用"。
 - **MOS 简化**：set_mos_policy 提供 4 个一键预设（充电/放电 × 开/关），选中后不再自动弹参数表单，priority 不出现在默认路径；高级入口保留。
 - **验证**：前端 2567 passed | 1 skipped、typecheck 绿；后端 go test ./... 通过；Playwright 截图见 [证据-2026-11-14-规则目录修复](验证/证据-2026-11-14-规则目录修复/)，详见 [验证记录 §16](验证/日出日落BMS-MOS-自动化验证记录-2026-11-13.md)。

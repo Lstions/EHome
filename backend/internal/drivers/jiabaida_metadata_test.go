@@ -52,4 +52,11 @@ func TestJiabaidaAutomationMetadata(t *testing.T) {
 			t.Errorf("%s must carry risk_reason", id)
 		}
 	}
+
+	// 0x0C 是产测/自检命令，不是可反复设置的状态开关：只能留在设备详情/手动控制。
+	for _, id := range []string{"test_charge_mos", "test_discharge_mos"} {
+		if byID[id].Exposure != "diagnostic" {
+			t.Errorf("%s exposure = %q, want diagnostic", id, byID[id].Exposure)
+		}
+	}
 }

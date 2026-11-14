@@ -82,13 +82,16 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	// MOS test / balance / buzzer / alarm / EDV / custom / resistance / timing
 	// -----------------------------------------------------------------------
 	actions = append(actions,
+		// 0x0C 是 BMS 的产测/自检命令，不是可反复设置的状态开关：写 test_status
+		// 触发一次测试，结果依赖外部负载，读回只用于判定 OK/NG/超时。规则编排要的是
+		// 幂等的开关方法，因此这两个动作仅保留在设备详情/手动控制（diagnostic）。
 		ControlAction{ID: "test_charge_mos", Version: 1, Name: "测试充电 MOS",
 			Description: "0C 写 test_status=01 + 读回 0C 状态对账；测试需注入负载电流",
-			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			Semantics:   "set", Exposure: "diagnostic", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
 			AtMostOnce: true, MaxSteps: 2},
 		ControlAction{ID: "test_discharge_mos", Version: 1, Name: "测试放电 MOS",
 			Description: "0C 写 test_status=02 + 读回 0C 状态对账；测试需注入负载电流",
-			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			Semantics:   "set", Exposure: "diagnostic", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
 			AtMostOnce: true, MaxSteps: 2},
 		ControlAction{ID: "read_test_mos_status", Version: 1, Name: "读取 MOS 测试状态",
 			Description: "0C 读：返回充放电 MOS 测试状态(0 未测试/1 OK/2 NG/3 超时)",
