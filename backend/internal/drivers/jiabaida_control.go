@@ -16,11 +16,11 @@ import (
 // factory-mode, reset or parameter command is represented here.
 func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	actions := []ControlAction{
-		jiabaidaReadAction("read_basic_info", "读取基本信息", jiabaidaReadFrame(0x03), 60, "总压、电流、容量、SOC、温度与 FET 状态"),
-		jiabaidaReadAction("read_cell_voltage", "读取单体电压", jiabaidaReadFrame(0x04), 50, "各串电芯电压"),
-		jiabaidaReadAction("read_hardware_version", "读取硬件版本", jiabaidaReadFrame(0x05), 40, "硬件版本字符串"),
-		jiabaidaReadAction("read_comprehensive", "读取综合信息", jiabaidaReadFrame(0x0F), 100, "综合状态与单体电压"),
-		jiabaidaReadAction("read_protection_count", "读取保护历史次数", jiabaidaReadFrame(0xAA), 40, "保护触发次数统计"),
+		jiabaidaReadAction("read_basic_info", "读取基本信息", jiabaidaReadFrame(0x03), 256, "总压、电流、容量、SOC、温度与 FET 状态"),
+		jiabaidaReadAction("read_cell_voltage", "读取单体电压", jiabaidaReadFrame(0x04), 256, "各串电芯电压"),
+		jiabaidaReadAction("read_hardware_version", "读取硬件版本", jiabaidaReadFrame(0x05), 256, "硬件版本字符串"),
+		jiabaidaReadAction("read_comprehensive", "读取综合信息", jiabaidaReadFrame(0x0F), 256, "综合状态与单体电压"),
+		jiabaidaReadAction("read_protection_count", "读取保护历史次数", jiabaidaReadFrame(0xAA), 256, "保护触发次数统计"),
 	}
 	// These capabilities are deliberately visible but unavailable. Their
 	// schemas and evidence requirements are frozen now, while physical
@@ -96,7 +96,7 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 		ControlAction{ID: "read_test_mos_status", Version: 1, Name: "读取 MOS 测试状态",
 			Description: "0C 读：返回充放电 MOS 测试状态(0 未测试/1 OK/2 NG/3 超时)",
 			Semantics:   "read", Risk: "low", Enabled: true,
-			TXData: []byte{0xDD, 0xA5, 0x0C, 0x00, 0xFF, 0xF4, 0x77}, ReadSize: 9, RXTimeoutMS: 1000},
+			TXData: []byte{0xDD, 0xA5, 0x0C, 0x00, 0xFF, 0xF4, 0x77}, ReadSize: 256, RXTimeoutMS: 1000},
 		ControlAction{ID: "force_balance", Version: 1, Name: "强制均衡",
 			Description: "F5 进入强制均衡模式 + 读回 0x03 均衡状态对账",
 			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
@@ -131,7 +131,7 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 		ControlAction{ID: "read_custom_attributes", Version: 1, Name: "读取自定义属性",
 			Description: "F0 读 3 个 uint16 自定义字段",
 			Semantics:   "read", Risk: "low", Enabled: true,
-			TXData: []byte{0xDD, 0xA5, 0xF0, 0x00, 0xFF, 0x10, 0x77}, ReadSize: 13, RXTimeoutMS: 1000},
+			TXData: []byte{0xDD, 0xA5, 0xF0, 0x00, 0xFF, 0x10, 0x77}, ReadSize: 256, RXTimeoutMS: 1000},
 		ControlAction{ID: "write_internal_resistance", Version: 1, Name: "写入电芯内阻",
 			Description: "F6 写 30 串内阻(0.1mΩ 有符号) + 读回对账；协议固定 30 串，参数为 30 个标量（catalog schema 仅支持标量参数）",
 			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
@@ -176,7 +176,7 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 		ControlAction{ID: "read_internal_resistance", Version: 1, Name: "读取电芯内阻",
 			Description: "F6 读 30 串内阻(0.1mΩ 有符号)",
 			Semantics:   "read", Risk: "low", Enabled: true, Verification: "ack", ExecutionShape: "single",
-			TXData: jiabaidaReadFrame(0xF6), ReadSize: 67, RXTimeoutMS: 2000},
+			TXData: jiabaidaReadFrame(0xF6), ReadSize: 256, RXTimeoutMS: 2000},
 		ControlAction{ID: "write_sn", Version: 1, Name: "写入 SN 码",
 			Description: "进工厂→写 SN(ASCII,≤31 字符)→退出工厂",
 			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
@@ -226,6 +226,23 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 
 func uint32Ptr(v uint32) *uint32 { return &v }
 
+// ReadSize 的两种语义（2026-11-15 实机缺陷修复，勿再混用）：
+//
+//   - **单步 V2（本文件的 jiabaidaReadAction / 显式 ReadSize 的单步动作）**：
+//     固件把 read_size 当"**接收窗口**"而不是帧长承诺 —— bus_worker.c 对
+//     channel_cmd_v2 豁免了短读丢弃规则，但 read_size==0 会被当作"不期待回包"，
+//     在 bus_dma_write 之后立即 complete_control(success, 空载荷)。所以单步读
+//     **必须 > 0**，取协议上界 256（与 Techfine 的做法一致），由服务端 verifier
+//     裁决内容。
+//
+//   - **有界计划（CompileControlActionPlan 的每一步）**：固件用
+//     uart_collect_response() 收集，2 处判据都是 `len >= expected` 的**下界**：
+//     真实回包比声明短就永远收不满，静默窗口一到即判步骤失败（error_code
+//     0x1400+step）。因此**每一步都必须声明 0**（= 行空闲定帧），由 verifier 裁决。
+//     2026-11-15 实机：「MOS 开关无法控制」的根因就是读回步声明了 60，而真实 0x03
+//     帧长 = 30 + 2×NTC（典型 38 B）；详见
+//     docs/分析/BMS-MOS实机无法控制-代码缺陷定位-2026-11-15.md
+//
 // jiabaidaReadAction builds a low-risk single-step read.
 //
 // Enabled is true (2026-09-23): these frames are already exercised continuously
@@ -443,6 +460,13 @@ func compileF3Block(params json.RawMessage) ([]byte, error) {
 // golden 0x03 read request; the verifier (VerifyControlAction) binds the
 // final response to the originating action.
 //
+// **每一步的 ReadSize 必须是 0**（2026-11-15）：固件 uart_collect_response 把
+// read_size 当"收满下界"（`len >= expected`），真实帧比声明短就永不满足，
+// 静默窗口一到即判该步失败（error_code 0x1400+step），整条计划 FAILED。
+// 嘉佰达所有 0x03/0x04/0x05/0x0C/0x0F/0xAA/0xF0/0xF6/0xA2 回包都是变长的
+// （0x03 为 23 + 2×NTC），任何固定值都会在某个 NTC/串数/固件版本上失败。
+// 0 = 行空闲定帧（10ms 静默），与 GetCommandTemplates 的 ReadLength=0 同一策略。
+//
 // bms_restart compiles the V19 §7.7 reset frame (0x0E, fixed code 0x8118)
 // followed by a readback of protection history (0xAA) whose restart_count
 // observes the reboot side effect.  The latter is a "readback" step so the
@@ -459,8 +483,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_fet", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_fet", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "bms_restart":
@@ -474,28 +498,30 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_reboot", Kind: "write", TXData: rebootFrame, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_restart_count", Kind: "readback", TXData: jiabaidaReadFrame(0xAA), ReadSize: 40, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_reboot", Kind: "write", TXData: rebootFrame, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_restart_count", Kind: "readback", TXData: jiabaidaReadFrame(0xAA), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "read_protection_parameters", "read_system_parameters":
-		cmd, readSize := byte(0xF2), uint32(60)
+		// ReadSize 一律 0（见文件顶部 plan ReadSize 说明）：0x03/0xF2/0xF3 的
+		// 响应长度随 NTC/串数/固件版本变化，任何固定值都会被固件当成"收满下界"。
+		cmd := byte(0xF2)
 		if actionID == "read_system_parameters" {
-			cmd, readSize = 0xF3, 59
+			cmd = 0xF3
 		}
 		return CompiledControlPlan{
 			RequiresFinally: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "read_params", Kind: "readback", TXData: jiabaidaReadFrame(cmd), ReadSize: readSize, RXTimeoutMS: 2000, PostTXDelayMS: 100},
-				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForRead(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "read_params", Kind: "readback", TXData: jiabaidaReadFrame(cmd), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
+				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForRead(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "write_protection_parameters", "write_system_parameters":
-		cmd, readSize := byte(0xF2), uint32(60)
+		cmd := byte(0xF2)
 		block, err := compileF2Block(params)
 		if actionID == "write_system_parameters" {
-			cmd, readSize = 0xF3, 59
+			cmd = 0xF3
 			block, err = compileF3Block(params)
 		}
 		if err != nil {
@@ -507,10 +533,10 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true, RequiresFinally: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "write_params", Kind: "write", TXData: jiabaidaWriteFrame(cmd, block), ReadSize: 7, RXTimeoutMS: 2000, PostTXDelayMS: 200},
-				{ID: "readback_params", Kind: "readback", TXData: jiabaidaReadFrame(cmd), ReadSize: readSize, RXTimeoutMS: 2000, PostTXDelayMS: 100},
-				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForWrite(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_params", Kind: "write", TXData: jiabaidaWriteFrame(cmd, block), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 200},
+				{ID: "readback_params", Kind: "readback", TXData: jiabaidaReadFrame(cmd), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
+				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForWrite(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "test_charge_mos", "test_discharge_mos":
@@ -521,16 +547,16 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_test", Kind: "write", TXData: jiabaidaWriteFrame(0x0C, []byte{0x00, status}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_test_status", Kind: "readback", TXData: jiabaidaReadFrame(0x0C), ReadSize: 9, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_test", Kind: "write", TXData: jiabaidaWriteFrame(0x0C, []byte{0x00, status}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_test_status", Kind: "readback", TXData: jiabaidaReadFrame(0x0C), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "force_balance":
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_force_balance", Kind: "write", TXData: jiabaidaWriteFrame(0xF5, []byte{0x00, 0x01}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_force_balance", Kind: "write", TXData: jiabaidaWriteFrame(0xF5, []byte{0x00, 0x01}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "find_car":
@@ -548,15 +574,15 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		}
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_find_car", Kind: "write", TXData: jiabaidaWriteFrame(0xF1, []byte{0x18, onOff}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_find_car", Kind: "write", TXData: jiabaidaWriteFrame(0xF1, []byte{0x18, onOff}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "clear_alarm":
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_clear_alarm", Kind: "write", TXData: jiabaidaWriteFrame(0xE6, []byte{0x18, 0x81}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_clear_alarm", Kind: "write", TXData: jiabaidaWriteFrame(0xE6, []byte{0x18, 0x81}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "auto_test_edv":
@@ -571,8 +597,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_edv", Kind: "write", TXData: jiabaidaWriteFrame(0x0D, []byte{byte(minutes >> 8), byte(minutes)}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_edv", Kind: "write", TXData: jiabaidaWriteFrame(0x0D, []byte{byte(minutes >> 8), byte(minutes)}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "write_custom_attributes":
@@ -590,8 +616,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		}
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_custom", Kind: "write", TXData: jiabaidaWriteFrame(0xF0, data), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_custom", Kind: "readback", TXData: jiabaidaReadFrame(0xF0), ReadSize: 13, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_custom", Kind: "write", TXData: jiabaidaWriteFrame(0xF0, data), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_custom", Kind: "readback", TXData: jiabaidaReadFrame(0xF0), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "write_internal_resistance":
@@ -610,8 +636,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_resistance", Kind: "write", TXData: jiabaidaWriteFrame(0xF6, data), ReadSize: 7, RXTimeoutMS: 2000, PostTXDelayMS: 200},
-				{ID: "readback_resistance", Kind: "readback", TXData: jiabaidaReadFrame(0xF6), ReadSize: 67, RXTimeoutMS: 2000, PostTXDelayMS: 100},
+				{ID: "write_resistance", Kind: "write", TXData: jiabaidaWriteFrame(0xF6, data), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 200},
+				{ID: "readback_resistance", Kind: "readback", TXData: jiabaidaReadFrame(0xF6), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "set_static_correction_time":
@@ -625,8 +651,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		}
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_correction", Kind: "write", TXData: jiabaidaWriteFrame(0xF7, []byte{byte(minutes >> 8), byte(minutes)}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_correction", Kind: "write", TXData: jiabaidaWriteFrame(0xF7, []byte{byte(minutes >> 8), byte(minutes)}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "set_report_interval":
@@ -644,8 +670,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		}
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_interval", Kind: "write", TXData: jiabaidaWriteFrame(0xF8, data), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_interval", Kind: "write", TXData: jiabaidaWriteFrame(0xF8, data), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "set_charge_time_window":
@@ -663,8 +689,8 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		}
 		return CompiledControlPlan{
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_charge_window", Kind: "write", TXData: jiabaidaWriteFrame(0xFA, []byte{byte(delay >> 8), byte(delay), byte(duration >> 8), byte(duration)}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_charge_window", Kind: "write", TXData: jiabaidaWriteFrame(0xFA, []byte{byte(delay >> 8), byte(delay), byte(duration >> 8), byte(duration)}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "set_discharge_time_limit":
@@ -687,17 +713,17 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_discharge_limit", Kind: "write", TXData: jiabaidaWriteFrame(0xFB, []byte{enable, byte(days >> 8), byte(days)}), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_discharge_limit", Kind: "write", TXData: jiabaidaWriteFrame(0xFB, []byte{enable, byte(days >> 8), byte(days)}), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_basic", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "read_sn":
 		return CompiledControlPlan{
 			RequiresFinally: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 				{ID: "read_sn", Kind: "readback", TXData: jiabaidaReadFrame(0xA2), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
-				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForRead(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForRead(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "write_sn":
@@ -728,10 +754,10 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true, RequiresFinally: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "write_sn", Kind: "write", TXData: jiabaidaWriteFrame(0xA2, data), ReadSize: 7, RXTimeoutMS: 2000, PostTXDelayMS: 200},
-				{ID: "readback_sn", Kind: "readback", TXData: jiabaidaReadFrame(0xA2), ReadSize: 39, RXTimeoutMS: 2000, PostTXDelayMS: 100},
-				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForWrite(), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "enter_factory", Kind: "write", TXData: FactoryModeEnterCmd(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_sn", Kind: "write", TXData: jiabaidaWriteFrame(0xA2, data), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 200},
+				{ID: "readback_sn", Kind: "readback", TXData: jiabaidaReadFrame(0xA2), ReadSize: 0, RXTimeoutMS: 2000, PostTXDelayMS: 100},
+				{ID: "exit_factory", Kind: "finally", TXData: FactoryModeExitForWrite(), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	default:

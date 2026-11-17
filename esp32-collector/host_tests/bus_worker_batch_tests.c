@@ -669,6 +669,108 @@ static void test_expected_length_does_not_absorb_sticky_bytes(void)
     }
 }
 
+/* =====================================================================
+ * Test 9 (2026-11-15 实机缺陷回归): 声明长度是「收满下界」，不是建议窗口。
+ *
+ * 现场故障：嘉佰达 set_mos_policy 的读回步曾声明 read_size=60，而真实 0x03
+ * 帧长 = 4 + (23 + 2*NTC) + 2 + 1 = 30 + 2*NTC（4 路 NTC ⇒ 38 B）。
+ * 固件在 uart_collect_response() 的两处判据都是 len >= expected，短帧永不
+ * 满足 ⇒ 静默窗口一到即判该步失败（error_code = 0x1400 + step）⇒ 整条计划
+ * FAILED，而写帧其实已经发出去了。
+ *
+ * 判据双向钉死：
+ *   · 声明 60 / 实收 38  ⇒ 失败（0x1401），绝不静默成功；
+ *   · 声明 0  / 实收 38  ⇒ 成功（行空闲定帧），这是后端现在的编译产物。
+ * ===================================================================== */
+static void test_declared_read_size_short_response_is_error(void)
+{
+    reset_capture();
+    reset_batch_rx(0);
+    g_stage_last_rx_now = false;
+
+    uint8_t step1[64], step2[64];
+    static const uint8_t tx1[] = {0xDD, 0x5A, 0xE1, 0x02, 0x00, 0x01, 0xFF, 0x1C, 0x77};
+    static const uint8_t tx2[] = {0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77};
+    size_t n1 = build_step(step1, 1, tx1, sizeof(tx1), 7, 1500, 100);
+    size_t n2 = build_step(step2, 2, tx2, sizeof(tx2), 60, 1500, 100);   /* 旧的错误声明 */
+
+    bus_cmd_t cmd;
+    init_batch_cmd(&cmd);
+    append_plan_step(&cmd, step1, n1);
+    append_plan_step(&cmd, step2, n2);
+
+    static const uint8_t ack[] = {0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77};
+    uint8_t reply[38];
+    memset(reply, 0, sizeof(reply));
+    reply[0] = 0xDD; reply[1] = 0x03; reply[2] = 0x00; reply[3] = 31;  /* LEN = 23 + 2*4 */
+    reply[4 + 20] = 0x02;                                              /* fet_status */
+    reply[37] = 0x77;
+    stage_response(ack, sizeof(ack));
+    stage_response(reply, sizeof(reply));
+
+    bus_dma_ctx_t ctx = make_uart_ctx();
+    uint8_t raw[256];
+    size_t raw_len = 0;
+    uint32_t error_code = 0;
+    bool ok = execute_uart_batch(0, &ctx, &cmd, raw, &raw_len, &error_code);
+
+    CHECK(!ok, "a real 38 B reply must NOT satisfy a declared read_size of 60");
+    CHECK(error_code == 0x1401u, "the short readback must fail as step 1 (0x1401), not succeed");
+    CHECK(raw_len == 0, "a failed batch must not publish a payload");
+    CHECK(s_batch_rx[0].waiter == NULL && s_plan_active[0] == false,
+          "the failure path must still release the waiter and plan latch");
+}
+
+/* Test 10: 声明 0 ⇒ 行空闲定帧。后端现在编译出的计划就是这个形状。 */
+static void test_zero_read_size_uses_idle_framing(void)
+{
+    reset_capture();
+    reset_batch_rx(0);
+    g_stage_last_rx_now = false;
+
+    uint8_t step1[64], step2[64];
+    static const uint8_t tx1[] = {0xDD, 0x5A, 0xE1, 0x02, 0x00, 0x01, 0xFF, 0x1C, 0x77};
+    static const uint8_t tx2[] = {0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77};
+    size_t n1 = build_step(step1, 1, tx1, sizeof(tx1), 0, 1500, 100);
+    size_t n2 = build_step(step2, 2, tx2, sizeof(tx2), 0, 1500, 100);
+
+    bus_cmd_t cmd;
+    init_batch_cmd(&cmd);
+    append_plan_step(&cmd, step1, n1);
+    append_plan_step(&cmd, step2, n2);
+
+    static const uint8_t ack[] = {0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77};
+    uint8_t reply[38];
+    memset(reply, 0, sizeof(reply));
+    reply[0] = 0xDD; reply[1] = 0x03; reply[2] = 0x00; reply[3] = 31;
+    reply[4 + 20] = 0x02;
+    reply[37] = 0x77;
+    stage_response(ack, sizeof(ack));
+    stage_response(reply, sizeof(reply));
+
+    bus_dma_ctx_t ctx = make_uart_ctx();
+    uint8_t raw[256];
+    size_t raw_len = 0;
+    uint32_t error_code = 0;
+    bool ok = execute_uart_batch(0, &ctx, &cmd, raw, &raw_len, &error_code);
+
+    CHECK(ok, "read_size=0 must complete via the line-idle gap (this is what the backend now compiles)");
+    CHECK(error_code == 0u, "read_size=0 with a real reply must not set an error code");
+    CHECK(raw_len == 1 + 3 + sizeof(ack) + 3 + sizeof(reply),
+          "the envelope must carry exactly the bytes the device sent");
+    if (raw_len == 1 + 3 + sizeof(ack) + 3 + sizeof(reply)) {
+        CHECK(raw[0] == 2, "raw[0] must be the step count");
+        CHECK(raw[2] == (uint8_t)sizeof(ack) && raw[3] == 0, "step1 must report the ACK length");
+        CHECK(memcmp(raw + 4, ack, sizeof(ack)) == 0, "step1 payload must be the 7 B ACK");
+        size_t off = 4 + sizeof(ack);
+        CHECK(raw[off] == 2 && raw[off + 1] == (uint8_t)sizeof(reply) && raw[off + 2] == 0,
+              "step2 must report the real 38 B readback length, not a declared window");
+        CHECK(memcmp(raw + off + 3, reply, sizeof(reply)) == 0, "step2 payload must be the real frame");
+    }
+    CHECK(s_batch_rx[0].waiter == NULL && s_plan_active[0] == false,
+          "the success path must release the waiter and plan latch");
+}
+
 int main(void)
 {
     reset_capture();
@@ -682,6 +784,8 @@ int main(void)
     test_top_level_guards();
     test_expected_length_completes_without_idle();
     test_expected_length_does_not_absorb_sticky_bytes();
+    test_declared_read_size_short_response_is_error();
+    test_zero_read_size_uses_idle_framing();
 
     if (g_failures > 0) {
         fprintf(stderr, "\nbus_worker_batch_tests: %d FAILURES\n", g_failures);
