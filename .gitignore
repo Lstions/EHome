@@ -99,6 +99,9 @@ frontend-shared/.tmp-probe/
 **/__dbg_*
 **/_tmp-*
 **/__scratch_*
+
+# Docker 沙盒验证（docker-sandbox-verify 技能）证据目录：报告/日志，不是产物
+.dsbx-evidence/
 backend/coverage_raw.out
 coverage.out
 frontend-shared/coverage/

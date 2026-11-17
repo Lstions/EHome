@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { parse } from '@vue/compiler-sfc'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { execSync } from 'node:child_process'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
 
 /**
  * F8 移动端宽表横滚合同 —— 口径基线与豁免白名单（规范 §4.3.2.2 MUST / §4.4.1 MUST）。
@@ -97,9 +96,35 @@ export function scanTables(templateSource: string): Array<{ wrapped: boolean; hi
  * 空格/'>'，用 [ >] 会把这两个**已正确包裹**的文件静默漏掉 ——
  * 漏掉不是"少报一个"，而是让它们永远不会被本 spec 检查（隐蔽的假绿）。
  */
+/**
+ * 口径实现（2026-11-15 改为纯 Node 遍历）。
+ *
+ * 原实现是 `execSync("grep -rl '<el-table' src --include=*.vue || true")`。
+ * **本仓 Dockerfile 的 frontend-builder 用的是 node:24-alpine，那里是 BusyBox grep，
+ * 不认识 `--include`**：命令报错后被 `|| true` 吞掉 ⇒ 口径跑空 0 个文件 ⇒ 本 spec
+ * 在干净沙盒/容器里恒红（实测：node:24-alpine 201 文件里只有这一条失败，换成
+ * 带 GNU grep 的 Debian 镜像即全绿）。结论：这是**口径实现的可移植性缺陷**，不是
+ * 页面缺口。改成 Node 侧遍历后与 grep 无关，验收判据（数量、白名单、祖先链）不变。
+ */
+function walkVue(dir: string, out: string[]): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name)
+    if (entry.isDirectory()) walkVue(abs, out)
+    else if (entry.isFile() && entry.name.endsWith('.vue')) out.push(abs)
+  }
+  return out
+}
+
 function auditFiles(): string[] {
-  const out = execSync("grep -rl '<el-table' src --include=*.vue || true", { cwd: ROOT, encoding: 'utf8' })
-  return out.split('\n').map(s => s.trim()).filter(Boolean).filter(f => !f.includes('__tests__'))
+  const root = resolve(ROOT, 'src')
+  const files: string[] = []
+  for (const abs of walkVue(root, [])) {
+    const rel = relative(ROOT, abs)
+    if (rel.includes('__tests__')) continue
+    if (!readFileSync(abs, 'utf8').includes('<el-table')) continue
+    files.push(rel)
+  }
+  return files.sort()
 }
 
 function templateOf(rel: string): string {
