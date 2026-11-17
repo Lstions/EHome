@@ -103,6 +103,8 @@ import { ApiError } from '@/api/client'
 import { useDeviceOperationStore, type ResourceRefreshAttempt } from '@/stores/deviceOperation'
 import { classifyUnavailable } from '@/utils/actionAvailability'
 import { useWebSocketStore } from '@/stores/websocket'
+// WS 事件名走常量单一来源（scripts/check_ws_event_names.sh 的 magic-string 门禁）
+import { WS_EVENT } from '@/events/events'
 import { newIdempotencyKey, type ActionDefinition, type DeviceOperation, type EffectiveAction, type ManualResolutionOutcome, type OperationStatus } from '@/api/deviceOperation'
 import ActionForm from './ActionForm.vue'
 import ActionConfirmationDialog from './ActionConfirmationDialog.vue'
@@ -228,7 +230,7 @@ function timelineType(status: OperationStatus) { return status === 'SUCCEEDED' ?
 function format(value: string) { return value ? new Date(value).toLocaleString() : '' }
 function resultSummary(operation: DeviceOperation) { return operation.verified_result?.map(value => `${value.name}=${value.string_value || value.value}${value.unit || ''}`).join(', ') || '' }
 function resolutionLabel(outcome: ManualResolutionOutcome) { return outcome === 'CONFIRMED_SUCCEEDED' ? '确认成功' : outcome === 'CONFIRMED_FAILED' ? '确认失败' : '仍无法确认' }
-const offEvent = ws.subscribe('device_operation_update', message => { const operation = (message.payload ?? message.data) as DeviceOperation | undefined; if (operation?.edge_device_id === props.deviceId) store.apply(operation) })
+const offEvent = ws.subscribe(WS_EVENT.DEVICE_OPERATION_UPDATE, message => { const operation = (message.payload ?? message.data) as DeviceOperation | undefined; if (operation?.edge_device_id === props.deviceId) store.apply(operation) })
 const offConnected = typeof ws.onConnected === 'function' ? ws.onConnected(load) : () => {}
 // 切换设备时重置"显示全部"，避免上一个设备的展开态带到下一个。
 watch(() => props.deviceId, () => { expandedHistory.value = false; load() }); onMounted(load); onUnmounted(() => { offEvent(); offConnected() })

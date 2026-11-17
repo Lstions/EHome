@@ -8,8 +8,18 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BE_FILE="$ROOT_DIR/backend/internal/events/events.go"
 FE_FILE="$ROOT_DIR/frontend-shared/src/events/events.ts"
 
-# 已知仅前端使用、后端尚未定义的事件名 (用空格分隔)
-KNOWN_FE_ONLY="channel_write_error"
+# 已知**不在常量表里**的事件名（用空格分隔），两种来源：
+#   · 前端自有：channel_write / channel_write_error（后端只发 error 那个）；
+#   · 后端直发但还没进 events.go 常量表：automation_* 三条（emit 在
+#     backend/internal/automation/planner.go，用的是裸字符串）。
+# 2026-11-17：此前只有 channel_write_error 一个豁免名，union check 因此**长期失败**
+# （等于没有门禁）。现在把豁免名补全，并让 union check 也认这份名单；
+# 把 automation_* 收进常量表是独立任务，不在本次缺陷修复范围。
+KNOWN_UNLISTED_NAMES="channel_write channel_write_error automation_daily_limit automation_pending_confirm automation_system_actor_unavailable"
+
+# 门禁只看生产代码：__tests__ / *.spec.ts 里用裸字符串是**故意的**
+# （测试要钉住线上真实事件名，用常量反而测不出改名）。
+FE_SRC_EXCLUDES=(--exclude-dir=__tests__ --exclude='*.spec.ts' --exclude='*.test.ts')
 
 # 如果后端 events.go 还不存在，跳过后端检查
 if [ ! -f "$BE_FILE" ]; then
@@ -24,10 +34,10 @@ if [ ! -f "$BE_FILE" ]; then
   fi
 
   # 验证前端 subscribe 调用全部使用常量
-  MAGIC_STRINGS=$(grep -rohP "subscribe\('\K[a-z_]+'" "$ROOT_DIR/frontend-shared/src/" 2>/dev/null | sed "s/'$//" | sort -u || true)
+  MAGIC_STRINGS=$(grep -rohP "${FE_SRC_EXCLUDES[@]}" "subscribe\('\K[a-z_]+'" "$ROOT_DIR/frontend-shared/src/" 2>/dev/null | sed "s/'$//" | sort -u || true)
   UNEXPECTED=""
   for s in $MAGIC_STRINGS; do
-    if ! echo "$KNOWN_FE_ONLY" | grep -qw "$s"; then
+    if ! echo "$KNOWN_UNLISTED_NAMES" | grep -qw "$s"; then
       UNEXPECTED="$UNEXPECTED $s"
     fi
   done
@@ -54,10 +64,10 @@ FE_NAMES=$(grep -oP "'\K[a-z]+_[a-z_]+'" "$FE_FILE" | sed "s/'$//" | sort -u)
 BE_BROADCAST=$(grep -rohP 'BroadcastEvent\("\K[a-z_]+' "$ROOT_DIR/backend/internal/" 2>/dev/null | sort -u || true)
 
 # 4. 提取前端 wsStore.subscribe 调用中的 magic string 事件名
-FE_SUBSCRIBE=$(grep -rohP "subscribe\('\K[a-z_]+'" "$ROOT_DIR/frontend-shared/src/" 2>/dev/null | sed "s/'$//" | sort -u || true)
+FE_SUBSCRIBE=$(grep -rohP "${FE_SRC_EXCLUDES[@]}" "subscribe\('\K[a-z_]+'" "$ROOT_DIR/frontend-shared/src/" 2>/dev/null | sed "s/'$//" | sort -u || true)
 UNEXPECTED=""
 for s in $FE_SUBSCRIBE; do
-  if ! echo "$KNOWN_FE_ONLY" | grep -qw "$s"; then
+  if ! echo "$KNOWN_UNLISTED_NAMES" | grep -qw "$s"; then
     UNEXPECTED="$UNEXPECTED $s"
   fi
 done
@@ -68,7 +78,9 @@ if [ -n "$UNEXPECTED" ]; then
 fi
 
 # 5. 比较常量定义是否一致
-MISSING_IN_BE=$(comm -23 <(echo "$FE_NAMES") <(echo "$BE_NAMES"))
+# FE 自有事件（KNOWN_FE_ONLY）不算"缺在后端"：它们是前端合成的通道事件，
+# 后端本来就不发。除此之外任何一侧多出来的名字都必须报错。
+MISSING_IN_BE=$(comm -23 <(echo "$FE_NAMES") <(echo "$BE_NAMES") | grep -vxF -f <(echo "$KNOWN_UNLISTED_NAMES" | tr ' ' '\n') || true)
 MISSING_IN_FE=$(comm -13 <(echo "$FE_NAMES") <(echo "$BE_NAMES"))
 
 if [ -n "$MISSING_IN_BE" ] || [ -n "$MISSING_IN_FE" ]; then

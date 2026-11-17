@@ -39,10 +39,18 @@ export interface BmsOperationsDeps {
   lastError: Ref<string>
   /** set_mos_policy 回执转交（MOS 域的实例在页面里后创建，故用回调而不是直接引用） */
   onMosReceipt: (op: DeviceOperation) => void
+  /**
+   * 跟踪某条命令直到终态（实现见 useDeviceOperationFeed：WS 主通道 + 有界 REST 兜底）。
+   *
+   * 2026-11-17 真机缺陷：本 composable 只读 store.histories，而 store 里那条记录只有
+   * POST 返回值（QUEUED）⇒ 没有回执推进，「已发送」永不复位。跟踪交给 feed 统一负责，
+   * 这里只在"页面发起了哪条命令"这个时点登记一次（谁发起谁登记）。
+   */
+  followCommand?: (commandId: string) => void
 }
 
 export function useBmsOperations(deps: BmsOperationsDeps) {
-  const { deviceId, isMobileViewport, dispatch, clearError, lastError, onMosReceipt } = deps
+  const { deviceId, isMobileViewport, dispatch, clearError, lastError, onMosReceipt, followCommand } = deps
 
   const opStore = useDeviceOperationStore()
   const historyOps = computed<DeviceOperation[]>(() => opStore.histories.get(deviceId.value) ?? [])
@@ -157,6 +165,8 @@ export function useBmsOperations(deps: BmsOperationsDeps) {
     if (!op) return
     activeCommandId = op.command_id
     applyOperationToUi(op)
+    // 状态推进只能靠回执：WS 是主通道，feed 另带 30s 有界 REST 兜底。
+    followCommand?.(activeCommandId)
   }
   watch(historyOps, (list) => {
     if (!activeCommandId) return

@@ -39,7 +39,9 @@ export function useBmsRealtime(deviceId: Ref<number>) {
   const wsConnected = computed(() => wsStore.isConnected)
   // 只消费 latestData（按 sensor_name 取值的字典）。dataItems（实时流列表）本页
   // 已于 2026-10-21 按用户要求移除渲染，不再解构 —— 留着会是一个永不被读的 ref。
-  const { latestData } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
+  // fieldAt = 每个字段最近一次被上报的时刻：MOS 卡用它判断"手里的 fet_status
+  // 是不是比那次写后回读更新"，避免更旧的周期帧把权威回读覆盖掉（真机实测的开关"跳一下"）。
+  const { latestData, fieldAt } = useRealtimeData({ deviceId, maxItems: REALTIME_MAX_ITEMS })
 
   const snapshotError = ref('')
   /** 最新快照请求在途（首屏骨架的判定信号之一；改前没有这个状态位） */
@@ -238,6 +240,7 @@ export function useBmsRealtime(deviceId: Ref<number>) {
     wsConnected,
     connectRealtime,
     latestData,
+    fieldAt,
     snapshotError,
     snapshotLoading,
     snapshotErrorText,

@@ -33,6 +33,8 @@ export interface RealtimeDataReturn {
   dataItems: Ref<DataItem[]>
   /** 最新数据（用于指标卡片等） */
   latestData: Ref<Record<string, any> | null>
+  /** 每个字段最近一次被上报的采集时刻（epoch ms；缺键 = 该字段还没上报过） */
+  fieldAt: Ref<Record<string, number>>
   /** 接收到的消息计数 */
   messageCount: Ref<number>
   /** 添加单条数据 */
@@ -60,7 +62,36 @@ export function useRealtimeData(options: RealtimeDataOptions): RealtimeDataRetur
   const wsStore = useWebSocketStore()
   const dataItems = ref<DataItem[]>([]) as Ref<DataItem[]>
   const latestData = ref<Record<string, any> | null>(null)
+  /**
+   * 每个字段**最近一次被上报**的采集时刻（epoch ms）。2026-11-17 新增。
+   *
+   * 为什么 latestData 不够：它只是"各字段当前值"的字典，看不出某个字段有多新。
+   * BMS 的 MOS 卡需要判断「手里这个 fet_status 是不是比那次写后回读更新」——
+   * 更旧的帧不得覆盖权威回读，否则开关会先被打回旧状态再跳回来（真机实测的"跳一下"）。
+   *
+   * ⚠ 不能用"最新一帧的时刻"代替：0xAA 保护次数 / 0x04 单体电压等帧**不含 fet_status**，
+   * 它们只能说明"有别的新数据到了"，不能说明 MOS 状态更新过 —— 用错就会把刚确认的
+   * 开关状态打回旧值，等于把要修的抖动原样搬回来。故按**字段**记时刻。
+   * 只前进不回退：乱序/重投递的旧帧不会把时刻拉回去。
+   */
+  const fieldAt = ref<Record<string, number>>({})
   const messageCount = ref(0)
+
+  /** 记录一帧里各字段的采集时刻（只前进，不回退） */
+  const trackFieldAt = (data: unknown, timestamp: unknown) => {
+    if (!data || typeof data !== 'object') return
+    const ms = typeof timestamp === 'string' ? Date.parse(timestamp) : NaN
+    if (!Number.isFinite(ms)) return
+    let changed = false
+    const next = { ...fieldAt.value }
+    for (const key of Object.keys(data as Record<string, unknown>)) {
+      if (ms > (next[key] ?? 0)) {
+        next[key] = ms
+        changed = true
+      }
+    }
+    if (changed) fieldAt.value = next
+  }
 
   // 批量缓冲：微任务合并
   let pendingBatch: DataItem[] = []
@@ -91,6 +122,7 @@ export function useRealtimeData(options: RealtimeDataOptions): RealtimeDataRetur
 
     if (trackLatest && item.data && typeof item.data === 'object') {
       latestData.value = { ...latestData.value, ...item.data }
+      trackFieldAt(item.data, item.timestamp)
     }
   }
 
@@ -107,6 +139,8 @@ export function useRealtimeData(options: RealtimeDataOptions): RealtimeDataRetur
       if (last.data && typeof last.data === 'object') {
         latestData.value = { ...latestData.value, ...last.data }
       }
+      // 批次内逐条记录字段时刻（不假设 items 已排序）
+      for (const item of items) trackFieldAt(item.data, item.timestamp)
     }
   }
 
@@ -176,6 +210,7 @@ export function useRealtimeData(options: RealtimeDataOptions): RealtimeDataRetur
   return {
     dataItems,
     latestData,
+    fieldAt,
     messageCount,
     addData,
     addDataBatch,

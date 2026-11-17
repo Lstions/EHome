@@ -369,6 +369,9 @@ import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useControlAction } from '@/composables/useControlAction'
+// 受控操作回执的唯一入口（WS 主通道 + 有界 REST 兜底）：2026-11-17 真机缺陷，
+// 本页原先只读 store.histories ⇒ 回执永远到不了页面，「已发送」只能靠手点刷新复位。
+import { useDeviceOperationFeed } from '@/composables/useDeviceOperationFeed'
 // ── 2026-11-12 纯搬移式拆分：数据域进 composable、自包含卡片进子组件，本页只留页面级编排 ──
 // 页面级约定（§5 拆分纪律）：PageHeader / 路由参数解析 / 页级 composable 调用 / 折叠记忆 /
 // 页级时间窗 / 身份重验证弹窗 / 参数化表单弹窗 仍留在本文件；DOM 与文案逐字未变。
@@ -522,6 +525,7 @@ const {
   wsConnected,
   connectRealtime,
   latestData,
+  fieldAt,
   snapshotErrorText,
   realtimeLoading,
   realtimeError,
@@ -564,6 +568,10 @@ const headerTags = computed<Array<{ text: string; type: TagType; effect: 'plain'
 const ca = useControlAction(() => deviceId.value)
 const { lastError, dispatch, clearError } = ca
 
+// 回执通道：订阅 WS device_operation_update，并按命令做有界兜底轮询。
+// 必须在两个域之前建立 —— 它们发起命令后要立刻登记跟踪（followCommand）。
+const opFeed = useDeviceOperationFeed()
+
 // 两个数据域各需对方一处：MOS 需要「页面发起命令后登记跟踪」，操作域需要把 set_mos_policy
 // 回执**转交**给 MOS（谁的状态谁维护）。用晚绑定表达，避免两个 composable 互相 import 成环：
 // 先建操作域（onMosReceipt 只在回执到达时才被调用），再建 MOS 域并回填 mosApi。
@@ -575,6 +583,7 @@ const ops = useBmsOperations({
   clearError,
   lastError,
   onMosReceipt: (op) => mosApi?.handleReceipt(op),
+  followCommand: opFeed.startFollow,
 })
 const {
   opGroups, totalOps, openGroups, toggleGroup, riskCount, opState, opBusy,
@@ -590,6 +599,8 @@ const mos = useBmsMosControl({
   dispatch,
   clearError,
   lastError,
+  // 字段上报时刻：给"权威回读桥接"设有效期，更旧的 fet_status 不得覆盖它（真机实测的开关抖动）
+  fieldReportedAt: fieldAt,
   trackCommand,
 })
 mosApi = mos
@@ -642,6 +653,8 @@ function resetDeviceScopedState() {
   resetRealtime()
   resetMos()
   resetOperations()
+  // 上一台设备的在途命令不再跟踪（否则它的回执会被当成新设备的状态写进 store/卡片）
+  opFeed.stopFollow()
 }
 
 async function refreshAll() {

@@ -15,6 +15,16 @@ export const WS_EVENT = {
 
   // 边缘设备 (v2.2)
   EDGE_DEVICE_STATUS: 'edge_device_status',
+  /**
+   * 受控操作执行状态推进（queued → dispatched → device_accepted → verifying → succeeded/failed）。
+   *
+   * 2026-11-17 补齐（真机缺陷）：后端 events.go 早就定义并在**每次**状态变化时广播，
+   * 前端常量表里却一直没有它 ⇒ 订阅方只能写裸字符串，union check 长期失败；
+   * BMS 详情页干脆没订阅 ⇒「已发送…」永不复位，必须手点「刷新数据」才消失。
+   */
+  DEVICE_OPERATION_UPDATE: 'device_operation_update',
+  /** 节点资源上报（capability 目录 / 可用动作的刷新信号） */
+  NODE_RESOURCES_UPDATED: 'node_resources_updated',
 
   // 数据
   DATA_UPDATE: 'data_update',
