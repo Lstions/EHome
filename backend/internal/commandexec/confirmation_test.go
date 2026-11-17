@@ -217,8 +217,8 @@ func TestIssueConfirmationUserDisabled(t *testing.T) {
 	s, edge, _ := setupConfirmationService(t)
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("enabled", false)
 	_, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
-	if !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("err=%v, want ErrRecentAuthRequired", err)
+	if !errors.Is(err, ErrConfirmationForbidden) {
+		t.Fatalf("err=%v, want ErrConfirmationForbidden", err)
 	}
 }
 
@@ -229,31 +229,39 @@ func TestIssueConfirmationNonAdminSubject(t *testing.T) {
 	otherKey := "operator"
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("subject_key", &otherKey)
 	_, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
-	if !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("err=%v, want ErrRecentAuthRequired", err)
+	if !errors.Is(err, ErrConfirmationForbidden) {
+		t.Fatalf("err=%v, want ErrConfirmationForbidden", err)
 	}
 }
 
-// --- IssueConfirmation: stale login ---
+// --- IssueConfirmation: stale login is NOT a gate (2026-11-15 用户裁定) ---
 
-func TestIssueConfirmationStaleLogin(t *testing.T) {
+// 危险动作不再要求"重新输入密码"，所以登录时间过去多久都不该挡住确认。
+// 本用例是需求的反向判据：把这道门加回去，这里必红。
+func TestIssueConfirmationStaleLoginIsStillAllowed(t *testing.T) {
 	s, edge, _ := setupConfirmationService(t)
-	stale := time.Now().UTC().Add(-recentAuthenticationWindow - time.Minute)
+	stale := time.Now().UTC().Add(-24 * time.Hour)
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("last_login_at", &stale)
-	_, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
-	if !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("err=%v, want ErrRecentAuthRequired", err)
+	grant, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
+	if err != nil {
+		t.Fatalf("stale login must not require re-authentication: %v", err)
+	}
+	if grant == nil || grant.Token == "" {
+		t.Fatal("expected a confirmation token")
 	}
 }
 
-// --- IssueConfirmation: nil login ---
+// --- IssueConfirmation: nil login is NOT a gate either ---
 
-func TestIssueConfirmationNilLogin(t *testing.T) {
+func TestIssueConfirmationNilLoginIsStillAllowed(t *testing.T) {
 	s, edge, _ := setupConfirmationService(t)
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("last_login_at", nil)
-	_, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
-	if !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("err=%v, want ErrRecentAuthRequired", err)
+	grant, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
+	if err != nil {
+		t.Fatalf("nil last_login_at must not require re-authentication: %v", err)
+	}
+	if grant == nil || grant.Token == "" {
+		t.Fatal("expected a confirmation token")
 	}
 }
 
@@ -287,20 +295,19 @@ func TestIssueConfirmationSuccess(t *testing.T) {
 	}
 }
 
-// --- IssueConfirmation: expiry clamped to login window ---
+// --- IssueConfirmation: expiry is the token lifetime, not a login window ---
 
-func TestIssueConfirmationExpiryClampedToLoginWindow(t *testing.T) {
+func TestIssueConfirmationExpiryUsesTokenLifetime(t *testing.T) {
 	s, edge, _ := setupConfirmationService(t)
-	// Login 8 minutes ago → window expires in 2 minutes, before the 5-minute token lifetime
+	// 登录 8 分钟前不再是约束（无密码门），令牌必须拿满 5 分钟。
 	loginAt := time.Now().UTC().Add(-8 * time.Minute)
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("last_login_at", &loginAt)
 	grant, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedExpiry := loginAt.Add(recentAuthenticationWindow)
-	if grant.ExpiresAt.After(expectedExpiry.Add(time.Second)) {
-		t.Fatalf("expiry %v not clamped to login window %v", grant.ExpiresAt, expectedExpiry)
+	if grant.ExpiresAt.Before(time.Now().Add(4 * time.Minute)) {
+		t.Fatalf("expiry %v must be the full token lifetime (5m), not clamped to the login window", grant.ExpiresAt)
 	}
 }
 
@@ -364,26 +371,25 @@ func TestConsumeConfirmationReplay(t *testing.T) {
 	}
 }
 
-// --- consumeConfirmation: stale login at consume time ---
+// --- consumeConfirmation: stale login must not invalidate a valid token ---
 
-func TestConsumeConfirmationStaleLoginAtConsume(t *testing.T) {
+func TestConsumeConfirmationStaleLoginIsStillAllowed(t *testing.T) {
 	s, edge, _ := setupConfirmationService(t)
 	grant, err := s.IssueConfirmation(context.Background(), confInput(edge.ID, "medium_read"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Make login stale after issuing
-	stale := time.Now().UTC().Add(-recentAuthenticationWindow - time.Minute)
+	// 令牌签发后把登录时间推到很久以前：不再有任何"近认证"语义。
+	stale := time.Now().UTC().Add(-24 * time.Hour)
 	s.db.Model(&models.User{}).Where("id = ?", 42).Update("last_login_at", &stale)
 
 	def, _ := s.actions.Get("prs3001", "medium_read")
 	params, _ := deviceaction.CanonicalizeParams(def.InputSchema, json.RawMessage(`{}`))
 	requestHash := fmt.Sprintf("%x", sha256sum(params))
-	err = s.db.Transaction(func(tx *gorm.DB) error {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		return s.consumeConfirmation(tx, grant.Token, 42, edge.ID, def, requestHash)
-	})
-	if !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("err=%v, want ErrRecentAuthRequired", err)
+	}); err != nil {
+		t.Fatalf("a valid token must survive a stale login time: %v", err)
 	}
 }
 

@@ -16,11 +16,10 @@ import {
   type OpGroup,
   type OpPhase,
   type OpState,
-  type ReauthTarget,
 } from './bmsOperationModel'
 
 /**
- * BMS「受控操作」状态域：目录分组 / 执行状态机 / 操作历史 / 参数化表单 / 重验证编排。
+ * BMS「受控操作」状态域：目录分组 / 执行状态机 / 操作历史 / 参数化表单（失败态标记）。
  *
  * 为什么单独拆出来（2026-11-12 纯搬移式拆分）：
  *   这一整段是**一个数据域**——目录来自后端 catalogs，回执来自 store.histories，
@@ -38,14 +37,12 @@ export interface BmsOperationsDeps {
   dispatch: (actionId: string, params: Record<string, unknown>, requiresConfirmation: boolean) => Promise<boolean>
   clearError: () => void
   lastError: Ref<string>
-  reauthVisible: Ref<boolean>
-  reauthTarget: Ref<ReauthTarget>
   /** set_mos_policy 回执转交（MOS 域的实例在页面里后创建，故用回调而不是直接引用） */
   onMosReceipt: (op: DeviceOperation) => void
 }
 
 export function useBmsOperations(deps: BmsOperationsDeps) {
-  const { deviceId, isMobileViewport, dispatch, clearError, lastError, reauthVisible, reauthTarget, onMosReceipt } = deps
+  const { deviceId, isMobileViewport, dispatch, clearError, lastError, onMosReceipt } = deps
 
   const opStore = useDeviceOperationStore()
   const historyOps = computed<DeviceOperation[]>(() => opStore.histories.get(deviceId.value) ?? [])
@@ -177,7 +174,7 @@ export function useBmsOperations(deps: BmsOperationsDeps) {
    * 必填与范围也在同一处校验，不再有第二套表单导致的规则漂移。
    *
    * 提交流程：填参数 →（若为高风险动作）极简确认 → dispatch(带参数)。
-   * 风险动作后端强制单次令牌，仍由 useControlAction 内部处理重验证。
+   * 风险动作后端强制单次令牌，仍由 useControlAction 内部申请。
    */
   const opFormVisible = ref(false)
   const opFormTarget = ref<OpDef | null>(null)
@@ -300,13 +297,10 @@ export function useBmsOperations(deps: BmsOperationsDeps) {
     setPhase(op.id, 'sent', '已发送')
     const ok = await dispatch(op.id, params, op.requiresConfirmation)
     if (ok) {
-      reauthTarget.value = null
       trackCommand(op.id)
-    } else if (reauthVisible.value) {
-      reauthTarget.value = { type: 'op', id: op.id }
     } else {
-      setPhase(op.id, 'failed', '失败')
-      st.reason = lastError.value || '操作未能提交'
+      // 2026-11-15 用户裁定：不再要求输入密码 —— 失败即按普通错误常驻标记（不挂起等密码）。
+      markFailed(op.id, lastError.value || '操作未能提交')
       feedback.error('「' + op.name + '」未能提交：' + (lastError.value || '未知原因'))
     }
   }
@@ -350,17 +344,17 @@ export function useBmsOperations(deps: BmsOperationsDeps) {
     }
   }
 
-  /** 重验证通过：命令已按原参数重新提交 */
+  /** 命令已按原参数重新提交：置为"已发送"（2026-11-15 起不再有密码重验证入口，保留给重试编排复用） */
   function markSent(id: string) {
     setPhase(id, 'sent', '已发送')
   }
-  /** 重验证失败：进入失败态并常驻原因 */
+  /** 下发失败：进入失败态并常驻原因（2026-11-15 起失败即走这里，不再等密码输入） */
   function markFailed(id: string, message: string) {
     const st = opState(id)
     setPhase(id, 'failed', '失败')
     st.reason = message
   }
-  /** 用户取消重验证：进入已取消态并常驻原因 */
+  /** 用户取消已受理的操作：进入已取消态并常驻原因（保留给取消编排复用） */
   function markCancelled(id: string, message: string) {
     const st = opState(id)
     setPhase(id, 'cancelled', '已取消')

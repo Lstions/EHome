@@ -759,15 +759,19 @@ func readingsFromUnified(values []models.UnifiedData) []sensorfield.Reading {
 // gorm 的 Transaction 用 defer 直接 return 回调的 err, 不再包一层, 因此 errors.Is
 // 能可靠穿透。此处不再保留文案兜底: 文案比对正是这个缺陷的成因, 留着只会再次腐烂。
 func isGateError(err error) bool {
-	return errors.Is(err, commandexec.ErrActionUnavailable)
+	// ErrConfirmationForbidden = 该账户无权确认（授权失败）：与 availability gate
+	// 同属"重试也不会好"的拒绝，落 failed_gate 而不是 failed_dispatch。
+	return errors.Is(err, commandexec.ErrActionUnavailable) ||
+		errors.Is(err, commandexec.ErrConfirmationForbidden)
 }
 
 // isConfirmationGateError 判定 commandexec 返回错误是否来自**确认门**。
 //
 // 覆盖三个哨兵 (方案 §3.2.5 第 2 步):
 //   - ErrConfirmationRequired: 没有 token / token 为空 → 需要人工确认;
-//   - ErrRecentAuthRequired:   近认证窗口已过 → 需要用户重新验证身份;
 //   - ErrConfirmationInvalid:  token 无效/过期/已用 → 需要重新走确认流程。
+//
+// 2026-11-15：ErrRecentAuthRequired 已随「危险动作不再要求重新输入密码」一并删除。
 //
 // 注意这不是把确认门归为 availability gate —— failed_gate 仍然只表示 availability
 // gate 的 fail-closed。确认门是**预期安全行为**(需要人), 必须与传输失败、门禁拒绝
@@ -775,7 +779,6 @@ func isGateError(err error) bool {
 // (这正是 C5 缺陷)。
 func isConfirmationGateError(err error) bool {
 	return errors.Is(err, commandexec.ErrConfirmationRequired) ||
-		errors.Is(err, commandexec.ErrRecentAuthRequired) ||
 		errors.Is(err, commandexec.ErrConfirmationInvalid)
 }
 
@@ -1585,7 +1588,7 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 // **部分失败不写冷却锚点** (P2-C 裁决): 规则没有完整执行完, 锚点会静默冷却它。
 //
 // cause 是**透传给调用方**的原始错误 (Create 的 gate/确认门/参数错误)。为什么必须
-// 透传而不是吞掉: handler 依赖它映射 HTTP 状态码 (ErrRecentAuthRequired → 403 等),
+// 透传而不是吞掉: handler 依赖它映射 HTTP 状态码 (ErrConfirmationForbidden → 403 等),
 // 且既有契约 TestConfirmEventCreateFailureFlipsFailed 断言"不吞错也不留 pending 悬置"。
 // 落库失败只告警 (与 recordActionFailure 同款 fail-open), 不覆盖 cause。
 func (p *Planner) recordConfirmFailure(ctx context.Context, ev *models.AutomationEvent,

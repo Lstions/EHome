@@ -36,7 +36,9 @@ func setupAccountRouter(t *testing.T) (*gin.Engine, *models.User, string) {
 	return r, &user, token
 }
 
-func TestAccountReauthenticateRefreshesRecentAuthentication(t *testing.T) {
+// 2026-11-15 用户裁定：危险动作只需二次点击确认，整程序不再要求用户重新输入密码。
+// 这条用例是"密码环节真的没了"的反向判据 —— 谁把 /account/reauthenticate 加回来，它必红。
+func TestAccountReauthenticateEndpointIsGone(t *testing.T) {
 	r, _, token := setupAccountRouter(t)
 	body, _ := json.Marshal(map[string]string{"password": "old-password-123"})
 	w := httptest.NewRecorder()
@@ -44,44 +46,16 @@ func TestAccountReauthenticateRefreshesRecentAuthentication(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("reauthenticate endpoint must be removed (no password step), status=%d body=%s", w.Code, w.Body.String())
 	}
-	var response struct {
-		Data struct {
-			AuthenticatedAt *time.Time `json:"authenticated_at"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Data.AuthenticatedAt == nil {
-		t.Fatalf("missing authenticated_at: %s", w.Body.String())
-	}
-}
-
-func TestAccountReauthenticateFailureKeepsSessionAndRateLimits(t *testing.T) {
-	r, _, token := setupAccountRouter(t)
-	for attempt, want := range []int{http.StatusForbidden, http.StatusForbidden, http.StatusTooManyRequests} {
-		body, _ := json.Marshal(map[string]string{"password": "wrong-password"})
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/account/reauthenticate", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		r.ServeHTTP(w, req)
-		if w.Code != want {
-			t.Fatalf("attempt=%d status=%d want=%d body=%s", attempt+1, w.Code, want, w.Body.String())
-		}
-		if attempt == 0 && !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"invalid_reauthentication_credentials"`)) {
-			t.Fatalf("missing machine error code: %s", w.Body.String())
-		}
-	}
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/account", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("failed reauthentication revoked session: status=%d body=%s", w.Code, w.Body.String())
+	// 会话与会话内其它账户接口不受影响。
+	me := httptest.NewRecorder()
+	meReq := httptest.NewRequest(http.MethodGet, "/api/v1/account", nil)
+	meReq.Header.Set("Authorization", "Bearer "+token)
+	r.ServeHTTP(me, meReq)
+	if me.Code != http.StatusOK {
+		t.Fatalf("account endpoint must keep working: status=%d body=%s", me.Code, me.Body.String())
 	}
 }
 

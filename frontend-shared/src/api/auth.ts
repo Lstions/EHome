@@ -55,9 +55,8 @@ export const authApi = {
     await client.post('/api/v1/account/password', data)
   },
 
-  async reauthenticate(password: string): Promise<void> {
-    await client.post('/api/v1/account/reauthenticate', { password })
-  },
+  // 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码；
+  // 故原「重新验证身份」接口包装已删除（后端也不再下发 recent_auth_required）。
 
   getToken(): string {
     return localStorage.getItem('token') || sessionStorage.getItem('token') || ''

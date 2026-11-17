@@ -44,14 +44,9 @@ test.describe('SN-3001 开发实机写入与读回', () => {
       await confirmation.getByRole('button', { name: '确认', exact: true }).click()
     }
 
-    // A login within the recent-auth window proceeds directly. If the test is
-    // resumed after that window, use the same explicit re-authentication path
-    // as the production UI rather than bypassing confirmation.
-    const reauth = page.getByRole('dialog', { name: '验证当前身份' })
-    if (await reauth.isVisible().catch(() => false)) {
-      await reauth.getByLabel('当前账户密码').fill(password)
-      await reauth.getByRole('button', { name: '验证并继续', exact: true }).click()
-    }
+    // 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+    // 任何情况下都不应再出现「验证当前身份」密码对话框（反向判据，防功能回退）。
+    await expect(page.getByRole('dialog', { name: '验证当前身份' })).toHaveCount(0)
 
     const createResponse = await createResponsePromise
     expect(createResponse.status()).toBe(202)

@@ -83,8 +83,9 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 			Error(c, http.StatusBadRequest, "invalid command request")
 		case errors.Is(err, commandexec.ErrConfirmationRequired), errors.Is(err, commandexec.ErrConfirmationInvalid):
 			Error(c, http.StatusConflict, "valid confirmation is required")
-		case errors.Is(err, commandexec.ErrRecentAuthRequired):
-			ErrorWithCode(c, http.StatusForbidden, "recent_auth_required", "recent authentication is required")
+		case errors.Is(err, commandexec.ErrConfirmationForbidden):
+			// 2026-11-15：危险动作不再要求输密码，缺席的是授权而不是近认证。
+			ErrorWithCode(c, http.StatusForbidden, "confirmation_forbidden", "this account may not confirm the action")
 		case errors.Is(err, commandexec.ErrConfirmationRateLimited):
 			Error(c, http.StatusTooManyRequests, "confirmation rate limit exceeded")
 		case errors.Is(err, gorm.ErrRecordNotFound):
@@ -206,8 +207,9 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 			Success(c, grant)
 		case errors.Is(err, commandexec.ErrConfirmationNotNeeded):
 			Error(c, http.StatusConflict, "confirmation is not required for this action")
-		case errors.Is(err, commandexec.ErrRecentAuthRequired):
-			ErrorWithCode(c, http.StatusForbidden, "recent_auth_required", "recent authentication is required")
+		case errors.Is(err, commandexec.ErrConfirmationForbidden):
+			// 2026-11-15：危险动作不再要求输密码，缺席的是授权而不是近认证。
+			ErrorWithCode(c, http.StatusForbidden, "confirmation_forbidden", "this account may not confirm the action")
 		case errors.Is(err, commandexec.ErrActionUnavailable):
 			Error(c, http.StatusConflict, "action unavailable")
 		case errors.Is(err, commandexec.ErrInvalidParams), errors.Is(err, commandexec.ErrConfirmationRequired):

@@ -88,27 +88,8 @@
       </template>
     </el-dialog>
 
-    <!-- 近期身份验证（后端 10 分钟窗口，缺失即 403 recent_auth_required） -->
-    <el-dialog
-      v-model="reauthVisible"
-      title="验证当前身份"
-      width="420px"
-      :close-on-click-modal="false"
-      append-to-body
-    >
-      <p class="mos-confirm-text">该操作属于高风险动作，需要重新验证当前账户密码。</p>
-      <el-input
-        v-model="reauthPassword"
-        type="password"
-        show-password
-        placeholder="请输入当前账户密码"
-        data-testid="mos-reauth-password"
-      />
-      <template #footer>
-        <el-button @click="doCancelReauth">取消</el-button>
-        <el-button type="primary" :loading="reauthBusy" @click="doReauth">验证并继续</el-button>
-      </template>
-    </el-dialog>
+    <!-- 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+         原身份重验证对话框的挂起逻辑已删除：失败直接回滚开关 + 常驻错误文案。 -->
   </div>
 </template>
 
@@ -278,14 +259,12 @@ watch(lastMosOp, (op) => {
 })
 
 const ca = useControlAction(() => props.deviceId ?? 0)
-const { submitting, lastError, reauthVisible, reauthPassword, reauthBusy, dispatch, retryAfterReauth, cancelReauth, clearError } = ca
+const { submitting, lastError, dispatch, clearError } = ca
 
 const confirmVisible = ref(false)
 const pendingKind = ref<'charge' | 'discharge' | null>(null)
-/** el-switch before-change 的挂起 resolve：由 doConfirm/cancelConfirm/doReauth 决定开关是否允许动 */
+/** el-switch before-change 的挂起 resolve：由 doConfirm/cancelConfirm 决定开关是否允许动 */
 let pendingResolve: ((ok: boolean) => void) | null = null
-/** 命中 recent_auth_required 时把 resolve 交接给重验证流程（验证通过才放行开关） */
-let reauthResolve: ((ok: boolean) => void) | null = null
 const pendingTargetOn = ref(false)
 const busyKey = ref('')
 const resultText = ref('')
@@ -348,7 +327,7 @@ async function doConfirm() {
   busyKey.value = kind
   resultText.value = ''
   // 先在**不改变开关视觉**的前提下发起下发；只有受理成功才让滑块动。
-  // 这样即使下发失败/需要重验证，开关也不会先跳过去再弹回来（避免虚假反馈）。
+  // 这样即使下发失败，开关也不会先跳过去再弹回来（避免虚假反馈）。
   try {
     // 两个位一起提交（协议要求两个字段都必填）：未操作的那个保持当前实际状态。
     const targetCharge = kind === 'charge' ? pendingTargetOn.value : chargeOn.value
@@ -364,9 +343,6 @@ async function doConfirm() {
       emit('changed')
       // 受理成功 ⇒ 允许滑块跟随目标位置（真实位置随后由权威 fet_status 收敛）
       resolveChange?.(true)
-    } else if (reauthVisible.value) {
-      // 需要重验证：**先不让滑块动**，等重验证+重跑成功后再放行（见 doReauth）
-      reauthResolve = resolveChange
     } else {
       resultOk.value = false
       resultText.value = lastError.value || 'MOS 指令未能提交'
@@ -380,34 +356,9 @@ async function doConfirm() {
   }
 }
 
-/** 重验证结果同步到结果行 */
-async function doReauth() {
-  resultText.value = ''
-  const ok = await retryAfterReauth()
-  if (ok) {
-    resultOk.value = true
-    resultText.value = 'MOS 指令已发送，正在回读校验…'
-    emit('changed')
-    // 重验证+重跑成功，此时才放行开关滑块
-    reauthResolve?.(true)
-    reauthResolve = null
-  } else if (!reauthVisible.value) {
-    resultOk.value = false
-    resultText.value = lastError.value || 'MOS 指令未能提交'
-    reauthResolve?.(false)
-    reauthResolve = null
-  }
-  // 仍在 reauthVisible（用户输错密码）时保持挂起：开关不动，等下一次提交
-}
-
-function doCancelReauth() {
-  cancelReauth()
-  resultOk.value = false
-  resultText.value = lastError.value || '已取消（未执行 MOS 操作）'
-  // 取消重验证 ⇒ 开关必须保持原位
-  reauthResolve?.(false)
-  reauthResolve = null
-}
+// 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+// 原 doReauth / doCancelReauth（等用户输密码后才放行/保持挂起的重验证态）已删除：
+// 下发失败直接走上面的「结果行常驻错误 + 开关保持原位」分支，不再有密码等待态。
 
 // 设备切换时清掉上一台设备的结果文案，避免串台（与 CommandList 同款守卫）
 watch(() => props.deviceId, () => {
@@ -418,7 +369,6 @@ watch(() => props.deviceId, () => {
   verifiedFet.value = null
   // 设备切换时把挂起的 before-change 一律判否，避免开关停在一个"永远 loading"的 Promise 上
   pendingResolve?.(false); pendingResolve = null
-  reauthResolve?.(false); reauthResolve = null
 })
 </script>
 

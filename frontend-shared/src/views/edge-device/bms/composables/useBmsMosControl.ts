@@ -3,7 +3,7 @@ import type { Ref } from 'vue'
 import { feedback } from '@/utils/feedback'
 import type { DeviceOperation } from '@/api/deviceOperation'
 import { hexOf, num } from '../bmsFormat'
-import { OPERATION_UI, TERMINAL, readableFinalReason, type ReauthTarget } from './bmsOperationModel'
+import { OPERATION_UI, TERMINAL, readableFinalReason } from './bmsOperationModel'
 
 /**
  * BMS「MOS 直控」状态域（诉求①：像电灯开关一样直接操作）。
@@ -27,14 +27,12 @@ export interface BmsMosControlDeps {
   dispatch: (actionId: string, params: Record<string, unknown>, requiresConfirmation: boolean) => Promise<boolean>
   clearError: () => void
   lastError: Ref<string>
-  reauthVisible: Ref<boolean>
-  reauthTarget: Ref<ReauthTarget>
   /** 页面发起的命令登记（实现在 useBmsOperations，回执由它转交回来） */
   trackCommand: (actionId: string) => void
 }
 
 export function useBmsMosControl(deps: BmsMosControlDeps) {
-  const { deviceId, deviceOnline, latestData, dispatch, clearError, lastError, reauthVisible, reauthTarget, trackCommand } = deps
+  const { deviceId, deviceOnline, latestData, dispatch, clearError, lastError, trackCommand } = deps
 
   const mosPhase = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
   const mosError = reactive<Record<'charge' | 'discharge', string>>({ charge: '', discharge: '' })
@@ -125,13 +123,10 @@ export function useBmsMosControl(deps: BmsMosControlDeps) {
     }, true)
     if (ok) {
       mosPhase[which] = '已发送'
-      reauthTarget.value = null
       trackCommand('set_mos_policy')
-    } else if (reauthVisible.value) {
-      reauthTarget.value = { type: 'mos', which }
     } else {
-      mosPhase[which] = ''
-      mosError[which] = lastError.value || 'MOS 指令未能提交'
+      // 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+      markFailed(which, lastError.value || 'MOS 指令未能提交')
       feedback.error(name + '指令未能提交：' + (lastError.value || '未知原因'))
     }
   }
@@ -175,11 +170,11 @@ export function useBmsMosControl(deps: BmsMosControlDeps) {
     })
   }
 
-  /** 重验证通过：命令已重新提交（与拆分前 doReauth 的 MOS 分支一致） */
+  /** 命令已按原参数重新提交：置为"已发送"（2026-11-15 起不再有密码重验证入口，保留给重试编排复用） */
   function markSent(which: 'charge' | 'discharge') {
     mosPhase[which] = '已发送'
   }
-  /** 重验证失败 / 取消：清掉在途态并常驻原因 */
+  /** 下发失败 / 取消：清掉在途态并常驻原因（2026-11-15 起失败即走这里，不再等密码输入） */
   function markFailed(which: 'charge' | 'discharge', message: string) {
     mosPhase[which] = ''
     mosError[which] = message

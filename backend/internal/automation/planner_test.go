@@ -1123,7 +1123,7 @@ func TestClassifyDeviceActionErrorMapsThreeOutcomes(t *testing.T) {
 		want string
 	}{
 		{"确认门 (无 token)", commandexec.ErrConfirmationRequired, models.AutomationResultConfirmationRequired},
-		{"确认门 (近认证过期)", commandexec.ErrRecentAuthRequired, models.AutomationResultConfirmationRequired},
+		{"授权门 (账户无权确认)", commandexec.ErrConfirmationForbidden, models.AutomationResultFailedGate},
 		{"确认门 (token 无效)", commandexec.ErrConfirmationInvalid, models.AutomationResultConfirmationRequired},
 		{"availability gate", commandexec.ErrActionUnavailable, models.AutomationResultFailedGate},
 		{"参数非法 (既非 gate 也非确认门)", commandexec.ErrInvalidParams, models.AutomationResultFailedDispatch},

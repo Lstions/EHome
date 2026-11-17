@@ -877,10 +877,9 @@ func triggerAutomationRule(trigger automationManualTrigger) gin.HandlerFunc {
 
 // POST /api/v1/automation-events/:id/confirm
 // 裁决 4 确认制闭环: 人工确认 pending_confirm 事件后真正下发动作。
-// 前置: 操作者须先经 POST /api/v1/account/reauthenticate 重新认证 (校验密码后
-// 由 authservice.AuthenticateSingleUser 刷新 LastLoginAt, 见 handler_account.go),
-// 以通过 commandexec 的近认证门 —— 该窗口为 10 分钟
-// (commandexec/confirmation.go: recentAuthenticationWindow)。
+// 前置: 无密码环节 (2026-11-15 用户裁定：危险动作只需二次点击确认)。
+// 确认令牌由 planner 当场铸造并立即消费；操作者身份仍需是系统管理员主体
+// (授权判定保留, 见 commandexec/confirmation.go)。
 // 无 body; planner 即铸即销 token, token 不跨请求存储。
 func confirmAutomationEvent(planner automationPlanner) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -914,8 +913,8 @@ func confirmAutomationEvent(planner automationPlanner) gin.HandlerFunc {
 				ErrorWithCode(c, 409, "RULE_CHANGED", "规则动作在触发后已变更, 为保一致性拒绝确认; 请按新配置重新触发")
 			case errors.Is(err, automation.ErrConfirmInvalidParams):
 				ErrorWithCode(c, 409, "INVALID_PARAMS", "规则动作参数非法, 无法确认")
-			case errors.Is(err, commandexec.ErrRecentAuthRequired):
-				ErrorWithCode(c, 403, "RECENT_AUTH_REQUIRED", "需先完成手动确认 (刷新近认证)")
+			case errors.Is(err, commandexec.ErrConfirmationForbidden):
+				ErrorWithCode(c, 403, "CONFIRMATION_FORBIDDEN", "当前账户无权确认该操作（危险动作只需二次点击确认，但需系统管理员主体）")
 			case errors.Is(err, commandexec.ErrConfirmationInvalid):
 				ErrorWithCode(c, 409, "CONFIRMATION_INVALID", "确认令牌无效或已过期")
 			default:

@@ -103,16 +103,15 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 	if err := db.Create(&models.User{ID: 11, Username: "api-medium", PasswordHash: "hash", Enabled: true, SubjectKey: &subjectKey, SessionVersion: 1, LastLoginAt: &staleLogin}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// 2026-11-15 用户裁定：危险动作只需二次点击确认，**不再要求重新输入密码**。
+	// 因此即使登录时间已经很旧（staleLogin，1 小时前），confirm 端点也必须直接
+	// 发令牌；若有人把"近认证门"加回来，这里会退化成 403 recent_auth_required 而红。
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/actions/medium_read/confirm", bytes.NewReader([]byte(`{"params":{},"reason":"recoverable test"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"recent_auth_required"`)) {
-		t.Fatalf("recent-auth status=%d body=%s", w.Code, w.Body.String())
-	}
-	now := time.Now().UTC()
-	if err := db.Model(&models.User{}).Where("id = ?", 11).UpdateColumn("last_login_at", now).Error; err != nil {
-		t.Fatal(err)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirm must not require a password re-entry, status=%d body=%s", w.Code, w.Body.String())
 	}
 	grant, err := service.IssueConfirmation(context.Background(), commandexec.ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 11, ActionID: "medium_read", Params: json.RawMessage(`{}`), Reason: "recoverable test", SourceIP: "127.0.0.1"})
 	if err != nil {

@@ -37,10 +37,10 @@ describe('authApi', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/auth/logout', {})
   })
 
-  it('reauthenticate posts only the current password to the protected endpoint', async () => {
-    mockClient.post.mockResolvedValue({ data: { authenticated_at: '2026-07-19T00:00:00Z' } })
-    await authApi.reauthenticate('current-password')
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/account/reauthenticate', { password: 'current-password' })
+  it('不再暴露 reauthenticate 包装（2026-11-15 用户裁定：危险操作只保留二次点击确认）', () => {
+    // 反向判据：整个应用不再有「输入密码后重验证再重跑」的 API 入口。
+    // 身份类接口（login / logout / changePassword）不受影响，仍在下面各自用例里钉住。
+    expect('reauthenticate' in authApi, '密码二次确认接口又被加回来了').toBe(false)
   })
 
   it('getToken reads from localStorage first', () => {

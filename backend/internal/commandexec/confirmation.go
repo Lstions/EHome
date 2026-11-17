@@ -23,13 +23,19 @@ import (
 var (
 	ErrConfirmationRequired    = errors.New("confirmation is required")
 	ErrConfirmationInvalid     = errors.New("confirmation is invalid, expired, or already used")
-	ErrRecentAuthRequired      = errors.New("recent authentication is required")
+	ErrConfirmationForbidden   = errors.New("this actor may not confirm the action")
 	ErrConfirmationNotNeeded   = errors.New("confirmation is not required for this action")
 	ErrConfirmationRateLimited = errors.New("confirmation rate limit exceeded")
 )
 
+// 2026-11-15 用户裁定：危险动作只保留「二次点击确认」，**不再要求用户重新输入
+// 账户密码**（整程序范围）。因此这里删除了 recentAuthenticationWindow（登录超过
+// 10 分钟即要求重认证）这道门：
+//   - 它是 ErrRecentAuthRequired 的唯一来源，删掉后确认弹窗不会再变成密码框；
+//   - 保留的仍是**授权**判定（Enabled + 系统管理员主体），那是"谁能确认"，
+//     与"刚刚是否输过密码"是两件事，混在一起会让非管理员永远卡在密码框上。
+// 单次令牌、参数摘要绑定、5 分钟 TTL、限流、审计等安全不变量不变。
 const confirmationLifetime = 5 * time.Minute
-const recentAuthenticationWindow = 10 * time.Minute
 const confirmationRateWindow = time.Minute
 const maxConfirmationsPerWindow = 5
 
@@ -136,8 +142,9 @@ func (s *Service) issueConfirmation(tx *gorm.DB, grant *ConfirmationGrant, actor
 		return err
 	}
 	now := s.now()
-	if !user.Enabled || user.SubjectKey == nil || *user.SubjectKey != models.SystemAdminSubjectKey || user.LastLoginAt == nil || user.LastLoginAt.Before(now.Add(-recentAuthenticationWindow)) {
-		return ErrRecentAuthRequired
+	// 只判"有没有资格确认"，不判"多久没输入过密码"（2026-11-15 用户裁定）。
+	if !user.Enabled || user.SubjectKey == nil || *user.SubjectKey != models.SystemAdminSubjectKey {
+		return ErrConfirmationForbidden
 	}
 	var issued int64
 	if err := tx.Model(&models.CommandConfirmation{}).Where("actor_user_id = ? AND edge_device_id = ? AND action_id = ? AND created_at >= ?", actorUserID, targetID, definition.ID, now.Add(-confirmationRateWindow)).Count(&issued).Error; err != nil {
@@ -152,9 +159,6 @@ func (s *Service) issueConfirmation(tx *gorm.DB, grant *ConfirmationGrant, actor
 	}
 	tokenHash := confirmationHash(rawToken)
 	expiresAt := now.Add(confirmationLifetime)
-	if deadline := user.LastLoginAt.Add(recentAuthenticationWindow); deadline.Before(expiresAt) {
-		expiresAt = deadline
-	}
 	*grant = ConfirmationGrant{Token: rawToken, ExpiresAt: expiresAt}
 	if err := tx.Create(&models.CommandConfirmation{TokenHash: tokenHash, ActorUserID: actorUserID, EdgeDeviceID: targetID, ActionID: definition.ID, ActionVersion: definition.Version, RequestHash: requestHash, ExpiresAt: grant.ExpiresAt, CreatedAt: now}).Error; err != nil {
 		return err
@@ -171,8 +175,8 @@ func (s *Service) consumeConfirmation(tx *gorm.DB, rawToken string, actorID, edg
 	if err := tx.First(&user, actorID).Error; err != nil {
 		return err
 	}
-	if !user.Enabled || user.LastLoginAt == nil || user.LastLoginAt.Before(now.Add(-recentAuthenticationWindow)) {
-		return ErrRecentAuthRequired
+	if !user.Enabled {
+		return ErrConfirmationForbidden
 	}
 	result := tx.Model(&models.CommandConfirmation{}).Where("token_hash = ? AND actor_user_id = ? AND edge_device_id = ? AND action_id = ? AND action_version = ? AND request_hash = ? AND consumed_at IS NULL AND expires_at > ?", confirmationHash(rawToken), actorID, edgeDeviceID, definition.ID, definition.Version, requestHash, now).Update("consumed_at", now)
 	if result.Error != nil {

@@ -305,15 +305,8 @@
       />
     </main>
 
-    <!-- 近期身份验证（后端 10 分钟窗口，缺失即 403 recent_auth_required） -->
-    <el-dialog v-model="reauthVisible" title="验证当前身份" width="420px" :close-on-click-modal="false" append-to-body>
-      <p class="dialog-note">该操作属于高风险动作，需要重新验证当前账户密码；验证通过后会自动继续执行。</p>
-      <el-input v-model="reauthPassword" type="password" show-password placeholder="请输入当前账户密码" aria-label="当前账户密码" />
-      <template #footer>
-        <el-button @click="cancelReauth">取消</el-button>
-        <el-button type="primary" :loading="reauthBusy" :disabled="!reauthPassword" @click="doReauth">验证并继续</el-button>
-      </template>
-    </el-dialog>
+    <!-- 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+         原身份重验证对话框（doReauth / cancelReauth）已整体移除；失败按普通错误文案标记。 -->
 
     <!-- 参数化操作表单：字段由后端 definition.input_schema 生成，与生产页同一组件。
          参数与标定组（30/33 参数的内阻与保护参数表）靠它的双列布局 + 数字感知排序排版。 -->
@@ -382,7 +375,6 @@ import { useControlAction } from '@/composables/useControlAction'
 import { useBmsRealtime } from './composables/useBmsRealtime'
 import { useBmsMosControl } from './composables/useBmsMosControl'
 import { useBmsOperations } from './composables/useBmsOperations'
-import type { ReauthTarget } from './composables/bmsOperationModel'
 import BmsMetricsRow from './components/BmsMetricsRow.vue'
 import BmsStatusCards from './components/BmsStatusCards.vue'
 import BmsCellVoltageCard from './components/BmsCellVoltageCard.vue'
@@ -565,12 +557,12 @@ const headerTags = computed<Array<{ text: string; type: TagType; effect: 'plain'
   { text: deviceTypeLabel.value + ' · ' + cellCountLabel.value, type: 'info', effect: 'plain' },
 ])
 
-// ════════════ 受控操作 / MOS 直控 / 身份重验证（同一批回执，故一起装配） ════════════
+// ════════════ 受控操作 / MOS 直控（同一批回执，故一起装配） ════════════
+// 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+// 页面不再持有任何身份重验证状态：失败/取消语义由两个 composable 各自的 markFailed
+// 用普通错误文案常驻展示（不再挂起等待用户输入密码）。
 const ca = useControlAction(() => deviceId.value)
-const { lastError, reauthVisible, reauthPassword, reauthBusy, dispatch, retryAfterReauth, cancelReauth: cancelReauthAction, clearError } = ca
-
-/** 重验证目标：MOS 直控与受控操作共用同一个「验证当前身份」弹窗（状态不在两个 composable 各存一份） */
-const reauthTarget = ref<ReauthTarget>(null)
+const { lastError, dispatch, clearError } = ca
 
 // 两个数据域各需对方一处：MOS 需要「页面发起命令后登记跟踪」，操作域需要把 set_mos_policy
 // 回执**转交**给 MOS（谁的状态谁维护）。用晚绑定表达，避免两个 composable 互相 import 成环：
@@ -582,8 +574,6 @@ const ops = useBmsOperations({
   dispatch,
   clearError,
   lastError,
-  reauthVisible,
-  reauthTarget,
   onMosReceipt: (op) => mosApi?.handleReceipt(op),
 })
 const {
@@ -592,7 +582,6 @@ const {
   opFormVisible, opFormTarget, opFormCanRead, opFormReading, opFormPrefill,
   onOpClick, submitOpForm, readOpFormValues,
   catalogError, catalogLoading, loadOperations, resetOperations,
-  markSent: markOpSent, markFailed: markOpFailed, markCancelled: markOpCancelled,
 } = ops
 const mos = useBmsMosControl({
   deviceId,
@@ -601,47 +590,18 @@ const mos = useBmsMosControl({
   dispatch,
   clearError,
   lastError,
-  reauthVisible,
-  reauthTarget,
   trackCommand,
 })
 mosApi = mos
 const {
   mosPhase, mosError, hasFetStatus, fetHex, chargeOn, dischargeOn, canControlMos,
-  requestMosChange, resetMos, markSent: markMosSent, markFailed: markMosFailed,
+  requestMosChange, resetMos,
 } = mos
 
-/** 重验证通过后自动继续执行（令牌单次且绑定 params，由 useControlAction 重新 confirm）。 */
-async function doReauth() {
-  const target = reauthTarget.value
-  const ok = await retryAfterReauth()
-  if (ok) {
-    if (target?.type === 'mos') {
-      markMosSent(target.which)
-      trackCommand('set_mos_policy')
-    } else if (target?.type === 'op') {
-      markOpSent(target.id)
-      trackCommand(target.id)
-    }
-    reauthTarget.value = null
-    return
-  }
-  if (!reauthVisible.value) {
-    if (target?.type === 'mos') markMosFailed(target.which, lastError.value || 'MOS 指令未能提交')
-    else if (target?.type === 'op') markOpFailed(target.id, lastError.value || '操作未能提交')
-    reauthTarget.value = null
-  }
-}
-
-function cancelReauth() {
-  cancelReauthAction()
-  if (reauthTarget.value?.type === 'mos') {
-    markMosFailed(reauthTarget.value.which, lastError.value || '已取消（未执行 MOS 操作）')
-  } else if (reauthTarget.value?.type === 'op') {
-    markOpCancelled(reauthTarget.value.id, '已取消（未执行该操作）')
-  }
-  reauthTarget.value = null
-}
+// 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+// 原 doReauth / cancelReauth（等用户输密码后才决定"继续/取消"并 markSent/markFailed/
+// markCancelled）已整体删除。失败/取消语义不变：dispatch 返回 false 时由
+// useBmsMosControl / useBmsOperations 各自的 markFailed 用普通错误文案常驻标记。
 
 // ════════════ 轮询指令配置（共享组件 CommandFrequencySection） ════════════
 /**
@@ -682,7 +642,6 @@ function resetDeviceScopedState() {
   resetRealtime()
   resetMos()
   resetOperations()
-  reauthTarget.value = null
 }
 
 async function refreshAll() {

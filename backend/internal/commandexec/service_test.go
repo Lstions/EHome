@@ -292,9 +292,11 @@ func TestConfirmationRejectsMissingRuntimeActionChannel(t *testing.T) {
 	}
 }
 
-func TestConfirmationRequiresRecentAuthentication(t *testing.T) {
+// 2026-11-15 用户裁定：危险动作只保留二次点击确认，不再要求重新输入密码。
+// 本用例是需求的反向判据：把「近认证窗口」加回来，这里必红。
+func TestConfirmationDoesNotRequireRecentAuthentication(t *testing.T) {
 	s, edge := setupService(t)
-	oldLogin := time.Now().UTC().Add(-recentAuthenticationWindow - time.Second)
+	oldLogin := time.Now().UTC().Add(-24 * time.Hour)
 	subjectKey := models.SystemAdminSubjectKey
 	if err := s.db.Create(&models.User{ID: 7, Username: "operator-old", PasswordHash: "hash", Enabled: true, SubjectKey: &subjectKey, SessionVersion: 1, LastLoginAt: &oldLogin}).Error; err != nil {
 		t.Fatal(err)
@@ -304,8 +306,12 @@ func TestConfirmationRequiresRecentAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.actions = actions
-	if _, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: "controlled test"}); !errors.Is(err, ErrRecentAuthRequired) {
-		t.Fatalf("old login confirmation error=%v", err)
+	grant, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: "controlled test"})
+	if err != nil {
+		t.Fatalf("a stale login must not block confirmation (no password step): %v", err)
+	}
+	if grant == nil || grant.Token == "" {
+		t.Fatal("expected a confirmation token")
 	}
 }
 

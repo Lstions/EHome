@@ -118,8 +118,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "commit": apiBuildCommit})
 	})
 
-	// Login and in-session reauthentication share one limiter (in-process
-	// sliding window; Redis retired in 方案 v3.4 §4 任务B).
+	// Login limiter (in-process sliding window; Redis retired in 方案 v3.4 §4 任务B).
+	// 2026-11-15：in-session reauthentication 已删除（危险动作不再要求输密码），
+	// 因此该 limiter 现在只服务登录。
 	authLimiter := authservice.NewLoginLimiter(5, 15*time.Minute)
 	registerAuthRoutesWithLimiter(r, db, authLimiter)
 

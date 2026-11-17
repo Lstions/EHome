@@ -3,14 +3,28 @@ import source from '../DeviceControlPanel.vue?raw'
 import availabilitySource from '@/utils/actionAvailability.ts?raw'
 
 describe('DeviceControlPanel high-risk recovery', () => {
-  it('reauthenticates and retries the original confirmed intent', () => {
-    expect(source).toContain("isApiErrorCode(error, 'recent_auth_required')")
-    expect(source).toContain('authApi.reauthenticate(password)')
-    // 2026-10-15 用户裁定：确认弹窗只保留确认/取消，理由不再在链路中传递。
+  /**
+   * 2026-11-15 用户裁定：危险操作只保留「二次点击确认」，不再要求输入账户密码。
+   *
+   * 本条是**反向判据**：重验证密码框整条链路必须消失 —— 即使旧后端仍返回
+   * recent_auth_required，也只按普通错误展示，不得出现任何密码输入入口。
+   */
+  it('不再弹密码框：高风险操作失败时直接展示错误（2026-11-15 用户裁定）', () => {
+    expect(source).not.toContain('reauthenticationVisible')
+    expect(source).not.toContain('reauthenticationPassword')
+    expect(source).not.toContain('reauthenticateAndRetry')
+    expect(source).not.toContain('cancelReauthentication')
+    expect(source).not.toContain('retryAfterReauth')
+    expect(source).not.toContain("isApiErrorCode(error, 'recent_auth_required')")
+    expect(source).not.toContain('authApi')
+    expect(source).not.toContain('验证当前身份')
+    expect(source).not.toContain('type="password"')
+    // 正向判据：二次点击确认 / 单次令牌 / 幂等键的编排保持不变（本次只删密码环节）
+    expect(source).toContain('ActionConfirmationDialog')
     expect(source).toContain('await queueConfirmed(action)')
     expect(source).not.toContain('pendingConfirmationReason')
     expect(source).toContain('selectedKey.value')
-    expect(source).toContain('该高风险操作要求最近 10 分钟内验证密码')
+    expect(source).toContain('newIdempotencyKey')
   })
 
   it('distinguishes authoritative HTTP failures from ambiguous lost responses', () => {

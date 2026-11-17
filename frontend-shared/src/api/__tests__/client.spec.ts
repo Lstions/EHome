@@ -80,9 +80,9 @@ describe('apiClient 拦截器', () => {
     await expect(handler({ data: { code: 400, message: '参数错误' } })).rejects.toThrow('参数错误')
   })
 
-  it('保留 HTTP 响应和机器错误码供受控操作恢复', async () => {
+  it('保留 HTTP 响应和机器错误码供错误分派', async () => {
     const handler = mockResponseRejected.getMockImplementation() as any
-    const response = { status: 403, data: { message: 'recent authentication is required', error_code: 'recent_auth_required' } }
+    const response = { status: 409, data: { message: 'confirmation expired', error_code: 'confirmation_expired' } }
     let caught: unknown
     try {
       await handler({ response, message: 'Request failed' })
@@ -91,8 +91,8 @@ describe('apiClient 拦截器', () => {
     }
     expect(caught).toBeInstanceOf(ApiError)
     expect((caught as ApiError).response).toBe(response)
-    expect((caught as ApiError).status).toBe(403)
-    expect(isApiErrorCode(caught, 'recent_auth_required')).toBe(true)
+    expect((caught as ApiError).status).toBe(409)
+    expect(isApiErrorCode(caught, 'confirmation_expired')).toBe(true)
   })
 
   it('业务 code 200 时 resolve data', () => {

@@ -13,11 +13,8 @@ import type { TagType } from '../bmsFormat'
  * 内容与拆分前逐字一致。
  */
 
-/**
- * 重验证目标：MOS 直控与受控操作共用同一个「验证当前身份」弹窗，
- * 故目标形状（而不是两份状态）由页面持有、两侧共同读写。
- */
-export type ReauthTarget = { type: 'mos'; which: 'charge' | 'discharge' } | { type: 'op'; id: string } | null
+// 2026-11-15 用户裁定：危险操作只保留二次点击确认，不再要求输入账户密码。
+// 原 ReauthTarget 类型随身份重验证流程一并删除（MOS 直控与受控操作不再共享重验证目标）。
 
 export interface OpDef {
   id: string

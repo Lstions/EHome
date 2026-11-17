@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,7 +26,9 @@ func registerAccountRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(5, 15*time.Minute))
 }
 
-func registerAccountRoutesWithLimiter(v1 *gin.RouterGroup, db *gorm.DB, limiter *authservice.LoginLimiter) {
+// limiter 保留在签名里只为不改动调用点：2026-11-15 删除 /account/reauthenticate 后，
+// 账户路由已不需要限流器（登录限流在 registerAuthRoutesWithLimiter 里）。
+func registerAccountRoutesWithLimiter(v1 *gin.RouterGroup, db *gorm.DB, _ *authservice.LoginLimiter) {
 	v1.GET("/account", func(c *gin.Context) {
 		user, ok := currentSubject(c, db)
 		if !ok {
@@ -94,38 +95,10 @@ func registerAccountRoutesWithLimiter(v1 *gin.RouterGroup, db *gorm.DB, limiter 
 		Success(c, gin.H{"reauthenticate": true})
 	})
 
-	v1.POST("/account/reauthenticate", func(c *gin.Context) {
-		user, ok := currentSubject(c, db)
-		if !ok {
-			return
-		}
-		var request struct {
-			Password string `json:"password" binding:"required"`
-		}
-		if err := c.ShouldBindJSON(&request); err != nil {
-			ErrorWithCode(c, http.StatusBadRequest, "invalid_reauthentication_request", "password is required")
-			return
-		}
-		authenticated, err := authservice.AuthenticateSingleUser(db, user.Username, request.Password)
-		if err != nil {
-			allowed, retryAfter, limitErr := limiter.AllowFailure(c.Request.Context(), c.ClientIP(), user.Username)
-			if limitErr != nil || !allowed {
-				seconds := int(retryAfter.Seconds())
-				if seconds < 1 {
-					seconds = 1
-				}
-				c.Header("Retry-After", strconv.Itoa(seconds))
-				ErrorWithCode(c, http.StatusTooManyRequests, "reauthentication_rate_limited", "too many reauthentication attempts")
-				return
-			}
-			// A bad password must not revoke the still-valid session. The caller
-			// may retry within the bounded limiter window.
-			ErrorWithCode(c, http.StatusForbidden, "invalid_reauthentication_credentials", "reauthentication failed")
-			return
-		}
-		limiter.Reset(c.Request.Context(), c.ClientIP(), user.Username)
-		Success(c, gin.H{"authenticated_at": authenticated.LastLoginAt})
-	})
+	// 2026-11-15 用户裁定：危险动作只保留「二次点击确认」，整程序不再要求用户
+	// 重新输入密码。原 POST /account/reauthenticate 是"近认证门"的唯一刷新入口，
+	// 已随该门一并删除；保留它只会让客户端以为"还有密码环节"。回归判据见
+	// handler_account_test.go 的 TestAccountReauthenticateEndpointIsGone。
 
 	revoke := func(c *gin.Context) {
 		user, ok := currentSubject(c, db)

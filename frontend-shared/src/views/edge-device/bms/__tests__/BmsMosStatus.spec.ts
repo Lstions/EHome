@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
+import { ApiError } from '@/api/client'
 import source from '../BmsMosStatus.vue?raw'
 import BmsMosStatus from '../BmsMosStatus.vue'
 
@@ -207,5 +208,73 @@ describe('BmsMosStatus 直接开关（极性 + 确认）', () => {
     // 参数构造必须经 swClosed；出现 "charge_software_closed: !" 即为内联取反
     expect(source).not.toMatch(/charge_software_closed:\s*!/)
     expect(source).not.toMatch(/discharge_software_closed:\s*!/)
+  })
+})
+
+/**
+ * 2026-11-15 用户裁定：危险操作只保留「二次点击确认」，不再要求输入账户密码。
+ *
+ * 本组是**反向判据**（本次需求的核心验收点）：
+ *   · 即便旧后端仍返回 recent_auth_required，也只能在结果行展示错误，绝不出现密码输入框；
+ *   · 开关不挂起等待密码（失败即回滚到设备实际状态），符合"失败后开关不动"的既有观感。
+ */
+describe('BmsMosStatus 不再要求密码二次确认（2026-11-15 用户裁定）', () => {
+  let pinia: ReturnType<typeof createPinia>
+  let store: ReturnType<typeof useDeviceOperationStore>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    store = useDeviceOperationStore(pinia)
+    store.confirm = vi.fn().mockResolvedValue({ token: 'tok-1', expires_at: '' }) as never
+  })
+
+  it('旧后端回 recent_auth_required 时：只展示错误、不弹密码框、开关保持原位', async () => {
+    // 模拟旧后端：确认令牌拿到了，但提交因「近期身份验证」被拒（真实 ApiError，带 error_code）
+    const legacy = new ApiError(
+      '近期身份验证已失效',
+      { status: 403, data: { message: '近期身份验证已失效', error_code: 'recent_auth_required' } } as never,
+      'recent_auth_required',
+    )
+    store.create = vi.fn().mockRejectedValue(legacy) as never
+
+    const wrapper = mount(BmsMosStatus, { props: { data: { fet_status: 0 }, deviceId: 1 }, global: { plugins: [pinia] } })
+    await wrapper.findAll('.el-switch')[0].trigger('click')
+    // 二次点击确认仍在（本次只删密码环节，确认语义不变）
+    const confirmBtn = wrapper.findAll('button').find(b => b.text() === '确认')
+    expect(confirmBtn, '二次确认弹窗丢失').toBeTruthy()
+    await confirmBtn!.trigger('click')
+    await new Promise(r => setTimeout(r, 0))
+
+    // 确实走到了后端（不是被前端拦下/吞掉）
+    expect(store.create).toHaveBeenCalled()
+
+    // 反向判据：不存在密码输入框、也没有「验证当前身份」弹窗或挂起的重验证态
+    expect(wrapper.find('[data-testid="mos-reauth-password"]').exists(), '密码框又回来了').toBe(false)
+    expect(wrapper.findAll('input[type="password"]').length).toBe(0)
+    expect(wrapper.text()).not.toContain('验证当前身份')
+    expect(document.body.querySelector('[data-testid="mos-reauth-password"]')).toBeNull()
+
+    // 错误常驻在结果行（规范要求：失败必须留在页面上，不能只弹 toast）
+    const result = wrapper.find('.mos-result')
+    expect(result.exists(), '失败后没有常驻错误文案').toBe(true)
+    expect(result.classes()).toContain('is-bad')
+    expect(result.text()).toContain('近期身份验证已失效')
+
+    // 开关回卷到设备实际状态（fet_status=0 ⇒ 未导通），不挂起等待密码
+    expect(
+      wrapper.findAll('.el-switch')[0].classes(),
+      '失败后开关被挂起/跳过去了 —— 应回滚到实际状态',
+    ).not.toContain('is-checked')
+  })
+
+  it('源码守卫：不再持有身份重验证状态', () => {
+    expect(source).not.toContain('reauthVisible')
+    expect(source).not.toContain('reauthResolve')
+    expect(source).not.toContain('reauthPassword')
+    expect(source).not.toContain('retryAfterReauth')
+    expect(source).not.toContain('cancelReauth')
+    expect(source).not.toContain('data-testid="mos-reauth-password"')
+    expect(source).not.toContain('type="password"')
   })
 })

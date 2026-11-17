@@ -777,7 +777,7 @@ func admissionMetricResult(err error, replayed bool) string {
 		return "invalid"
 	case errors.Is(err, ErrActionUnavailable):
 		return "unavailable"
-	case errors.Is(err, ErrConfirmationRequired), errors.Is(err, ErrConfirmationInvalid), errors.Is(err, ErrRecentAuthRequired):
+	case errors.Is(err, ErrConfirmationRequired), errors.Is(err, ErrConfirmationInvalid), errors.Is(err, ErrConfirmationForbidden):
 		return "confirmation"
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return "not_found"
