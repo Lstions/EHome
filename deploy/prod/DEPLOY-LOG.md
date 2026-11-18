@@ -10,6 +10,7 @@
 | 2026-11-17 21:43 | 9f77db7b | sha256:d4a098e9dadf… | 上一版（BMS 受控操作回执前） | — |
 | 2026-11-18 11:36 | 52b06798 | sha256:5f9786143a11… | 四轮修复（能力快照自愈/确认令牌/V7 收口/同步卡死重推/窗口不补发）+ 债务收敛（预测同源/冷却回灌/partial 生产者/告警/时区根治）+ 前端时区选择器 + 固件看门狗 | /health commit 一致；next_run 正常；BMS 手动触发 executed，命令 SUCCEEDED/final_succeeded，回读 mos_ack=1；日志 automation: 节点能力快照已刷新 node_id=F0F5BD02DD84；ehome_automation_events_total{result="executed"} 1 |
 | 2026-11-18 12:13 | 1e22c47c | sha256:6806836b3c4f… | 仅仿真夹具/场景修正（补时区、对齐不补发、确认场景改用真实登录）。build tag simulation ⇒ **运行时与 52b06798 完全相同** | /health commit=1e22c47c；两条规则 next_run 正常（日落 17:41 / 日出次日 06:42） |
+| 2026-11-18 12:56 | ee903d0f | sha256:ea277d70c8d9… | 删除规则级风险授权（L4）：保存前改为一次确认弹窗、system 路径直接执行风险动作、动作目录只发 risk_level；DB 列 risk_acknowledged_at **保留一版**以便回滚 | 生产实测：风险规则**不带授权字段**创建 200（旧码 400）、改参数 200（旧码 400 死循环）、precheck 清单 1 条、catalog 无 risk 字段、列仍在且新行 NULL；/health 一致、10 分钟 0 错误 |
 
 ## 回滚
 
