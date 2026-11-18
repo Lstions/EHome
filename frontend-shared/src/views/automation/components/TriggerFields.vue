@@ -174,6 +174,27 @@
         跨越零点：{{ form.trigger_window_start }} 到次日 {{ form.trigger_window_end }}
       </div>
     </el-form-item>
+    <!-- 时区（2026-11-18）：后端改为按规则自带时区解释窗口内时刻，此前用的是进程时区
+         （生产容器 = UTC）—— 东八区用户配 08:00–18:00 实际 16:00–02:00 生效。
+         必填，默认由 useRuleForm 填浏览器时区；选项来自 Intl.supportedValuesOf，
+         能力检测与兜底列表在 ../timezone.ts（环境没有该 API 时不能把弹窗打白）。 -->
+    <el-form-item label="时区" required>
+      <el-select
+        v-model="form.timezone"
+        filterable
+        placeholder="搜索 IANA 时区，如 Asia/Shanghai"
+        aria-label="时间窗口时区（IANA）"
+        data-test="field-window-timezone"
+      >
+        <el-option v-for="opt in timezoneOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+      </el-select>
+      <!-- 一句人话说明"按哪个时区解释"：否则用户会按浏览器 / 服务器本地时间理解这个
+           窗口，而那正是这次要修的静默错位。日出日落规则用的是同一口径（IANA 时区），
+           只是它的时区随定位自动填充、不允许手选。 -->
+      <div class="hint-block" data-test="window-timezone-hint">
+        时间窗口按所选时区解释（与日出日落规则同一口径），不是浏览器或服务器本地时间。
+      </div>
+    </el-form-item>
     <el-form-item label="触发沿" required>
       <el-select v-model="form.trigger_window_edge" data-test="field-window-edge">
         <el-option label="进入窗口" value="enter" />
@@ -278,6 +299,7 @@ import type { AutomationTriggerType, SunEventKind } from '@/api/automation'
 import {
   SUN_KIND_OPTIONS, SUN_OFFSET_MIN, SUN_OFFSET_MAX, sunOffsetText,
 } from '../sunEvent'
+import { buildTimeZoneOptions } from '../timezone'
 import { comparators } from '../automationFormat'
 import type { RuleFormModel } from '../composables/useRuleForm'
 import type { ConditionRow } from '../composables/useRuleConditions'
@@ -289,7 +311,8 @@ import ConditionEditor from './ConditionEditor.vue'
  * 边界：只渲染 + 抛语义事件，**不持有任何状态**。表单模型由页面持有并作为 prop 传入
  * （字段组有 20+ 个双向字段，逐字段拆成 props/emits 会把同一份字段清单复制三遍，
  * 任何一处漏写就是"界面改了、提交体没改"）；所有派生值（单位/精度、时间窗修复提示、
- * 跨零点判定、试算结论、时区词表）仍在页面/组合式函数里，本组件不重算。
+ * 跨零点判定、试算结论）仍在页面/组合式函数里；时区词表、能力检测与 UTC 偏移文案
+ * 在 ../timezone.ts（同一个纯函数模块，页面与表单都读它，不产生第二份判定）。
  *
  * 为什么把附加条件再拆一层（ConditionEditor）：它是唯一「行 ↔ JSON 原文」双形态的
  * 编辑器，模板与样式（条件行四件套 / 窄屏堆叠）自成一块。
@@ -348,6 +371,11 @@ function onSourceGroupChange() {
 function onPreview() {
   emit('preview')
 }
+
+// 时区下拉选项（只有 time_window 会渲染）：词表 / 能力检测 / UTC 偏移文案都在
+// ../timezone.ts，这里只负责把当前值并进选项 —— 存量规则可能带不在词表里的旧值，
+// 不能让它变成一个下拉里找不到的选中项。
+const timezoneOptions = computed(() => buildTimeZoneOptions(props.form.timezone))
 
 // ── 来源组下拉文案（只在这里使用，不参与组语义判定 —— 语义由后端 sourceref 负责）──
 const COMBINE_LABELS: Record<string, string> = {

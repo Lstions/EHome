@@ -22,6 +22,20 @@
           <div class="trigger-cell">
             <el-tag size="small" class="trigger-type-tag">{{ triggerTypeText(row.trigger_type) }}</el-tag>
             <span class="mono trigger-summary">{{ triggerSummary(asRule(row)) }}</span>
+            <!-- 下次执行时间（2026-11-17）：后端只读计算字段 next_run。
+                 为什么不新增第 8 列：现有 7 列最小宽度合计已 970px（见下方表格列定义），
+                 再加一列会把 fixed="right" 的「操作」列挤出可视区，
+                 正是 F26 裁决里记录过的那类事故。放在触发器单元格第二行既不增列宽，
+                 语义上也属于"这条触发器什么时候会响"。 -->
+            <span
+              v-if="nextRunById[asRule(row).id]"
+              class="trigger-next-run"
+              :class="'is-' + nextRunById[asRule(row).id].tone"
+              :title="asRule(row).next_run?.detail"
+              data-test="rule-next-run"
+            >
+              <template v-if="nextRunById[asRule(row).id].hasTime">下次 </template>{{ nextRunById[asRule(row).id].text }}
+            </span>
           </div>
         </template>
       </el-table-column>
@@ -123,6 +137,13 @@
             <dt>冷却/熔断</dt>
             <dd class="mono">{{ row.cooldown_sec }}s / {{ row.max_daily_exec === 0 ? '不限' : row.max_daily_exec }}</dd>
           </div>
+          <!-- 下次执行时间：桌面在「触发器」单元格内，窄屏在 meta 里独占一行 -->
+          <div>
+            <dt>下次执行</dt>
+            <dd class="mono" :class="'is-' + (nextRunById[row.id]?.tone ?? 'muted')" data-test="rule-next-run">
+              {{ nextRunById[row.id]?.text ?? '—' }}
+            </dd>
+          </div>
         </dl>
         <div class="rule-card__ops">
           <el-button type="warning" size="small" plain :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
@@ -137,9 +158,18 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import type { AutomationRule } from '@/api/automation'
-import { actionSummary, ruleActions, ruleRiskCount, triggerSummary, triggerTypeText } from '../automationFormat'
+import {
+  actionSummary,
+  nextRunText,
+  ruleActions,
+  ruleRiskCount,
+  triggerSummary,
+  triggerTypeText,
+  type NextRunView,
+} from '../automationFormat'
 
 /**
  * 规则列表区（桌面 7 列宽表 / 窄屏卡片列表）。
@@ -171,12 +201,30 @@ import { actionSummary, ruleActions, ruleRiskCount, triggerSummary, triggerTypeT
  *   · 行内控件全部走 emit：危险确认（feedback.confirmDanger）与「触发中」状态因此
  *     仍只有页面一个事实源，既有测试「点删除 → 弹确认 → 调 deleteRule」的接线不变。
  */
-defineProps<{
+const props = withDefaults(defineProps<{
   rules: AutomationRule[]
   loading: boolean
   isMobile: boolean
   triggeringId: number | null
-}>()
+  /**
+   * 当前时刻（毫秒）。页面用 30s ticker 推进它，让"下次执行"从"明天 06:42"
+   * 自然收敛到"1 分钟内 / 即将触发"，不必轮询接口。
+   *
+   * 为什么由页面注入而不是本组件自己 new Date()：自己算的话模板只在其它响应式
+   * 依赖变化时重算，页面停留跨过触发点后文案会永远停在旧值。
+   */
+  now?: number
+}>(), { now: () => Date.now() })
+
+/**
+ * 每行「下次执行时间」的展示结果（一次算完整张表，避免模板里每列各算一遍）。
+ * 依赖 props.now ⇒ ticker 推进时自动重算。
+ */
+const nextRunById = computed<Record<number, NextRunView>>(() => {
+  const out: Record<number, NextRunView> = {}
+  for (const r of props.rules) out[r.id] = nextRunText(r, props.now)
+  return out
+})
 
 const emit = defineEmits<{
   (e: 'create'): void
@@ -223,6 +271,13 @@ function onTrigger(rule: AutomationRule) {
 .trigger-cell, .action-cell { display: flex; align-items: center; gap: 6px; }
 .trigger-type-tag { flex-shrink: 0; }
 .trigger-summary, .action-summary { font-size: 12px; }
+/* 「下次执行」独占触发器单元格的第二行：不挤占既有 7 列的宽度预算。 */
+.trigger-cell { flex-wrap: wrap; }
+.trigger-next-run { flex: 0 0 100%; font-size: 12px; line-height: 1.4; }
+.trigger-next-run.is-ok { color: var(--el-color-primary); }
+.trigger-next-run.is-muted { color: var(--el-text-color-secondary); }
+.trigger-next-run.is-warn { color: var(--el-color-warning); }
+.rule-card__meta dd.is-warn { color: var(--el-color-warning); }
 
 /* ============================================================================
    窄屏卡片列表（2026-10-21 第二轮：393 宽表只剩 2 列 + 名称被省略号截断）

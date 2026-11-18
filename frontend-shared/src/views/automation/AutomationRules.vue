@@ -13,6 +13,7 @@
       :loading="rulesLoading"
       :is-mobile="isMobile"
       :triggering-id="triggeringId"
+      :now="nowTs"
       @create="openCreate"
       @edit="openEdit"
       @delete="onDelete"
@@ -1238,6 +1239,39 @@ async function goCommand(commandId: string) {
   }
 }
 
+// ── 「下次执行时间」的页面时钟（2026-11-17）──
+//
+// 后端下发的 next_run.at 是**计算那一刻**的绝对时刻；页面停留跨过它之后，
+// 文案必须从"明天 06:42"自然收敛到"即将触发"，而不是永远停在旧值。
+// 用 30s ticker 推进 nowTs，让 RuleListSection 的 computed 自动重算 ——
+// 比轮询接口便宜得多，也不需要额外的 WebSocket 事件。
+//
+// 标签页隐藏时直接跳过：后台标签没必要每 30 秒唤醒一次 JS 定时器。
+const nowTs = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+/** 已为哪个 (规则, 时刻) 触发过兜底刷新 —— 防止"后端算出的时刻永远过去"时无限重拉。 */
+const overdueRefreshed = new Set<string>()
+
+function tickNow() {
+  if (typeof document !== 'undefined' && document.hidden) return
+  nowTs.value = Date.now()
+  // 兜底刷新：计划时刻过去 90s 后重新拉一次列表，给求值器一个 tick 落事件、
+  // 给后端按新的内存态重算 next_run。每对 (rule, at) 只拉一次。
+  for (const r of rules.value) {
+    const nr = r.next_run
+    if (!nr || nr.status !== 'scheduled' || !nr.at) continue
+    const atMs = Date.parse(nr.at)
+    if (!Number.isFinite(atMs) || nowTs.value - atMs < 90_000) continue
+    const key = `${r.id}@${nr.at}`
+    if (overdueRefreshed.has(key)) continue
+    overdueRefreshed.add(key)
+    void fetchRules().catch((err: unknown) => {
+      logger.warn('下次执行时间已过，自动刷新规则列表失败', { error: String(err), rule_id: r.id })
+    })
+    break
+  }
+}
+
 onMounted(async () => {
   await Promise.all([fetchRules(), fetchEvents()])
   try {
@@ -1291,8 +1325,12 @@ function onAutomationPush(name: string, message: unknown) {
   if (name === 'automation_confirmation_required') {
     const rule = detail.rule_name ?? detail.rule_id ?? ''
     const action = detail.action_id ?? ''
+    // 2026-11-18 用户裁定：能保存成功就一定是完成了规则级授权，所以这个结果**不应出现**；
+    // 旧文案让用户"到触发历史里对相应事件执行确认" —— 那一步做不到（确认入口只对
+    // pending_confirm 开放，planner.ConfirmEvent 对其它结果返回 ErrConfirmNotPending）。
+    // 唯一有效处置是回到规则里重新勾选风险确认。
     ElMessage.warning(
-      `规则「${rule}」的风险动作 ${action} 未获授权，已被确认门拦下：请在本页「触发历史」中对相应事件执行确认，或在编辑规则时勾选风险确认。`,
+      `规则「${rule}」的风险动作 ${action} 缺少规则级授权，已被确认门拦下（不应出现的数据状态）：请编辑该规则并勾选风险确认后重新保存。`,
     )
   } else if (name === 'automation_partial_failure') {
     const rule = detail.rule_name ?? detail.rule_id ?? ''
@@ -1312,6 +1350,7 @@ function onAutomationPush(name: string, message: unknown) {
 }
 
 onMounted(() => {
+  nowTimer = setInterval(tickNow, 30_000)
   try {
     unsubscribeAutomationPushes = AUTOMATION_PUSH_EVENTS.map(name => wsStore.subscribe(name, message => onAutomationPush(name, message)))
   } catch (err: unknown) {
@@ -1321,6 +1360,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (nowTimer) {
+    clearInterval(nowTimer)
+    nowTimer = null
+  }
+  overdueRefreshed.clear()
   for (const off of unsubscribeAutomationPushes) off()
   unsubscribeAutomationPushes = []
 })

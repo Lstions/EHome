@@ -52,7 +52,7 @@ export type AutomationEventResult =
   | 'failed_dispatch'         // commandexec.Create 调用失败
   | 'notification'            // 纯通知动作已发出
   | 'expired'                 // pending_confirm 超时未确认 (24h 清扫置位)
-  | 'confirmation_required'   // 自动路径被确认门拦住 (规则未授权风险动作); 与 failed_dispatch 分开, 是"需人工确认"不是"故障"
+  | 'confirmation_required'   // 自动路径被确认门拦住: 规则缺少规则级风险授权。**不应出现** —— 保存入口 V7 校验保证"能保存成功 = 已授权"(2026-11-18 用户裁定); 唯一来源是存量数据/风险等级升级/绕过 API, 处置=编辑规则重新授权
   | 'partial_failure'         // 多动作执行到第 k 个失败、剩余已中止 (危险状态: 设备已被改了一半, 需人工介入)
   | 'suppressed_no_solar_event' // 极昼/极夜: 本日无日出/日落事件, 规则本日不触发 (显式审计, 不静默)
   // ── 来源组结果码（方案《规则数据来源与复合来源》N-18；与后端
@@ -106,7 +106,12 @@ export interface AutomationRule {
   /** 坐标（2026-11-14 起由 location_source 解析后落库；旧规则可能没有来源字段） */
   latitude?: number
   longitude?: number
-  /** IANA 时区：随位置自动带出，**不接受用户设置** */
+  /**
+   * IANA 时区（2026-11-18 起语义分化）：
+   * - sun_event：随定位结果自动带出，**不接受用户单独设置**；
+   * - time_window：**必填**，由用户在下拉里选择 —— 窗口按该时区解释执行；
+   * - sensor_threshold：不使用。
+   */
   timezone?: string
   /** 坐标来源：ip=外网 IP 定位，city=手动选择城市；空 = 2026-11-14 之前的旧规则 */
   location_source?: 'ip' | 'city' | ''
@@ -144,8 +149,52 @@ export interface AutomationRule {
   /** 高风险动作需人工确认 (BMS MOS 等); 仅 device_action 有意义 (后端 fail-closed 校验) */
   require_confirmed: boolean
 
+  /**
+   * 下次执行时间 (后端只读计算字段, 后端 models/next_run.go)。
+   *
+   * 为什么是服务端算的派生字段而不是前端推算: 判定"下一次会不会触发"要看
+   * 求值器的内存态 (sunStates / windowStates / 冷却锚点), 前端拿不到; 自己
+   * 复刻日出日落算法 + 时区 + 状态机必然与执行侧漂移。
+   *
+   * undefined = 后端未接线该能力 (单测替身/老后端), 显示 "-";
+   * 不得把它当作"规则没有下次执行"。
+   */
+  next_run?: NextRun
+
   created_at: string
   updated_at: string
+}
+
+/**
+ * 「下次执行时间」状态 (与后端 models/next_run.go 的 NextRun* 常量逐字一致)。
+ *
+ * 为什么必须分类而不是一个可空时间: sensor_threshold 是数据驱动, 根本不存在
+ * 可预测的时刻 —— 给时间就是编数据; 而停用/极昼极夜/配置非法各自需要不同的
+ * 界面措辞与处置建议, 合并成 null 会让用户无从判断该做什么。
+ */
+export type NextRunStatus =
+  | 'scheduled'    // 有确定的下次时刻 (at 非空)
+  | 'waiting_data' // 数据驱动, 无法预测 (仅冷却期给 at = 冷却到期)
+  | 'no_event'     // 极昼/极夜: 本日无该日出/日落事件
+  | 'disabled'     // 规则已停用
+  | 'unsupported'  // event 触发器尚未实现
+  | 'unavailable'  // 坐标/时区/窗口格式非法
+
+/** at 这个时刻是怎么来的 (前端据此区分"计划时刻"与"被顺延") */
+export type NextRunBasis = 'sun' | 'window' | 'cooldown' | 'daily_limit'
+
+/** 一条规则的「下次执行时间」(后端 models/next_run.go 的 NextRun)。 */
+export interface NextRun {
+  status: NextRunStatus
+  /** RFC3339 **带偏移** 的绝对时刻; 仅 status='scheduled' 时保证非空 */
+  at?: string
+  /** at 的展示时区 (IANA); sun_event 与 time_window = 规则时区, sensor_threshold = 后端进程时区 */
+  timezone?: string
+  basis?: NextRunBasis
+  /** 人类可读补充, 如 "日落 17:41"、"冷却中，25 秒后解除" */
+  detail?: string
+  /** 计算时刻, 前端据此判断陈旧 (页面停留期间 at 会过去) */
+  computed_at: string
 }
 
 /**
@@ -230,7 +279,7 @@ export interface CreateAutomationRuleRequest {
   trigger_sun_kind?: SunEventKind
   /** 偏移分钟, 可负; 缺省 0 (恰好在事件时刻) */
   trigger_sun_offset_min?: number
-  /** 坐标与时区（由前端定位控件解析后提交；时区随位置自动带出） */
+  /** 坐标与 IANA 时区：sun_event 由定位控件解析后自动带出；time_window 的时区由用户显式选择 */
   latitude?: number
   longitude?: number
   timezone?: string

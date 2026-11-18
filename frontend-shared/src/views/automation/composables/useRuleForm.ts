@@ -6,6 +6,7 @@ import type { ActionDefinition } from '@/api/deviceOperation'
 import type { SensorField } from '@/api/sensorField'
 import { sourceGroupApi, type SourceGroup } from '@/api/sourceGroup'
 import { SUN_OFFSET_MAX, SUN_OFFSET_MIN, sunLocationComplete } from '../sunEvent'
+import { browserTimeZone, isValidTimeZone } from '../timezone'
 import { emptyAction, toSequencedActions, type ActionDraft } from '../actionList'
 import { ruleActions } from '../automationFormat'
 import { requiredMissingText } from './useRuleActions'
@@ -63,6 +64,9 @@ export function emptyForm() {
     location_label: '',
     latitude: undefined as number | undefined,
     longitude: undefined as number | undefined,
+    // 时区字段两用（2026-11-18）：sun_event 由定位结果回填、不由用户手选；
+    // time_window 由用户在下拉里选，切到该类型 / 编辑存量规则时补浏览器时区
+    //（见 onTriggerTypeChange / openEdit）。默认留空 = sun_event 的既有语义。
     timezone: '' as string | undefined,
     conditions_json: '',
     actions: [emptyAction(1)] as ActionDraft[],
@@ -262,6 +266,12 @@ export function useRuleForm(options: {
     // 而用户在编辑框里看到的仍是"看起来正常"的 8:00。规范化后必须留下可见的修复提示。
     const windowStart = normalizeTimeWindow(rule.trigger_window_start ?? '')
     const windowEnd = normalizeTimeWindow(rule.trigger_window_end ?? '')
+    // 时间窗规则的时区是**本规则语义的一部分**（2026-11-18）：编辑时必须回显；
+    // 存量规则没有该字段时补浏览器时区 —— 这个值直接显示在时区下拉里，用户保存前
+    // 能看到并改，所以不是静默改写。sun_event 的 timezone 仍只由定位结果回填。
+    const windowTimeZone = rule.trigger_type === 'time_window'
+      ? ((rule.timezone ?? '').trim() || browserTimeZone())
+      : (rule.timezone ?? '')
     // 传感器字段对象在 openEdit 里**不主动拉目录**：
     // SensorFieldPicker 在目录就绪后会自己对当前 modelValue 回填一次 change-field
     // （组件契约，见该组件 refillFieldFromCatalog），这里只需先清空上一份的单位。
@@ -291,7 +301,7 @@ export function useRuleForm(options: {
         ?? (typeof rule.latitude === 'number' && typeof rule.longitude === 'number' ? '已配置坐标（历史规则）' : ''),
       latitude: rule.latitude,
       longitude: rule.longitude,
-      timezone: rule.timezone ?? '',
+      timezone: windowTimeZone,
       conditions_json: rule.conditions_json ?? '',
       actions: ruleActions(rule).map((a, index) => ({
         uid: index + 1,
@@ -329,6 +339,9 @@ export function useRuleForm(options: {
       form.trigger_sensor_name = ''
       form.trigger_threshold = 0
       form.trigger_duration_sec = 0
+      // 切到时间窗口时补默认时区（必填，空着会被保存校验拦住）。已有值不覆盖：
+      // 从日出日落规则带过来的定位时区比浏览器时区更贴合用户所在位置。
+      if (!form.timezone?.trim()) form.timezone = browserTimeZone()
     } else if (form.trigger_type !== 'sun_event') {
       form.trigger_sun_offset_min = 0
     }
@@ -368,6 +381,13 @@ export function useRuleForm(options: {
       // 文案与时间选择器的 value-format 同一口径（HH:mm，两位补零）。
       if (!HHMM_PATTERN.test(form.trigger_window_start.trim())) return '时间格式必须为 HH:mm'
       if (!HHMM_PATTERN.test(form.trigger_window_end.trim())) return '时间格式必须为 HH:mm'
+      // 时区必填（2026-11-18）：后端改为按规则时区解释 HH:mm 后，缺时区 = 规则按
+      // 进程时区（生产 = UTC）执行，正是本次要消灭的静默错位。文案直接说"必须选"，
+      // 而不是笼统的"请填写"，因为用户很可能不知道自己漏了哪个字段。
+      const timezone = (form.timezone ?? '').trim()
+      if (!timezone) return '时间窗口必须选择时区'
+      // 手改坏的存量值 / 别的工具写入：交给浏览器 Intl 解析一遍，保存前拦住。
+      if (!isValidTimeZone(timezone)) return '时区无效：请选择 IANA 时区（如 Asia/Shanghai）'
     } else if (form.trigger_type === 'sun_event') {
       // 界面侧前置校验（2026-11-14 用户裁决）：坐标只有两个来源 —— 外网 IP 自动定位
       // 或手动选择设备城市；时区随位置自动填充，**不允许用户单独设置**。
@@ -530,6 +550,9 @@ export function useRuleForm(options: {
       payload.trigger_window_start = form.trigger_window_start.trim()
       payload.trigger_window_end = form.trigger_window_end.trim()
       payload.trigger_window_edge = form.trigger_window_edge
+      // 时区必须随窗口一起提交：后端按规则时区解释 HH:mm；不带时区会退回进程时区
+      //（生产 = UTC），东八区用户配的 08:00 会在 16:00 才生效。
+      payload.timezone = (form.timezone ?? '').trim()
     } else if (form.trigger_type === 'sun_event') {
       // 三组坐标字段 + 来源元数据在 2026-11-14 后**无条件提交**：
       // validate() 已保证来源与坐标齐全；时区由定位结果带出（这里仍 trim 一次，

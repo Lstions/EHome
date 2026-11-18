@@ -1634,7 +1634,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
         // 未映射的枚举在 resultText 里会回落到英文原串 —— 断言"不得出现英文原串"
         expect(labels.join('|')).not.toContain(r)
       }
-      expect(labels).toContain('需确认（未授权）')
+      expect(labels).toContain('规则未授权')
       expect(labels).toContain('部分失败')
       expect(labels).toContain('无日出日落事件')
     })
@@ -1647,7 +1647,7 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const rows = wrapper.findAll('[data-test="events-table"] tbody tr')
       expect(rows).toHaveLength(3)
       const texts = rows.map(r => r.text())
-      expect(texts[0]).toContain('需确认（未授权）')
+      expect(texts[0]).toContain('规则未授权')
       expect(texts[1]).toContain('部分失败')
       expect(texts[2]).toContain('无日出日落事件')
       // 三处映射齐全 ⇒ 表格里不得出现英文原串

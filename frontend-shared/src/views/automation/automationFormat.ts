@@ -69,7 +69,11 @@ export const resultOptions: Array<{ value: AutomationEventResult; label: string 
   { value: 'failed_dispatch', label: '下发失败' },
   { value: 'notification', label: '已通知' },
   { value: 'expired', label: '已过期' },
-  { value: 'confirmation_required', label: '需确认（未授权）' },
+  // 2026-11-18: 该结果码在保存入口 V7 校验存在的前提下**不应出现**（能保存成功 = 已完成
+  // 规则级风险授权）。它只可能来自 V7 之前的存量数据/风险等级被升级/绕过 API 写库,
+  // 且**不能**靠"去事件表确认"修复（确认入口只对 pending_confirm 开放）—— 唯一处置是
+  // 编辑规则重新勾选风险确认。故标签按真实语义命名, 不再写"需确认（未授权）"。
+  { value: 'confirmation_required', label: '规则未授权' },
   { value: 'partial_failure', label: '部分失败' },
   { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
   { value: 'unresolved_selector', label: '选择器解析不到' },
@@ -141,7 +145,8 @@ export function resultText(r: AutomationEventResult): string {
     failed_dispatch: '下发失败',
     notification: '已通知',
     expired: '已过期',
-    confirmation_required: '需确认（未授权）',
+    // 见 resultOptions 同名项注释: 这是"数据异常"而非"等待用户确认"。
+    confirmation_required: '规则未授权',
     partial_failure: '部分失败',
     suppressed_no_solar_event: '无日出日落事件',
     // 字段解析层：配置错（解析不到）与运维开关（解析未启用）分列，处置方式不同
@@ -179,4 +184,140 @@ export function formatValue(v: number): string {
 export function formatTime(t?: string | null): string {
   if (!t) return UNKNOWN
   return new Date(t).toLocaleString()
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 「下次执行时间」(2026-11-17)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 列表/卡片里「下次执行时间」的展示结果。
+ *
+ * 为什么返回三件套而不是一个字符串: 调用方要决定**是否加"下次"前缀**
+ * （"下次 明天 06:42" 成立, "下次 等待数据满足条件" 不成立）, 以及配色。
+ */
+export interface NextRunView {
+  /** 直接展示的文本 (不含"下次"前缀) */
+  text: string
+  /** ok=有确定时刻; muted=无需行动; warn=需要用户注意 (即将触发/配置异常) */
+  tone: 'ok' | 'muted' | 'warn'
+  /** true 表示 text 是一个具体时刻, 调用方可以加"下次"前缀 */
+  hasTime: boolean
+}
+
+const NEXT_RUN_NONE: NextRunView = { text: UNKNOWN, tone: 'muted', hasTime: false }
+
+// Intl.DateTimeFormat 的构造成本远高于 formatToParts, 而列表每次渲染每行都要用。
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>()
+
+function zonedFormatter(timeZone?: string): Intl.DateTimeFormat {
+  const key = timeZone || ''
+  const cached = zonedFormatters.get(key)
+  if (cached) return cached
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    // 空串传进 Intl 会抛 RangeError（后端在拿不到真实 IANA 名时会下发 ""），
+    // 必须归一成 undefined = 用浏览器本地时区。
+    timeZone: timeZone || undefined,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    // h23 而不是 hour12:false —— 后者在部分 ICU 版本里把午夜格式化成 "24",
+    // 会让"今天 24:00"这种不存在的钟面值出现在界面上。
+    hourCycle: 'h23',
+  })
+  zonedFormatters.set(key, fmt)
+  return fmt
+}
+
+/** 把毫秒时刻拆成**指定时区**下的年月日时分。 */
+function zonedParts(ms: number, timeZone?: string): { y: number; m: number; d: number; H: string; M: string } {
+  let parts: Intl.DateTimeFormatPart[]
+  try {
+    parts = zonedFormatter(timeZone).formatToParts(new Date(ms))
+  } catch {
+    // 非法 IANA 名 (后端脏数据): 退回浏览器本地时区, 而不是抛错炸掉整张表。
+    parts = zonedFormatter(undefined).formatToParts(new Date(ms))
+  }
+  const pick = (type: string) => parts.find(p => p.type === type)?.value ?? ''
+  return {
+    y: Number(pick('year')),
+    m: Number(pick('month')),
+    d: Number(pick('day')),
+    H: pick('hour'),
+    M: pick('minute'),
+  }
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/**
+ * 把绝对时刻按**规则所在时区**渲染成「今天 / 明天 HH:mm」。
+ *
+ * 为什么要按时区渲染而不是直接 toLocaleString: sun_event 的时刻是**规则时区**的
+ * 钟面值 (设备在美国、规则配 America/New_York 时, 后端返回的就是那边的日落时刻)。
+ * 按浏览器时区格式化会显示成"明天 05:41"这类与该规则语义无关的数字,
+ * 用户会以为规则配错了。
+ */
+export function nextRunAtText(at: string, timeZone: string | undefined, nowMs: number): string {
+  const atMs = Date.parse(at)
+  if (!Number.isFinite(atMs)) return UNKNOWN
+  const a = zonedParts(atMs, timeZone)
+  const n = zonedParts(nowMs, timeZone)
+  const dayDiff = Math.round((Date.UTC(a.y, a.m - 1, a.d) - Date.UTC(n.y, n.m - 1, n.d)) / 86_400_000)
+  const hm = `${a.H}:${a.M}`
+  if (dayDiff === 0) return `今天 ${hm}`
+  if (dayDiff === 1) return `明天 ${hm}`
+  return `${pad2(a.m)}-${pad2(a.d)} ${hm}`
+}
+
+/**
+ * 规则列表的「下次执行时间」文案。
+ *
+ * nowMs 必须由调用方传入**会随时间推进**的值 (页面 30s ticker): 如果这里直接调
+ * Date.now(), 模板只在其它响应式依赖变化时才重算, 页面停留跨过触发点后文案会
+ * 永远停在旧值上。
+ */
+export function nextRunText(rule: AutomationRule, nowMs: number): NextRunView {
+  const nr = rule.next_run
+  // undefined = 后端未接线该能力 (老后端/单测替身), 与"规则没有下次执行"不是一回事。
+  if (!nr) return NEXT_RUN_NONE
+
+  switch (nr.status) {
+    case 'disabled':
+      return { text: '已停用', tone: 'muted', hasTime: false }
+    case 'unsupported':
+      return { text: '触发器暂未实现', tone: 'muted', hasTime: false }
+    case 'unavailable':
+      // 坐标/时区/窗口格式非法: 这条规则**不会**按预期工作, 必须显眼而不是静默。
+      return { text: nr.detail ? `配置异常：${nr.detail}` : '配置异常', tone: 'warn', hasTime: false }
+    case 'no_event':
+      return { text: '今日无日出/日落', tone: 'muted', hasTime: false }
+    case 'waiting_data':
+      // 数据驱动: 给不出"下次什么时候", 只能说明在等什么。
+      // 冷却期是唯一例外 —— 那时能诚实地说"最早何时可再次触发"。
+      if (!nr.at) return { text: '等待数据满足条件', tone: 'muted', hasTime: false }
+      return { text: `可再触发 ${nextRunAtText(nr.at, nr.timezone, nowMs)}`, tone: 'muted', hasTime: false }
+    default:
+      break
+  }
+
+  if (!nr.at) return NEXT_RUN_NONE
+  const atMs = Date.parse(nr.at)
+  if (!Number.isFinite(atMs)) return NEXT_RUN_NONE
+
+  const remaining = atMs - nowMs
+  // 确认制规则到点只是落 pending_confirm, 必须把这层说清楚, 否则用户以为会自动下发。
+  const confirm = rule.require_confirmed ? '（需确认）' : ''
+  if (remaining <= 0) {
+    // 计划时刻已过: 一般是页面停留跨过了触发点, 或求值器刚处理完还没被重新拉取。
+    return { text: `即将触发${confirm}`, tone: 'warn', hasTime: false }
+  }
+  if (remaining <= 60_000) {
+    return { text: `1 分钟内${confirm}`, tone: 'warn', hasTime: true }
+  }
+  return { text: `${nextRunAtText(nr.at, nr.timezone, nowMs)}${confirm}`, tone: 'ok', hasTime: true }
 }
