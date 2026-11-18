@@ -283,7 +283,8 @@ type AutomationRule struct {
 	// 现在风险只有等级 (normal/elevated) + 界面弹窗确认, 自动执行是否等人由
 	// RequireConfirmed 决定。
 	//
-	// DB 列保留一版以保留回滚窗口 (代码零引用), 下一版由 internal/database 的迁移删除。
+	// DB 列由 internal/database.MigrateAutomationRuleDropRiskAcknowledged 在启动时
+	// 幂等删除（2026-11-18 同版本发布，不再保留回滚窗口）。
 
 	// ── 冷却锚点 (清理前置条件 A, docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md) ──
 	//
@@ -360,10 +361,10 @@ type AutomationEvent struct {
 	//
 	// 值口径：sun_event 写"当日计算出的日出/日落时刻 + 偏移"（fireAt），不是 tick
 	// 的 now —— 两者相差最多一个 tick（2s~60s），但它才是用户配置因果里的"事件"。
-	EventAt *time.Time `gorm:"index" json:"event_at,omitempty"`
-	Result        string    `gorm:"size:32;not null;index" json:"result"`
-	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
-	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
+	EventAt   *time.Time `gorm:"index" json:"event_at,omitempty"`
+	Result    string     `gorm:"size:32;not null;index" json:"result"`
+	CommandID string     `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
+	Detail    string     `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
 	// ActionHash 是 pending 事件创建时对「动作集合」做的归一化哈希快照（Y5 TOCTOU 修复）。
 	//
 	// 背景：ConfirmEvent 在人工确认时会**重读 DB 规则**并按当前动作集合执行；

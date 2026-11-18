@@ -160,6 +160,13 @@ func main() {
 		startupTracker.Fail(bootstrap.StepAutoMigrate, err)
 		abortStartup("Failed to backfill automation time_window timezone: %v", err)
 	}
+	// 2026-11-18：规则级风险授权整层删除，automation_rules.risk_acknowledged_at
+	// 已零引用。AutoMigrate 只增不减，老库会永久残留该列 ⇒ 启动时幂等删掉
+	// （新库 / 重复启动为空转）。删列使"回滚到旧镜像"不再可行，见 DEPLOY-LOG。
+	if _, err := database.MigrateAutomationRuleDropRiskAcknowledged(database.GetDB()); err != nil {
+		startupTracker.Fail(bootstrap.StepAutoMigrate, err)
+		abortStartup("Failed to drop legacy automation_rules.risk_acknowledged_at: %v", err)
+	}
 	logger.Infof("Database connected and migrated")
 
 	// 数据层时序化 (方案 v3.4 §3.2.1): 时序表分区迁移 + 滚动分区保障。
