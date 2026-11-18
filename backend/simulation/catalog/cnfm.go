@@ -167,9 +167,13 @@ func cnfmPrepareDispatchable(e *harness.Env, fx *autoFixture) {
 // "harness 初始化登录到现在还没超 10 分钟"这种时间巧合，必须显式刷新。
 func cnfmReauthenticate(e *harness.Env) {
 	e.T.Helper()
-	e.Admin.Post("/api/v1/account/reauthenticate", map[string]any{
-		"password": e.AdminPass,
-	}).Expect(http.StatusOK)
+	// 2026-11-15 起 POST /account/reauthenticate 已删除（危险操作只保留"二次点击确认"，
+	// 不再要求重新输入密码）。但近认证窗口仍由 users.last_login_at 判定
+	// （commandexec/confirmation.go），所以这里改用一次**真实登录**刷新它 ——
+	// Session.Login 会同时把新令牌写回会话，后续请求不会 401。
+	if err := e.Admin.Login(e.AdminUser, e.AdminPass); err != nil {
+		e.Fatalf("刷新近认证窗口（重新登录）失败: %v", err)
+	}
 }
 
 // cnfmEvents 读某条规则下的全部事件（可带 result 过滤）。
