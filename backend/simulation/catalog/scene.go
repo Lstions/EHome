@@ -1280,7 +1280,8 @@ func sceneRun007(e *harness.Env) {
 	})
 	cmdArmNode(e, bms.edge)
 
-	now := time.Now()
+	// 2026-11-18 D7：窗口分钟数按 UTC 计算，规则时区也必须是 UTC。
+	now := time.Now().UTC()
 	windowStart := now.Add(-time.Hour).Format("15:04")
 	windowEnd := now.Add(time.Hour).Format("15:04")
 
@@ -1293,6 +1294,7 @@ func sceneRun007(e *harness.Env) {
 		"trigger_window_start": windowStart,
 		"trigger_window_end":   windowEnd,
 		"trigger_window_edge":  "inside",
+		"timezone":             "UTC",
 		"action_type":          "notification",
 		"action_level":         "warning",
 		"cooldown_sec":         3600,

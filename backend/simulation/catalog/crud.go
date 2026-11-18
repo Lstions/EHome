@@ -244,6 +244,7 @@ func crudRun001(e *harness.Env) {
 		"trigger_window_start": "00:00",
 		"trigger_window_end":   "00:01",
 		"trigger_window_edge":  "enter",
+		"timezone":             "UTC",
 		"action_type":          "notification",
 		"action_level":         "warning",
 	})

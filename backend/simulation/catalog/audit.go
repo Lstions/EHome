@@ -677,6 +677,7 @@ func auditRun005(e *harness.Env) {
 		"trigger_window_start": "00:00",
 		"trigger_window_end":   "00:01",
 		"trigger_window_edge":  "inside",
+		"timezone":             "UTC",
 		"action_type":          "device_action",
 		"action_device_id":     actuator.edgeDeviceID,
 		"action_id":            cmdActionReadRainfall,

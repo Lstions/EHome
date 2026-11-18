@@ -91,6 +91,22 @@ func windWindowAround(now time.Time, startDelta, endDelta int) (string, string) 
 	return windHHMM(base + startDelta), windHHMM(base + endDelta)
 }
 
+// windEnterPlan 为 enter 边沿场景构造「先观测到窗外、再真正跨入」的窗口（2026-11-18）。
+//
+// 为什么不能再用 windWindowAround(now, -1, 20)：那是"创建时就已在内"的窗口。自
+// 2026-11-18 起 enter 判据是 inside && exists && !wasInside（不补发），创建时已在
+// 窗内 ⇒ 首次 tick 没有历史 ⇒ 永不触发。要测"进入边沿"，必须让引擎**先看见窗外**。
+//
+// 窗口粒度是分钟，所以跨入点取下一个分钟边界，并保证距 now 至少 8s（仿真 tick 2s，
+// 足够建立 wasInside=false）；否则首 tick 可能已经落在边界之后。
+func windEnterPlan(now time.Time) (start, end string, untilEnter time.Duration) {
+	startAt := now.Truncate(time.Minute).Add(time.Minute)
+	if startAt.Sub(now) < 8*time.Second {
+		startAt = startAt.Add(time.Minute)
+	}
+	return startAt.Format("15:04"), startAt.Add(20 * time.Minute).Format("15:04"), time.Until(startAt)
+}
+
 // windContains 按设计冻结的语义独立判断「当前时刻是否在窗口内」：
 // start == end 视为全天；start < end 为 [start, end)；start > end 为跨零点
 // [start, 24:00) ∪ [00:00, end)。刻意不调用产品内部函数（不可导出），
@@ -254,6 +270,9 @@ func windCreateWindowRule(e *harness.Env, name, start, end, edge string, cooldow
 		"trigger_window_start": start,
 		"trigger_window_end":   end,
 		"trigger_window_edge":  edge,
+		// 2026-11-18 D7：time_window 必须带时区。场景里的窗口分钟数由 now.UTC() 算出，
+		// 规则时区必须同为 UTC，否则在 TZ 非 UTC 的机器上窗口会整体偏移。
+		"timezone":             "UTC",
 		"action_type":          "notification",
 		"action_level":         "info",
 		"cooldown_sec":         cooldownSec,
@@ -283,13 +302,18 @@ const windTickTimeout = harness.WindowTickInterval + 15*time.Second
 // ---------------------------------------------------------------------------
 
 func windRun001(e *harness.Env) {
-	now := time.Now()
-	start, end := windWindowAround(now, -1, 20)
-	windAssertContains(e, "SIM-WIND-001", start, end, now, true)
+	now := time.Now().UTC()
+	// 2026-11-18：enter 改为"必须真实跨入"（inside && exists && !wasInside，不补发）。
+	// 因此窗口在创建时**不得包含 now**：引擎要先观测到窗外，再跨进分钟边界。
+	start, end, untilEnter := windEnterPlan(now)
+	windAssertContains(e, "SIM-WIND-001 创建时", start, end, now, false)
 
 	ruleID := windCreateWindowRule(e, e.NS("SIM-WIND-001", "enter"), start, end, "enter", 300)
 
-	rows := trigWaitResult(e, ruleID, "notification", 1, windTickTimeout)
+	rows := trigWaitResult(e, ruleID, "notification", 1, untilEnter+windTickTimeout)
+	if got := trigEventTime(e, rows[0]).UTC().Format("15:04"); got != start {
+		e.Fatalf("进入边沿事件时刻 %s 与窗口起点 %s 不吻合（应落在起点后的第一个 tick）", got, start)
+	}
 	// 时间窗口触发不是阈值触发：事件不该带 trigger_value（带了说明触发源被张冠李戴）。
 	if rows[0].TriggerValue != nil {
 		e.Fatalf("时间窗口事件不应带 trigger_value，实际 %v：%+v", *rows[0].TriggerValue, rows[0])
@@ -309,7 +333,7 @@ func windRun001(e *harness.Env) {
 // ---------------------------------------------------------------------------
 
 func windRun002(e *harness.Env) {
-	now := time.Now()
+	now := time.Now().UTC()
 
 	// enter 策略用一条"当前包含、且很久以后才结束"的窗口，只负责证明 tick 在跑。
 	enterStart, enterEnd := windWindowAround(now, -1, 20)
@@ -345,8 +369,10 @@ func windRun002(e *harness.Env) {
 	// 用它当"已经过去几个 tick"的**确凿证据**（不靠 sleep 猜）。
 	probeID := windCreateWindowRule(e, e.NS("SIM-WIND-002", "tick-probe"), enterStart, enterEnd, "inside", 1)
 
-	trigWaitResult(e, enterID, "notification", 1, windTickTimeout)
+	// 2026-11-18：创建时已在窗内的 enter 策略**不补发**（与 SIM-WIND-001 同一裁决）。
+	// 先等 ticker 真跑起来（probe 计数），再正向断言 enter 一次都没触发。
 	trigWaitResult(e, probeID, "notification", 3, 3*windTickTimeout)
+	trigAssertNoResult(e, "创建时已在窗内的 enter 策略（不补发）", enterID, "notification", 2*time.Second)
 
 	// 仍在窗口内：离开边沿不能触发（此时至少已过 3 个 tick、wasInside 必然已建立）。
 	trigAssertNoResult(e, "仍在窗口内时的离开边沿策略", exitID, "notification", 0)
@@ -361,10 +387,11 @@ func windRun002(e *harness.Env) {
 			exitAt.Format(time.RFC3339Nano), exitEndAt.Format(time.RFC3339Nano))
 	}
 
-	// enter 策略仍在窗口内：它只有第一次那一条事件（边沿不是每 tick 刷新）。
+	// 2026-11-18：enter 策略是**创建时就已在窗内**的，按"不补发"裁决它一条都不该有
+	// （上面已断言过一次；这里在 exit 边沿之后再复核一次，确认没有任何补发）。
 	finalEnter := windWindowEvents(e, enterID)
-	if got := trigCountResult(finalEnter, "notification"); got != 1 {
-		e.Fatalf("仍在窗口内的 enter 策略产生了 %d 条事件，期望恰好 1 条（边沿触发）：%+v", got, finalEnter)
+	if got := trigCountResult(finalEnter, "notification"); got != 0 {
+		e.Fatalf("创建时已在窗内的 enter 策略产生了 %d 条事件，期望 0 条（不补发）：%+v", got, finalEnter)
 	}
 
 	e.Evidence("SIM-WIND-002.exit", map[string]any{
@@ -384,7 +411,7 @@ func windRun002(e *harness.Env) {
 // ---------------------------------------------------------------------------
 
 func windRun003(e *harness.Env) {
-	now := time.Now()
+	now := time.Now().UTC()
 	start, end := windWindowAround(now, -1, 30)
 	windAssertContains(e, "SIM-WIND-003", start, end, now, true)
 
@@ -466,7 +493,7 @@ func windRun003(e *harness.Env) {
 // ---------------------------------------------------------------------------
 
 func windRun004(e *harness.Env) {
-	now := time.Now()
+	now := time.Now().UTC()
 	inStart, inEnd := windWindowAround(now, -1, 20)
 	outStart, outEnd := windWindowAround(now, -420, -300)
 	// 前提自检：含 / 不含当前时刻，必须是我们以为的那样（构造错会让「不触发」变空断言）。
@@ -493,7 +520,7 @@ func windRun004(e *harness.Env) {
 // ---------------------------------------------------------------------------
 
 func windRun005(e *harness.Env) {
-	now := time.Now()
+	now := time.Now().UTC()
 	nowMin := windMinutes(now)
 
 	// 含当前时刻的跨零点窗口：**恒有解**（推导见 windFindCrossWindow 的注释）。
@@ -522,15 +549,17 @@ func windRun005(e *harness.Env) {
 		windAssertContains(e, "SIM-WIND-005 不含当前时刻的窗口", outStart, outEnd, now, false)
 	}
 
-	inID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-in"), inStart, inEnd, "enter", 300)
+	// 本场景验证的是"跨零点窗口的包含判定"，不是 enter 边沿；创建时已在窗内，
+	// 用 inside 才与"当前在窗内 ⇒ 触发"的语义一致（enter 自 2026-11-18 起不补发）。
+	inID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-in"), inStart, inEnd, "inside", 300)
 	// out 规则只在真的有窗口时才创建：23:59 那一分钟不存在不含 now 的跨零点窗口，
 	// 造一条不可能满足语义的规则只会污染后续计数（且它必然为「在窗口内」）。
 	var outID int64
 	if okOut {
-		outID = windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-out"), outStart, outEnd, "enter", 300)
+		outID = windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-out"), outStart, outEnd, "inside", 300)
 	}
 	// 字面窗口 22:00–06:00：真实用户会这么配，用它做一次独立交叉验证。
-	literalID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "night"), "22:00", "06:00", "enter", 300)
+	literalID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "night"), "22:00", "06:00", "inside", 300)
 
 	nightBefore := windNightWindowContains(now)
 
@@ -554,7 +583,7 @@ func windRun005(e *harness.Env) {
 	}
 
 	// ③ 字面 22:00–06:00 的独立交叉验证。
-	nightAfter := windNightWindowContains(time.Now())
+	nightAfter := windNightWindowContains(time.Now().UTC())
 	switch {
 	case nightBefore != nightAfter:
 		// 观察期恰好横跨 22:00/06:00：窗口在观察期内翻转，两种结果都自洽。

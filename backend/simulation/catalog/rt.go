@@ -616,6 +616,7 @@ func rtRun005(e *harness.Env) {
 		"trigger_window_start": "00:00",
 		"trigger_window_end":   "00:01",
 		"trigger_window_edge":  "inside",
+		"timezone":             "UTC",
 		"action_type":          "notification",
 		"action_level":         "info",
 		"cooldown_sec":         0,
