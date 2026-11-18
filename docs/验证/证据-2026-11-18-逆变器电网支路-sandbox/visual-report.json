@@ -1,0 +1,198 @@
+{
+  "url": "http://127.0.0.1:5189/dev/mock-power-flow",
+  "desktop": [
+    {
+      "id": "discharge",
+      "title": "① 电池放电（用户报障的工况）PV 1W · 市电 231.5V · 负载 219W · 电池 52.3V/81% 放电 6.0A ⇒ 电池 → 逆变器",
+      "gridStatus": "未使用",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-idle",
+      "gridMarker": null,
+      "gridStroke": "rgb(144, 147, 153)",
+      "gridDash": "3px, 5px",
+      "batteryClasses": "pf-link discharging",
+      "batteryMarker": "url(#pf-arrow-discharge)",
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网已接入，当前未使用"
+      ]
+    },
+    {
+      "id": "charge",
+      "title": "② PV 富余，电池充电PV 3200W · 负载 900W · 电池 51.8V/64% 充电 22.0A ⇒ 逆变器 → 电池",
+      "gridStatus": "供电",
+      "gridCircle": "on",
+      "gridClasses": "pf-link on",
+      "gridMarker": "url(#pf-arrow-flow)",
+      "gridStroke": "rgb(20, 122, 58)",
+      "gridDash": "none",
+      "batteryClasses": "pf-link charging",
+      "batteryMarker": "url(#pf-arrow-charge)",
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用"
+      ]
+    },
+    {
+      "id": "idle",
+      "title": "③ 待机：无充放电PV 0W · 负载 0W · 电池 51.5V/58% 静止 ⇒ 电池支路不画箭头（不猜方向）",
+      "gridStatus": "待机",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-idle",
+      "gridMarker": null,
+      "gridStroke": "rgb(144, 147, 153)",
+      "gridDash": "3px, 5px",
+      "batteryClasses": "pf-link",
+      "batteryMarker": null,
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网已接入，当前待机"
+      ]
+    },
+    {
+      "id": "conflict",
+      "title": "④ 读数矛盾：充放电流同时非零充电 3.0A 且放电 2.0A ⇒ 不判定方向、不画箭头，两个数都列出来",
+      "gridStatus": "未使用",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-idle",
+      "gridMarker": null,
+      "gridStroke": "rgb(144, 147, 153)",
+      "gridDash": "3px, 5px",
+      "batteryClasses": "pf-link",
+      "batteryMarker": null,
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网已接入，当前未使用"
+      ]
+    },
+    {
+      "id": "grid-battery",
+      "title": "⑤ 电池模式：市电接入但未使用（本次报障）PV 750W · 负载 175W · 电池 51.6V/74% 充电 5.0A · 市电 234.8V · work_mode=3(B) ⇒ 电网灰虚线、无箭头、徽标「未使用」",
+      "gridStatus": "未使用",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-idle",
+      "gridMarker": null,
+      "gridStroke": "rgb(144, 147, 153)",
+      "gridDash": "3px, 5px",
+      "batteryClasses": "pf-link charging",
+      "batteryMarker": "url(#pf-arrow-charge)",
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网已接入，当前未使用"
+      ]
+    },
+    {
+      "id": "grid-line",
+      "title": "⑥ 市电模式：市电供电PV 0W · 负载 500W · 电池 51.2V/60% 静止 · 市电 230.0V · work_mode=2(L) ⇒ 电网绿色实线 + 箭头 + 徽标「供电」",
+      "gridStatus": "供电",
+      "gridCircle": "on",
+      "gridClasses": "pf-link on",
+      "gridMarker": "url(#pf-arrow-flow)",
+      "gridStroke": "rgb(20, 122, 58)",
+      "gridDash": "none",
+      "batteryClasses": "pf-link",
+      "batteryMarker": null,
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用"
+      ]
+    },
+    {
+      "id": "grid-off",
+      "title": "⑦ 市电未接入PV 300W · 负载 100W · 电池放电 2.0A · 市电 0V · work_mode=3(B) ⇒ 徽标「未接入」、不画箭头",
+      "gridStatus": "未接入",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-off",
+      "gridMarker": null,
+      "gridStroke": "rgb(235, 238, 245)",
+      "gridDash": "2px, 6px",
+      "batteryClasses": "pf-link discharging",
+      "batteryMarker": "url(#pf-arrow-discharge)",
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网未接入（无电压）"
+      ]
+    },
+    {
+      "id": "grid-standby",
+      "title": "⑧ 待机：市电接入，方向不可判定PV 0W · 负载 0W · 电池 51.5V/58% 静止 · 市电 230.0V · work_mode=1(S) ⇒ 灰虚线、无箭头、徽标「待机」",
+      "gridStatus": "待机",
+      "gridCircle": "",
+      "gridClasses": "pf-link is-idle",
+      "gridMarker": null,
+      "gridStroke": "rgb(144, 147, 153)",
+      "gridDash": "3px, 5px",
+      "batteryClasses": "pf-link",
+      "batteryMarker": null,
+      "legend": [
+        "实线 = 能量流；灰色虚线 = 已接入未使用",
+        "电网已接入，当前待机"
+      ]
+    }
+  ],
+  "mobile": [
+    {
+      "id": "discharge",
+      "mobile": true,
+      "gridStatus": "未使用",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    },
+    {
+      "id": "charge",
+      "mobile": true,
+      "gridStatus": "供电",
+      "gridArrow": "↓",
+      "gridArrowClass": "pfm-arrow is-flow",
+      "gridNodeClass": "pfm-node on"
+    },
+    {
+      "id": "idle",
+      "mobile": true,
+      "gridStatus": "待机",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    },
+    {
+      "id": "conflict",
+      "mobile": true,
+      "gridStatus": "未使用",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    },
+    {
+      "id": "grid-battery",
+      "mobile": true,
+      "gridStatus": "未使用",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    },
+    {
+      "id": "grid-line",
+      "mobile": true,
+      "gridStatus": "供电",
+      "gridArrow": "↓",
+      "gridArrowClass": "pfm-arrow is-flow",
+      "gridNodeClass": "pfm-node on"
+    },
+    {
+      "id": "grid-off",
+      "mobile": true,
+      "gridStatus": "未接入",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    },
+    {
+      "id": "grid-standby",
+      "mobile": true,
+      "gridStatus": "待机",
+      "gridArrow": "·",
+      "gridArrowClass": "pfm-arrow is-idle",
+      "gridNodeClass": "pfm-node"
+    }
+  ],
+  "errors": []
+}

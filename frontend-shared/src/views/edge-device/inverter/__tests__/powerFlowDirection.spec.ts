@@ -68,7 +68,6 @@ describe('功率流向：光伏 / 负载', () => {
   it('光伏有功率 ⇒ 光伏 → 逆变器（dir=in）', () => {
     expect(pvFlow(1200).dir).toBe('in')
     expect(pvFlow(1200).active).toBe(true)
-    expect(pvFlow(1200).inferred).toBe(false)
     expect(pvFlow(1200).text).toContain('光伏流向逆变器')
   })
 
@@ -85,33 +84,61 @@ describe('功率流向：光伏 / 负载', () => {
   })
 })
 
-describe('功率流向：电网（无功率传感器 ⇒ 方向必须标为推定）', () => {
-  it('有合法电压 ⇒ 电网 → 逆变器，但 inferred=true（协议没有市电功率字段）', () => {
-    const f = gridFlow(231.5)
-    expect(f.dir).toBe('in')
-    expect(f.active).toBe(true)
-    expect(f.inferred, '电网方向无法实测，必须标推定，不得与实测支路混为一谈').toBe(true)
-    expect(f.text).toContain('推定')
+describe('功率流向：电网（仅有电压/频率 ⇒ 必须同时看工作模式）', () => {
+  it('电池模式（B=3）：市电接入但未使用 ⇒ none、不画箭头、标「未使用」', () => {
+    const f = gridFlow(231.5, 3)
+    expect(f.connected, '234.8V 证明电气上已接入').toBe(true)
+    expect(f.dir, '电池模式下市电不参与供能，方向必须是 none').toBe('none')
+    expect(f.active).toBe(false)
+    expect(f.status).toBe('未使用')
+    expect(f.text).toContain('不参与供能')
   })
 
-  it('无电压 / 坏电压 ⇒ 无流动（不画箭头）', () => {
-    expect(gridFlow(0).dir).toBe('none')
-    expect(gridFlow(undefined).dir).toBe('none')
-    expect(gridFlow(1e12).dir).toBe('none')
+  it('市电模式（L=2）：电网 → 逆变器，标「供电」', () => {
+    const f = gridFlow(231.5, 2)
+    expect(f.connected).toBe(true)
+    expect(f.dir).toBe('in')
+    expect(f.active).toBe(true)
+    expect(f.status).toBe('供电')
+    expect(f.text).toContain('供电')
+  })
+
+  it('待机（S=1）：已接入但方向不可判定 ⇒ none、标「待机」', () => {
+    const f = gridFlow(231.5, 1)
+    expect(f.connected).toBe(true)
+    expect(f.dir).toBe('none')
+    expect(f.status).toBe('待机')
+  })
+
+  it('未知 / 故障 / 关机 / 测试模式：不猜方向，标「不可判定」', () => {
+    for (const mode of [0, 4, 5, 6, null, undefined]) {
+      const f = gridFlow(231.5, mode as number | null | undefined)
+      expect(f.connected, 'mode=' + String(mode)).toBe(true)
+      expect(f.dir, 'mode=' + String(mode)).toBe('none')
+      expect(f.status, 'mode=' + String(mode)).toBe('不可判定')
+    }
+  })
+
+  it('无电压 / 坏电压 ⇒ 未接入，不画箭头', () => {
+    for (const v of [0, undefined, 1e12]) {
+      const f = gridFlow(v, 2)
+      expect(f.connected, 'v=' + String(v)).toBe(false)
+      expect(f.dir, 'v=' + String(v)).toBe('none')
+      expect(f.status, 'v=' + String(v)).toBe('未接入')
+    }
   })
 })
 
-describe('功率流向：与用户截图一致的真实工况（电池放电 6.0A / 负载 219W / 市电 231.5V）', () => {
-  it('该工况下三条支路方向自洽：PV 无输出、电网流入、负载流出、电池流入', () => {
-    const battery = batteryFlow(0, 6)
-    const grid = gridFlow(231.5)
-    const load = loadFlow(219)
-    // 截图里 PV 读到 1W（等于没发电）：方向仍是「流入」，但只在有真实功率时才高亮箭头，
-    // 本用例只锁方向语义，不把 1W 当成"光伏在供电"。
-    expect(pvFlow(0).dir).toBe('none')
-    expect(pvFlow(1).dir, '1W 也是真实读数（极小的流入），方向不得反').toBe('in')
-    expect(grid.dir).toBe('in')
+describe('功率流向：与用户截图一致的 2026-11-18 工况（电池模式 / PV 750W / 负载 175W / 市电 234.8V / 充电 5.0A）', () => {
+  it('电网虽接入但不参与供能：PV/电池/负载方向自洽，电网无箭头', () => {
+    const battery = batteryFlow(5, 0)
+    const grid = gridFlow(234.8, 3)
+    const load = loadFlow(175)
+    expect(pvFlow(750).dir).toBe('in')
+    expect(grid.dir, '截图工况是 B=电池：市电不供能，不能再画流入').toBe('none')
+    expect(grid.active).toBe(false)
+    expect(grid.status).toBe('未使用')
     expect(load.dir).toBe('out')
-    expect(battery.dir, '用户报障点：放电时能量必须是 电池 → 逆变器').toBe('in')
+    expect(battery.dir, '充电 5.0A：能量由逆变器流向电池').toBe('out')
   })
 })

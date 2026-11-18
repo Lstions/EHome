@@ -25,6 +25,7 @@
           <span class="pfm-icon">🏭</span>
           <span class="pfm-label">电网</span>
           <span class="pfm-value">{{ fmtVolt(gridVoltage) }}</span>
+          <span class="pfm-status" :class="gridStatusClass" :data-status="grid.status">{{ grid.status }}</span>
         </div>
       </div>
       <div class="pfm-arrow-row" role="img" :aria-label="topArrowLabel">
@@ -93,12 +94,13 @@
         <text x="80" y="130" text-anchor="middle" class="pf-value">{{ fmtPower(pvPower) }}</text>
       </g>
 
-      <!-- 电网（圆落在 y170..230）：数值在圆上方，标签在圆下方 -->
+      <!-- 电网（圆落在 y170..230）：数值在圆上方，状态徽标再上一层 -->
       <g class="pf-node grid">
         <circle cx="80" cy="200" r="30" :class="{ on: grid.active }" />
         <text x="80" y="206" text-anchor="middle" class="pf-icon">🏭</text>
         <text x="80" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(gridVoltage) }}</text>
-        <text x="80" y="252" text-anchor="middle" class="pf-label">电网</text>
+        <!-- 状态贴在「电网」标签上：放在 PV 数值下方会被误读成 PV 的状态 -->
+        <text x="80" y="252" text-anchor="middle" class="pf-label">电网<tspan class="pf-label-status" :class="gridStatusClass" :data-status="grid.status"> · {{ grid.status }}</tspan></text>
       </g>
 
       <!-- 逆变器 -->
@@ -135,7 +137,8 @@
       -->
       <path d="M110,60 C200,60 240,110 282,120" class="pf-link" :class="{ on: pv.active }"
             :marker-end="arrowMarker(pv)"><title>{{ pv.text }}</title></path>
-      <path d="M110,200 C200,200 240,150 282,140" class="pf-link" :class="{ on: grid.active }"
+      <path d="M110,200 C200,200 240,150 282,140" class="pf-link"
+            :class="{ on: grid.active, 'is-idle': grid.connected && !grid.active, 'is-off': !grid.connected }"
             :marker-end="arrowMarker(grid)"><title>{{ grid.text }}</title></path>
       <path d="M358,120 C400,110 440,60 530,60" class="pf-link" :class="{ on: load.active }"
             :marker-end="arrowMarker(load)"><title>{{ load.text }}</title></path>
@@ -144,13 +147,14 @@
     </svg>
 
     <div class="pf-legend">
-      <span><i class="dot on" /> 工作中</span>
+      <span><i class="dot on" /> 实测工作中</span>
       <span><i class="dot idle" /> 空闲</span>
-      <span class="pf-legend-note">箭头方向 = 能量流向；逐支路按实测读数判定</span>
-      <!-- 电网没有功率传感器：方向是推定的，必须与实测支路区分开 -->
-      <span v-if="grid.inferred && grid.active" class="pf-legend-note is-inferred">
-        电网方向为推定（协议只提供电压/频率，无市电功率）
+      <span class="pf-legend-note">实线 = 能量流；灰色虚线 = 已接入未使用</span>
+      <!-- 市电模式直接按工作模式判定为供电；电池/待机等才显示「已接入未使用」 -->
+      <span v-if="grid.connected && !grid.active" class="pf-legend-note is-idle">
+        电网已接入，当前{{ grid.status }}
       </span>
+      <span v-else-if="!grid.connected" class="pf-legend-note">电网未接入（无电压）</span>
     </div>
   </div>
 </template>
@@ -158,7 +162,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from 'vue'
 import { formatPower } from '@/utils/format'
-import { batteryFlow, gridFlow, loadFlow, pvFlow, type BranchFlow } from './powerFlow'
+import { batteryFlow, gridFlow, loadFlow, pvFlow, type BranchFlow, type GridFlow } from './powerFlow'
 
 /**
  * 窄屏用 DOM 版布局（结构变化，CSS 媒体查询只能隐藏不能换结构）。
@@ -196,7 +200,7 @@ const props = defineProps<{
   batteryCapacity: number
   /** 市电电压（grid_voltage，V） */
   gridVoltage: number
-  /** 工作模式数值（work_mode），用于中心节点文案 */
+  /** 工作模式数值（work_mode）：中心节点文案 + 电网支路「是否参与供能」判定 */
   workMode: number | null
   /** 输出视在功率（output_apparent_power，VA），仅用于展示 */
   apparentPower?: number
@@ -230,9 +234,19 @@ const workModeLabel = computed(() => {
  *   现在方向只有一处结论，标签、节点配色、SVG 箭头、窄屏箭头全部由它派生。
  */
 const pv = computed(() => pvFlow(props.pvPower))
-const grid = computed(() => gridFlow(props.gridVoltage))
+const grid = computed(() => gridFlow(props.gridVoltage, props.workMode))
 const load = computed(() => loadFlow(props.loadPower))
 const battery = computed(() => batteryFlow(props.batteryChargeCurrent, props.batteryDischargeCurrent))
+
+/**
+ * 电网状态视觉类：供电（绿）/ 仅接入（灰）/ 未接入（更淡）。
+ * 同一组类名同时用于 SVG 与窄屏 DOM，避免两端语义漂移。
+ */
+const gridStatusClass = computed(() => ({
+  'is-active': grid.value.active,
+  'is-idle': grid.value.connected && !grid.value.active,
+  'is-off': !grid.value.connected,
+}))
 
 /** 电池节点/连线配色（既有测试与 CSS 类名契约保持不变）。 */
 const batteryClass = computed(() => {
@@ -298,7 +312,7 @@ function arrowTone(flow: BranchFlow): string {
 
 /** 读屏器的方向摘要（窄屏两行箭头各自有标签，不能只念「↓ ↓」）。 */
 const topArrowLabel = computed(() =>
-  `上排连接方向：光伏${dirWord(pv.value)}，电网${dirWord(grid.value)}`)
+  `上排连接方向：光伏${dirWord(pv.value)}，电网${gridLinkWord(grid.value)}`)
 const bottomArrowLabel = computed(() =>
   `下排连接方向：负载${dirWord(load.value)}，电池${dirWord(battery.value)}`)
 function dirWord(flow: BranchFlow): string {
@@ -307,8 +321,15 @@ function dirWord(flow: BranchFlow): string {
   return '无流动'
 }
 
+/** 电网的读屏摘要：市电模式直接说流入；电池/待机等说已接入未使用。 */
+function gridLinkWord(flow: GridFlow): string {
+  if (!flow.connected) return '未接入'
+  if (flow.active) return '流入逆变器'
+  return `已接入，${flow.status}`
+}
+
 const svgAriaLabel = computed(() =>
-  `功率流向：光伏${dirWord(pv.value)}，电网${dirWord(grid.value)}${grid.value.inferred && grid.value.active ? '（推定）' : ''}，`
+  `功率流向：光伏${dirWord(pv.value)}，电网${gridLinkWord(grid.value)}，`
   + `负载${dirWord(load.value)}，电池${battery.value.label}（${dirWord(battery.value)}）`)
 
 /**
@@ -433,6 +454,7 @@ function fmtVolt(v: number | undefined | null): string {
   gap: 8px;
 }
 .pfm-node {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -471,6 +493,23 @@ function fmtVolt(v: number | undefined | null): string {
   color: var(--el-text-color-primary);
   overflow-wrap: anywhere;
 }
+/*
+  电网状态徽标：绝对定位在节点右上角，不改变节点高度，避免与 PV 行错位。
+  「未使用 / 供电 / 未接入 / 待机 / 不可判定」是节点级结论，比图例更靠近用户视线。
+*/
+.pfm-status {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  pointer-events: none;
+}
+.pfm-status.is-active { color: var(--el-color-success-dark-2); }
+.pfm-status.is-idle { color: var(--el-text-color-regular); }
+.pfm-status.is-off { color: var(--el-text-color-secondary); }
 /*
   连接位箭头：**每列一个**（2026-10-23）。改前是整行一个写死的「↓」，
   电池放电时也显示向下 —— 正是用户报障的「方向指向电池」的窄屏版本。
@@ -537,6 +576,11 @@ function fmtVolt(v: number | undefined | null): string {
 .pf-icon { font-size: 22px; }
 .pf-label { font-size: 12px; fill: var(--el-text-color-secondary); }
 .pf-value { font-size: 13px; font-weight: 600; fill: var(--el-text-color-primary); }
+/* 电网状态跟在「电网」标签后（不是 PV 数值下方），颜色承载供电/未使用/未接入。 */
+.pf-label-status { font-size: 11px; font-weight: 600; fill: var(--el-text-color-secondary); }
+.pf-label-status.is-active { fill: var(--el-color-success-dark-2); }
+.pf-label-status.is-idle { fill: var(--el-text-color-regular); }
+.pf-label-status.is-off { fill: var(--el-text-color-secondary); }
 
 .pf-link {
   fill: none;
@@ -548,6 +592,9 @@ function fmtVolt(v: number | undefined | null): string {
 .pf-link.on { stroke: var(--el-color-success); stroke-dasharray: none; }
 .pf-link.charging { stroke: var(--el-color-primary); stroke-dasharray: none; }
 .pf-link.discharging { stroke: var(--el-color-warning); stroke-dasharray: none; }
+/* 电网非供电态：已接入未使用=灰虚线；未接入=更淡的点线。 */
+.pf-link.is-idle { stroke: var(--el-text-color-secondary); stroke-dasharray: 3 5; opacity: 0.9; }
+.pf-link.is-off { stroke: var(--el-border-color-lighter); stroke-dasharray: 2 6; opacity: 0.5; }
 .marker-fill { fill: var(--el-text-color-secondary); }
 /* 箭头头部与连线同色：方向是本组件的头号信息，不能让箭头成为最弱的一环 */
 .marker-fill-flow { fill: var(--el-color-success); }
@@ -575,11 +622,10 @@ function fmtVolt(v: number | undefined | null): string {
 /* 复核实测：placeholder #a8abb2 on #fff = 2.3:1（12px 正文要求 4.5:1）。
    这行是「箭头方向 = 能量流向；数据来自各传感器最新值」的解释性文字，属有效信息，不允许低对比。 */
 .pf-legend-note { color: var(--el-text-color-regular); }
-/* 「电网方向为推定」是**限定条件**，比普通说明更强：用 warning 文字色 + 前置标记，
-   让用户一眼看出它不是实测值。 */
-.pf-legend-note.is-inferred {
-  color: var(--el-color-warning-dark-2);
-  border-left: 2px solid var(--el-color-warning);
+/* 「已接入未使用/待机/不可判定」是中性事实，不是警告；用 regular 文字 + 灰边。 */
+.pf-legend-note.is-idle {
+  color: var(--el-text-color-regular);
+  border-left: 2px solid var(--el-border-color);
   padding-left: 6px;
 }
 </style>

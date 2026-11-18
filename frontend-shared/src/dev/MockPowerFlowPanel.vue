@@ -8,7 +8,10 @@
     在一个页面里就能全部覆盖，还能同时量桌面 SVG 与窄屏 DOM 两套布局的箭头。
   -->
   <div class="mock-pf" style="padding: 16px; background: #f0f2f5; min-height: 100vh;">
-    <h3 style="margin: 0 0 16px;">逆变器功率流向 四工况（离线验证）</h3>
+    <h3 style="margin: 0 0 4px;">逆变器功率流向 八工况（离线验证）</h3>
+    <p style="margin: 0 0 16px; color: #909399; font-size: 12px;">
+      ①-④ 电池充放电方向；⑤-⑧ 电网支路：未使用 / 供电 / 未接入 / 待机
+    </p>
     <el-card v-for="c in CASES" :key="c.id" :style="{ marginBottom: '16px' }" shadow="hover">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
@@ -72,6 +75,38 @@ const CASES = [
     pvPower: 1500, loadPower: 800, batteryVoltage: 52.0,
     batteryChargeCurrent: 3, batteryDischargeCurrent: 2,
     batteryCapacity: 70, gridVoltage: 229.0, workMode: 3,
+  },
+  {
+    id: 'grid-battery',
+    title: '⑤ 电池模式：市电接入但未使用（本次报障）',
+    note: 'PV 750W · 负载 175W · 电池 51.6V/74% 充电 5.0A · 市电 234.8V · work_mode=3(B) ⇒ 电网灰虚线、无箭头、徽标「未使用」',
+    pvPower: 750, loadPower: 175, batteryVoltage: 51.6,
+    batteryChargeCurrent: 5, batteryDischargeCurrent: 0,
+    batteryCapacity: 74, gridVoltage: 234.8, workMode: 3,
+  },
+  {
+    id: 'grid-line',
+    title: '⑥ 市电模式：市电供电',
+    note: 'PV 0W · 负载 500W · 电池 51.2V/60% 静止 · 市电 230.0V · work_mode=2(L) ⇒ 电网绿色实线 + 箭头 + 徽标「供电」',
+    pvPower: 0, loadPower: 500, batteryVoltage: 51.2,
+    batteryChargeCurrent: 0, batteryDischargeCurrent: 0,
+    batteryCapacity: 60, gridVoltage: 230.0, workMode: 2,
+  },
+  {
+    id: 'grid-off',
+    title: '⑦ 市电未接入',
+    note: 'PV 300W · 负载 100W · 电池放电 2.0A · 市电 0V · work_mode=3(B) ⇒ 徽标「未接入」、不画箭头',
+    pvPower: 300, loadPower: 100, batteryVoltage: 51.8,
+    batteryChargeCurrent: 0, batteryDischargeCurrent: 2,
+    batteryCapacity: 66, gridVoltage: 0, workMode: 3,
+  },
+  {
+    id: 'grid-standby',
+    title: '⑧ 待机：市电接入，方向不可判定',
+    note: 'PV 0W · 负载 0W · 电池 51.5V/58% 静止 · 市电 230.0V · work_mode=1(S) ⇒ 灰虚线、无箭头、徽标「待机」',
+    pvPower: 0, loadPower: 0, batteryVoltage: 51.5,
+    batteryChargeCurrent: 0, batteryDischargeCurrent: 0,
+    batteryCapacity: 58, gridVoltage: 230.0, workMode: 1,
   },
 ]
 </script>

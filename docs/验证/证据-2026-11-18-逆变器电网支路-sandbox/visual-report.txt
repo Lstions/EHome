@@ -1,0 +1,20 @@
+URL: http://127.0.0.1:5189/dev/mock-power-flow
+DESKTOP:
+  discharge      status=未使用  marker=null                      classes=pf-link is-idle stroke=rgb(144, 147, 153) dash=3px, 5px
+  charge         status=供电   marker=url(#pf-arrow-flow)       classes=pf-link on stroke=rgb(20, 122, 58) dash=none
+  idle           status=待机   marker=null                      classes=pf-link is-idle stroke=rgb(144, 147, 153) dash=3px, 5px
+  conflict       status=未使用  marker=null                      classes=pf-link is-idle stroke=rgb(144, 147, 153) dash=3px, 5px
+  grid-battery   status=未使用  marker=null                      classes=pf-link is-idle stroke=rgb(144, 147, 153) dash=3px, 5px
+  grid-line      status=供电   marker=url(#pf-arrow-flow)       classes=pf-link on stroke=rgb(20, 122, 58) dash=none
+  grid-off       status=未接入  marker=null                      classes=pf-link is-off stroke=rgb(235, 238, 245) dash=2px, 6px
+  grid-standby   status=待机   marker=null                      classes=pf-link is-idle stroke=rgb(144, 147, 153) dash=3px, 5px
+MOBILE:
+  discharge      status=未使用 arrow=· class=pfm-arrow is-idle
+  charge         status=供电 arrow=↓ class=pfm-arrow is-flow
+  idle           status=待机 arrow=· class=pfm-arrow is-idle
+  conflict       status=未使用 arrow=· class=pfm-arrow is-idle
+  grid-battery   status=未使用 arrow=· class=pfm-arrow is-idle
+  grid-line      status=供电 arrow=↓ class=pfm-arrow is-flow
+  grid-off       status=未接入 arrow=· class=pfm-arrow is-idle
+  grid-standby   status=待机 arrow=· class=pfm-arrow is-idle
+CONSOLE_ERRORS: 0

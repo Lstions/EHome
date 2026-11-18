@@ -14,14 +14,17 @@
  *   dir = 'out' → 能量由逆变器**流出到该支路节点**
  *   dir = 'none'→ 没有可判定的能量流动（不画箭头，绝不猜方向）
  *
- * 各支路的知识边界（决定能不能画箭头、要不要标「推定」）：
+ * 各支路的知识边界（决定能不能画箭头、要不要标状态）：
  *   · 光伏 PV：pv1_power + pv2_power 实测功率 ⇒ 可判定；
  *   · 负载：output_active_power 实测有功 ⇒ 可判定（负载只消耗）；
  *   · 电池：HBAT 的充电电流 / 放电电流是**两个独立寄存器**（不是带符号的单量），
  *     谁 > 0 就说明能量往哪走 ⇒ 可判定；
- *   · 电网：协议只给 HGRID 电压/频率，**没有任何市电功率传感器** ⇒ 方向无法实测。
- *     仍然画「电网 → 逆变器」，但标 inferred=true（界面注明「按市电供电推定」），
- *     而不是像改前那样把它和实测支路画成一样、让人以为也是测出来的。
+ *   · 电网：协议只给 HGRID 电压/频率。
+ *     工作模式决定方向：
+ *       - 电池模式（B）：市电已接入但未使用 ⇒ dir='none'，不画箭头；
+ *       - 市电模式（L）：按拓扑市电必然供电 ⇒ dir='in'，正常画出能量流；
+ *       - 待机/故障/关机/模式未知：无法判定方向 ⇒ dir='none'，标「不可判定」。
+ *     方向判定必须同时看 gridVoltage 与 workMode，**绝不能只看电压**。
  */
 
 /** 支路方向：相对**逆变器**而言（in = 流入逆变器，out = 流出到该节点）。 */
@@ -32,10 +35,18 @@ export interface BranchFlow {
   dir: BranchDir
   /** 该支路是否有能量在动（用于节点高亮 / 连线着色） */
   active: boolean
-  /** 方向是否**推定**（该支路没有功率传感器）而非实测 */
-  inferred: boolean
   /** 人类可读的方向说明（<title> / aria-label，读屏器与悬停都能拿到） */
   text: string
+}
+
+/** 电网节点的短徽标：让「接入」与「供能」在图上可区分。 */
+export type GridStatus = '未接入' | '未使用' | '供电' | '待机' | '不可判定'
+
+export interface GridFlow extends BranchFlow {
+  /** 电气上是否接入（市电电压在合法区间） */
+  connected: boolean
+  /** 节点短徽标（同时用于状态展示与读屏摘要） */
+  status: GridStatus
 }
 
 /** 功率上限（W）：与驱动 checkRange 的 maxPower 同口径，超出视为坏数据、不参与方向判定。 */
@@ -63,31 +74,92 @@ function normalizeCurrent(value: number | null | undefined): number {
 /** 光伏：有实测功率就向逆变器送电。 */
 export function pvFlow(pvPower: number | null | undefined): BranchFlow {
   const p = normalizePower(pvPower)
-  if (p <= 0) return { dir: 'none', active: false, inferred: false, text: '光伏无输出' }
-  return { dir: 'in', active: true, inferred: false, text: '能量由光伏流向逆变器' }
+  if (p <= 0) return { dir: 'none', active: false, text: '光伏无输出' }
+  return { dir: 'in', active: true, text: '能量由光伏流向逆变器' }
 }
 
 /** 负载：消耗侧，永远只能「逆变器 → 负载」。 */
 export function loadFlow(loadPower: number | null | undefined): BranchFlow {
   const p = normalizePower(loadPower)
-  if (p <= 0) return { dir: 'none', active: false, inferred: false, text: '负载无用电' }
-  return { dir: 'out', active: true, inferred: false, text: '能量由逆变器流向负载' }
+  if (p <= 0) return { dir: 'none', active: false, text: '负载无用电' }
+  return { dir: 'out', active: true, text: '能量由逆变器流向负载' }
 }
+
+/** 工作模式数值 —— 与驱动 workModeMap / InverterStatusGrid 同表。 */
+export const WORK_MODE = {
+  POWER_ON: 0,
+  STANDBY: 1,
+  LINE: 2,
+  BATTERY: 3,
+  FAULT: 4,
+  SHUTDOWN: 5,
+  TEST: 6,
+} as const
 
 /**
  * 电网：只有电压/频率可测，**没有功率传感器**。
- * 因此「市电在电」可判定（电压在合法区间），但「功率往哪走、走多大」不可测 ——
- * 方向按市电供电推定（inferred=true），并在界面上明确标注。
+ *
+ * 关键修正（2026-11-18 用户报障）：电压只能证明「接入」，不能证明「供能」。
+ * 电池模式下市电即使有 234.8V，也没有功率流入逆变器 —— 改前只看电压就画
+ * dir='in', active=true，导致电网与 PV 一样画成绿色实线箭头，用户自然读成
+ * 「市电正在供电」。现在必须同时消费 workMode：
+ *   · B=电池    ⇒ connected=true, dir='none'，节点标「未使用」，不画箭头；
+ *   · L=市电    ⇒ connected=true, dir='in'，按市电模式正常画出能量流；
+ *   · S=待机    ⇒ connected=true, dir='none'，标「待机」；
+ *   · 其它/未知 ⇒ connected=true, dir='none'，标「不可判定」，绝不猜。
  */
-export function gridFlow(gridVoltage: number | null | undefined): BranchFlow {
+export function gridFlow(
+  gridVoltage: number | null | undefined,
+  workMode: number | null | undefined,
+): GridFlow {
   const v = Number(gridVoltage)
-  const present = Number.isFinite(v) && v >= MIN_VOLT_AC && v <= MAX_VOLT_AC
-  if (!present) return { dir: 'none', active: false, inferred: false, text: '市电未接入（无电压）' }
+  const connected = Number.isFinite(v) && v >= MIN_VOLT_AC && v <= MAX_VOLT_AC
+  if (!connected) {
+    return {
+      dir: 'none',
+      active: false,
+      connected: false,
+      status: '未接入',
+      text: '市电未接入（无电压）',
+    }
+  }
+
+  const mode = workMode === null || workMode === undefined ? null : Number(workMode)
+  const known = mode !== null && Number.isFinite(mode)
+
+  if (known && mode === WORK_MODE.BATTERY) {
+    return {
+      dir: 'none',
+      active: false,
+      connected: true,
+      status: '未使用',
+      text: '市电已接入，但电池模式下不参与供能',
+    }
+  }
+  if (known && mode === WORK_MODE.LINE) {
+    return {
+      dir: 'in',
+      active: true,
+      connected: true,
+      status: '供电',
+      text: '市电供电中',
+    }
+  }
+  if (known && mode === WORK_MODE.STANDBY) {
+    return {
+      dir: 'none',
+      active: false,
+      connected: true,
+      status: '待机',
+      text: '市电已接入，待机状态下方向不判定',
+    }
+  }
   return {
-    dir: 'in',
-    active: true,
-    inferred: true,
-    text: '市电在电（协议只提供电压与频率，功率方向按市电供电推定）',
+    dir: 'none',
+    active: false,
+    connected: true,
+    status: '不可判定',
+    text: '市电已接入，但当前工作模式无法判定方向',
   }
 }
 
@@ -116,7 +188,6 @@ export function batteryFlow(
     return {
       dir: 'none',
       active: true,
-      inferred: false,
       label: `充电 ${charge.toFixed(1)}A / 放电 ${discharge.toFixed(1)}A`,
       cls: '',
       text: '充电电流与放电电流同时非零，读数矛盾，不判定方向',
@@ -126,7 +197,6 @@ export function batteryFlow(
     return {
       dir: 'out',
       active: true,
-      inferred: false,
       label: `充电 ${charge.toFixed(1)}A`,
       cls: 'charging',
       text: `电池充电 ${charge.toFixed(1)}A：能量由逆变器流向电池`,
@@ -136,11 +206,10 @@ export function batteryFlow(
     return {
       dir: 'in',
       active: true,
-      inferred: false,
       label: `放电 ${discharge.toFixed(1)}A`,
       cls: 'discharging',
       text: `电池放电 ${discharge.toFixed(1)}A：能量由电池流向逆变器`,
     }
   }
-  return { dir: 'none', active: false, inferred: false, label: '静止', cls: '', text: '电池无充放电' }
+  return { dir: 'none', active: false, label: '静止', cls: '', text: '电池无充放电' }
 }

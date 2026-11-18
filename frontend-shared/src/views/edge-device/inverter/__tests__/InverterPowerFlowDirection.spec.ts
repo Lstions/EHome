@@ -102,18 +102,46 @@ describe('功率流向箭头：其余三条支路方向固定，但同样由读�
     off.unmount()
   })
 
-  it('电网没有功率传感器 ⇒ 有电压时画箭头但同时在图例声明"方向为推定"', () => {
-    const wrapper = mountFlow({ gridVoltage: 231.5 })
-    expect(wrapper.findAll('path.pf-link')[1].attributes('marker-end')).toBe('url(#pf-arrow-flow)')
-    // 关键：必须显式声明这不是实测方向，否则用户会以为市电功率也测了
-    expect(wrapper.find('.pf-legend-note.is-inferred').exists()).toBe(true)
-    expect(wrapper.find('.pf-legend-note.is-inferred').text()).toContain('推定')
+  it('电池模式 + 231.5V：无箭头、灰虚线、节点标「未使用」，图例说明未参与供能', () => {
+    const wrapper = mountFlow({ gridVoltage: 231.5, workMode: 3 })
+    const gridPath = wrapper.findAll('path.pf-link')[1]
+    expect(gridPath.attributes('marker-end'), '电池模式不得画箭头').toBeUndefined()
+    expect(gridPath.classes()).toContain('is-idle')
+    expect(gridPath.classes()).not.toContain('on')
+    expect(wrapper.find('.pf-node.grid .pf-label-status').attributes('data-status')).toBe('未使用')
+    expect(wrapper.find('.pf-node.grid circle').classes()).not.toContain('on')
+    expect(wrapper.find('.pf-legend-note.is-idle').text()).toContain('未使用')
     wrapper.unmount()
+  })
 
-    const noGrid = mountFlow({ gridVoltage: 0 })
-    expect(noGrid.findAll('path.pf-link')[1].attributes('marker-end')).toBeUndefined()
-    expect(noGrid.find('.pf-legend-note.is-inferred').exists()).toBe(false)
-    noGrid.unmount()
+  it('市电模式 + 231.5V：电网按供电正常画绿色实线/箭头，节点标「供电」', () => {
+    const wrapper = mountFlow({ gridVoltage: 231.5, workMode: 2 })
+    const gridPath = wrapper.findAll('path.pf-link')[1]
+    expect(gridPath.attributes('marker-end')).toBe('url(#pf-arrow-flow)')
+    expect(gridPath.classes()).toContain('on')
+    expect(wrapper.find('.pf-node.grid .pf-label-status').attributes('data-status')).toBe('供电')
+    expect(wrapper.find('.pf-node.grid circle').classes()).toContain('on')
+    expect(wrapper.find('.pf-legend-note.is-idle').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('待机 / 未知模式：不画箭头，节点标「待机」/「不可判定」', () => {
+    const standby = mountFlow({ gridVoltage: 231.5, workMode: 1 })
+    expect(standby.findAll('path.pf-link')[1].attributes('marker-end')).toBeUndefined()
+    expect(standby.find('.pf-node.grid .pf-label-status').attributes('data-status')).toBe('待机')
+    standby.unmount()
+
+    const unknown = mountFlow({ gridVoltage: 231.5, workMode: null })
+    expect(unknown.findAll('path.pf-link')[1].attributes('marker-end')).toBeUndefined()
+    expect(unknown.find('.pf-node.grid .pf-label-status').attributes('data-status')).toBe('不可判定')
+    unknown.unmount()
+  })
+
+  it('无电压：标「未接入」，不画箭头', () => {
+    const wrapper = mountFlow({ gridVoltage: 0, workMode: 2 })
+    expect(wrapper.findAll('path.pf-link')[1].attributes('marker-end')).toBeUndefined()
+    expect(wrapper.find('.pf-node.grid .pf-label-status').attributes('data-status')).toBe('未接入')
+    wrapper.unmount()
   })
 })
 
@@ -179,10 +207,29 @@ describe('窄屏（≤768px）DOM 版：每个连接位独立箭头', () => {
     off.unmount()
   })
 
+  it('上排电网：电池模式接入但未使用 ⇒ 中性点「·」+ 徽标「未使用」', () => {
+    const wrapper = mount(InverterPowerFlow, { props: { ...BASE, pvPower: 1000, gridVoltage: 231.5, workMode: 3 } })
+    const top = wrapper.findAll('.pfm-arrow-row')[0].findAll('.pfm-arrow')
+    expect(top[1].text()).toBe('·')
+    expect(top[1].classes()).toContain('is-idle')
+    expect(wrapper.find('[data-branch="grid"] .pfm-status').text()).toBe('未使用')
+    wrapper.unmount()
+  })
+
+  it('上排电网：市电模式 ⇒ ↓ + 绿色 flow 色调 + 徽标「供电」', () => {
+    const wrapper = mount(InverterPowerFlow, { props: { ...BASE, gridVoltage: 231.5, workMode: 2 } })
+    const top = wrapper.findAll('.pfm-arrow-row')[0].findAll('.pfm-arrow')
+    expect(top[1].text()).toBe('↓')
+    expect(top[1].classes()).toContain('is-flow')
+    expect(wrapper.find('[data-branch="grid"] .pfm-status').text()).toBe('供电')
+    wrapper.unmount()
+  })
+
   it('两排连接位都有读屏可读的方向说明（不能只念"↓ ↓"）', () => {
-    const wrapper = mount(InverterPowerFlow, { props: { ...BASE, batteryDischargeCurrent: 6 } })
+    const wrapper = mount(InverterPowerFlow, { props: { ...BASE, pvPower: 1000, batteryDischargeCurrent: 6 } })
     const rows = wrapper.findAll('.pfm-arrow-row')
-    expect(rows[0].attributes('aria-label')).toContain('流入逆变器')
+    expect(rows[0].attributes('aria-label')).toContain('光伏流入逆变器')
+    expect(rows[0].attributes('aria-label')).toContain('电网已接入，未使用')
     expect(rows[1].attributes('aria-label')).toContain('电池')
     expect(rows[1].attributes('aria-label')).toContain('流入逆变器')
     wrapper.unmount()
