@@ -47,7 +47,11 @@ static void handle_hello_success(void)
         rgb_led_set_state(LED_STATE_WAITING_CONFIG);
     }
     msg_handler_send_resource_report();
-    sync_manager_start_config_timeout();
+    /* ⚠ task-5：这里**不再**是 "起 120 s 表" 的唯一起点。
+     * 整轮看门狗在 sync_manager_request_sync() 里就起好了；本调用现在只负责
+     * 补表与收表（有配置 ⇒ 本轮完成；无配置 ⇒ 继续等 ConfigManifest，且表
+     * 保持原截止时间，不会被重复 Ack 续命）。见 sync_manager.c 的同名说明。 */
+    sync_manager_on_hello_ack_accepted();
 }
 
 static void clear_active_nonce(void)
@@ -101,6 +105,10 @@ static bool process_action(hello_sm_action_t action)
             clear_active_nonce();
             ESP_LOGE(TAG, "Hello failed after retries; continuing supervisor");
             rgb_led_set_state(LED_STATE_SERVER_OFFLINE);
+            /* task-5：Hello 重试用尽 = 这一轮**不会**再完成。旧实现只点灯就
+             * 走了，sync_manager 那边仍停在 SYNCING（要等 120 s 看门狗才发现）。
+             * ⇒ 显式告知，让它立刻复位并进入退避重试。 */
+            sync_manager_on_round_failed();
             action = hello_sm_next_action(&s_sm);
             continue;
         }

@@ -6,7 +6,11 @@ idf_component_register(SRCS "sync_manager.c"
                        #     的传递 REQUIRES 活着。删除后立刻报
                        #     "fatal error: esp_timer.h: No such file or directory"。
                        #     ⇒ 本文件 :15 早就写过这个教训，这次真的应验了。
-                       REQUIRES config_mgr nvs_flash rgb_led esp_timer)
+                       # task-5：补 frame —— sync_manager.c 现在包含
+                       # frame_codec.h 取 MSG_CONFIG_MFST / MSG_CONFIG_RSLT /
+                       # MSG_HELLO_ACK（原来在 switch 里写裸 0x04/0x05/0x12）。
+                       # frame 只依赖标准头、不依赖任何组件 ⇒ 不会成环。
+                       REQUIRES config_mgr nvs_flash rgb_led esp_timer frame)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 # 见 2026-10-04 status_task 栈溢出（prvTaskCheckFreeStackSpace）：根因帧在

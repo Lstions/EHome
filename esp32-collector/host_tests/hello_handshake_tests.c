@@ -91,7 +91,9 @@ uint8_t config_mgr_get_active_channel_count(void) { return 0; }
 uint64_t config_mgr_get_epoch(void) { return 7; }
 const char *config_mgr_get_last_known_manifest_id(void) { return stub_last_manifest_id; }
 void msg_handler_send_resource_report(void) { resource_report_count++; }
-void sync_manager_start_config_timeout(void) {}
+/* task-5：整轮看门狗的两个入口（本组用例不测超时语义，只保证链接得上）。 */
+void sync_manager_on_hello_ack_accepted(void) {}
+void sync_manager_on_round_failed(void) {}
 void sync_manager_on_downlink_received(uint8_t msg_type)
 {
     if (msg_type == MSG_HELLO_ACK) sync_downlink_count++;

@@ -1058,10 +1058,44 @@ target_include_directories(sync_manager_uplink_tests PRIVATE
     ../components/sync_manager
     ../components/config_mgr
     ../components/rgb_led/include
+    # task-5：sync_manager.c 现在包含 frame_codec.h 取消息号（MSG_CONFIG_MFST /
+    # MSG_CONFIG_RSLT / MSG_HELLO_ACK）。它们都是宏 ⇒ 不需要链接 frame_codec.c。
+    ../components/frame
 )
 target_compile_options(sync_manager_uplink_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-parameter)
 add_test(NAME sync_manager_uplink COMMAND sync_manager_uplink_tests)
+
+# ---- task-5：sync_manager 整轮看门狗 + 无条件复位（缺陷 A/B/C）----
+#
+# 为什么单列一个 target，而不是塞进 sync_manager_uplink_tests：
+# 那条用例的 esp_timer 替身**刻意是 no-op**（stubs/esp_timer.h 自己写着
+# "它不会让超时真的触发"）。而本用例的**全部**主张都发生在"表到点之后" ——
+# 用 no-op 替身写出来会是一条永远绿的空断言（假绿），
+# 两种语义的替身塞进同一个 target 还会让人分不清哪条断言靠哪个替身成立。
+# ⇒ 本 target 自带一个**可被用例 fire() 的**定时器替身。
+#
+# SYNC_MANAGER_HOST_TEST 只打开 sync_manager_test_reset()（生产固件不编这段），
+# 手法与 hello_handshake_tests 的 HELLO_HANDSHAKE_HOST_TEST 一致。
+add_executable(sync_manager_round_timeout_tests
+    sync_manager_round_timeout_tests.c
+    sync_manager_round_timeout_tests_stubs.c
+    ../components/sync_manager/sync_manager.c
+)
+target_include_directories(sync_manager_round_timeout_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/sync_manager
+    ../components/config_mgr
+    ../components/rgb_led/include
+    ../components/frame
+)
+target_compile_definitions(sync_manager_round_timeout_tests PRIVATE
+    SYNC_MANAGER_HOST_TEST=1
+)
+target_compile_options(sync_manager_round_timeout_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-parameter)
+add_test(NAME sync_manager_round_timeout COMMAND sync_manager_round_timeout_tests)
 
 # 出厂重置白名单（2026-10-08 从 factory_reset.c 抽出，见 factory_reset_namespaces.h）
 add_executable(factory_reset_namespaces_tests

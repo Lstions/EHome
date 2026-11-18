@@ -581,7 +581,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 	if (msg_handler_send_config_result(new_id ? new_id : "unknown", new_cfg ? new_cfg->sync_id : "", true) != ESP_OK) {
 		ESP_LOGE(TAG, "Config committed but ConfigResult publish failed; keeping timeout/retry active");
 	} else {
-		sync_manager_cancel_config_timeout();
+		sync_manager_cancel_round_timeout();
 		sync_manager_on_downlink_received(MSG_CONFIG_MFST);
 		/* 健康证明：一次完整的端到端往返成功了（收到 manifest -> 应用 -> 回 ConfigResult）。
 		 * 这是"设备已恢复正常"的最强证据，用来自动解除启动熔断的安全模式。

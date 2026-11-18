@@ -98,9 +98,36 @@ void sync_manager_periodic_task(void *pvParameters);
 /* === Update state after successful ConfigManifest apply === */
 esp_err_t sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id);
 
-/* === Config receive timeout (esp_timer one-shot) === */
-void sync_manager_start_config_timeout(void);
-void sync_manager_cancel_config_timeout(void);
+/* === 整轮同步看门狗（★task-5）===
+ *
+ * 语义：从 sync_manager_request_sync() **开始一轮**的那一刻起表，覆盖
+ *       Hello → HelloAck → ConfigManifest → ConfigResult 全程；到点则
+ *       **无条件**把 s_sync_enum 从 SYNCING 复位（ERROR）并按有界退避重试。
+ *
+ * 为什么要单独一组入口而不是让调用方自己起定时器：
+ *   "这一轮有没有人看着" 必须是**本模块**的性质。旧实现在 HelloAck 之后才起表，
+ *   于是 Hello 发不出去 / Ack 丢失 / Ack 被拒三种情形全都没人管，state 钉在
+ *   SYNCING 达 11 h（现场实测），后端只能靠周期重推兜底。
+ *
+ * 调用约定：
+ *   · sync_manager_on_hello_ack_accepted() —— HelloAck 被**接受**后调用。
+ *     有可用配置 ⇒ 本轮完成、收表；无配置 ⇒ 继续等 ConfigManifest，
+ *     且**不重起**表（不许重复 Ack 续命）。
+ *   · sync_manager_cancel_round_timeout() —— 本轮确认成功（ConfigResult 发出）
+ *     后收表。
+ *   · sync_manager_on_round_failed() —— 本轮被确定判定为失败（stale-nonce
+ *     拒收 / Hello 重试用尽）。复位状态并立即进入退避重试。
+ *   · 复位判据一律是 "这一轮是否还在 SYNCING"，与 config_mgr_has_manifest()
+ *     无关；后者只决定 LED 与 "无配置激进重试" 分支。 */
+void sync_manager_on_hello_ack_accepted(void);
+void sync_manager_cancel_round_timeout(void);
+void sync_manager_on_round_failed(void);
+
+#ifdef SYNC_MANAGER_HOST_TEST
+/* 宿主用例专用：把模块拉回 "已初始化、没有在途轮次、退避为最小" 的状态。
+ * 实现见 sync_manager.c 的同名段落（含 "为什么需要复位点" 的说明）。 */
+void sync_manager_test_reset(void);
+#endif
 
 #ifdef __cplusplus
 }

@@ -150,7 +150,8 @@ static const uint8_t kRebootPayload[15] = {
 uint64_t config_mgr_get_epoch(void) { return 0; }
 bool config_mgr_has_manifest(void) { return false; }
 const char *config_mgr_get_last_known_manifest_id(void) { return ""; }
-void sync_manager_start_config_timeout(void) {}
+void sync_manager_on_hello_ack_accepted(void) {}
+void sync_manager_on_round_failed(void) {}
 void sync_manager_on_downlink_received(uint8_t msg_type) { (void)msg_type; }
 void rgb_led_set_state(led_state_t state) { (void)state; }
 /* handler_hello.c 引用 main/ 的握手监督器；本程序不跑它。 */

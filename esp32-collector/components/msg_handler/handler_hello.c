@@ -129,6 +129,13 @@ void handler_hello_process_ack(frame_decoder_t *dec)
     bool accepted = hello_handshake_notify_ack(handshake_nonce);
     if (!accepted) {
         ESP_LOGW(TAG, "Rejecting HelloAck: stale nonce=%u", (unsigned)handshake_nonce);
+        /* task-5（缺陷 C = 缺陷 A 的第二条入口）：拒绝一条 HelloAck 等于
+         * "这一轮没成功"，而旧代码在这里直接 return —— 不回 0x12 分支、也不
+         * 通知 sync_manager ⇒ s_sync_enum 静默留在 SYNCING，零超时零重试。
+         * ⇒ 必须显式告诉 sync_manager 本轮作废。
+         * 注意：**不**调用 sync_manager_on_downlink_received() —— 那条入口的
+         * 语义是 "这条下行被接受了"，用在这里等于把拒收说成收妥。 */
+        sync_manager_on_round_failed();
         return;
     }
     s_server_time_ms = server_time;
