@@ -10,7 +10,8 @@
 | 2026-11-17 21:43 | 9f77db7b | sha256:d4a098e9dadf… | 上一版（BMS 受控操作回执前） | — |
 | 2026-11-18 11:36 | 52b06798 | sha256:5f9786143a11… | 四轮修复（能力快照自愈/确认令牌/V7 收口/同步卡死重推/窗口不补发）+ 债务收敛（预测同源/冷却回灌/partial 生产者/告警/时区根治）+ 前端时区选择器 + 固件看门狗 | /health commit 一致；next_run 正常；BMS 手动触发 executed，命令 SUCCEEDED/final_succeeded，回读 mos_ack=1；日志 automation: 节点能力快照已刷新 node_id=F0F5BD02DD84；ehome_automation_events_total{result="executed"} 1 |
 | 2026-11-18 12:13 | 1e22c47c | sha256:6806836b3c4f… | 仅仿真夹具/场景修正（补时区、对齐不补发、确认场景改用真实登录）。build tag simulation ⇒ **运行时与 52b06798 完全相同** | /health commit=1e22c47c；两条规则 next_run 正常（日落 17:41 / 日出次日 06:42） |
-| 2026-11-18 12:56 | ee903d0f | sha256:ea277d70c8d9… | 删除规则级风险授权（L4）：保存前改为一次确认弹窗、system 路径直接执行风险动作、动作目录只发 risk_level；DB 列 risk_acknowledged_at **保留一版**以便回滚 | 生产实测：风险规则**不带授权字段**创建 200（旧码 400）、改参数 200（旧码 400 死循环）、precheck 清单 1 条、catalog 无 risk 字段、列仍在且新行 NULL；/health 一致、10 分钟 0 错误 |
+| 2026-11-18 12:56 | ee903d0f | sha256:ea277d70c8d9… | 删除规则级风险授权（L4）：保存前改为一次确认弹窗、system 路径直接执行风险动作、动作目录只发 risk_level；DB 列 risk_acknowledged_at 当时**保留一版**（已于同日晚删除，见下方回滚说明） | 生产实测：风险规则**不带授权字段**创建 200（旧码 400）、改参数 200（旧码 400 死循环）、precheck 清单 1 条、catalog 无 risk 字段、列仍在且新行 NULL；/health 一致、10 分钟 0 错误 |
+| 2026-11-18 13:48 | a67adf88 | sha256:3590ef660096… | 启动迁移幂等删除 automation_rules.risk_acknowledged_at（旧代码零引用；删时有 2 行非空，语义已废除） | /health commit 一致；日志 dropped dead column（had 2 non-null rows）；schema 列数 0；2 条规则与名称完整保留；API 无该字段、next_run 正常 |
 
 ## 回滚
 
@@ -27,6 +28,12 @@ curl -s http://127.0.0.1:18090/health                 # commit 必须回到 9f77
 本次变更没有数据库结构迁移（next_run 是 gorm:"-"），回滚不涉及库。
 唯一的启动期数据迁移是 MigrateTimeWindowTimezone：只回填 time_window 且时区为空的存量行，
 生产当前没有 time_window 规则，实际影响 0 行。
+
+> **2026-11-18 13:40 起（ee903d0f 之后）**：automation_rules.risk_acknowledged_at 已由启动迁移
+> MigrateAutomationRuleDropRiskAcknowledged 删除（当时生产上该列有 **2 行非空** —— 两条 BMS 规则
+> 的旧授权时间戳；该语义已废除、执行路径不再读取，删除不丢业务数据）。
+> **回滚到 ee903d0f 及更早的镜像不再可行** —— 旧代码 SELECT 该列会报 unknown column，
+> 本发布之后只能前进修复。
 
 ## 注意
 
