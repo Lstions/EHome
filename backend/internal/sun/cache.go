@@ -145,14 +145,20 @@ func (c *Cache) get(key CacheKey) (CacheEntry, bool) {
 // 一个跑一年的进程会保留 365 × 坐标 × 2 事件 条, 与方案 §3.1.3 的
 // "内存为常数级"结论直接矛盾。
 //
-// 为什么是三天而不是两天（2026-11-18 D21）：next_run 会以**次日**为 localDate
-// 调 Lookup（报"明天的日出"）。只留 {给定日, 次日} 时，这次读请求会把**今天**
-// 的条目淘汰掉，求值器下一个 tick 又要重算一整天 —— 纯浪费。保留前一日即可
-// 覆盖读路径问明天的情况，空间仍是常数级。
+// 为什么是五日而不是三日（2026-11-18 D22）：求值器现在一次求值要看「前一日 /
+// 当日 / 次日」三场事件（偏移可跨本地午夜），而 next_run 还会以次日为 localDate
+// 查询。若只留 {前一日, 当日, 次日}，查次日会把前一日淘汰、下一 tick 查前一日
+// 又把次日淘汰 —— 每天两次未命中，缓存形同虚设（A-18 实测 2 → 4 次重算）。
+// 保留 {today-2 … today+2} 覆盖三场候选 + 次日预热，空间仍是常数级
+// （5 日 × 2 事件 × 坐标组合）。
 func (c *Cache) pruneLocked(today string) {
-	keep := map[string]struct{}{today: {}, nextDateString(today): {}}
-	if prev := prevDateString(today); prev != "" {
-		keep[prev] = struct{}{}
+	d, err := time.Parse("2006-01-02", today)
+	if err != nil {
+		return // 键不是预期格式：不淘汰（保守），避免一次脏键清空整个缓存。
+	}
+	keep := make(map[string]struct{}, 5)
+	for i := -2; i <= 2; i++ {
+		keep[d.AddDate(0, 0, i).Format("2006-01-02")] = struct{}{}
 	}
 	for k := range c.entries {
 		if _, ok := keep[k.Date]; !ok {

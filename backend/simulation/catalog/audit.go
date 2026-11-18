@@ -326,7 +326,7 @@ func auditRun001(e *harness.Env) {
 //
 //	executed / pending_confirm / suppressed_cooldown / suppressed_daily_limit /
 //	condition_changed / failed_gate / failed_dispatch / confirmation_required /
-//	partial_failure / suppressed_no_solar_event / notification / expired /
+//	partial_failure / suppressed_no_solar_event / missed_solar_event / notification / expired /
 //	unresolved_selector / field_resolver_disabled
 //
 // confirmation_required 由 B1 新增（方案 §3.2.5 第 1 步）；partial_failure 由 B2
@@ -341,7 +341,7 @@ func auditIsDefinedResult(result string) bool {
 	switch result {
 	case "executed", "pending_confirm", "suppressed_cooldown", "suppressed_daily_limit",
 		"condition_changed", "failed_gate", "failed_dispatch", "confirmation_required",
-		"partial_failure", "suppressed_no_solar_event", "notification", "expired",
+		"partial_failure", "suppressed_no_solar_event", "missed_solar_event", "notification", "expired",
 		// 数据字段解析层结果码（设计《数据字段解析层》§10；与 models.AutomationResult
 		// UnresolvedSelector / FieldResolverDisabled 逐项一致 —— 求值阶段 fail-closed，
 		// 生产路径 automation/selector.go 会真实写入，漏列即误判为"未定义"）

@@ -86,6 +86,8 @@ var allModels = []interface{}{
 	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)
 	&models.AutomationRule{},
 	&models.AutomationEvent{},
+	// 日出/日落事件认领（P2，2026-11-18；与生产 AutoMigrate 列表同步）
+	&models.AutomationSunFire{},
 	// 多动作子表 (方案 §3.2.3 M1 / §5.1.1; 与生产 AutoMigrate 列表同步)
 	&models.AutomationRuleAction{},
 	// 数据字段解析层 (方案 v0.2 §4.2/§4.3; 与生产 AutoMigrate 列表同步)

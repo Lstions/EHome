@@ -26,6 +26,16 @@
 
 ## 变更清单
 
+### 2026-11-18（**日出日落跨午夜、停机补发、预览与多副本去重**）
+
+- **新增文档**：[分析/日出日落跨午夜与启动补发-2026-11-18.md](分析/日出日落跨午夜与启动补发-2026-11-18.md)：修复时间边界并补齐表单预览/精度/跨进程去重。
+- **P0 跨午夜漏触发**：偏移把 fireAt 推过本地午夜时旧实现**一次都不触发**（实测北京日出 -600min / 日落 +300min 均 0 次）；求值器与 `next_run` 改为 D-1/D/D+1 三日候选，`sunStates` 按**事件日期**记账，缓存淘汰窗口 3 日 → 5 日。
+- **P1 停机补发**：进程启动跨过事件时，10 分钟窗口内补发一次（库侧按 `event_at` 去重、查询失败 fail-safe）；超窗落新结果码 `missed_solar_event`（models / 仿真白名单 / 前端 union 三处同步）；配置晚于事件仍不补发。
+- **P3 表单预览**：新增只读 `GET /automation-rules/sun-times`；规则表单显示今天日出/日落与「偏移跨午夜 → 次日 00:46 触发」；极昼/极夜不显示假时刻。
+- **P2 精确唤醒**：`StartWindowTicker` 改为 `min(1min, 最近 sun fireAt)` 单 goroutine 循环，日出日落到点 ≤1 秒触发；`time_window` 仍 1 分钟。
+- **P2 跨进程认领**：新增 `automation_sun_fires` 唯一键 `(rule_id,event_date,kind)`，滚动发布/多副本下同一场事件只执行一次；`time_window`/`sensor_threshold` 仍要求单副本（TOPOLOGY §7）。
+- **验证**：Go 四包（automation/models/api/database）全绿 + `go vet ./...`；前端 `vue-tsc` 无错、automation 186 条用例通过；新增 15 条回归用例（Go 10 / 前端 5）。
+
 ### 2026-11-14（**环境变量收敛** —— 只保留部署身份，删除 28 个行为开关）
 
 - **触发**：BMS 页「温度趋势加载失败：查询窗口 24h0m0s 超过帧表单次解码上限 1h0m0s」。数据完全正常（帧表 86,400 帧/天、rollup 1,436 桶/24h、coverage complete/1440）；根因是当天重部署时 `/srv/ehomesystem/docker-compose.yml` 被仓库模板覆盖，丢了 `EHOME_TELEMETRY_ROLLUP_READ=true` 与 `EHOME_TELEMETRY_FRAME_DECODE_MAX_WINDOW=6h`，而代码默认值分别是 **false / 1h**。

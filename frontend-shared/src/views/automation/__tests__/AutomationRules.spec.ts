@@ -127,6 +127,9 @@ vi.mock('@/api/automation', () => ({
     confirmEvent: vi.fn(),
     triggerRule: vi.fn(),
     precheckRule: vi.fn(),
+    // 日出/日落预览（P3，2026-11-18）：表单有完整位置时才会调用；未在用例内
+    // mockResolvedValue 时返回 undefined，组件按"预览不可用"静默处理。
+    sunTimes: vi.fn(),
   },
 }))
 vi.mock('@/api/edgeDevice', () => ({

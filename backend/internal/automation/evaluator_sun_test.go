@@ -167,10 +167,12 @@ func TestA2SunEventOffsetIncludingNegative(t *testing.T) {
 	}
 }
 
-// ── A-3: 重启后首 tick **不补触发**已过事件 ──────────────────────────────
+// ── A-3: 重启后首 tick **不补触发**超出窗口的已过事件 ────────────────────
+//
+// 2026-11-18 P1 起，事件刚过去 ≤10 分钟时会补发一次（见 sun_offset_catchup_test.go）；
+// 本用例用"事件后 2 小时"，钉死窗口外仍不补发。
 //
 // 反向验证: 把首 tick 改成"now >= eventTime 即触发" → 变红。
-// 这是方案 §6.2 明确要求被测试钉死的语义。
 func TestA3RestartFirstTickDoesNotBackfire(t *testing.T) {
 	fx := buildSunFixture(t, models.AutomationSunKindSunrise, 0)
 	rec := &sunRecorder{}

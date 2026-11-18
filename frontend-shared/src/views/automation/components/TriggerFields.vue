@@ -273,6 +273,21 @@
         </div>
       </div>
     </el-form-item>
+    <!-- 今天日出/日落预览（P3，2026-11-18）：位置/偏移一变化就按规则时区现算。
+         跨午夜偏移必须显式提示（旧实现这类规则一次都不触发），否则用户会以为规则配错了。 -->
+    <div v-if="hasLocation" class="sun-preview" data-test="sun-preview">
+      <div v-if="sunPreviewLoading" class="hint">正在计算今天的日出/日落…</div>
+      <template v-else-if="sunPreview">
+        <div class="sun-preview__line" data-test="sun-preview-summary">{{ sunTimesText(sunPreview) }}</div>
+        <div
+          v-if="sunSelection"
+          class="sun-preview__line"
+          :class="{ 'sun-preview__line--warning': sunSelection.tone === 'warning' }"
+          data-test="sun-preview-selection"
+        >{{ sunSelection.text }}</div>
+      </template>
+      <div v-else-if="sunPreviewError" class="hint" data-test="sun-preview-error">{{ sunPreviewError }}</div>
+    </div>
   </template>
 
   <!-- 附加条件（结构化行 / JSON 源码）：编辑器自成一块，见 components/ConditionEditor.vue。
@@ -295,12 +310,12 @@ import { geoApi, type GeoCity } from '@/api/geo'
 import type { SensorField } from '@/api/sensorField'
 import type { EdgeDevice } from '@/api/edgeDevice'
 import type { SourceGroup } from '@/api/sourceGroup'
-import type { AutomationTriggerType, SunEventKind } from '@/api/automation'
+import { automationApi, type AutomationTriggerType, type SunEventKind, type SunTimesPreview } from '@/api/automation'
 import {
   SUN_KIND_OPTIONS, SUN_OFFSET_MIN, SUN_OFFSET_MAX, sunOffsetText,
 } from '../sunEvent'
 import { buildTimeZoneOptions } from '../timezone'
-import { comparators } from '../automationFormat'
+import { comparators, sunSelectionView, sunTimesText } from '../automationFormat'
 import type { RuleFormModel } from '../composables/useRuleForm'
 import type { ConditionRow } from '../composables/useRuleConditions'
 import ConditionEditor from './ConditionEditor.vue'
@@ -414,6 +429,67 @@ const hasLocation = computed(() => (
   && typeof props.form.timezone === 'string' && props.form.timezone.trim() !== ''
 ))
 
+// ── 今天日出/日落预览（P3，2026-11-18）──
+//
+// 组件持有的仍是「取数过程的临时状态」（loading / 失败提示），位置与规则参数仍在
+// 页面持有的 form 上。判据（时区归日/极昼极夜/跨午夜）全部在后端，前端只渲染。
+const sunPreview = ref<SunTimesPreview | null>(null)
+const sunPreviewLoading = ref(false)
+const sunPreviewError = ref('')
+const sunSelection = computed(() => (sunPreview.value ? sunSelectionView(sunPreview.value) : null))
+/** 只用于丢弃过期响应：快速改偏移时，先发的请求可能后到。 */
+let sunPreviewSeq = 0
+let sunPreviewTimer: ReturnType<typeof setTimeout> | undefined
+
+async function loadSunPreview() {
+  if (!props.isSunTrigger || !hasLocation.value) {
+    sunPreview.value = null
+    sunPreviewError.value = ''
+    return
+  }
+  // 单测替身/老后端可能没有该方法：预览是附加能力，缺失不得影响表单保存。
+  if (typeof automationApi.sunTimes !== 'function') return
+  const seq = ++sunPreviewSeq
+  sunPreviewLoading.value = true
+  sunPreviewError.value = ''
+  try {
+    const data = await automationApi.sunTimes({
+      latitude: props.form.latitude as number,
+      longitude: props.form.longitude as number,
+      timezone: props.form.timezone ?? '',
+      kind: props.form.trigger_sun_kind as SunEventKind,
+      offset_min: props.form.trigger_sun_offset_min,
+    })
+    if (seq !== sunPreviewSeq) return
+    sunPreview.value = data ?? null
+  } catch (e) {
+    if (seq !== sunPreviewSeq) return
+    sunPreview.value = null
+    sunPreviewError.value = '今天日出/日落计算失败（不影响保存）'
+    console.warn('[automation] 日出日落预览失败:', e)
+  } finally {
+    if (seq === sunPreviewSeq) sunPreviewLoading.value = false
+  }
+}
+
+function scheduleSunPreview() {
+  if (sunPreviewTimer) clearTimeout(sunPreviewTimer)
+  sunPreviewTimer = setTimeout(() => { void loadSunPreview() }, 300)
+}
+
+watch(
+  [
+    () => props.isSunTrigger,
+    () => props.form.latitude,
+    () => props.form.longitude,
+    () => props.form.timezone,
+    () => props.form.trigger_sun_kind,
+    () => props.form.trigger_sun_offset_min,
+  ],
+  () => scheduleSunPreview(),
+  { immediate: true },
+)
+
 function locationLabel(city: string, country?: string): string {
   return city && country ? `${city}（${country}）` : (city || '已定位')
 }
@@ -461,6 +537,10 @@ function onCityChange(name: string | number | boolean | undefined) {
   const picked = cityOptions.value.find(c => c.name === String(name ?? ''))
   if (!picked) return
   applyLocation(picked.latitude, picked.longitude, picked.timezone, locationLabel(picked.name, picked.country))
+  // TODO(2026-11-18, P3 后续)：选中城市后自动把预览/表单滚动到该城市"今天的日落"。
+  // 刻意未做：它会在用户没有明确改 kind 时改变默认值与滚动位置，需先定
+  // 「是否覆盖用户已选的日出/日落」的交互口径；当前只显示预览，不替用户做选择。
+  // 关联：docs/分析/日出日落跨午夜与启动补发-2026-11-18.md §7。
 }
 
 async function locateByIP() {
@@ -486,7 +566,10 @@ watch(() => props.form.location_source, (source) => {
   if (source === 'city' && cityOptions.value.length === 0) void loadCityOptions('')
 }, { immediate: true })
 
-onBeforeUnmount(() => { if (citySearchTimer) clearTimeout(citySearchTimer) })
+onBeforeUnmount(() => {
+  if (citySearchTimer) clearTimeout(citySearchTimer)
+  if (sunPreviewTimer) clearTimeout(sunPreviewTimer)
+})
 </script>
 
 <style scoped>
@@ -523,6 +606,19 @@ onBeforeUnmount(() => { if (citySearchTimer) clearTimeout(citySearchTimer) })
 .sun-location__picker :deep(.el-select) { width: 320px; max-width: 100%; }
 .sun-location__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 .sun-location__label { font-weight: 600; }
+
+/* 今天日出/日落预览：非输入区，用弱底色与次级文字，避免与表单校验错误混淆。 */
+.sun-preview {
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+.sun-preview__line--warning { color: var(--el-color-warning); }
 
 /* ============================================================================
    窄屏：768px 主断点（与 theme.css / useResponsive 同源）

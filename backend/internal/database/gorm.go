@@ -142,6 +142,9 @@ func AutoMigrate() error {
 		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)
 		&models.AutomationRule{},
 		&models.AutomationEvent{},
+		// 日出/日落事件认领（P2，2026-11-18）：(rule_id,event_date,kind) 唯一，
+		// 滚动发布/多副本时保证一场事件只执行一次。
+		&models.AutomationSunFire{},
 		// 多动作子表 (方案 §3.2.3 M1 / §5.1.1, 实施计划 §2 B2)。
 		// 唯一索引 (rule_id, seq) 由模型 tag 建出; 历史规则的 seq=1 回填由
 		// MigrateAutomationRuleActions (本文件尾部调用) 幂等完成。

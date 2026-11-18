@@ -12,8 +12,13 @@ import (
 //
 // 触发只发生在"这一轮 tick 真的跨过事件时刻"(prevTick < fireAt <= now), 且规则的
 // 当前配置必须在事件之前就已生效 (configChanged=false)。规则在事件之后才进入求值器
-// 缓存 (新建 / 重新启用 / 编辑白名单字段 ⇒ sunStates 被清) 时, 一律登记"本日已处理"、
+// 缓存 (新建 / 重新启用 / 编辑白名单字段 ⇒ sunStates 被清) 时, 一律登记"本场已处理"、
 // 不执行 —— 要立刻执行请用手动触发。
+//
+// 2026-11-18 P1 的**唯一例外**是"进程启动跨过事件"（部署/崩溃），且必须同时满足：
+// 事件刚过去 ≤ sunCatchUpWindow、规则 UpdatedAt 早于 fireAt、库侧没有该事件的审计行。
+// 该路径由 sun_offset_catchup_test.go 单独覆盖；本文件覆盖的"配置变更 / 事件后新建"
+// 语义没有放宽。
 //
 // 反向验证: 把 evalSunEventRule 的 prevTick / configChanged 守卫删掉 (退回
 // "now >= fireAt 且本日未触发" 的电平判定) → 本文件三条子用例全部变红。

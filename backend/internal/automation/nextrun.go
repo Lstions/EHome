@@ -28,8 +28,8 @@ import (
 //     (evaluator.go 的 LoadRules)。2026-11-17 起 sun_event 改边沿判定、**不补发**
 //     (evaluator.go 的 lastClockTick): 清态后当天不会再触发, 所以这里必须能看见
 //     "本日未触发"这个内存事实, 才能把下一次正确报到次日;
-//  2. **进程刚重启** —— sunStates 为空 + 首 tick 不补发 (prevTick 为空), 反推
-//     得"今天还会触发", 实际今天已经不会再触发;
+//  2. **进程刚重启** —— sunStates 为空 + 首 tick 走补发窗口 (≤10min 可能真的
+//     触发, 之后不再触发), 反推得"今天还会触发"在窗口外必然说错;
 //  3. **手动触发 / 确认执行** —— 2026-11-18 起这两条执行路径也会
 //     MarkTriggered 回灌 evaluator.triggered（见 planner.markCooldown），
 //     因此内存态是**唯一判据**；数据库里的 last_triggered_at 只在重启时
@@ -234,12 +234,14 @@ func (e *Evaluator) nextRunForRule(rule models.AutomationRule, now time.Time, st
 	return res
 }
 
-// nextSunEvent 计算日出/日落规则的下一个 fireAt (= 当日事件时刻 + 偏移)。
+// nextSunEvent 计算日出/日落规则的下一个 fireAt（= 事件时刻 + 偏移）。
 //
-// 与 evaluator.evalSunEventRule 的状态机严格对齐:
-//   - 每节点本地日只触发一次 (sunStates 记的是本地日期);
-//   - 首 tick 对"已过时刻"保守跳过, 该本地日不再补触发;
-//   - 极昼/极夜显式返回 no_event, **绝不**用零值时间冒充结果。
+// 与 evaluator.evalSunEventRule 的状态机严格对齐（2026-11-18 候选集）：
+//   - 候选 = now 所在本地日的前一日/当日/次日，跨午夜偏移不会算错日期；
+//   - 每场事件只触发一次（sunStates 记的是**事件日期**，不是 tick 的本地日）；
+//   - 首 tick（clockTick 为空）不报"即将触发"：真实是否会触发取决于补发窗口与
+//     库侧是否已有记录，读路径不额外查库，保守地报下一个未来时刻；
+//   - 极昼/极夜显式返回 no_event，**绝不**用零值时间冒充结果。
 func (e *Evaluator) nextSunEvent(rule models.AutomationRule, now time.Time, st ruleNextRunState) nextRunCandidate {
 	resolved, err := models.ResolveRuleSunLocation(rule)
 	if err != nil {
@@ -251,71 +253,74 @@ func (e *Evaluator) nextSunEvent(rule models.AutomationRule, now time.Time, st r
 	}
 	loc := resolved.Location
 	out := nextRunCandidate{tz: resolved.Timezone}
+	offset := time.Duration(rule.TriggerSunOffsetMin) * time.Minute
 
-	eventAt, evStatus, err := e.sunCache.Lookup(resolved.Latitude, resolved.Longitude, loc, now, kind)
+	candidates, err := e.sunCandidatesAround(resolved, now, kind, offset)
 	if err != nil {
 		out.status = models.NextRunUnavailable
 		out.detail = "日出日落计算失败: " + err.Error()
 		return out
 	}
-	if evStatus != sun.StatusOK {
+	if len(candidates) == 0 {
 		out.status = models.NextRunNoEvent
-		out.detail = solarStatusText(evStatus)
-		return out
-	}
-
-	offset := time.Duration(rule.TriggerSunOffsetMin) * time.Minute
-	fireToday := eventAt.Add(offset)
-	localDate := now.In(loc).Format("2006-01-02")
-
-	switch {
-	case st.sunFiredDate == localDate:
-		// 本日已触发 → 次日 (日期翻转即天然复位)。
-		return e.sunCandidate(resolved, loc, now, kind, offset, 1, out)
-	case now.Before(fireToday):
-		// 本日事件尚未到达, 就是它。
-		return e.sunCandidate(resolved, loc, now, kind, offset, 0, out)
-	case !st.configChanged && !st.clockTick.IsZero() && fireToday.After(st.clockTick):
-		// 事件正好落在"上一轮 tick ~ 现在"之间, 而本日尚未落触发状态: 规则在
-		// 上一轮 tick 时已在缓存 (configChanged=false), 只是还没遇到跨过事件的那
-		// 一轮 —— 求值器会在下一个 tick 真的触发 (prevTick < fireAt <= now)。
-		// 报"明天"会让用户以为今晚不会执行, 报下一个 tick 之后才贴近事实。
-		// 若规则刚新建/刚改过判定字段 (configChanged=true), 求值器本日会跳过,
-		// 落到 default 分支报次日。
-		out.status = models.NextRunScheduled
-		out.basis = models.NextRunBasisSun
-		out.at = now.Add(WindowTickInterval())
-		out.detail = fmt.Sprintf("即将触发（%s 落在本次求值区间内: %s）", sunKindText(kind), eventAt.In(loc).Format("15:04"))
-		return out
-	default:
-		// 事件早已过去而本日未触发: 2026-11-17 起不补发 (边沿判定), 本日不会再
-		// 触发 → 次日。
-		return e.sunCandidate(resolved, loc, now, kind, offset, 1, out)
-	}
-}
-
-// sunCandidate 取 dayOffset 天后的日出/日落并叠加偏移, 组装成候选。
-func (e *Evaluator) sunCandidate(resolved models.SunLocation, loc *time.Location, now time.Time,
-	kind sun.Kind, offset time.Duration, dayOffset int, out nextRunCandidate) nextRunCandidate {
-	day := now
-	if dayOffset != 0 {
-		day = now.AddDate(0, 0, dayOffset)
-	}
-	eventAt, status, err := e.sunCache.Lookup(resolved.Latitude, resolved.Longitude, loc, day, kind)
-	if err != nil || status != sun.StatusOK {
-		out.status = models.NextRunNoEvent
-		if dayOffset > 0 {
-			out.detail = "次日无日出/日落事件"
-		} else {
+		if _, status, lookupErr := e.sunCache.Lookup(resolved.Latitude, resolved.Longitude, loc, now, kind); lookupErr == nil {
 			out.detail = solarStatusText(status)
+		} else {
+			out.detail = "本日无日出/日落事件"
 		}
 		return out
 	}
-	out.status = models.NextRunScheduled
-	out.basis = models.NextRunBasisSun
-	out.at = eventAt.Add(offset)
-	out.detail = fmt.Sprintf("%s %s", sunKindText(kind), eventAt.In(loc).Format("15:04"))
+
+	// ① 本次 tick 区间内即将触发（与求值器同一判据 prevTick < fireAt <= now）：
+	// 该事件尚未被判为已处理，求值器下一轮就会真的提交。
+	if !st.configChanged && !st.clockTick.IsZero() {
+		for i := range candidates {
+			c := &candidates[i]
+			if c.fireAt.After(st.clockTick) && !c.fireAt.After(now) && st.sunFiredDate != c.eventDate {
+				out.status = models.NextRunScheduled
+				out.basis = models.NextRunBasisSun
+				out.at = now.Add(WindowTickInterval())
+				out.detail = fmt.Sprintf("即将触发（%s 落在本次求值区间内: %s）",
+					sunKindText(kind), c.eventAt.In(loc).Format("15:04"))
+				return out
+			}
+		}
+	}
+
+	// ② 下一个未来时刻（跳过已处理的事件日）。
+	//
+	// 只报"今天/明天"这类绝对时刻还不够：跨午夜偏移时事件时刻与触发时刻不在
+	// 同一本地日，detail 必须把触发日写出来，否则用户会以为规则配错了。
+	for i := range candidates {
+		c := &candidates[i]
+		if !c.fireAt.After(now) || st.sunFiredDate == c.eventDate {
+			continue
+		}
+		out.status = models.NextRunScheduled
+		out.basis = models.NextRunBasisSun
+		out.at = c.fireAt
+		out.detail = sunNextDetail(kind, *c, loc)
+		return out
+	}
+
+	// ③ 理论不可达：D+1 的事件必然晚于 now。兜底不承诺时刻（不编造）。
+	out.status = models.NextRunNoEvent
+	out.detail = "未来 48 小时内无日出/日落事件"
 	return out
+}
+
+// sunNextDetail 生成"下一次"的可读说明。
+//
+// 跨午夜偏移时事件时刻与触发时刻不在同一本地日（日落 19:46 + 300min ⇒ 次日
+// 00:46 触发）；只写事件时刻会让用户以为规则配错了，必须把触发日也写出来。
+func sunNextDetail(kind sun.Kind, c sunEventCandidate, loc *time.Location) string {
+	eventAt := c.eventAt.In(loc)
+	fireAt := c.fireAt.In(loc)
+	if eventAt.Format("2006-01-02") != fireAt.Format("2006-01-02") {
+		return fmt.Sprintf("%s %s（%s 触发）", sunKindText(kind),
+			eventAt.Format("15:04"), fireAt.Format("01-02 15:04"))
+	}
+	return fmt.Sprintf("%s %s", sunKindText(kind), eventAt.Format("15:04"))
 }
 
 // nextTimeWindow 计算时间窗口规则的下一个边界时刻。

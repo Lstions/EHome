@@ -4,6 +4,7 @@ import type {
   AutomationEventResult,
   AutomationRule,
   AutomationTriggerType,
+  SunTimesPreview,
 } from '@/api/automation'
 import { UNKNOWN } from '@/utils/format'
 import { sunOffsetText } from './sunEvent'
@@ -76,6 +77,7 @@ export const resultOptions: Array<{ value: AutomationEventResult; label: string 
   { value: 'confirmation_required', label: '规则未授权' },
   { value: 'partial_failure', label: '部分失败' },
   { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
+  { value: 'missed_solar_event', label: '错过日出日落' },
   { value: 'unresolved_selector', label: '选择器解析不到' },
   { value: 'field_resolver_disabled', label: '字段解析未启用' },
 ]
@@ -149,6 +151,7 @@ export function resultText(r: AutomationEventResult): string {
     confirmation_required: '规则未授权',
     partial_failure: '部分失败',
     suppressed_no_solar_event: '无日出日落事件',
+    missed_solar_event: '错过日出日落',
     // 字段解析层：配置错（解析不到）与运维开关（解析未启用）分列，处置方式不同
     unresolved_selector: '选择器解析不到',
     field_resolver_disabled: '字段解析未启用',
@@ -171,6 +174,9 @@ export function resultTagType(r: AutomationEventResult): 'success' | 'warning' |
   //     的状态（设备已被改动、下发失败、待确认已超时）；这两条没有任何动作下发、无设备副作用，
   //     处置是改配置或开开关，属"需要处理但不紧急"。
   if (r === 'unresolved_selector' || r === 'field_resolver_disabled') return 'warning'
+  // missed_solar_event: 事件存在但没执行（停机/重启跨过且超补发窗口）。没有任何动作
+  // 下发、无设备副作用，但用户必须知道"这次设备没动过" ⇒ warning，与 suppressed_* 区分。
+  if (r === 'missed_solar_event') return 'warning'
   // partial_failure 是**危险状态**（设备已被改了一半，需人工介入），必须比 failed_* 更显眼，
   // 故与 expired/failed_* 同为 danger。
   if (r.startsWith('failed_') || r === 'expired' || r === 'partial_failure') return 'danger'
@@ -320,4 +326,86 @@ export function nextRunText(rule: AutomationRule, nowMs: number): NextRunView {
     return { text: `1 分钟内${confirm}`, tone: 'warn', hasTime: true }
   }
   return { text: `${nextRunAtText(nr.at, nr.timezone, nowMs)}${confirm}`, tone: 'ok', hasTime: true }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 日出/日落预览（P3，2026-11-18；后端 models/sun_times.go）
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 把 ISO 时刻按**规则时区**渲染成 HH:mm（与 next_run 同一套 zonedParts）。 */
+export function zonedHM(iso: string, timeZone?: string): string {
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) return UNKNOWN
+  const p = zonedParts(ms, timeZone)
+  return `${p.H}:${p.M}`
+}
+
+type SunTimePointStatus = SunTimesPreview['sunrise']['status']
+
+function sunStatusText(status: SunTimePointStatus): string {
+  switch (status) {
+    case 'always_up':
+      return '极昼'
+    case 'always_down':
+      return '极夜'
+    case 'error':
+      return '计算失败'
+    default:
+      return ''
+  }
+}
+
+/**
+ * 表单里「今天（MM-DD）：日出 HH:mm ｜ 日落 HH:mm」一行。
+ *
+ * 时区必须用**规则时区**渲染：设备在纽约、规则配 America/New_York 时，
+ * 后端返回的就是那边的钟面值；按浏览器时区格式化会显示成无关数字。
+ */
+export function sunTimesText(p: SunTimesPreview): string {
+  const date = p.date.length >= 10 ? p.date.slice(5) : p.date
+  const sr = p.sunrise.status === 'ok' && p.sunrise.at
+    ? zonedHM(p.sunrise.at, p.timezone)
+    : sunStatusText(p.sunrise.status)
+  const ss = p.sunset.status === 'ok' && p.sunset.at
+    ? zonedHM(p.sunset.at, p.timezone)
+    : sunStatusText(p.sunset.status)
+  return `今天（${date}）：日出 ${sr} ｜ 日落 ${ss}`
+}
+
+/**
+ * 表单里「本规则会怎么触发」一行。
+ *
+ * 跨午夜偏移必须显式提示（旧实现这类规则一次都不触发，修复后由候选集处理）：
+ * 只显示事件时刻会让用户以为规则配错了，所以把真实 fireAt 与「次日/前一日」写出来。
+ */
+export function sunSelectionView(p: SunTimesPreview): { text: string; tone: 'info' | 'warning' } | null {
+  const sel = p.selected
+  if (!sel) return null
+  const kind = sel.kind === 'sunrise' ? '日出' : '日落'
+  if (sel.status !== 'ok' || !sel.event_at || !sel.fire_at) {
+    const why = sunStatusText(sel.status)
+    return { text: `本规则：今天没有${kind}事件${why ? `（${why}）` : ''}`, tone: 'warning' }
+  }
+  const evMs = Date.parse(sel.event_at)
+  const fireMs = Date.parse(sel.fire_at)
+  if (!Number.isFinite(evMs) || !Number.isFinite(fireMs)) return null
+  const ev = zonedParts(evMs, p.timezone)
+  const fire = zonedParts(fireMs, p.timezone)
+  const dayDiff = Math.round(
+    (Date.UTC(fire.y, fire.m - 1, fire.d) - Date.UTC(ev.y, ev.m - 1, ev.d)) / 86_400_000,
+  )
+  const dayPrefix = dayDiff === 1 ? '次日 ' : dayDiff === -1 ? '前一日 ' : ''
+  const offset = sel.offset_min
+  const offsetText = offset === 0 ? '正点' : `${offset > 0 ? '后' : '前'} ${Math.abs(offset)} 分钟`
+  if (dayDiff !== 0 && dayPrefix === '') {
+    // ±720 分钟最多跨一日；真出现跨多日就按绝对日期写，不猜「次日」。
+    return {
+      text: `本规则：${kind} ${ev.H}:${ev.M}，${offsetText} → ${fire.m}-${fire.d} ${fire.H}:${fire.M} 触发`,
+      tone: 'warning',
+    }
+  }
+  return {
+    text: `本规则：${kind} ${ev.H}:${ev.M}，${offsetText} → ${dayPrefix}${fire.H}:${fire.M} 触发`,
+    tone: dayDiff === 0 ? 'info' : 'warning',
+  }
 }

@@ -17,6 +17,7 @@ import (
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
+	"ehome/backend/internal/sun"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -174,6 +175,9 @@ func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automa
 		// 保存前风险预检（修 AU-06）：契约 = frontend-shared/src/api/automation.ts 的
 		// PrecheckResponse{risk_actions,blocking_errors,warnings}。只读、无副作用。
 		rules.POST("/precheck", precheckAutomationRule(db, catalog))
+		// 规则表单的日出/日落预览（P3，2026-11-18）。必须注册在 /:id 之前，
+		// 否则 "sun-times" 会被当成规则 id。只读、无副作用。
+		rules.GET("/sun-times", previewSunTimes)
 		rules.GET("/:id", getAutomationRule(db, evaluator))
 		rules.PUT("/:id", updateAutomationRule(db, evaluator, catalog))
 		rules.DELETE("/:id", deleteAutomationRule(db, evaluator))
@@ -208,6 +212,110 @@ func attachNextRuns(rules []models.AutomationRule, evaluator automationEvaluator
 			rules[i].NextRun = &val
 		}
 	}
+}
+
+// GET /api/v1/automation-rules/sun-times
+//
+// 规则表单的只读预览：按「坐标 + 时区」算今天的日出/日落；带 kind/offset 时
+// 顺带算出这条规则的真实 fireAt 与是否跨本地午夜（P3，2026-11-18）。
+//
+// 为什么放在后端：归日/极昼极夜/跨午夜偏移全部是 sun 包与求值器的既有判据，
+// 前端复刻一份必然与执行侧漂移。本端点不读库、不写库、不触发任何动作。
+//
+// 参数（query）：latitude, longitude, timezone 必填；date 可选（默认今天，YYYY-MM-DD）；
+// kind=sunrise|sunset 与 offset_min（[-720,720]）可选，用于算 Selected。
+func previewSunTimes(c *gin.Context) {
+	lat, err := strconv.ParseFloat(strings.TrimSpace(c.Query("latitude")), 64)
+	if err != nil {
+		Error(c, 400, "latitude 非法: "+c.Query("latitude"))
+		return
+	}
+	lon, err := strconv.ParseFloat(strings.TrimSpace(c.Query("longitude")), 64)
+	if err != nil {
+		Error(c, 400, "longitude 非法: "+c.Query("longitude"))
+		return
+	}
+	if err := models.ValidateSunCoordinates(lat, lon); err != nil {
+		Error(c, 400, err.Error())
+		return
+	}
+	tzName := strings.TrimSpace(c.Query("timezone"))
+	loc, err := models.ValidateTimezone(tzName)
+	if err != nil {
+		Error(c, 400, "timezone 非法: "+err.Error())
+		return
+	}
+	day := time.Now().In(loc)
+	if raw := strings.TrimSpace(c.Query("date")); raw != "" {
+		parsed, parseErr := time.ParseInLocation("2006-01-02", raw, loc)
+		if parseErr != nil {
+			Error(c, 400, "date 非法（YYYY-MM-DD）: "+raw)
+			return
+		}
+		day = parsed
+	}
+
+	resp := models.SunTimesPreview{
+		Timezone: tzName,
+		Date:     day.In(loc).Format("2006-01-02"),
+		Sunrise:  sunTimePoint(lat, lon, loc, day, sun.Sunrise),
+		Sunset:   sunTimePoint(lat, lon, loc, day, sun.Sunset),
+	}
+	if kind := strings.TrimSpace(c.Query("kind")); kind != "" {
+		if !validAutomationSunKinds[kind] {
+			Error(c, 400, "kind 非法: "+kind+"（sunrise|sunset）")
+			return
+		}
+		offset := 0
+		if raw := strings.TrimSpace(c.Query("offset_min")); raw != "" {
+			v, parseErr := strconv.Atoi(raw)
+			if parseErr != nil {
+				Error(c, 400, "offset_min 非法: "+raw)
+				return
+			}
+			offset = v
+		}
+		if offset < -sunMaxOffsetMinutes || offset > sunMaxOffsetMinutes {
+			Error(c, 400, fmt.Sprintf("offset_min 越界: %d（允许 [-%d, %d]）",
+				offset, sunMaxOffsetMinutes, sunMaxOffsetMinutes))
+			return
+		}
+		resp.Selected = sunSelection(lat, lon, loc, day, sun.Kind(kind), offset)
+	}
+	Success(c, resp)
+}
+
+// sunTimePoint 把 SunEvent 的 (时刻, 状态) 翻译成响应结构；非 OK 时 At 必须为 nil。
+func sunTimePoint(lat, lon float64, loc *time.Location, day time.Time, kind sun.Kind) models.SunTimePoint {
+	at, status, err := sun.SunEvent(lat, lon, loc, day, kind)
+	if err != nil {
+		return models.SunTimePoint{Status: "error"}
+	}
+	if status != sun.StatusOK {
+		return models.SunTimePoint{Status: string(status)}
+	}
+	t := at
+	return models.SunTimePoint{At: &t, Status: string(status)}
+}
+
+// sunSelection 计算规则当前的 eventAt / fireAt / 是否跨本地午夜。
+func sunSelection(lat, lon float64, loc *time.Location, day time.Time, kind sun.Kind, offsetMin int) *models.SunSelection {
+	sel := &models.SunSelection{Kind: string(kind), OffsetMin: offsetMin}
+	at, status, err := sun.SunEvent(lat, lon, loc, day, kind)
+	if err != nil {
+		sel.Status = "error"
+		return sel
+	}
+	sel.Status = string(status)
+	if status != sun.StatusOK {
+		return sel
+	}
+	fireAt := at.Add(time.Duration(offsetMin) * time.Minute)
+	eventAt := at
+	sel.EventAt = &eventAt
+	sel.FireAt = &fireAt
+	sel.CrossesMidnight = at.In(loc).Format("2006-01-02") != fireAt.In(loc).Format("2006-01-02")
+	return sel
 }
 
 // GET /api/v1/automation-rules

@@ -3,6 +3,7 @@ import {
   SUN_KIND_OPTIONS, SUN_OFFSET_MAX, SUN_OFFSET_MIN,
   sunKindLabel, sunOffsetText, sunLocationComplete,
 } from '../sunEvent'
+import { sunSelectionView, sunTimesText } from '../automationFormat'
 
 /**
  * F-1 门禁：日出/日落选项 + 偏移分钟（含**负值**）。
@@ -70,5 +71,60 @@ describe('F-1 坐标/时区必填', () => {
   it('非有限数字视为未填（NaN/Infinity 不得混进提交体）', () => {
     expect(sunLocationComplete({ latitude: Number.NaN, longitude: 1, timezone: 'UTC' })).toBe(false)
     expect(sunLocationComplete({ latitude: 1, longitude: Number.POSITIVE_INFINITY, timezone: 'UTC' })).toBe(false)
+  })
+})
+
+// ── P3：规则表单的日出/日落预览（2026-11-18）─────────────────────────────
+describe('日出/日落预览文案', () => {
+  const base = {
+    timezone: 'Asia/Shanghai',
+    date: '2026-11-18',
+    sunrise: { at: '2026-11-18T07:02:10+08:00', status: 'ok' as const },
+    sunset: { at: '2026-11-18T16:56:18+08:00', status: 'ok' as const },
+  }
+
+  it('今天一行按规则时区渲染（不按浏览器时区）', () => {
+    expect(sunTimesText(base)).toBe('今天（11-18）：日出 07:02 ｜ 日落 16:56')
+  })
+
+  it('跨午夜偏移必须提示「次日」并用 warning 色', () => {
+    const view = sunSelectionView({
+      ...base,
+      selected: {
+        kind: 'sunset',
+        offset_min: 300,
+        event_at: '2026-06-21T19:46:19+08:00',
+        fire_at: '2026-06-22T00:46:19+08:00',
+        crosses_midnight: true,
+        status: 'ok',
+      },
+    })
+    expect(view?.tone).toBe('warning')
+    expect(view?.text).toContain('次日 00:46')
+  })
+
+  it('负偏移跨到前一日也要写清楚', () => {
+    const view = sunSelectionView({
+      ...base,
+      selected: {
+        kind: 'sunrise',
+        offset_min: -600,
+        event_at: '2026-06-21T04:45:55+08:00',
+        fire_at: '2026-06-20T18:45:55+08:00',
+        crosses_midnight: true,
+        status: 'ok',
+      },
+    })
+    expect(view?.tone).toBe('warning')
+    expect(view?.text).toContain('前一日 18:45')
+  })
+
+  it('极昼/极夜不显示假时刻', () => {
+    expect(sunTimesText({ ...base, sunrise: { status: 'always_up' } })).toContain('极昼')
+    expect(sunTimesText({ ...base, sunset: { status: 'always_down' } })).toContain('极夜')
+  })
+
+  it('未选规则参数时不渲染第二行', () => {
+    expect(sunSelectionView(base)).toBeNull()
   })
 })

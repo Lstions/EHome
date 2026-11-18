@@ -55,6 +55,7 @@ export type AutomationEventResult =
   | 'confirmation_required'   // 自动路径被确认门拦住: 规则缺少规则级风险授权。**不应出现** —— 保存入口 V7 校验保证"能保存成功 = 已授权"(2026-11-18 用户裁定); 唯一来源是存量数据/风险等级升级/绕过 API, 处置=编辑规则重新授权
   | 'partial_failure'         // 多动作执行到第 k 个失败、剩余已中止 (危险状态: 设备已被改了一半, 需人工介入)
   | 'suppressed_no_solar_event' // 极昼/极夜: 本日无日出/日落事件, 规则本日不触发 (显式审计, 不静默)
+  | 'missed_solar_event'       // 日出/日落事件存在但未执行: 进程停机/重启跨过且超出启动补发窗口 (设备本次没动过)
   // ── 来源组结果码（方案《规则数据来源与复合来源》N-18；与后端
   // models.AutomationResultSource* 及 simulation/catalog/audit.go 白名单逐项一致，
   // 由 backend/scripts/check_source_group.sh SG-16 三向钉住）
@@ -395,6 +396,33 @@ async function unwrap<T>(p: Promise<unknown>): Promise<T> {
   return res as T
 }
 
+// ── 日出/日落预览 (P3, 2026-11-18; 后端 models/sun_times.go) ──
+
+/** 单个日出/日落事件；status != ok 时 at 必须缺席（极昼/极夜没有该事件）。 */
+export interface SunTimePoint {
+  at?: string
+  status: 'ok' | 'always_up' | 'always_down' | 'error'
+}
+
+/** 某条 sun_event 规则在当前坐标/偏移下的触发预览。 */
+export interface SunSelection {
+  kind: SunEventKind
+  offset_min: number
+  event_at?: string
+  fire_at?: string
+  crosses_midnight: boolean
+  status: SunTimePoint['status']
+}
+
+/** 规则表单的「今天日出/日落」预览（只读，不落库）。 */
+export interface SunTimesPreview {
+  timezone: string
+  date: string
+  sunrise: SunTimePoint
+  sunset: SunTimePoint
+  selected?: SunSelection
+}
+
 export const automationApi = {
   async listRules(params?: { enabled?: boolean; trigger_type?: AutomationTriggerType }): Promise<AutomationRule[]> {
     return unwrap<AutomationRule[]>(client.get('/api/v1/automation-rules', { params }))
@@ -482,5 +510,20 @@ export const automationApi = {
    */
   async triggerRule(id: number): Promise<AutomationEvent> {
     return unwrap<AutomationEvent>(client.post(`/api/v1/automation-rules/${id}/trigger`))
+  },
+  /**
+   * 表单预览（只读、无副作用）：按坐标/时区算当天日出日落；带 kind/offset 时
+   * 顺带算真实 fireAt 与是否跨本地午夜。判据全部在后端（sun 包/求值器），
+   * 前端不复制一份，避免"预览说会触发、执行侧却不会"的漂移。
+   */
+  async sunTimes(params: {
+    latitude: number
+    longitude: number
+    timezone: string
+    kind?: SunEventKind
+    offset_min?: number
+    date?: string
+  }): Promise<SunTimesPreview> {
+    return unwrap<SunTimesPreview>(client.get('/api/v1/automation-rules/sun-times', { params }))
   },
 }

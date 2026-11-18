@@ -22,6 +22,7 @@ import (
 	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const maxWindowSamples = 1000
@@ -117,15 +118,19 @@ type Evaluator struct {
 	// 若在窗口内则触发, exit 规则首次 tick 若在窗口内则不触发)。
 	windowStates map[uint]bool
 
-	// sunStates 记录 sun_event 规则"本节点本地日是否已触发过" (rule ID → 本地日期)。
+	// sunStates 记录 sun_event 规则"哪一场事件已处理过" (rule ID → **事件日期**)。
 	//
 	// 为什么是日期而不是 bool: 日出日落是瞬时点事件, 1 分钟 tick 会在事件时刻之后
-	// 的每一分钟命中同一个事件。记录"已触发的本地日期"后, 日期翻转即天然表示
-	// "新一日可再触发", 不需要额外的跨日清理逻辑 (方案 §6.2 状态机)。
+	// 的每一分钟命中同一个事件。记录"已处理的事件日期"后, 事件日期推进即天然表示
+	// "新一场可再触发", 不需要额外的跨日清理逻辑 (方案 §6.2 状态机)。
 	//
-	// 重启后清空 + **首 tick 保守不触发** (见 evalSunEventRule):
-	// 与 windowStates 的区间边沿语义不同, 点事件无法区分"重启前已触发"与
-	// "重启错过了", 故一律按保守处理 (方案 §6.2)。
+	// ⚠ 是**事件日期**不是 tick 的本地日 (2026-11-18 D22): 偏移可把 fireAt 推过
+	// 本地午夜 (日落 +300min ⇒ 次日 00:46 触发), 此时 tick 的本地日已经翻篇, 而
+	// 事件仍属于前一天。用 tick 日期会让同一场事件在次日重复处理。
+	//
+	// 重启后清空; 首 tick 走补发窗口 (见 evalSunEventFirstTick): 事件刚过去
+	// ≤ sunCatchUpWindow 且库侧无记录时补发一次, 超窗落 missed 审计; 配置晚于
+	// 事件的仍不补发 (2026-11-17 裁决)。
 	sunStates map[uint]string
 
 	// sunCache 是日出日落计算的进程内缓存 (key 含 lat/lon/tzName/localDate/kind)。
@@ -137,6 +142,10 @@ type Evaluator struct {
 	// 用于**每天只落一条**审计 (防刷量), key=ruleID → 已落审计的本地日期。
 	sunLocationAudit map[uint]string
 
+	// lastSunClaimPrune 是认领表清理的上次执行时刻（Start 的 30s 循环里每天一次）。
+	// 只由 Start 的单个 goroutine 读写，不加锁。
+	lastSunClaimPrune time.Time
+
 	// lastClockTick 是上一次时钟驱动求值 (time_window + sun_event) 的时刻,
 	// 零值 = 本进程尚未求值过。
 	//
@@ -145,7 +154,9 @@ type Evaluator struct {
 	// (2026-11-17 用户裁决: 不做补发, 要立刻执行请用手动触发)。
 	//
 	// 由此一条规则只在"事件发生前就已生效"时才会被自动执行:
-	//   · 进程重启 (prevTick 为空) 不补发已过事件 (方案 §6.2 / A-3);
+	//   · 进程重启 (prevTick 为空) 走首 tick 分支: 事件刚过去 ≤ sunCatchUpWindow
+	//     且库侧无记录时补发一次, 超过窗口落 missed_solar_event 审计
+	//     (2026-11-18 P1; 仍不属于"任意补发" —— 窗口外的旧事件绝不执行);
 	//   · 规则在事件之后才新建 / 重新启用 / 编辑白名单字段 (sunStates 被清) 也不补发
 	//     —— 旧实现按"now >= fireAt 且本日未触发"判电平, 状态一丢就立刻重放旧事件。
 	// 该字段只在 evalTimeWindows 里读改写一次 (1 分钟 1 次), 不在求值热路径。
@@ -406,7 +417,7 @@ func (e *Evaluator) LoadRules() {
 		}
 	}
 	// 配置变更标记 (2026-11-17 不补发): 新进入缓存或判定字段变化 ⇒ 下一次求值
-	// 若事件已过则跳过。载体独立于 sunStates —— 后者记"本日已触发过", 本标记记
+	// 若事件已过则跳过。载体独立于 sunStates —— 后者记"这一场已处理过", 本标记记
 	// "当前配置晚于事件生效" (编辑把 fireAt 往后挪时只有它能拦住)。
 	for id, r := range next {
 		if old, ok := prev[id]; !ok || !sameWindowStateFields(old, r) {
@@ -566,6 +577,7 @@ func (e *Evaluator) Start() {
 				return
 			case <-ticker.C:
 				e.LoadRules()
+				e.pruneSunClaims()
 			}
 		}
 	}()
@@ -589,24 +601,82 @@ var windowTickInterval = time.Minute
 // WindowTickInterval 返回 time_window 触发器的求值周期（生产恒 1 分钟）。
 func WindowTickInterval() time.Duration { return windowTickInterval }
 
-// StartWindowTicker 启动 time_window 触发器独立求值 ticker（周期见 WindowTickInterval）。
+// StartWindowTicker 启动时钟驱动规则的求值循环（time_window + sun_event）。
 // 与 sensor_threshold 的 Evaluate 路径完全独立 — 时钟驱动不挂传感器解析回调。
 // ctx 取消时优雅退出 (main.go 接线用)。
+//
+// 2026-11-18 P2：不再是固定 1 分钟的 ticker，而是"最近一个日出/日落 fireAt 与
+// 1 分钟中取较小者"的循环 —— 事件到点后 ≤1 秒唤醒，time_window 仍按 1 分钟兜底。
+//
+// 为什么必须是**单 goroutine**：tick 与提前唤醒若各起一个 goroutine 并发调用
+// evalTimeWindows，prevTick 的读改写虽然加了锁，但两次求值会交错使用对方的
+// "上一轮时刻"，边沿判定可能漏触发或重复。串行循环没有这个问题，代价是
+// 唤醒粒度受一次求值耗时限制（毫秒级）。
 func (e *Evaluator) StartWindowTicker(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(WindowTickInterval())
-		defer ticker.Stop()
 		for {
+			wait := WindowTickInterval()
+			now := time.Now()
+			if at := e.nextSunWakeAt(now); !at.IsZero() {
+				// +1s 保证唤醒时 now 已跨过 fireAt（定时器可能早于墙钟一点点）。
+				if d := at.Sub(now) + time.Second; d > 0 && d < wait {
+					wait = d
+				}
+			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
 			case <-e.stopCh:
+				timer.Stop()
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				e.evalTimeWindows(time.Now())
 			}
 		}
 	}()
+}
+
+// nextSunWakeAt 返回所有 enabled sun_event 规则中最近的**未来** fireAt（零值 = 没有）。
+//
+// 只用于缩短唤醒间隔，不改变任何判定：早醒时 evalTimeWindows 仍按
+// prevTick < fireAt <= now 判边沿，没跨过就什么都不做（冷却/配置变更同样拦住）。
+func (e *Evaluator) nextSunWakeAt(now time.Time) time.Time {
+	e.mu.RLock()
+	rules := make([]models.AutomationRule, 0, 4)
+	for _, r := range e.rules {
+		if r.TriggerType == models.AutomationTriggerSunEvent {
+			rules = append(rules, r)
+		}
+	}
+	e.mu.RUnlock()
+
+	var next time.Time
+	for _, r := range rules {
+		resolved, err := e.resolveRuleSun(r)
+		if err != nil {
+			continue
+		}
+		kind := sun.Kind(r.TriggerSunKind)
+		if !kind.Valid() {
+			continue
+		}
+		candidates, err := e.sunCandidatesAround(resolved, now, kind,
+			time.Duration(r.TriggerSunOffsetMin)*time.Minute)
+		if err != nil {
+			continue
+		}
+		for _, c := range candidates {
+			if !c.fireAt.After(now) {
+				continue
+			}
+			if next.IsZero() || c.fireAt.Before(next) {
+				next = c.fireAt
+			}
+		}
+	}
+	return next
 }
 
 // EvaluateClockRulesAt 以**注入时刻**执行一次时钟驱动规则求值 (time_window + sun_event)。
@@ -651,29 +721,26 @@ func (e *Evaluator) evalTimeWindows(now time.Time) {
 	}
 }
 
-// evalSunEventRule 单条 sun_event 规则求值 (方案 §6.2 状态机, 2026-11-17 改为边沿判定)。
+// evalSunEventRule 单条 sun_event 规则求值（方案 §6.2 状态机；2026-11-18 改候选集）。
 //
-// 状态机:
+// 状态机（按**事件日期**记忆，不是按 tick 的本地日）：
 //
-//	未求值 ──(tick 且 prevTick < fireAt <= now)──▶ 已触发
-//	未求值 ──(tick 且 now <  fireAt)──────────────▶ 未求值
-//	未求值 ──(tick 且 fireAt <= prevTick)─────────▶ 记为"本日已处理", 不触发
-//	已触发 ──(节点本地日期翻转)────────────────────▶ 未求值 (新一日)
-//	任意   ──(极昼/极夜)──────────────────────────▶ 本日不触发 + 显式审计
+//	未处理 ──(tick 且 prevTick < fireAt <= now)──▶ 已触发
+//	未处理 ──(tick 且 now <  fireAt)──────────────▶ 未处理（配置先于事件生效）
+//	未处理 ──(tick 且 fireAt <= prevTick)─────────▶ 记为"本场已处理", 不触发
+//	已处理 ──(事件日期推进)───────────────────────▶ 新一场事件可触发
+//	任意   ──(极昼/极夜, 三日无解)────────────────▶ 本日不触发 + 显式审计
 //
-// 三条硬约束:
+// 三条硬约束：
 //  1. **只在真正跨过事件时刻的那一轮 tick 触发**: 必须 prevTick < fireAt <= now。
-//     · 进程重启 (prevTick 为空) 不补发已过事件 (方案 §6.2 / A-3 门禁钉死);
-//     · 规则在事件之后才新建 / 重新启用 / 编辑白名单字段 (sunStates 被清) 也不补发
-//       —— 2026-11-17 用户裁决: 不做补发, 要立刻执行请用手动触发
-//       (POST /api/v1/automation-rules/:id/trigger)。
-//     旧实现按"now >= fireAt 且本日未触发"判电平, 上述两种情况会把几小时前的
-//     日出/日落**重放**一次并真实下发设备动作 (2026-11-17 22:14:57 生产实测)。
-//     代价(有意接受): 在事件前不足一个 tick 内才新建/修改的规则, 当天也不再自动
-//     触发(无法判定新配置是否赶在事件之前生效, 取保守方向), 需要时手动触发。
-//  2. 每节点本地日**只触发一次**: 由 sunStates[ruleID] = 本地日期 保证。
-//  3. 极昼/极夜**不静默**: 落一条显式审计 (suppressed_no_solar_event, O-6),
-//     每日本事件只落一条 (防刷量)。
+//     · 进程重启 (prevTick 为空) 走首 tick 分支：事件刚过去 ≤ sunCatchUpWindow
+//     且库侧无记录时补发一次；超过窗口落 missed_solar_event 审计；配置晚于
+//     事件 (UpdatedAt > fireAt) 仍不补发（2026-11-17 裁决 + 2026-11-18 P1）。
+//     · 规则在事件之后才新建 / 重新启用 / 编辑白名单字段 也不补发。
+//  2. 每场事件**只触发一次**: 由 sunStates[ruleID] = eventDate（事件所属本地日）
+//     保证；跨午夜偏移时它与 tick 的本地日不同。
+//  3. 极昼/极夜**不静默**: 落一条显式审计 (suppressed_no_solar_event, O-6)，
+//     每日本事件只落一条（防刷量）。
 func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, prevTick time.Time) {
 	resolved, err := e.resolveRuleSun(rule)
 	if err != nil {
@@ -689,97 +756,303 @@ func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, 
 		return
 	}
 
-	eventAt, status, err := e.sunCache.Lookup(resolved.Latitude, resolved.Longitude,
-		resolved.Location, now, kind)
-	if err != nil {
-		e.recordSunNoEvent(rule, now, "compute_failed: "+err.Error())
-		return
-	}
-	if status != sun.StatusOK {
-		// 极昼/极夜 (O-6): 不触发 + 显式审计 (前端可见), 每日本事件一条。
-		e.recordSunNoEvent(rule, now, string(status))
-		return
-	}
-
 	// 偏移分钟 (可负 = 提前)。范围由 handler 校验; 运行期若见到越界值按不触发处理。
 	offset := rule.TriggerSunOffsetMin
 	if offset < -sunMaxOffsetMin || offset > sunMaxOffsetMin {
 		e.recordSunNoEvent(rule, now, fmt.Sprintf("offset_out_of_range: %d", offset))
 		return
 	}
-	fireAt := eventAt.Add(time.Duration(offset) * time.Minute)
 
-	// 节点本地日 (归日口径 = 节点时区, 不是后端进程时区; 方案 §3.1.3)。
-	localDate := now.In(resolved.Location).Format("2006-01-02")
+	// 候选事件 = now 所在本地日的前一日/当日/次日。
+	//
+	// 为什么必须看前后各一日（2026-11-18 D22）：偏移可把 fireAt 推过本地午夜
+	// （日落 23:40 + 60min ⇒ 次日 00:40；日出 03:30 - 300min ⇒ 前一日 22:30）。
+	// 旧实现只取"now 当日那一场"事件，到了真正的 fireAt 时 now 已属于相邻本地日，
+	// 算出来的是再下一场事件 ⇒ now < fireAt 恒成立，规则**一次都不会触发**
+	// （实测：北京日出 -600min / 日落 +300min 均 0 次）。
+	candidates, err := e.sunCandidatesAround(resolved, now, kind, time.Duration(offset)*time.Minute)
+	if err != nil {
+		e.recordSunNoEvent(rule, now, "compute_failed: "+err.Error())
+		return
+	}
+	if len(candidates) == 0 {
+		// 极昼/极夜 (O-6): 不触发 + 显式审计 (前端可见), 每日本事件一条。
+		//
+		// 边界日（今日无事件、明日有）不落本条：候选集非空，规则会在明日正常触发。
+		e.recordSunNoEvent(rule, now, "no_solar_event")
+		return
+	}
 
+	// ── 冷却判定 (与 sensor_threshold / time_window 共用 triggered map 与 cooldownFor) ──
+	//
+	// 放在候选选择之前，与旧实现同序：冷却期内直接返回，连 configChanged 都不清
+	// (冷却到期后第一次 tick 才继续往下走)。
 	e.mu.Lock()
-	// 冷却判定 (与 sensor_threshold / time_window 共用 triggered map 与 cooldownFor)。
 	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
 		if cooldown := cooldownFor(rule); cooldown > 0 && now.Sub(firedAt) < cooldown {
 			e.mu.Unlock()
-			return // 冷却期内不触发 (冷却语义与其它触发类型一致)
+			return
 		}
 		delete(e.triggered, rule.ID)
 	}
-	// 本日是否已触发过 (日期翻转即自然复位)。
-	alreadyFiredToday := e.sunStates[rule.ID] == localDate
+	e.mu.Unlock()
 
-	// 边沿判定 (2026-11-17 用户裁决: 不做补发)。两个守卫缺一不可:
+	// ── 选出"这一轮 tick 真的跨过的那一场" ──
 	//
-	//  1. configChanged: 规则(或其判定字段)是在**事件之后**才生效的 (新建 /
-	//     重新启用 / 编辑白名单字段)。编辑可能把 fireAt 往后挪, 使 prevTick <
-	//     fireAt 仍成立, 所以只靠 2 判不出来;
-	//  2. prevTick < fireAt <= now: 这一轮 tick 真的跨过了事件时刻。prevTick 为
-	//     空 = 本进程第一次时钟求值, 无法区分"重启前已触发"与"重启错过了",
-	//     一律不补发 (方案 §6.2 / A-3)。
-	//
-	// 命中任一守卫都登记"本日已处理"(否则后续 tick 仍会认为"本日未触发"),
-	// 但绝不提交 Planner、不下发设备动作。
-	if now.Before(fireAt) {
-		// 事件尚未到达: 当前配置已先于事件生效, 清掉变更标记, 等跨过它的那一轮 tick。
-		delete(e.configChanged, rule.ID)
+	// 正常 tick: prevTick < fireAt <= now（边沿判定，2026-11-17 用户裁决不补发）。
+	// 首 tick（prevTick 为空）：没有左端点，取"最近一场已发生的事件"交给补发窗口
+	// 判定 —— 它要么在窗口内补发，要么落 missed 审计，要么按配置变更静默跳过。
+	var due *sunEventCandidate
+	var nextFuture *sunEventCandidate
+	if prevTick.IsZero() {
+		for i := len(candidates) - 1; i >= 0; i-- {
+			if !candidates[i].fireAt.After(now) {
+				due = &candidates[i]
+				break
+			}
+		}
+	} else {
+		for i := range candidates {
+			c := &candidates[i]
+			if c.fireAt.After(prevTick) && !c.fireAt.After(now) {
+				due = c
+				break
+			}
+		}
+	}
+	for i := range candidates {
+		if candidates[i].fireAt.After(now) {
+			nextFuture = &candidates[i]
+			break
+		}
+	}
+
+	if due == nil {
+		e.mu.Lock()
+		if nextFuture != nil {
+			// 事件尚未到达：当前配置已先于事件生效，清掉变更标记，等跨过它的那一轮 tick。
+			delete(e.configChanged, rule.ID)
+		} else {
+			// 所有候选都已在上一轮 tick 之前过去（进程假死/时钟跳变）：登记最近一场，
+			// 后续 tick 不再反复求值。不补发（与 2026-11-17 裁决一致）。
+			for i := len(candidates) - 1; i >= 0; i-- {
+				if !candidates[i].fireAt.After(prevTick) {
+					e.sunStates[rule.ID] = candidates[i].eventDate
+					break
+				}
+			}
+		}
 		e.mu.Unlock()
 		return
 	}
-	if alreadyFiredToday {
-		// 本日已触发过: 不重复提交 (sunStates 已持有该日期)。
+
+	// 首 tick 走补发窗口（P1，2026-11-18）：进程重启跨过事件时，若事件刚过去
+	// ≤ sunCatchUpWindow 且库侧没有该事件的执行记录，补发一次；超过窗口落
+	// missed 审计。配置在事件之后才生效的（UpdatedAt > fireAt）仍不补发。
+	if prevTick.IsZero() {
+		e.evalSunEventFirstTick(rule, *due, now)
+		return
+	}
+
+	e.mu.Lock()
+	// 这一场事件本进程已处理过（同一场重复 tick 不会再触发）。
+	if e.sunStates[rule.ID] == due.eventDate {
 		e.mu.Unlock()
 		return
 	}
 	if e.configChanged[rule.ID] {
 		// 规则的当前配置是在**事件之后**才生效的 (新建 / 重新启用 / 编辑判定字段)。
 		// 即使 fireAt 恰好落在 (prevTick, now] 内也不算"跨越" —— 那一刻这条规则
-		// 还不存在(或是别的参数)。登记本日已处理, 不提交、不下发。
+		// 还不存在(或是别的参数)。登记本场已处理, 不提交、不下发。
+		e.sunStates[rule.ID] = due.eventDate
 		delete(e.configChanged, rule.ID)
-		e.sunStates[rule.ID] = localDate
 		e.mu.Unlock()
-		logger.Infof("automation: sun_event 规则在事件之后才生效, 跳过本日(不补发) rule_id=%d event=%s now=%s",
-			rule.ID, fireAt.Format(time.RFC3339), now.Format(time.RFC3339))
+		logger.Infof("automation: sun_event 规则在事件之后才生效, 跳过本场(不补发) rule_id=%d event=%s event_date=%s now=%s",
+			rule.ID, due.fireAt.Format(time.RFC3339), due.eventDate, now.Format(time.RFC3339))
 		return
 	}
-	if prevTick.IsZero() || !fireAt.After(prevTick) {
-		e.sunStates[rule.ID] = localDate
-		e.mu.Unlock()
-		if prevTick.IsZero() {
-			logger.Infof("automation: sun_event 首 tick 保守跳过已过事件 rule_id=%d event=%s (方案 §6.2: 重启不补触发)",
-				rule.ID, fireAt.Format(time.RFC3339))
-		} else {
-			logger.Infof("automation: sun_event 跳过已过事件(不补发) rule_id=%d event=%s prev_tick=%s now=%s",
-				rule.ID, fireAt.Format(time.RFC3339), prevTick.Format(time.RFC3339), now.Format(time.RFC3339))
-		}
-		return
-	}
-	e.sunStates[rule.ID] = localDate
-	e.triggered[rule.ID] = now
+	e.sunStates[rule.ID] = due.eventDate
 	e.mu.Unlock()
 
-	if e.handler != nil {
-		ev := newTriggerEvent(rule, now, 0, "", nil)
-		// 把**事件时刻**（而非 tick 的 now）一并带出：UI 的「事件时刻」列展示的是
-		// "哪一次日出/日落"，不是"求值器哪一秒看到了它"。
-		eventAt := fireAt
-		ev.EventAt = &eventAt
-		e.handler.HandleTrigger(ev)
+	// 认领 + 执行在同一函数里：只有真正交给 Planner 才写冷却锚点。
+	// 滚动发布时两个容器可能同时走到这里，认领表保证同一场事件只执行一次。
+	if !e.fireSunEvent(rule, *due, now) {
+		return
+	}
+	e.mu.Lock()
+	e.triggered[rule.ID] = now
+	e.mu.Unlock()
+}
+
+// sunCatchUpWindow 是进程启动时"事件刚过去"的补发窗口（P1，2026-11-18）。
+//
+// 为什么需要它：日出/日落是**时刻事件**，部署/崩溃窗口撞上就整天不执行；而
+// 2026-11-17 的"不补发"裁决把"服务不可用导致的错过"也变成了静默跳过 —— 用户
+// 只能看到"规则今天没动"。10 分钟足以覆盖一次正常滚动发布，又不会让用户在事件
+// 后很久突然看到设备动作。
+//
+// 与"配置变更不补发"的边界：只有 rule.UpdatedAt < fireAt（当前配置在事件之前
+// 就已生效）才允许补发；否则仍按原裁决跳过。
+const sunCatchUpWindow = 10 * time.Minute
+
+// evalSunEventFirstTick 处理进程启动后的首轮时钟求值（P1 补发窗口）。
+//
+// 调用方保证：due 是本轮"最近一场已发生的事件"，prevTick 为空。
+func (e *Evaluator) evalSunEventFirstTick(rule models.AutomationRule, due sunEventCandidate, now time.Time) {
+	lateBy := now.Sub(due.fireAt)
+	configInEffect := rule.UpdatedAt.Before(due.fireAt)
+
+	fire := false
+	auditMissed := false
+	if configInEffect {
+		recorded := e.sunEventRecorded(rule.ID, due.fireAt)
+		switch {
+		case lateBy <= sunCatchUpWindow && !recorded:
+			fire = true
+		case lateBy > sunCatchUpWindow && !recorded:
+			auditMissed = true
+		}
+	}
+
+	e.mu.Lock()
+	if e.sunStates[rule.ID] == due.eventDate {
+		e.mu.Unlock()
+		return
+	}
+	e.sunStates[rule.ID] = due.eventDate
+	delete(e.configChanged, rule.ID)
+	e.mu.Unlock()
+
+	switch {
+	case fire:
+		// 先认领再执行：另一个进程可能已经抢到同一场事件。
+		if !e.fireSunEvent(rule, due, now) {
+			return
+		}
+		e.mu.Lock()
+		e.triggered[rule.ID] = now
+		e.mu.Unlock()
+		logger.Infof("automation: sun_event 启动补发(事件已过 %s, 窗口 %s) rule_id=%d event=%s",
+			lateBy.Round(time.Second), sunCatchUpWindow, rule.ID, due.fireAt.Format(time.RFC3339))
+	case auditMissed:
+		logger.Infof("automation: sun_event 启动时事件已超补发窗口(已过 %s) rule_id=%d event=%s",
+			lateBy.Round(time.Second), rule.ID, due.fireAt.Format(time.RFC3339))
+		e.recordMissedSunEvent(rule, due, now, lateBy)
+	case !configInEffect:
+		logger.Infof("automation: sun_event 配置晚于事件, 启动不补发 rule_id=%d event=%s updated_at=%s",
+			rule.ID, due.fireAt.Format(time.RFC3339), rule.UpdatedAt.Format(time.RFC3339))
+	}
+}
+
+// fireSunEvent 认领并执行一场日出/日落事件；true = 本进程真的把它交给了 Planner。
+//
+// 认领（P2，2026-11-18）必须在交给 Planner **之前**：滚动发布时两个容器可能同时
+// 判定"跨过了事件"，唯一键 (rule_id,event_date,kind) 只允许一个 INSERT 成功。
+// 返回 false 时调用方不得写冷却锚点 —— 否则会出现"本进程没执行却处于冷却中"。
+//
+// EventAt 必须是**事件时刻**（fireAt = 日出/日落 + 偏移），不是 tick 的 now ——
+// UI 的「事件时刻」列回答的是"哪一次日出/日落"，补发时两者可能相差数分钟。
+func (e *Evaluator) fireSunEvent(rule models.AutomationRule, due sunEventCandidate, now time.Time) bool {
+	if e.handler == nil {
+		return false
+	}
+	if !e.claimSunEvent(rule, due) {
+		return false
+	}
+	ev := newTriggerEvent(rule, now, 0, "", nil)
+	at := due.fireAt
+	ev.EventAt = &at
+	e.handler.HandleTrigger(ev)
+	return true
+}
+
+// sunEventRecorded 报告该规则在 fireAt 附近是否已有审计行（任意 result）。
+//
+// 为什么"任意 result"而不是只查 executed：我们要回答的是"这次事件有没有被处理
+// 过"。上一次可能落的是 failed_gate / pending_confirm / missed —— 它们都证明系统
+// 已经为这场事件做过决策，补发会重复下发设备动作（安全相关）。
+//
+// 查询失败按"已记录"处理（fail-safe）：重复动作的代价高于漏一次补发。
+func (e *Evaluator) sunEventRecorded(ruleID uint, fireAt time.Time) bool {
+	if e.db == nil {
+		return true
+	}
+	var cnt int64
+	err := e.db.Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND event_at BETWEEN ? AND ?",
+			ruleID, fireAt.Add(-2*time.Minute), fireAt.Add(2*time.Minute)).
+		Count(&cnt).Error
+	if err != nil {
+		logger.Warn("automation: check sun event recorded failed, skip catch-up",
+			"rule_id", ruleID, "fired_at", fireAt.Format(time.RFC3339), "error", err)
+		return true
+	}
+	return cnt > 0
+}
+
+// recordMissedSunEvent 落一条"事件已过且超出补发窗口"的显式审计（P1）。
+//
+// 与 suppressed_no_solar_event 的区别：后者是"今天根本没有该事件"（极昼/极夜），
+// 本码是"事件存在但没执行"（停机/重启跨过）。两者的处置完全不同 —— 前者无需
+// 动作，后者提示"这次设备没动过"，必须让用户看见（C5 静默失败形态）。
+func (e *Evaluator) recordMissedSunEvent(rule models.AutomationRule, due sunEventCandidate, now time.Time, lateBy time.Duration) {
+	if e.db == nil {
+		return
+	}
+	at := due.fireAt
+	ev := models.AutomationEvent{
+		RuleID:      rule.ID,
+		TriggeredAt: now,
+		Result:      models.AutomationResultMissedSolarEvent,
+		Detail: fmt.Sprintf("missed solar event %s: 事件已过 %s，超过启动补发窗口 %s",
+			due.fireAt.Format(time.RFC3339), lateBy.Round(time.Second), sunCatchUpWindow),
+		EventAt:   &at,
+		CreatedAt: now,
+	}
+	if err := e.db.Create(&ev).Error; err != nil {
+		logger.Warn("automation: failed to record missed_solar_event",
+			"rule_id", rule.ID, "error", err)
+	}
+}
+
+// claimSunEvent 为一场日出/日落事件写全局认领行；true = 本进程抢到，可以执行。
+//
+// ON CONFLICT DO NOTHING：并发/跨副本只有一个 INSERT 成功（RowsAffected=1）。
+// 写库失败一律按"未抢到"处理（fail-safe）：重复下发设备动作的代价高于漏一次。
+// 认领语义是 at-most-once —— 抢到后崩溃，本场事件不会再被任何进程执行，
+// 但审计里会有一条 executed 缺失/超窗的可见痕迹。
+func (e *Evaluator) claimSunEvent(rule models.AutomationRule, due sunEventCandidate) bool {
+	if e.db == nil {
+		return true
+	}
+	claim := models.AutomationSunFire{
+		RuleID:    rule.ID,
+		EventDate: due.eventDate,
+		Kind:      rule.TriggerSunKind,
+		FireAt:    due.fireAt,
+		CreatedAt: time.Now(),
+	}
+	res := e.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim)
+	if res.Error != nil {
+		logger.Warn("automation: claim sun event failed, skip fire",
+			"rule_id", rule.ID, "event_date", due.eventDate, "error", res.Error)
+		return false
+	}
+	return res.RowsAffected == 1
+}
+
+// pruneSunClaims 每天清理一次 14 天前的认领行。
+//
+// 规模：每规则每天 2 行（日出+日落），14 天足够覆盖"重启后再判"与排障窗口，
+// 又不会让表随运行时长无界增长。只由 Start 的 30s 循环调用。
+func (e *Evaluator) pruneSunClaims() {
+	if e.db == nil || time.Since(e.lastSunClaimPrune) < 24*time.Hour {
+		return
+	}
+	e.lastSunClaimPrune = time.Now()
+	cutoff := time.Now().AddDate(0, 0, -14).Format("2006-01-02")
+	if err := e.db.Where("event_date < ?", cutoff).Delete(&models.AutomationSunFire{}).Error; err != nil {
+		logger.Warn("automation: prune sun claims failed", "error", err)
 	}
 }
 

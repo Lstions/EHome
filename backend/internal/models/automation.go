@@ -87,6 +87,15 @@ const (
 	// 每节点每日本事件只落一次 (与 recordSuppressed 同款同窗节流, 防刷量)。
 	AutomationResultSuppressedNoSolarEvent = "suppressed_no_solar_event"
 
+	// AutomationResultMissedSolarEvent 是"日出/日落事件存在，但本次没有被执行"的
+	// 专属结果码（2026-11-18 P1 启动补发窗口）。
+	//
+	// 与 suppressed_no_solar_event 的区别：后者是"本日根本没有该事件"（极昼/
+	// 极夜），无需任何处置；本码是"事件存在、但进程停机/重启跨过了它，且已超出
+	// 补发窗口" —— 设备这次真的没动过，必须让用户看见（C5 静默失败形态）。
+	// 与 failed_* 的区别：没有任何动作进入执行路径，不是执行失败。
+	AutomationResultMissedSolarEvent = "missed_solar_event"
+
 	// ── 数据字段解析层结果码（设计《数据字段解析层-方案-2026-10-21》§10 审计口径 / §12.1 节流）──
 	//
 	// 为什么**不是** failed_*：这两条在**求值阶段**就 fail-closed（规则不触发），
