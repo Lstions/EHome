@@ -7,8 +7,7 @@ import type { ActionDefinition } from '@/api/deviceOperation'
 function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefinition {
   return {
     id: 'form_action', version: 1, name: '表单操作', description: 'desc',
-    device_type: 'prs3001', semantics: 'set', risk: 'medium',
-    transport: 'channel_cmd_v2',
+    device_type: 'prs3001', semantics: 'set',     transport: 'channel_cmd_v2',
     input_schema: {
       properties: {
         mode: { type: 'string', enum: ['auto', 'manual'] },

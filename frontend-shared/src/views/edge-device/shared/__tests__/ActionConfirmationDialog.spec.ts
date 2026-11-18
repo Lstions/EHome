@@ -6,8 +6,7 @@ import type { ActionDefinition } from '@/api/deviceOperation'
 function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefinition {
   return {
     id: 'test_action', version: 1, name: '测试操作', description: 'desc',
-    device_type: 'prs3001', semantics: 'set', risk: 'high',
-    risk_level: 'elevated', requires_confirmation: true,
+    device_type: 'prs3001', semantics: 'set',     risk_level: 'elevated', requires_confirmation: true,
     transport: 'channel_cmd_v2', ...overrides,
   }
 }

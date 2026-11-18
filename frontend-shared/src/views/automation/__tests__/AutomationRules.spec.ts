@@ -1457,8 +1457,8 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     })
   })
 
-  describe('F-4 保存前风险清单弹窗（O-2 授权落地）', () => {
-    it('含风险动作时弹清单，列出全部风险动作，未勾满时「保存规则」disabled', async () => {
+  describe('F-4 保存前风险确认（一次弹窗，无授权字段）', () => {
+    it('含风险动作时弹一次确认清单，列出全部风险动作；未确认不落库', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
       const wrapper = await mountPage()
       await openCreateFilled(wrapper, '日落关断 BMS')
@@ -1468,66 +1468,45 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
       expect(wrapper.findAll('[data-test="risk-item"]')).toHaveLength(1)
       const item = wrapper.find('[data-test="risk-item"]')
-      // 清单必须列全 动作名 + 目标设备 + 动作 ID + 参数 + 风险原因
       expect(item.text()).toContain('设置充放电 MOS 软件策略')
       expect(item.text()).toContain('BMS-01')
-      expect(item.text()).toContain('set_mos_policy')
-      expect(item.text()).toContain('discharge_software_closed=true')
       expect(item.text()).toContain('关闭充放电 MOS')
-
-      const confirmBtn = wrapper.find('[data-test="confirm-save"]')
-      expect(confirmBtn.attributes('disabled')).toBeDefined()
-      expect(wrapper.find('[data-test="ack-progress"]').text()).toContain('已确认 0 / 1')
-
-      // 勾选后才解禁
-      await wrapper.find('[data-test="risk-ack-1"]').setValue(true)
-      await flushPromises()
-      expect(wrapper.find('[data-test="confirm-save"]').attributes('disabled')).toBeUndefined()
-      expect(wrapper.find('[data-test="ack-progress"]').text()).toContain('已确认 1 / 1')
-      // 未点「保存规则」前不得落库
+      // 一次确认：没有逐项勾选框，也没有「已确认 x/y」计数
+      expect(wrapper.find('[data-test="risk-ack-1"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="ack-progress"]').exists()).toBe(false)
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
     })
 
-    it('勾选后点「保存规则」提交 risk_acknowledged=true（O-2 规则级授权）', async () => {
+    it('点「确认保存」直接提交，且提交体不含 risk_acknowledged', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
       mockedAutomationApi.createRule.mockResolvedValue({ ...ruleFixture, id: 12 })
       const wrapper = await mountPage()
       await openCreateFilled(wrapper, '日落关断 BMS')
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
-      await wrapper.find('[data-test="risk-ack-1"]').setValue(true)
-      await flushPromises()
       await wrapper.find('[data-test="confirm-save"]').trigger('click')
       await flushPromises()
 
       expect(mockedAutomationApi.createRule).toHaveBeenCalledTimes(1)
-      expect(mockedAutomationApi.createRule.mock.calls[0][0]).toEqual(
-        expect.objectContaining({ risk_acknowledged: true }),
-      )
+      const payload = mockedAutomationApi.createRule.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(payload).not.toHaveProperty('risk_acknowledged')
       expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
     })
 
-    it('未勾选时「保存规则」不可用，且直接点它也不落库（不靠 UI disabled 兜底）', async () => {
+    it('取消后不落库，弹窗关闭', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
       const wrapper = await mountPage()
       await openCreateFilled(wrapper, '日落关断 BMS')
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
-
-      // ① UI 层：按钮必须 disabled。
-      expect(wrapper.find('[data-test="confirm-save"]').attributes('disabled')).toBeDefined()
-      // ② 函数层：**直接调用处理函数**绕过 DOM 的 disabled 短路。
-      //    为什么必须这样测：VTU 的 trigger('click') 对 disabled 元素直接跳过派发
-      //    （实测：只断言"点 disabled 按钮不落库"时，把函数内的 allRisksAcked 判定
-      //    删掉本用例仍然全绿 —— 门禁变成恒真）。disabled 只是 UI 属性，
-      //    键盘/程序化调用/未来快捷键都可能绕过它，函数内必须再判一次。
-      const vm = wrapper.vm as unknown as { confirmRiskSave: () => Promise<void> }
-      await vm.confirmRiskSave()
+      await wrapper.find('[data-test="risk-cancel"]').trigger('click')
       await flushPromises()
+
+      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
     })
 
-    it('绕过弹窗直接再触发保存会被拦（onSave 入口护栏，不依赖按钮 disabled）', async () => {
+    it('弹窗已打开时再次触发保存会被入口护栏拦住（不依赖按钮 disabled）', async () => {
       mockedAutomationApi.precheckRule.mockResolvedValue(riskPrecheck())
       const wrapper = await mountPage()
       await openCreateFilled(wrapper, '日落关断 BMS')
@@ -1536,20 +1515,12 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(true)
       expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(1)
 
-      // 弹窗已开时再次点「保存」：必须在入口被拒。
-      // 断言"没有第二次预检"而不只是"没有落库" —— 后者在护栏缺失时也成立
-      // （第二次 onSave 会再弹一次清单，仍然不会 createRule，断言会假绿）。
       await wrapper.find('[data-test="save-rule"]').trigger('click')
       await flushPromises()
       expect(mockedAutomationApi.precheckRule).toHaveBeenCalledTimes(1)
       expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
-
-      // 取消后不得落库
-      await wrapper.find('[data-test="risk-cancel"]').trigger('click')
-      await flushPromises()
-      expect(wrapper.find('[data-test="save-risk-dialog"]').exists()).toBe(false)
-      expect(mockedAutomationApi.createRule).not.toHaveBeenCalled()
     })
+
 
     // ── 预检端点不可用时的降级（后端 precheck 尚未实现，必须能保存） ──────────
     //
@@ -1717,8 +1688,8 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     })
   })
 
-  describe('F-9 订阅 automation_confirmation_required（C5 前端闭环）', () => {
-    it('订阅表含新事件名，且收到推送时给出用户可见提示（不只写事件表）', async () => {
+  describe('F-9 订阅 automation_partial_failure（部分失败必须可见）', () => {
+    it('订阅表含部分失败事件，且收到推送时给出用户可见提示（不只写事件表）', async () => {
       const { useWebSocketStore } = await import('@/stores/websocket')
       const pinia = createPinia()
       const store = useWebSocketStore(pinia)
@@ -1730,26 +1701,26 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       mount(AutomationRules, { global: { plugins: [pinia] } })
       await flushPromises()
 
-      expect([...captured.keys()]).toContain('automation_confirmation_required')
       expect([...captured.keys()]).toContain('automation_partial_failure')
+      // 2026-11-18：规则级授权删除后，confirmation_required 不再有生产者，订阅也已移除
+      expect([...captured.keys()]).not.toContain('automation_confirmation_required')
 
-      const { ElMessage } = await import('element-plus')
-      // 代码走的是 ElMessage.warning(...)（不是 ElMessage({...})）—— 断言必须落在
-      // 真正被调用的那个 mock 上，否则会拿到空 calls 而"看起来"没有提示。
-      const warnMock = (ElMessage as unknown as { warning: { mock: { calls: unknown[][] } } }).warning
-      captured.get('automation_confirmation_required')!({
-        type: 'automation_confirmation_required',
-        payload: { detail: { rule_name: '日落关断 BMS', action_id: 'set_mos_policy' } },
+      const { feedback } = await import('@/utils/feedback')
+      const errMock = vi.spyOn(feedback, 'error').mockImplementation(() => ({ close: () => {} }) as ReturnType<typeof feedback.error>)
+      captured.get('automation_partial_failure')!({
+        type: 'automation_partial_failure',
+        payload: { detail: { rule_name: '日落关断 BMS', failed_seq: 2, failed_action_id: 'set_mos_policy' } },
       })
       await flushPromises()
-      // 用户可见提示必须点名规则与动作（C5 的缺陷形态就是"前端毫无提示"）
-      expect(warnMock.mock.calls.length).toBeGreaterThan(0)
-      const last = JSON.stringify(warnMock.mock.calls.at(-1))
+      expect(errMock).toHaveBeenCalled()
+      const last = JSON.stringify(errMock.mock.calls.at(-1))
       expect(last).toContain('日落关断 BMS')
       expect(last).toContain('set_mos_policy')
+      expect(last).toContain('部分变更')
       vi.restoreAllMocks()
     })
   })
+
 
   describe('F-10 窄屏 ≤480px 断点', () => {
     it('样式含 480px 断点，且动作卡操作区与弹窗 footer 在该断点下换行/撑满', async () => {

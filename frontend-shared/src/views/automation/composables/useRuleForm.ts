@@ -513,7 +513,7 @@ export function useRuleForm(options: {
    *   ② 动作卡片 → actions 数组，seq 按**下标**重排（后端 V1: 1..N 连续无重复）；
    *   ③ 坐标只在整个"全有或全无"组合下提交，否则省略（= 继承节点）。
    */
-  function buildPayload(riskAcknowledged?: boolean): CreateAutomationRuleRequest {
+  function buildPayload(): CreateAutomationRuleRequest {
     // 行模式下提交前再同步一次（防御）：任何绕过 deep watch 的写入都不该让提交体与界面脱节。
     // 源码模式下本函数是空操作（syncConditionsJson 自己 guard），原文原样提交。
     conditions.syncConditionsJson()
@@ -527,7 +527,6 @@ export function useRuleForm(options: {
       require_confirmed: form.require_confirmed,
       enabled: form.enabled,
     }
-    if (riskAcknowledged !== undefined) payload.risk_acknowledged = riskAcknowledged
     if (form.trigger_type === 'sensor_threshold') {
       payload.trigger_sensor_name = form.trigger_sensor_name.trim()
       payload.trigger_comparator = form.trigger_comparator

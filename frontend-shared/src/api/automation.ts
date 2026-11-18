@@ -134,13 +134,6 @@ export interface AutomationRule {
    * 本数组按 seq 升序, 是**完整的动作集合**; 前端一律以它为准。
    */
   actions?: AutomationAction[]
-  /**
-   * 风险动作的规则级授权时刻 (用户裁决 O-2)。只读 —— 由后端在保存时写入,
-   * 客户端不得直接赋值 (写入途径是请求体的 risk_acknowledged)。
-   * null/undefined = 未授权: 该规则的风险动作在自动路径上仍会被确认门拦住。
-   */
-  risk_acknowledged_at?: string | null
-
   // ── 执行约束 ──
   /** 冷却期 (默认 300s), 触发后抑制 */
   cooldown_sec: number
@@ -253,7 +246,7 @@ export interface PrecheckRiskAction {
 
 /** POST /api/v1/automation-rules/precheck 响应 data (方案 §4.1.2, 只读无副作用) */
 export interface PrecheckResponse {
-  /** **全部**风险动作 (含 seq/设备/参数), 前端据此渲染保存前风险清单 */
+  /** **全部**风险动作 (含 seq/设备/参数), 前端据此渲染保存前的一次确认清单 */
   risk_actions?: PrecheckRiskAction[]
   /** 与 V1-V7 相同的校验失败 (前端可在弹窗前拦截并逐条展示) */
   blocking_errors?: string[]
@@ -297,13 +290,7 @@ export interface CreateAutomationRuleRequest {
   actions?: AutomationActionInput[]
   cooldown_sec?: number
   max_daily_exec?: number
-  require_confirmed?: boolean
-  /**
-   * O-2 规则级授权: 保存含风险动作的规则时, 用户已在风险清单弹窗逐项确认。
-   * 注意这与 require_confirmed=false 是**两个**条件, 后端 V7 要求二者齐备才放行。
-   */
-  risk_acknowledged?: boolean
-}
+  require_confirmed?: boolean}
 
 export interface UpdateAutomationRuleRequest {
   name?: string
@@ -336,10 +323,7 @@ export interface UpdateAutomationRuleRequest {
   actions?: AutomationActionInput[]
   cooldown_sec?: number
   max_daily_exec?: number
-  require_confirmed?: boolean
-  /** 同创建: 显式确认/撤回对风险动作的规则级授权 */
-  risk_acknowledged?: boolean
-}
+  require_confirmed?: boolean}
 
 /** 策略触发/执行审计 (后端 AutomationEvent, 一行 = 一次触发决策) */
 export interface AutomationEvent {

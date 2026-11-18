@@ -51,7 +51,7 @@ function effective(reasonCode: string, reason: string): EffectiveAction {
   return {
     definition: {
       id: 'probe', version: 1, name: 'probe', description: '', device_type: 'sn3001_rain',
-      semantics: 'read', risk: 'low', transport: 'channel_cmd_v2',
+      semantics: 'read', transport: 'channel_cmd_v2',
     },
     available: false,
     reason,

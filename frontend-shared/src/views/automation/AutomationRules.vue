@@ -199,10 +199,6 @@
                     开启则规则触发后只生成「待确认」通知，人工确认后才下发；关闭则触发即执行
                   </span>
                 </el-form-item>
-                <div v-if="!form.require_confirmed && riskyActions.length" class="ack-hint" data-test="ack-hint">
-                  本规则含 {{ riskyActions.length }} 个风险动作且已关闭人工确认：保存时会要求逐项勾选确认
-                  （后端按规则级授权放行，授权在动作集合变化后自动失效并需重新确认）。
-                </div>
 
                 <el-form-item label="冷却时间">
                   <div class="number-field">
@@ -370,68 +366,34 @@
       @submit="applyFormParams"
     />
 
-    <!-- R11: 保存前风险清单二次确认（用户裁决 O-2 = 逐规则显式授权 + 保存时强确认）。
-         为什么逐项勾选而不是一次总确认（设计 D-5）：一次总确认在 3 个以上风险动作时会
-         退化成"闭眼点确定"；逐项勾选强制用户逐条读完 动作名 + 目标设备 + 参数。
-         默认焦点在**安全侧**（取消）也沿用既有 feedback.confirmDanger 的裁决
-         （utils/feedback.ts: 不得诱导性确认）。 -->
+    <!-- 保存前一次确认（2026-11-18 简化）：风险等级只决定"要不要提示",
+         不再有逐项勾选/规则级授权。取消是默认焦点（安全侧）。 -->
     <el-dialog
       v-model="riskDialogVisible"
-      title="保存前确认"
-      width="min(560px, 92vw)"
+      title="确认保存"
+      width="min(480px, 92vw)"
       data-test="save-risk-dialog"
       class="save-risk-dialog"
     >
       <el-alert
-        type="error"
+        type="warning"
         :closable="false"
         show-icon
-        :title="`本规则包含 ${riskDialogActions.length} 个风险动作`"
+        :title="riskSummary"
         data-test="risk-summary"
       >
-        请核对下列动作的目标设备与参数，逐项勾选确认后才可保存。本弹窗只约束「保存这条规则」。
+        规则触发后将自动执行这些操作；若需要执行前先问你，请开启「需人工确认」。
       </el-alert>
       <ul class="risk-list" data-test="risk-list">
-        <li v-for="(item, index) in riskDialogActions" :key="item.seq" class="risk-item" data-test="risk-item">
-          <div class="risk-item__name">
-            <span aria-hidden="true">⚠</span>
-            {{ item.action_name }}
-            <el-tag type="danger" size="small" data-test="risk-item-badge">
-              <span aria-hidden="true">⚠</span> {{ item.risk_label }}
-            </el-tag>
-          </div>
-          <dl class="risk-item__meta">
-            <div><dt>目标设备</dt><dd>{{ item.device_name }}</dd></div>
-            <div><dt>动作 ID</dt><dd class="mono">{{ item.action_id }}</dd></div>
-            <div><dt>参数</dt><dd class="mono">{{ item.params_summary }}</dd></div>
-            <div><dt>风险原因</dt><dd data-test="risk-item-reason">{{ item.risk_reason }}</dd></div>
-          </dl>
-          <label class="risk-ack">
-            <input
-              type="checkbox"
-              :checked="ackedSeqs.includes(item.seq)"
-              :data-test="`risk-ack-${index + 1}`"
-              :aria-label="`我已了解「${item.action_name}」对「${item.device_name}」的影响，并确认将其加入本规则`"
-              @change="toggleAck(item.seq)"
-            />
-            <span>我已了解「{{ item.action_name }}」对「{{ item.device_name }}」的影响，并确认将其加入本规则。</span>
-          </label>
+        <li v-for="item in riskDialogActions" :key="item.seq" class="risk-item" data-test="risk-item">
+          <span class="risk-item__name">{{ item.action_name }}</span>
+          <span class="risk-item__device">→ {{ item.device_name }}</span>
+          <span v-if="item.risk_reason" class="risk-item__reason" data-test="risk-item-reason">{{ item.risk_reason }}</span>
         </li>
       </ul>
       <template #footer>
-        <span class="ack-progress" data-test="ack-progress" role="status">
-          已确认 {{ ackedSeqs.length }} / {{ riskDialogActions.length }} 个风险动作
-        </span>
         <el-button ref="riskCancelRef" data-test="risk-cancel" @click="cancelRiskSave">取消</el-button>
-        <el-button
-          type="danger"
-          :disabled="!allRisksAcked"
-          :loading="saving"
-          data-test="confirm-save"
-          @click="confirmRiskSave"
-        >
-          保存规则
-        </el-button>
+        <el-button type="danger" :loading="saving" data-test="confirm-save" @click="confirmRiskSave">确认保存</el-button>
       </template>
     </el-dialog>
 
@@ -856,39 +818,27 @@ const DAILY_LIMIT_CHIPS: Array<{ value: number; label: string; text: string }> =
 /** 保存中（主按钮 loading 与"保存"按钮的二次点击拦截都读它）。 */
 const saving = ref(false)
 
-// ── 保存前风险清单二次确认 (R11 / F-4, 用户裁决 O-2) ──────────────────────
+// ── 保存前一次确认 (R11 / F-4，2026-11-18 简化：无逐项勾选/无授权字段) ──────────────
 
 interface RiskCheckItem {
   seq: number
-  action_id: string
   action_name: string
   device_name: string
-  /** 后端下发的展示标签（缺失时用 2 级契约的固定文案） */
-  risk_label: string
   risk_reason: string
-  params_summary: string
 }
 
 const riskDialogVisible = ref(false)
 const riskDialogActions = ref<RiskCheckItem[]>([])
-const ackedSeqs = ref<number[]>([])
-/** 保存成功后真的要执行的提交（避免把已确认的风险清单状态带进下一次保存）。 */
+/** 保存成功后真的要执行的提交（避免把已确认的清单状态带进下一次保存）。 */
 const pendingSubmit = ref<CreateAutomationRuleRequest | null>(null)
 const riskCancelRef = ref<{ $el?: HTMLElement } | null>(null)
+const riskSummary = computed(() => '本规则包含 ' + riskDialogActions.value.length + ' 个风险操作')
 
-const allRisksAcked = computed(
-  () => riskDialogActions.value.length > 0 && ackedSeqs.value.length === riskDialogActions.value.length,
-)
 
-function toggleAck(seq: number) {
-  ackedSeqs.value = ackedSeqs.value.includes(seq)
-    ? ackedSeqs.value.filter(s => s !== seq)
-    : [...ackedSeqs.value, seq]
-}
+
 
 function cancelRiskSave() {
   riskDialogVisible.value = false
-  ackedSeqs.value = []
   pendingSubmit.value = null
 }
 
@@ -909,23 +859,14 @@ function riskItemReason(actionId: string, deviceId: number, backendReason?: stri
 function buildRiskItems(risks: PrecheckRiskAction[]): RiskCheckItem[] {
   return risks.map(item => ({
     seq: item.seq,
-    action_id: item.action_id,
     action_name: actionNameOf(item.action_id, item.action_device_id),
     device_name: item.action_device_name || deviceName(item.action_device_id),
-    risk_label: item.risk_label || '风险',
     risk_reason: riskItemReason(item.action_id, item.action_device_id, item.risk_reason),
-    // 摘要优先级: 后端给的摘要 → 后端回带的参数 JSON → 本地卡片里的参数 JSON。
-    // 不能写成 `paramsSummary(item.action_params_json) || ...`：paramsSummary(undefined)
-    // 返回 '无参数'（真值），会把本地兜底整段短路掉，风险清单里就看不到用户实际填的参数。
-    params_summary: item.params_summary
-      || (item.action_params_json ? paramsSummary(item.action_params_json) : '')
-      || paramsSummary(form.actions.find(a => a.action_id === item.action_id)?.action_params_json),
   }))
 }
 
 function openRiskDialog(risks: PrecheckRiskAction[], payload: CreateAutomationRuleRequest) {
   riskDialogActions.value = buildRiskItems(risks)
-  ackedSeqs.value = []
   pendingSubmit.value = payload
   riskDialogVisible.value = true
 }
@@ -983,11 +924,7 @@ async function onSave() {
   saving.value = true
   try {
     const payload = buildPayload()
-    // 普通动作**无**二次确认，直接落库。此处刻意**不带** risk_acknowledged 字段
-    // （既不 true 也不 false）：带 false 会在每次保存普通规则时清掉规则级授权，而
-    // "未授权的普通规则被改成含风险动作"必然触发后端 B1 的授权失效（动作集合变化即
-    // 清空）并强制重新确认 —— 故 false 不带来额外安全性，只带来无谓的状态翻转；
-    // 带 true 则是无依据的授权。省略 = "本次保存不改变授权语义"，与后端 *bool 可空语义一致。
+    // 无风险动作的规则直接落库；有风险动作时先弹一次确认（见下方 precheck 分支）。
     const submitPlain = async () => { await submitRule(payload) }
 
     // ① 后端预检端点（方案 §4.1.2，**尚未实现**）。
@@ -1092,15 +1029,14 @@ async function focusRiskCancel() {
 }
 
 /** 逐项勾满后才可调用（按钮 disabled 的同时在函数里再判一次：绕过 UI 也必须被拒）。 */
+/** 一次确认后提交；提交体不带任何授权字段（风险只在保存时提示一次）。 */
 async function confirmRiskSave() {
-  if (!allRisksAcked.value) return
   const payload = pendingSubmit.value
   if (!payload) return
   saving.value = true
   try {
-    await submitRule({ ...payload, risk_acknowledged: true })
+    await submitRule(payload)
     riskDialogVisible.value = false
-    ackedSeqs.value = []
     pendingSubmit.value = null
   } catch {
     feedback.error('保存失败')
@@ -1296,11 +1232,7 @@ onMounted(async () => {
 // 它们尚未收进 `events/events.ts` 的 WS_EVENT 枚举（枚举缺失是既有债，
 // 这里先用字面量并注释出处，避免为 3 个事件扩枚举引发更大范围的改动）。
 //
-// B4 新增两个事件名的订阅（方案 §4.3）：
-//   · `automation_confirmation_required` —— C5 消除的**前端闭环**：自动路径上的风险动作
-//     被确认门拦住时，前端必须给出用户可见的提示，而不是只往事件表里写一行
-//     （改造前该结果落 failed_dispatch，与"传输失败"在界面上无法区分，用户看不到
-//     任何可行动信号）。这里**显式提示 + 带规则名**，并把事件表刷出来。
+// B4 新增事件名的订阅（方案 §4.3）：
 //   · `automation_partial_failure` —— 多动作执行到第 k 个失败、剩余已中止。这是
 //     危险状态（设备已被改了一半），必须显式提示"需要人工介入"，不能等用户翻事件表。
 const wsStore = useWebSocketStore()
@@ -1308,7 +1240,6 @@ const AUTOMATION_PUSH_EVENTS = [
   'automation_pending_confirm',
   'automation_daily_limit',
   'automation_system_actor_unavailable',
-  'automation_confirmation_required',
   'automation_partial_failure',
 ] as const
 let unsubscribeAutomationPushes: Array<() => void> = []
@@ -1322,17 +1253,7 @@ function pushDetail(message: { payload?: { detail?: Record<string, unknown> } } 
 
 function onAutomationPush(name: string, message: unknown) {
   const detail = pushDetail(message as { payload?: { detail?: Record<string, unknown> } })
-  if (name === 'automation_confirmation_required') {
-    const rule = detail.rule_name ?? detail.rule_id ?? ''
-    const action = detail.action_id ?? ''
-    // 2026-11-18 用户裁定：能保存成功就一定是完成了规则级授权，所以这个结果**不应出现**；
-    // 旧文案让用户"到触发历史里对相应事件执行确认" —— 那一步做不到（确认入口只对
-    // pending_confirm 开放，planner.ConfirmEvent 对其它结果返回 ErrConfirmNotPending）。
-    // 唯一有效处置是回到规则里重新勾选风险确认。
-    ElMessage.warning(
-      `规则「${rule}」的风险动作 ${action} 缺少规则级授权，已被确认门拦下（不应出现的数据状态）：请编辑该规则并勾选风险确认后重新保存。`,
-    )
-  } else if (name === 'automation_partial_failure') {
+  if (name === 'automation_partial_failure') {
     const rule = detail.rule_name ?? detail.rule_id ?? ''
     const seq = detail.failed_seq ?? ''
     const failed = detail.failed_action_id ?? ''
@@ -1407,50 +1328,25 @@ onUnmounted(() => {
 .chip:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
 .chip.is-active { border-color: var(--el-color-primary); color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 
-/* ============================================================================
-   规则级「风险动作 + 已关闭人工确认」提示（R9 / V7）
-   —— 与动作卡片的风险样式（components/ActionCards.vue）分开：这一条是**规则级**语义。
-   ========================================================================== */
-.ack-hint {
-  margin: -6px 0 12px 110px;
-  padding: 6px 10px;
-  border: 1px dashed var(--el-color-warning-light-5);
-  border-radius: 4px;
-  background: var(--el-color-warning-light-9);
-  font-size: 12px;
-  color: var(--el-text-color-regular);
-  line-height: 1.6;
-}
 .params-error { margin: 6px 0 0; font-size: 12px; color: var(--el-color-danger); }
 
 /* ============================================================================
-   保存前风险清单弹窗 (设计稿 §5 R11 / §6 D-5)
+   保存前一次确认弹窗（2026-11-18 简化：只提示风险等级，不再逐项勾选）
    ========================================================================== */
-.risk-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.risk-item {
-  border: 1px solid var(--el-color-danger-light-5);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--el-bg-color);
+.save-risk-dialog .risk-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.save-risk-dialog .risk-item {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: 8px; padding: 10px 12px; background: var(--el-bg-color);
 }
-.risk-item__name {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  font-weight: 600; color: var(--el-text-color-primary); font-size: 14px;
-}
-.risk-item__meta { display: grid; grid-template-columns: 1fr; gap: 2px; margin: 8px 0 0; }
-.risk-item__meta > div { display: flex; gap: 6px; font-size: 12px; min-width: 0; }
-.risk-item__meta dt { flex: 0 0 60px; color: var(--el-text-color-secondary); }
-.risk-item__meta dd { margin: 0; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
-.risk-ack { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; font-size: 13px; color: var(--el-text-color-regular); cursor: pointer; line-height: 1.6; }
-.risk-ack input { width: 16px; height: 16px; margin: 3px 0 0; flex: 0 0 auto; accent-color: var(--el-color-danger); }
-.risk-ack input:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
-.ack-progress { margin-right: auto; font-size: 12px; color: var(--el-text-color-secondary); }
+.save-risk-dialog .risk-item__name { font-weight: 600; color: var(--el-text-color-primary); font-size: 14px; }
+.save-risk-dialog .risk-item__device { color: var(--el-text-color-regular); font-size: 13px; }
+.save-risk-dialog .risk-item__reason { flex: 1 0 100%; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 
 /* ============================================================================
    窄屏：768px 主断点（与 theme.css / useResponsive 同源）
    ========================================================================== */
 @media (max-width: 768px) {
-  .ack-hint { margin-left: 0; }
   /* 触控目标高度：chips 在粗指针设备上同样要够 36px（theme.css 的触控档） */
   .chip { min-height: 36px; padding: 0 12px; }
 }
@@ -1492,7 +1388,6 @@ onUnmounted(() => {
   :deep(.el-dialog__body) { overflow: auto; }
   :deep(.el-dialog__footer) { display: flex; flex-wrap: wrap; gap: 8px; }
   :deep(.el-dialog__footer .el-button) { flex: 1 1 auto; min-height: 44px; }
-  .ack-progress { flex: 1 1 100%; margin: 0 0 4px; }
 }
 
 /* ============================================================================
