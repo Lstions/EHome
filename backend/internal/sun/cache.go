@@ -139,18 +139,35 @@ func (c *Cache) get(key CacheKey) (CacheEntry, bool) {
 	return e, ok
 }
 
-// pruneLocked 淘汰与当前日期不相邻的条目 (只留 today 与 tomorrow)。
+// pruneLocked 淘汰与给定日期不相邻的条目 (只留前一日/当日/次日)。
 //
 // 为什么必须在缓存内部做: localDate 在键里 ⇒ 条目随日期累积。若不淘汰,
 // 一个跑一年的进程会保留 365 × 坐标 × 2 事件 条, 与方案 §3.1.3 的
-// "内存为常数级"结论直接矛盾。只留两日是**充分**的: Lookup 永远只查当日
-// (并预热次日), 更早的日期不会再被访问。
+// "内存为常数级"结论直接矛盾。
+//
+// 为什么是三天而不是两天（2026-11-18 D21）：next_run 会以**次日**为 localDate
+// 调 Lookup（报"明天的日出"）。只留 {给定日, 次日} 时，这次读请求会把**今天**
+// 的条目淘汰掉，求值器下一个 tick 又要重算一整天 —— 纯浪费。保留前一日即可
+// 覆盖读路径问明天的情况，空间仍是常数级。
 func (c *Cache) pruneLocked(today string) {
+	keep := map[string]struct{}{today: {}, nextDateString(today): {}}
+	if prev := prevDateString(today); prev != "" {
+		keep[prev] = struct{}{}
+	}
 	for k := range c.entries {
-		if k.Date != today && k.Date != nextDateString(today) {
+		if _, ok := keep[k.Date]; !ok {
 			delete(c.entries, k)
 		}
 	}
+}
+
+// prevDateString 返回 "YYYY-MM-DD" 的前一日。解析失败时返回空串（不额外保留）。
+func prevDateString(date string) string {
+	d, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return ""
+	}
+	return d.AddDate(0, 0, -1).Format("2006-01-02")
 }
 
 // nextDateString 返回 "YYYY-MM-DD" 的次日。解析失败时返回原值 (不淘汰, 保守)。

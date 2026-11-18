@@ -81,6 +81,7 @@ func precheckRiskBody(actionID string) map[string]interface{} {
 	return map[string]interface{}{
 		"name":                 "预检风险动作",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,

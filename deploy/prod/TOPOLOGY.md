@@ -81,3 +81,18 @@ const parts = [props.device.hardware_type?.toUpperCase(), props.device.hardware_
 
 复现：`node deploy/prod/verify-channel-label-bug.mjs`（只读，确认对话框后取消，不提交删除）。
 
+
+---
+
+## 7. 自动化求值器的单实例约束（2026-11-18）
+
+自动化策略求值器（`backend/internal/automation`）的边沿/冷却状态**全部在进程内存**：
+`windowStates`（窗口上次在不在窗内）、`sunStates`（本日是否已触发日出/日落）、
+`triggered`（冷却锚点）、`configChanged`。没有 leader election，也没有跨副本协调。
+
+因此：**`ehome-web` 必须保持单副本运行**。起两个副本的后果不是"性能更好"，而是
+每个副本各自认为"上次不在窗内" ⇒ 同一条规则会被触发两次（设备动作重复下发），
+冷却窗口也各算各的。
+
+若将来需要高可用：先给自动化求值器加分布式互斥（PG advisory lock 按规则 ID 或
+全局单 leader），再扩容。仅加副本数不会得到高可用，只会得到重复动作。

@@ -360,6 +360,7 @@ func TestNonSunTriggersUnaffectedBySunValidation(t *testing.T) {
 	body := map[string]interface{}{
 		"name":                 "time window 规则",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,

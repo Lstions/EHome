@@ -86,9 +86,39 @@ type SyncGate struct {
 	dedupMu        sync.Mutex
 	lastFullPushAt map[string]time.Time
 
+	// stuckMu / stuckSince / stuckRepushedAt 实现「设备自报 sync_state 长期非 idle」
+	// 的**卡死自愈**（2026-11-18）。
+	//
+	// 现场：C6 节点 F0F5BD02DD84（fw 2.8.0）连续 11 小时每条 StatusReport 都是
+	// sync_state=1(syncing)、epoch=0，12 小时内只有 1 次 Hello。设备在等一次同步
+	// 事务完成，而服务端因为 manifest hash 相等一直在 skip（Hello skip: reason=hash_match）
+	// —— 双方都没做错动作，所以日志里既没有 sent 也没有 rejected。这与 2026-10-05
+	// config_failed 那次是**同一形状**的死锁，只是打破对称的证据从「服务端判 failed」
+	// 换成了「设备自报卡死」。
+	//
+	// 生命周期（2026-11-18 D22）：这两个 map 只增不减，但与既有 lastFullPushAt
+	// 同款 —— 键是设备 ID，上界 = 设备总数，单条 ~几十字节。当前没有"删除节点"
+	// 的 API 路径（边缘设备删除走 purge，节点行保留），所以不存在可观察的泄漏；
+	// 若将来新增节点删除，**必须**在这里同步清理（否则同一 ID 复用时残留
+	// stuckSince 会立刻触发一次重推）。
+	stuckMu         sync.Mutex
+	stuckSince      map[string]time.Time // 首次观察到非 idle 的时刻
+	stuckRepushedAt map[string]time.Time // 最近一次为卡死重下发的时刻
+
 	// now 可注入（测试用）；nil 时用 time.Now。
 	now func() time.Time
 }
+
+// 卡死自愈的时间参数。
+//
+// 正常一次同步是秒级（Hello → manifest → ConfigResult），3 分钟仍非 idle 就已
+// 不可能是「正在同步中」；重下发节流取 5 分钟：卡死是**稳态**，喷 manifest 没有
+// 额外收益，只会把「配置卡死」放大成「总线过载」（与 fullPushDedupWindow 同源
+// 取舍，只是周期更长 —— 这里本来就不指望每推一次都能修好）。
+const (
+	stuckSyncGrace          = 3 * time.Minute
+	stuckSyncRepushInterval = 5 * time.Minute
+)
 
 // fullPushDedupWindow 是同一设备两次「全量 manifest 推送」之间的最小间隔。
 //
@@ -101,9 +131,11 @@ const fullPushDedupWindow = 5 * time.Second
 // NewSyncGate creates a new SyncGate.
 func NewSyncGate(mgr *Manager, eventBus *ConfigEventBus) *SyncGate {
 	return &SyncGate{
-		mgr:            mgr,
-		eventBus:       eventBus,
-		lastFullPushAt: make(map[string]time.Time),
+		mgr:             mgr,
+		eventBus:        eventBus,
+		lastFullPushAt:  make(map[string]time.Time),
+		stuckSince:      make(map[string]time.Time),
+		stuckRepushedAt: make(map[string]time.Time),
 	}
 }
 
@@ -284,6 +316,16 @@ func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDec
 		recordDecision(d)
 		return d
 	}
+
+	// === 设备自报「同步卡死」：hash 相等同样不能证明同步已完成 ===
+	//
+	// 必须放在 hash 比较**之前**（hash 相等恰恰就是死锁的那个条件，放在之后等于
+	// 没修）；但必须放在**老固件守卫之后** —— 不报 config_hash 的固件原先"永不重推"，
+	// 让它每 5 分钟收一份全量 manifest 是行为变更，不在本次修复范围内。
+	if d, ok := g.reconcileStuckSync(deviceID, rpt); ok {
+		return d
+	}
+
 	d := g.decide(deviceID, rpt.ConfigHash, false, rpt.ChannelCount)
 	// 周期心跳触发的全量推送走去重窗口（2026-10-03）：心跳 5s→1s 后，
 	// 一个持续 hash_mismatch 的节点会每 1s 收到一次全量 manifest。
@@ -303,6 +345,108 @@ func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDec
 		return deferred
 	}
 	return d
+}
+
+// reconcileStuckSync 处理「设备自报长期非 idle」的同步卡死自愈。
+//
+// 返回 ok=true 表示本函数已经给出决策，调用方必须直接采用（不得再走 hash 比较）。
+// ok=false 表示「要么健康、要么还在宽限期、要么刚推过」，交给原有逻辑。
+//
+// 为什么这个信号可信：sync_state 是**设备状态机**的自述，不是内容比对结果。
+// hash 相等只说明「设备持有的配置与我一致」，不说明「设备那次同步事务走完了」。
+// 而设备的卡死形态是：置 SYNCING → 发 Hello → 收到 hash_match 的 skip（无 manifest）
+// → 永远等不到让状态回 IDLE 的那条下行帧 ⇒ 双方互等。
+func (g *SyncGate) reconcileStuckSync(deviceID string, rpt *StatusReportMsg) (SyncDecision, bool) {
+	now := g.gateClock()
+	if rpt.SyncState == "" || rpt.SyncState == "idle" {
+		g.clearStuckSync(deviceID)
+		return SyncDecision{}, false
+	}
+	// 先用**廉价判据**筛一遍（宽限期 / 节流），再算 manifest hash。
+	//
+	// 为什么顺序重要（2026-11-18 复审指出）：CalcConfigHashForDevice 是 1 个事务 +
+	// 约 7 张表查询 + 全量 manifest SHA256；而生产节点恰恰长期处于非 idle，心跳 1Hz。
+	// 先算 hash 再判节流，等于每个非 idle 心跳都白算一次（本函数一次 + decide() 一次）。
+	// 廉价判据不成立就直接返回，常态心跳退回基线的成本。
+	g.stuckMu.Lock()
+	since, seen := g.stuckSince[deviceID]
+	if !seen {
+		g.stuckSince[deviceID] = now
+		since = now
+	}
+	lastPush, pushed := g.stuckRepushedAt[deviceID]
+	mayPush := now.Sub(since) >= stuckSyncGrace &&
+		(!pushed || now.Sub(lastPush) >= stuckSyncRepushInterval)
+	g.stuckMu.Unlock()
+	if !mayPush {
+		return SyncDecision{}, false
+	}
+	serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
+	if serverHash.Hash == "" {
+		// 服务端自己没配置可发：制造空 manifest 只会掩盖真实原因（与 decide() 的
+		// no_server_config 语义保持一致），交给原有路径如实返回。
+		// 同时清掉卡死观测：否则残留的 stuckSince 会让"后来真的配上配置"的那一刻立刻重推。
+		g.clearStuckSync(deviceID)
+		return SyncDecision{}, false
+	}
+	hashMatch := rpt.ConfigHash == serverHash.ManifestID
+
+	// 复判 + 置位必须在**同一个临界区**里。卡死态本身就是每秒一条 StatusReport，
+	// 旧写法"先读 lastPush → 决定 → 回写"会让两条并发上报同时看到"该推"，
+	// 各推一份全量 manifest（重复下发不致命，但会把卡死放大成总线过载）。
+	// 上面那次是**廉价预判**（可能因为算 hash 花了几毫秒而过期），这里才是判定点。
+	//
+	// 锁序固定 stuckMu → dedupMu（allowPeriodicFullPush 内部取 dedupMu）；
+	// 全文件没有反向获取路径，故不会死锁。
+	g.stuckMu.Lock()
+	since, seen = g.stuckSince[deviceID]
+	if !seen {
+		g.stuckSince[deviceID] = now
+		since = now
+	}
+	lastPush, pushed = g.stuckRepushedAt[deviceID]
+	eligible := now.Sub(since) >= stuckSyncGrace &&
+		(!pushed || now.Sub(lastPush) >= stuckSyncRepushInterval)
+	if eligible && !g.allowPeriodicFullPush(deviceID) {
+		// 与周期失配推送共用 5s 去重窗口：两条路径不能在同一秒各推一份全量 manifest。
+		eligible = false
+	}
+	if eligible {
+		g.stuckRepushedAt[deviceID] = now
+	}
+	g.stuckMu.Unlock()
+	if !eligible {
+		return SyncDecision{}, false
+	}
+
+	// reason 必须如实描述判据：早期版本无条件写 hash_match_but_sync_stuck，
+	// 而代码根本没比较 hash —— 日志/metric 会给出假的"hash 相等"结论。
+	reason := "sync_stuck_hash_mismatch"
+	switch {
+	case rpt.SyncState == "error":
+		reason = "sync_error_repush" // error 与 syncing 语义不同（前者是请求失败）
+	case hashMatch:
+		reason = "hash_match_but_sync_stuck"
+	}
+	d := SyncDecision{
+		Action:     SyncActionFull,
+		Reason:     reason,
+		SyncID:     uuid.New().String(),
+		DeviceID:   deviceID,
+		ManifestID: serverHash.ManifestID,
+	}
+	recordDecision(d)
+	logger.Warnf("[%s] 设备自报 sync_state=%s 已超过 %s 未回 idle（hash_match=%v）：疑似同步卡死，强制重下发 manifest",
+		deviceID, rpt.SyncState, stuckSyncGrace, hashMatch)
+	return d, true
+}
+
+// clearStuckSync 清掉卡死观测（设备回到 idle 即视为已恢复）。
+func (g *SyncGate) clearStuckSync(deviceID string) {
+	g.stuckMu.Lock()
+	defer g.stuckMu.Unlock()
+	delete(g.stuckSince, deviceID)
+	delete(g.stuckRepushedAt, deviceID)
 }
 
 // OnConfigChange handles a ConfigChangeEvent from the bus.

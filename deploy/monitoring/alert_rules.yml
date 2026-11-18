@@ -200,3 +200,57 @@ groups:
             平台历史上有过数据上报, 但 ehome_nodes_online 已持续 15 分钟为 0。
             排查方向: EMQX 连接数与断连日志、nodemgr 心跳/离线判定逻辑、
             后端与 broker 网络、节点供电与网络。
+
+  # ── 自动化执行健康 (2026-11-18) ────────────────────────────────────────
+  - name: ehome-automation-health
+    rules:
+      # 指标定义: backend/pkg/metrics/metrics.go 的 AutomationEventsTotal
+      # 递增点:   backend/internal/models/automation.go 的 AfterCreate 钩子
+      #           （所有 automation_events 创建路径的唯一收口, 漏一个创建点就少一类信号）
+      # 背景: 2026-11-18 生产事故 —— 日出规则 failed_gate 连续失败 11 小时无人发现;
+      #       当时既无指标也无告警, 前端也不订阅 failed_gate。
+      - alert: EhomeAutomationGateFailures
+        expr: increase(ehome_automation_events_total{result="failed_gate"}[5m]) >= 2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "自动化动作连续因门禁失败 ({{ $value }} 次/5m)"
+          description: >-
+            自动化在 5 分钟内至少 2 次被可用性/确认门禁拒绝。常见原因:
+            节点能力快照过期(MaxCapabilityAge=15m)、动作不在设备目录、节点离线、
+            规则未授权。查 automation_events.detail 里的 gate 名与 reason_code。
+
+      - alert: EhomeAutomationConfirmationRequired
+        expr: increase(ehome_automation_events_total{result="confirmation_required"}[10m]) >= 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "自动化触发被确认门拦下（规则未授权）"
+          description: >-
+            confirmation_required 对 API 保存的规则本应不可达（V7 保证能保存即已授权）。
+            出现即说明存在存量/绕过写入的规则, 或动作风险等级刚被上调。
+            处置: 编辑该规则重新勾选风险确认并保存。
+
+      - alert: EhomeAutomationPartialFailure
+        expr: increase(ehome_automation_events_total{result="partial_failure"}[10m]) >= 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "多动作自动化半完成（设备可能处于中间态）"
+          description: >-
+            多动作规则在第 k 个动作失败、剩余已中止, 设备可能只被改了一半。
+            必须人工核对设备实际状态。detail 里有失败的 action_seq 与原因。
+
+      - alert: EhomeAutomationPendingConfirmExpired
+        expr: increase(ehome_automation_events_total{result="expired"}[15m]) >= 3
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "多条待确认自动化事件超时过期"
+          description: >-
+            15 分钟内至少 3 条 pending_confirm 超过 TTL 未被确认, 说明
+            「待确认」通知没有到达处理人, 或规则配置产生过多待确认。

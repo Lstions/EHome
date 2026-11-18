@@ -203,12 +203,32 @@ func TestCachePrunesOldDates(t *testing.T) {
 			}
 		}
 	}
-	// 只允许留 today(60) + tomorrow(61) 两日 × 2 事件 = 4 条 (末次查询的日期为基准)。
-	if got := c.Len(); got > 4 {
-		t.Errorf("缓存条目 %d > 4 —— 日期淘汰失效, 长期运行会无界增长 (方案 §3.1.3)", got)
+	// 2026-11-18 D21: 淘汰窗口是 {前一日, 当日, 次日} 三日 × 2 事件 = 6 条。
+	// 为什么多留前一日: 读路径(next_run)会以"次日"为 localDate 查询明天的日出,
+	// 只留两日的实现会在这次查询里把今天的条目淘汰掉, 求值器下一个 tick 白重算。
+	if got := c.Len(); got > 6 {
+		t.Errorf("缓存条目 %d > 6 —— 日期淘汰失效, 长期运行会无界增长 (方案 §3.1.3)", got)
 	}
 	if c.Len() == 0 {
 		t.Error("缓存被清空 —— 淘汰过度, 当日/次日条目必须保留")
+	}
+
+	// D21 回归: 先查今天, 再查明天, 今天的条目必须仍在缓存里。
+	lat, lon := 39.9042, 116.4074
+	today := mustParseLocal(t, "2026-06-21", tz)
+	for _, k := range []Kind{Sunrise, Sunset} {
+		if _, _, err := c.Lookup(lat, lon, tz, today, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := c.Lookup(lat, lon, tz, today.AddDate(0, 0, 1), Sunrise); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []Kind{Sunrise, Sunset} {
+		key := CacheKey{Lat: lat, Lon: lon, TZ: tz.String(), Date: today.Format("2006-01-02"), Kind: k}
+		if _, ok := c.get(key); !ok {
+			t.Fatalf("查明天后今天的条目被淘汰了 (kind=%v) —— D21 回归", k)
+		}
 	}
 }
 

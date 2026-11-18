@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/notify"
 	"ehome/backend/internal/sensorfield"
@@ -76,6 +77,25 @@ type Planner struct {
 	// nowFn 可注入时钟 (测试用), 默认 time.Now。
 	nowFn func() time.Time
 
+	// capabilityRefresher 向节点索取一次资源快照（生产实现 = nodemgr.Manager）。
+	// nil = 未接线：保持旧行为（不主动刷新，门禁拒绝即失败）。
+	//
+	// 为什么必须有它（2026-11-18 生产事故）：commandexec 的 current_capabilities
+	// 门禁用 MaxCapabilityAge(15min) 卡"节点能力快照"，而快照只由 Hello / 清单提交
+	// / 服务端 QueryResources 三处刷新。设备实测固件周期 Hello 未生效（sync_state
+	// 一直钉在 SYNCING），于是**无人打开设备页**时自动化必然被判 stale ⇒ 日落/
+	// 日出动作整日失败（生产事件 06:42:57 failed_gate / capability_stale）。
+	// 自动化不能指望"人刚好打开过页面"，必须在执行前自愈。
+	capabilityRefresher CapabilityRefresher
+	// capabilityRefreshTimeout/Poll 控制"要快照 → 等落库"的等待策略。
+	// 实测设备 100ms 内回；默认 2s / 100ms，测试可调小。
+	capabilityRefreshTimeout time.Duration
+	capabilityRefreshPoll    time.Duration
+
+	// cooldownMarker 把"已下发"的触发回灌求值器内存冷却态（2026-11-18 D4）。
+	// nil = 未接线：自动路径仍按求值器自己的内存判定（手动触发不会推迟自动）。
+	cooldownMarker CooldownMarker
+
 	// notifier 通知写入+投递入口 (D-1 步骤 3, 设计/外发通知通道.md §2.1 取向 A):
 	// main.go 经 SetNotifier 注入 notify.Dispatcher。
 	// **nil 是显式支持的合法状态**: 既有测试 NewPlanner(db, svc, nil, id) 不注入时,
@@ -100,6 +120,9 @@ func NewPlanner(db *gorm.DB, cmdSvc *commandexec.Service, broadcast func(string,
 		systemActorID: systemActorID,
 		nowFn:         time.Now,
 		latestValueFn: nil, // 由 SetLatestValueFn 注入 (main.go 接线), 避免 automation→api 编译期依赖
+
+		capabilityRefreshTimeout: 2 * time.Second,
+		capabilityRefreshPoll:    100 * time.Millisecond,
 	}
 }
 
@@ -121,6 +144,110 @@ func (p *Planner) SetLatestValueBySensorFn(fn func(deviceID uint, sensorName str
 // 生产实现是 api.LatestValues。
 func (p *Planner) SetLatestValuesFn(fn func(deviceID uint) []models.UnifiedData) {
 	p.latestValuesFn = fn
+}
+
+// CapabilityRefresher 是"向节点要一次资源快照"的能力（生产实现 = nodemgr.Manager）。
+//
+// 单独成接口而不是直接拿 nodemgr：automation 包不 import nodemgr（保持依赖方向），
+// 与 SetLatestValueFn / SetNotifier 同款二阶段注入。
+type CapabilityRefresher interface {
+	SendQueryResources(deviceID string) (string, error)
+}
+
+// CooldownMarker 由 automation.Evaluator 实现（MarkTriggered）。
+//
+// 为什么需要这个接口（2026-11-18 D4）：求值器只认 e.triggered 内存态，而
+// 手动触发与确认执行不经过 evalWindowRule/evalSensor。没有回灌时"规则有冷却"
+// 对这两条路径不生效 —— 手动触发后自动路径仍 armed，冷却窗内会再动一次设备。
+// 语义：冷却属于**规则**，不属于某条执行路径。
+type CooldownMarker interface {
+	MarkTriggered(ruleID uint, at time.Time)
+}
+
+// SetCapabilityRefresher 注入资源快照刷新能力（main.go 接线；nil = 未接线）。
+//
+// 未接线时行为与改造前逐字节一致：不做主动刷新，门禁拒绝即按原错误落审计。
+func (p *Planner) SetCapabilityRefresher(r CapabilityRefresher) {
+	p.capabilityRefresher = r
+}
+
+// SetCooldownMarker 注入规则级冷却回灌入口（main.go 接线；nil = 未接线）。
+func (p *Planner) SetCooldownMarker(m CooldownMarker) {
+	p.cooldownMarker = m
+}
+
+// markCooldown 把一次已下发的触发写入求值器内存冷却态。
+//
+// 只在该次触发**通过了日熔断与冷却检查、即将下发**时调用；被抑制的尝试不推进
+// 锚点（否则每次被抑制的 tick 都会把冷却无限续期）。取消失败也不影响主流程：
+// 冷却只是抑制重复动作的优化，不能反过来让一次合法触发失败。
+func (p *Planner) markCooldown(ruleID uint, at time.Time) {
+	if p.cooldownMarker == nil || ruleID == 0 {
+		return
+	}
+	p.cooldownMarker.MarkTriggered(ruleID, at)
+}
+
+// SetCapabilityRefreshWait 覆盖"等资源快照落库"的超时与轮询（测试用）。
+func (p *Planner) SetCapabilityRefreshWait(timeout, poll time.Duration) {
+	p.capabilityRefreshTimeout = timeout
+	p.capabilityRefreshPoll = poll
+}
+
+// ensureNodeCapabilityFresh 在执行设备动作前保证该边缘设备所属节点的能力快照新鲜。
+//
+// 只在快照**已经过期**时才打扰节点（避免每次动作都白发一帧 QueryResources）；
+// 刷新失败不阻塞执行 —— 后续 Create 会用带门禁名的错误如实拒绝（可见地失败），
+// 而不是在这里静默吞掉。任何一步查不到（节点不存在 / 未接线）都直接返回。
+func (p *Planner) ensureNodeCapabilityFresh(ctx context.Context, actionID string, actionDeviceID uint) {
+	if p.capabilityRefresher == nil || actionDeviceID == 0 || p.capabilityRefreshTimeout <= 0 {
+		return
+	}
+	// periph_cmd 动作的 action_device_id 语义是 **nodes 表主键**，不是 edge_devices.id
+	// （见 commandexec.resolveActionTarget 与 deviceaction/periph.go:100）。按
+	// edge_devices 去查会命中同号的**无关**边缘设备：把 QueryResources 发给错误的
+	// 节点，还可能白等满 2s 超时。而 periph 门禁集（evaluatePeriphActionGates）
+	// 根本不含 current_capabilities，本来就不需要这份快照 ⇒ 直接跳过。
+	if deviceaction.IsPeriphAction(actionID) {
+		return
+	}
+	var edge models.EdgeDevice
+	if err := p.db.WithContext(ctx).Select("id", "node_id").First(&edge, actionDeviceID).Error; err != nil || edge.NodeID == "" {
+		return
+	}
+	var node models.Node
+	if err := p.db.WithContext(ctx).Select("node_id", "status", "resource_reported_at").
+		First(&node, "node_id = ?", edge.NodeID).Error; err != nil {
+		return
+	}
+	// 离线节点不会回应 QueryResources：别在这里白等满超时（下发无活会话时
+		// downlink 立即报错，但"连着却不回帧"会吃满超时）。
+	if node.Status != "online" {
+		return
+	}
+	if node.ResourceReportedAt != nil && p.nowFn().Sub(*node.ResourceReportedAt) <= commandexec.MaxCapabilityAge {
+		return // 快照仍新鲜：不打扰节点
+	}
+	before := node.ResourceReportedAt
+	if _, err := p.capabilityRefresher.SendQueryResources(edge.NodeID); err != nil {
+		logger.Warn("automation: 请求节点资源快照失败", "node_id", edge.NodeID, "error", err)
+		return
+	}
+	deadline := time.Now().Add(p.capabilityRefreshTimeout)
+	for {
+		var fresh models.Node
+		if err := p.db.WithContext(ctx).Select("node_id", "resource_reported_at").
+			First(&fresh, "node_id = ?", edge.NodeID).Error; err == nil && fresh.ResourceReportedAt != nil &&
+			(before == nil || fresh.ResourceReportedAt.After(*before)) {
+			logger.Infof("automation: 节点能力快照已刷新 node_id=%s", edge.NodeID)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			logger.Warn("automation: 等待节点资源快照超时", "node_id", edge.NodeID)
+			return
+		}
+		time.Sleep(p.capabilityRefreshPoll)
+	}
 }
 
 // SetPlanProvider 注入解析层控制面（selector 编译/谓词求值；kill switch 也在其中）。
@@ -422,6 +549,9 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		}
 		idemKey := fmt.Sprintf("automation:%d:%s:%d:%d",
 			rule.ID, at.Format("20060102"), triggerSeq, act.Seq)
+		// 能力快照自愈（2026-11-18）：过期就先向节点要一次资源快照，否则
+		// current_capabilities 门禁必然拒绝，且无人值守时没有任何人会把页面打开。
+		p.ensureNodeCapabilityFresh(context.Background(), act.ActionID, act.ActionDeviceID)
 		exec, _, err := p.cmdSvc.Create(context.Background(), commandexec.CreateInput{
 			EdgeDeviceID:   act.ActionDeviceID,
 			ActorUserID:    actorID,
@@ -437,7 +567,7 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 		})
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), true,
-				classifyDeviceActionError(err), err.Error(), src)
+				classifyDeviceActionError(err), describeDeviceActionError(rule, err), src)
 			return
 		}
 		executed++
@@ -762,7 +892,10 @@ func isGateError(err error) bool {
 	// ErrConfirmationForbidden = 该账户无权确认（授权失败）：与 availability gate
 	// 同属"重试也不会好"的拒绝，落 failed_gate 而不是 failed_dispatch。
 	return errors.Is(err, commandexec.ErrActionUnavailable) ||
-		errors.Is(err, commandexec.ErrConfirmationForbidden)
+		errors.Is(err, commandexec.ErrConfirmationForbidden) ||
+		// 确认令牌铸造限流（5 次/分钟，见 commandexec `confirmationRateWindow`）：同样是"重试也不会立刻好"的拒绝，
+		// 归 failed_gate 而不是 failed_dispatch —— 后者会让用户以为下发/传输坏了。
+		errors.Is(err, commandexec.ErrConfirmationRateLimited)
 }
 
 // isConfirmationGateError 判定 commandexec 返回错误是否来自**确认门**。
@@ -782,6 +915,36 @@ func isConfirmationGateError(err error) bool {
 		errors.Is(err, commandexec.ErrConfirmationInvalid)
 }
 
+// describeDeviceActionError 给确认门相关的失败补上「为什么」和「怎么办」。
+//
+// 三类错误的处置方向**完全不同**，所以必须按错误本身分支，而不是按规则有没有授权
+// 猜（2026-11-18 审查指出：早期版本只看 RiskAcknowledgedAt，会把"已授权但没带
+// 令牌"误诊成"令牌无效"，恰好误诊它自己要修的那次事故）：
+//
+//   - ErrConfirmationRequired + 规则无授权：数据异常（V7 保证能保存成功即已授权），
+//     唯一处置是编辑规则重新勾选风险确认；
+//   - ErrConfirmationRequired + 规则已授权：本次请求没带令牌 = 内部错误；
+//   - ErrConfirmationInvalid：令牌无效/过期/已用 = 内部错误；
+//   - ErrConfirmationRateLimited：铸造过于频繁（5 次/分钟），稍后重试。
+//
+// 为什么需要它：旧 detail 只有一句 "confirmation is required"，而事件的确认入口
+// 只对 pending_confirm 开放（ConfirmEvent 对其它结果返回 ErrConfirmNotPending），
+// 用户会照着"到事件表点确认"这种**做不到**的指引反复操作。
+func describeDeviceActionError(rule models.AutomationRule, err error) string {
+	switch {
+	case errors.Is(err, commandexec.ErrConfirmationInvalid):
+		return err.Error() + "（确认令牌无效或已过期: 内部错误，请重试；若持续出现请上报）"
+	case errors.Is(err, commandexec.ErrConfirmationRateLimited):
+		return err.Error() + "（确认令牌铸造过于频繁，请稍后重试）"
+	case errors.Is(err, commandexec.ErrConfirmationRequired):
+		if rule.RiskAcknowledgedAt == nil {
+			return err.Error() + "（该规则缺少规则级风险授权 —— 不应出现的数据状态: 请编辑该规则并勾选风险确认后重新保存）"
+		}
+		return err.Error() + "（规则已授权，但本次请求未携带确认令牌: 内部错误，请重试或上报）"
+	}
+	return err.Error()
+}
+
 // classifyDeviceActionError 把 commandexec.Create 的错误映射到 automation_events
 // 的 result 枚举。**唯一的错误分类入口** —— 自动路径与手动路径共用, 避免两处
 // 各自演化出不一致的映射 (本文件里 isGateError 死分支的教训)。
@@ -790,6 +953,7 @@ func isConfirmationGateError(err error) bool {
 // gate 循环在确认门之前短路返回 ErrActionUnavailable, 走到确认门说明 gate 全过),
 // 因此该顺序不会遮蔽 failed_gate 的既有语义; 写成 switch 也让"新增一类错误"必须
 // 显式落到某个枚举, 而不是被兜底吞掉。
+
 func classifyDeviceActionError(err error) string {
 	switch {
 	case isConfirmationGateError(err):
@@ -975,6 +1139,22 @@ func (p *Planner) broadcastAutomationEvent(rule models.AutomationRule, ev models
 		payload["action_seq"] = *ev.ActionSeq
 	}
 	p.broadcast("automation_event", payload)
+	// 2026-11-18：补上 `automation_confirmation_required` 的**生产者**。
+	//
+	// 前端从 2026-10 起就订阅了这个事件名（AutomationRules.vue 的
+	// AUTOMATION_PUSH_EVENTS），后端却一直是 **0 生产者** —— 三域架构审计 P1-6
+	// 记录过这条债。后果是「风险动作被确认门拦下」这条最需要人介入的事件，
+	// 用户只能靠翻事件表才发现，而那正是 C5 要消除的"前端无信号"。
+	if ev.Result == models.AutomationResultConfirmationRequired {
+		p.broadcast("automation_confirmation_required", payload)
+	}
+	// 2026-11-18：`automation_partial_failure` 是**第二个**零生产者事件（前端从
+	// 2026-10 就订阅并带"需要人工介入"的处理分支，后端一直没发）。partial_failure
+	// 正是"第 k 个动作成功、剩余中止"的半完成危险态 —— 设备已被改了一半，
+	// 比彻底失败更需要人立刻看见。
+	if ev.Result == models.AutomationResultPartialFailure {
+		p.broadcast("automation_partial_failure", payload)
+	}
 }
 
 // notificationBroadcastPayload 构造自动化通知的 WS 广播载荷 (负债 D-3 契约):
@@ -1242,6 +1422,11 @@ func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceI
 	}
 
 	// ── 动作分发 ──
+	//
+	// 2026-11-18 D4：下发改冷却锚点（内存），与下面事务里写的
+	// automation_rules.last_triggered_at（库）配对。两条都要写：
+	// 求值器判自动路径只读内存，界面/重启只读库。
+	p.markCooldown(rule.ID, at)
 	switch rule.ActionType {
 	case models.AutomationActionNotification:
 		p.notifyAction(rule, at, 0)
@@ -1252,7 +1437,21 @@ func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceI
 			Result:        models.AutomationResultNotification,
 			CreatedAt:     at,
 		}
-		_ = p.db.WithContext(ctx).Create(&ev).Error
+		// 2026-11-18 修复：通知动作原先**不写** last_triggered_at，而手动路径的
+		// 冷却判定正是读这个锚点（cooldownBase 的回落口径只认 executed/pending_confirm，
+		// 不含 notification）⇒ 手动连点通知规则永远不冷却。与自动路径不一致，
+		// 也让 next_run 的冷却顺延在重启后丢失。事件与锚点写在同一事务。
+		if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&ev).Error; err != nil {
+				return err
+			}
+			return tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+				Update("last_triggered_at", at).Error
+		}); err != nil {
+			metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+			logger.Warn("automation: failed to record manual notification event + cooldown anchor",
+				"rule_id", rule.ID, "error", err)
+		}
 		return ev, nil
 	case models.AutomationActionDeviceAction:
 		return p.executeManualDeviceAction(ctx, rule, at, actorID, sourceIP)
@@ -1349,18 +1548,46 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 		}
 		idempotencyKey := fmt.Sprintf("automation:manual:%d:%s:%d:%d",
 			rule.ID, at.Format("20060102"), triggerSeq, act.Seq)
+		reason := fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID)
+		// 能力快照自愈（同上）：先保证节点快照新鲜，否则铸造令牌与 Create 都会撞
+		// current_capabilities 门禁。
+		p.ensureNodeCapabilityFresh(ctx, act.ActionID, act.ActionDeviceID)
+		// 即铸即销（与 ConfirmEvent 同族，2026-11-18 修复）：手动触发是**人**的显式
+		// 动作（前端已二次确认），高风险动作必须带一次性确认令牌才能过确认门。
+		// 旧实现只传 ActorUserID、不带 token ⇒ 任何 risk>=high 的动作在"触发"按钮上
+		// 永久失败（生产事件 07:15:58 confirmation_required）。低风险动作不需要确认，
+		// IssueConfirmation 会返回 ErrConfirmationNotNeeded，此时按无令牌执行。
+		confirmationToken := ""
+		if grant, gerr := p.cmdSvc.IssueConfirmation(ctx, commandexec.ConfirmationInput{
+			EdgeDeviceID: act.ActionDeviceID,
+			ActorUserID:  actorID,
+			ActionID:     act.ActionID,
+			Params:       params,
+			Reason:       reason,
+			SourceIP:     sourceIP,
+		}); gerr == nil {
+			confirmationToken = grant.Token
+		} else if !errors.Is(gerr, commandexec.ErrConfirmationNotNeeded) &&
+			!errors.Is(gerr, commandexec.ErrActionUnavailable) {
+			// 注意 ErrActionUnavailable 被显式放过：IssueConfirmation 自带一套**内联**
+			// 可用性检查且不携带门禁名，若在这里终结，事件 detail 会退回那句无信息量的
+			// 通稿。继续无令牌走 Create，由它的 availability gate 给出精确原因。
+			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
+				classifyDeviceActionError(gerr), describeDeviceActionError(rule, gerr))
+		}
 		exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
-			EdgeDeviceID:   act.ActionDeviceID,
-			ActorUserID:    actorID,
-			ActionID:       act.ActionID,
-			Params:         params,
-			IdempotencyKey: idempotencyKey,
-			SourceIP:       sourceIP,
-			Reason:         fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID),
+			EdgeDeviceID:      act.ActionDeviceID,
+			ActorUserID:       actorID,
+			ActionID:          act.ActionID,
+			Params:            params,
+			IdempotencyKey:    idempotencyKey,
+			SourceIP:          sourceIP,
+			ConfirmationToken: confirmationToken,
+			Reason:            reason,
 		})
 		if err != nil {
 			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
-				classifyDeviceActionError(err), err.Error())
+				classifyDeviceActionError(err), describeDeviceActionError(rule, err))
 		}
 		executed++
 		lastCommandID = exec.CommandID
@@ -1537,6 +1764,9 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 			return p.recordConfirmFailure(ctx, &ev, rule, act, executed, len(actions),
 				models.AutomationResultFailedDispatch, err.Error(), err)
 		}
+		// 能力快照自愈（2026-11-18）：IssueConfirmation 自己也会核对
+		// current_capabilities，快照过期时铸造同样会被拒 —— 先刷新再铸。
+		p.ensureNodeCapabilityFresh(ctx, act.ActionID, act.ActionDeviceID)
 		// 即铸: 操作者 confirm 当下为**该动作**铸造 (近认证门由 IssueConfirmation
 		// 内核对操作者 LastLoginAt 强制)。
 		grant, err := p.cmdSvc.IssueConfirmation(ctx, commandexec.ConfirmationInput{
@@ -1576,6 +1806,10 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 	}); err != nil {
 		logger.Warn("automation: failed to flip event + cooldown anchor",
 			"event_id", ev.ID, "rule_id", rule.ID, "error", err)
+	} else {
+		// 2026-11-18 D4：库锚点（flipExecuted）与内存锚点必须同时推进，
+		// 否则确认执行后自动路径仍 armed，冷却窗内会再动一次设备。
+		p.markCooldown(rule.ID, ev.TriggeredAt)
 	}
 	p.db.WithContext(ctx).First(&ev, ev.ID)
 	return ev, nil
@@ -1591,6 +1825,12 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 // 透传而不是吞掉: handler 依赖它映射 HTTP 状态码 (ErrConfirmationForbidden → 403 等),
 // 且既有契约 TestConfirmEventCreateFailureFlipsFailed 断言"不吞错也不留 pending 悬置"。
 // 落库失败只告警 (与 recordActionFailure 同款 fail-open), 不覆盖 cause。
+// recordConfirmFailure 记确认路径的失败结果。
+//
+// 注意：本函数只 UPDATE 既有事件行，**不广播** WS。确认路径产生
+// `confirmation_required` 的唯一入口是 ErrConfirmationInvalid（令牌在铸造与消费之间
+// 失效），实际不可达；确认路径真正需要人看见的是 pending_confirm（触发时已广播）。
+// 若将来确认路径也会落 confirmation_required，记得在这里补 broadcastAutomationEvent。
 func (p *Planner) recordConfirmFailure(ctx context.Context, ev *models.AutomationEvent,
 	rule models.AutomationRule, act models.AutomationRuleAction, executed, total int,
 	result, detail string, cause error) (models.AutomationEvent, error) {

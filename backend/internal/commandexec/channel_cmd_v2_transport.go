@@ -301,7 +301,10 @@ func writeDigestUint64(h interface{ Write([]byte) (int, error) }, value uint64) 
 func currentCapabilities(node models.Node, now func() time.Time) (string, commandEngineCapabilities, error) {
 	var capabilities commandEngineCapabilities
 	if node.BootID == "" || node.ResourceReportedAt == nil || now().Sub(*node.ResourceReportedAt) > MaxCapabilityAge || node.CommandEngineRevision == 0 {
-		return "", capabilities, fmt.Errorf("node command capability is absent or stale")
+		// 返回**哨兵本身**（而不是同文本的 fmt.Errorf）：这个分支是唯一"可自愈"的
+		// 能力失败（要一次资源快照就能恢复），上游据此把它标成 reason=capability_stale
+		// 并挂 ErrCapabilityStale。文本保持一致，避免改变既有日志口径。
+		return "", capabilities, ErrCapabilityStale
 	}
 	if err := json.Unmarshal([]byte(node.CommandEngineCapabilities), &capabilities); err != nil {
 		return "", capabilities, fmt.Errorf("decode node command capability: %w", err)

@@ -25,6 +25,16 @@ import (
 var (
 	ErrIdempotencyCollision = errors.New("idempotency key was already used with different request")
 	ErrActionUnavailable    = errors.New("action is unavailable for this device")
+	// ErrCapabilityStale 是 ErrActionUnavailable 的**子类**（errors.Is 同时命中两者）:
+	// 节点命令能力快照缺失或过期（current_capabilities 门禁的**可自愈**分支）。
+	//
+	// 覆盖范围刻意收窄：只挂"缺失/过期"，不挂"节点不支持 ChannelCmdV2"或能力解码
+	// 失败 —— 后者刷新快照也不会好，挂上去会让将来的重试消费者空转。
+	//
+	// 消费者现状（如实记录，避免注释比代码活得久）：自动化走的是**执行前主动刷新**
+	// （planner.ensureNodeCapabilityFresh），**不读**这个哨兵；它当前只用于可诊断
+	// 分类（事件 detail 里能看出"这是刷新一下就好"的那一类失败）。
+	ErrCapabilityStale = errors.New("node command capability is absent or stale")
 	ErrInvalidParams        = errors.New("action parameters are invalid")
 	ErrNotCancellable       = errors.New("execution is no longer cancellable")
 	ErrInvalidResolution    = errors.New("manual resolution is invalid")
@@ -197,6 +207,28 @@ type gateResult struct {
 //     the shared node-state gates plus gatePeriphConfig. GPIO/PWM have no
 //     channel, manifest or capability facts, so the four channel-domain gates
 //     are never evaluated for them (no fabricated channel data).
+// actionUnavailableError 把**失败的那一道门禁**带进错误链。
+//
+// errors.Is(err, ErrActionUnavailable) 仍然成立（错误链首段就是它），因此既有
+// isGateError / 指标口径无需改动；而 err.Error() 从一句无信息量的通稿变成
+// "action is unavailable for this device: gate=node_status reason=node_offline"，
+// planner 已把 err.Error() 原样写进事件 detail，UI 立刻可诊断。
+//
+// current_capabilities 额外挂 ErrCapabilityStale，供自动化路径识别"可自愈"。
+func actionUnavailableError(gate gateResult) error {
+	detail := string(gate.name)
+	if gate.reasonCode != "" {
+		detail += " reason=" + gate.reasonCode
+	}
+	if gate.name == gateCurrentCapabilities && gate.reasonCode == "capability_stale" {
+		// 只有这一种能力失败是**可自愈**的：刷新资源快照即可。
+		// "节点不支持 ChannelCmdV2"/"能力解码失败"刷新一万次也没用，不能挂这个哨兵，
+		// 否则未来任何"见哨兵就刷新重试"的消费者会在不可自愈场景里空转。
+		return fmt.Errorf("%w: gate=%s reason=%s %w", ErrActionUnavailable, gate.name, gate.reasonCode, ErrCapabilityStale)
+	}
+	return fmt.Errorf("%w: gate=%s", ErrActionUnavailable, detail)
+}
+
 func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, definition deviceaction.Definition, params json.RawMessage) []gateResult {
 	if definition.Transport == deviceaction.PeriphCmdAdapter {
 		return evaluatePeriphActionGates(s, tx, edge, definition, params)
@@ -222,7 +254,16 @@ func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, defini
 	appendResult(gateActionChannel, channelErr == nil, "", "")
 	appendResult(gateReportedActionChannel, reportedErr == nil, "channel_not_reported", "")
 	appendResult(gateAppliedManifest, manifestErr == nil, "manifest_not_applied", "")
-	appendResult(gateCurrentCapabilities, capabilitiesErr == nil, "capability_unavailable", "")
+	// reason 码与 Catalog 对齐：只有"快照缺失/过期"是 capability_stale（可自愈），
+	// 其余（不支持 V2 / 能力解码失败）是 capability_unavailable（刷新也不会好）。
+	capReason := ""
+	if capabilitiesErr != nil {
+		capReason = "capability_unavailable"
+		if errors.Is(capabilitiesErr, ErrCapabilityStale) {
+			capReason = "capability_stale"
+		}
+	}
+	appendResult(gateCurrentCapabilities, capabilitiesErr == nil, capReason, "")
 	fitsReason := ""
 	fitsPassed := false
 	if capabilitiesErr == nil {
@@ -560,9 +601,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		// (F4): the same single source of truth drives Catalog annotations.
 		// The gate order deliberately mirrors the original Create checks so a
 		// new gate failure still yields ErrActionUnavailable.
+		//
+		// 2026-11-18: 拒绝原因不再被丢弃。旧实现只 return 哨兵, 12 道门禁的
+		// 差异在事件表里塌缩成同一句 "action is unavailable for this device" ——
+		// 生产上真机问题 (capability_stale) 因此无法从 UI 诊断。
 		for _, gate := range evaluateActionGates(s, tx, edge, def, params) {
 			if !gate.passed {
-				return ErrActionUnavailable
+				return actionUnavailableError(gate)
 			}
 		}
 		// 确认制门禁: 判定源收敛为**唯一**的 RiskLevel.RequiresConfirmation()

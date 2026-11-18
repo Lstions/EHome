@@ -62,6 +62,7 @@ func riskRuleBody(actionID string, requireConfirmed bool, acknowledged *bool) []
 	body := map[string]interface{}{
 		"name":                 "风险动作保存校验",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,
@@ -171,6 +172,7 @@ func TestCreateNotificationActionUnaffectedByV7(t *testing.T) {
 	body := map[string]interface{}{
 		"name":                 "纯通知",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,

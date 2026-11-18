@@ -3,6 +3,10 @@ package models
 import (
 	"encoding/json"
 	"time"
+
+	"gorm.io/gorm"
+
+	"ehome/backend/pkg/metrics"
 )
 
 // =====================================================================
@@ -318,6 +322,17 @@ type AutomationRule struct {
 	// 与"子表为唯一权威"的裁决直接冲突。
 	Actions []AutomationRuleAction `gorm:"-" json:"actions,omitempty"`
 
+	// NextRun 是「下次执行时间」的**只读计算字段** (2026-11-17 新增)。
+	//
+	// 与 Actions 同为 gorm:"-": 该值由 automation.(*Evaluator).NextRuns 在每次
+	// 读取时现算 (不落库、不加 ticker), 见 models/next_run.go 的文件头理由。
+	// 不加 gorm:"-" 会让 AutoMigrate 试图在 automation_rules 上建一列, 而
+	// 该列永远不可能被任何 ticker 正确维护 (两次写之间必然过期)。
+	//
+	// NULL/省略 = 计算层未接线 (如单测里 evaluator 传 nil), 前端显示 "-",
+	// 不得把它当作"规则没有下次执行"。
+	NextRun *NextRun `gorm:"-" json:"next_run,omitempty"`
+
 	// ── 解析层统计 (设计/数据字段解析层-方案-2026-10-21.md §10, M1 新增列) ──
 	//
 	// 与 AlertRule 同名同义（ResolveCount/MatchCount/LastMatchedAt）:
@@ -391,6 +406,17 @@ type AutomationEvent struct {
 	SourceEvidence string `gorm:"type:text" json:"source_evidence,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// AfterCreate 在事件落库后递增 ehome_automation_events_total{result}（2026-11-18）。
+//
+// 为什么用 GORM 钩子而不是在 15 个创建点逐个手写 +1：evaluator 2 处、planner 10 处、
+// selector/source 各 1 处，漏一个就少一类信号 —— 而"静默 11 小时没人发现"正是这次
+// 事故的放大因素。钩子在成功 INSERT 之后触发（含事务内创建），是所有创建路径的
+// 唯一收口；result 只取模型里的有界枚举常量，不做任何自由文本拼接。
+func (e *AutomationEvent) AfterCreate(tx *gorm.DB) error {
+	metrics.AutomationEventsTotal.WithLabelValues(e.Result).Inc()
+	return nil
 }
 
 func (AutomationEvent) TableName() string { return "automation_events" }

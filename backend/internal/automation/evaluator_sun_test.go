@@ -290,8 +290,11 @@ func TestA14PolarDayNightSuppressedWithAudit(t *testing.T) {
 // 让边沿反复触发, 比原缺陷更危险)。
 func TestA17WindowStatesClearedOnContentChange(t *testing.T) {
 	db := testutil.OpenTestDB(t)
+	// 本用例的钟点用 Asia/Shanghai 构造，规则时区必须一致（D7）。
+	winTZ := "Asia/Shanghai"
 	rule := models.AutomationRule{
-		Name: "win", Enabled: true,
+		Timezone: &winTZ,
+		Name:     "win", Enabled: true,
 		TriggerType:        models.AutomationTriggerTimeWindow,
 		TriggerWindowStart: "08:00", TriggerWindowEnd: "09:00",
 		TriggerWindowEdge: models.AutomationWindowEnter,
@@ -306,11 +309,14 @@ func TestA17WindowStatesClearedOnContentChange(t *testing.T) {
 
 	tz, _ := time.LoadLocation("Asia/Shanghai")
 	inWindow := time.Date(2026, 6, 21, 8, 30, 0, 0, tz)
+	outsideWindow := time.Date(2026, 6, 21, 7, 30, 0, 0, tz)
 
-	// 第一次 tick: enter 规则在窗口内 → 触发, 并写入 windowStates。
+	// 自 2026-11-18 起 enter 边沿要求 exists && !wasInside（不补发），所以先做一次
+	// "窗口外"求值建立 wasInside=false，再跨入窗口 —— 这才是真边沿。
+	ev.evalTimeWindows(outsideWindow)
 	ev.evalTimeWindows(inWindow)
 	if rec.count() != 1 {
-		t.Fatalf("窗口内首次 tick 应触发 1 次, got %d", rec.count())
+		t.Fatalf("跨入窗口边沿应触发 1 次, got %d", rec.count())
 	}
 	ev.mu.RLock()
 	_, hasState := ev.windowStates[rule.ID]
@@ -337,6 +343,7 @@ func TestA17WindowStatesClearedOnContentChange(t *testing.T) {
 	//  边沿反复触发 —— 比原缺陷更危险。)
 	ev2 := NewEvaluator(db, rec)
 	ev2.LoadRules()
+	// 无历史状态 + 在窗口内 ⇒ 不触发（不补发），但仍必须写入 windowStates。
 	ev2.evalTimeWindows(inWindow)
 	ev2.mu.RLock()
 	_, persisted := ev2.windowStates[rule.ID]

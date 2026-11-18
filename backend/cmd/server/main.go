@@ -152,6 +152,14 @@ func main() {
 		abortStartup("Failed to migrate database: %v", err)
 	}
 	startupTracker.Done(bootstrap.StepAutoMigrate, "表结构已同步")
+
+	// 2026-11-18 D7：time_window 改为按规则时区执行。存量行缺时区会被
+	// fail-closed 跳过 ⇒ 按旧口径（进程时区）回填一次，把行为原地保留。
+	// 失败即启动失败：静默停摆比拒绝启动更难排查。
+	if err := automation.MigrateTimeWindowTimezone(database.GetDB()); err != nil {
+		startupTracker.Fail(bootstrap.StepAutoMigrate, err)
+		abortStartup("Failed to backfill automation time_window timezone: %v", err)
+	}
 	logger.Infof("Database connected and migrated")
 
 	// 数据层时序化 (方案 v3.4 §3.2.1): 时序表分区迁移 + 滚动分区保障。
@@ -782,6 +790,10 @@ func main() {
 
 	// systemActorPrecheckID 可能为 0 (全新安装): 语义是"待 Planner 惰性解析", 不是有效 actor。
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorPrecheckID)
+	// 能力快照自愈（2026-11-18 生产事故）：自动化执行前若节点命令能力快照已过期
+	// （MaxCapabilityAge=15min），先向节点要一次资源上报再继续，避免"无人打开
+	// 设备页 ⇒ capability_stale ⇒ 日落/日出动作整日失败"。
+	automationPlanner.SetCapabilityRefresher(nodeMgr)
 	// 自动化策略通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 日熔断 / 待人工确认 /
 	// 纯通知动作 / 系统主体不可用四类通知随之可外发 —— 无人值守下"待确认"必须能推送到手机。
 	automationPlanner.SetNotifier(notifyDispatcher)
@@ -794,6 +806,9 @@ func main() {
 	automationPlanner.SetLatestValueBySensorFn(api.LatestValueBySensor)
 	automationPlanner.SetLatestValuesFn(api.LatestValues)
 	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
+	// 2026-11-18 D4：手动触发 / 确认执行也要推进规则级冷却（否则冷却窗内
+	// 自动路径仍 armed，会再动一次设备）。用接口注入，避免构造顺序耦合。
+	automationPlanner.SetCooldownMarker(automationEvaluator)
 	// 数据字段解析层控制面注入 (方案 §9.2#1/#2): trigger 与 conditions 都走编译产物。
 	// 与 alert 同理：**仅 enabled=true 时注入**，否则保持 legacy 快速路径（见上方说明）。
 	if fieldResolver.registry.Enabled() {

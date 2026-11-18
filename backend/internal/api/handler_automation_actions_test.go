@@ -25,6 +25,7 @@ func multiRiskBody(requireConfirmed bool, acknowledged *bool, actions []map[stri
 	body := map[string]interface{}{
 		"name":                 "多动作规则",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,

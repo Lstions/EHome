@@ -42,6 +42,7 @@ func automationRuleBody(t *testing.T, cooldown *int) []byte {
 	body := map[string]interface{}{
 		"name":                 "冷却语义契约",
 		"trigger_type":         models.AutomationTriggerTimeWindow,
+		"timezone":             "UTC",
 		"trigger_window_start": "08:00",
 		"trigger_window_end":   "18:00",
 		"trigger_window_edge":  models.AutomationWindowEnter,

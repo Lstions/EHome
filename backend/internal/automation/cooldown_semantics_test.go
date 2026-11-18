@@ -25,7 +25,9 @@ import (
 // 窗口内每 tick 都求值, 因此"某时刻是否再次触发"即等价于"是否处于冷却中"。
 // 动作用 notification, 不触达 commandexec/通知落库 (纯求值器路径)。
 func cooldownWindowRule(id uint, cooldownSec int) models.AutomationRule {
+	tz := testLocalZone()
 	return models.AutomationRule{
+		Timezone:           &tz,
 		ID:                 id,
 		Name:               fmt.Sprintf("冷却语义 %ds", cooldownSec),
 		Enabled:            true,

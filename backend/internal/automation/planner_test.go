@@ -1092,6 +1092,15 @@ func TestHandleTriggerAutoRiskActionWithoutAuthorizationIsNotDispatched(t *testi
 	if ev.Result == models.AutomationResultFailedDispatch {
 		t.Fatal("确认门被错误地记为 failed_dispatch (C5 复发)")
 	}
+	// 2026-11-18 用户裁定: 这个结果在本系统里**不应出现**(保存入口 V7 保证"能存下=已授权")。
+	// 既然它出现就只能是数据异常, detail 必须同时给出"为什么"和"怎么办",
+	// 否则用户会照旧文案去事件表点确认 —— 那一步做不到(只对 pending_confirm 开放)。
+	if !strings.Contains(ev.Detail, "缺少规则级风险授权") {
+		t.Fatalf("detail 未说明原因(规则缺少规则级授权): %q", ev.Detail)
+	}
+	if !strings.Contains(ev.Detail, "勾选风险确认") {
+		t.Fatalf("detail 未给出可执行的处置(编辑规则重新授权): %q", ev.Detail)
+	}
 	var execs int64
 	p.db.Model(&models.CommandExecution{}).Count(&execs)
 	if execs != 0 {

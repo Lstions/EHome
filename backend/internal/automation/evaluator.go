@@ -9,6 +9,7 @@ package automation
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,14 +137,29 @@ type Evaluator struct {
 	// 用于**每天只落一条**审计 (防刷量), key=ruleID → 已落审计的本地日期。
 	sunLocationAudit map[uint]string
 
-	// firstSunTick 标记"本进程尚未执行过任何 sun_event tick"。
+	// lastClockTick 是上一次时钟驱动求值 (time_window + sun_event) 的时刻,
+	// 零值 = 本进程尚未求值过。
 	//
-	// 语义 (方案 §6.2, A-3 钉死): 首个 tick 只**登记状态、不触发**。理由:
-	// 重启后无法区分"事件已过且已触发过"与"重启错过了事件", 而冷却锚点
-	// last_triggered_at 已在 rebuildCooldowns 恢复 —— 若当日已触发过, 冷却会拦;
-	// 若未触发过, 说明重启发生在事件时刻之前, 此时 now >= eventTime 不成立。
-	// 故"保守不触发"与锚点恢复配合后不会漏触发真实事件。
-	firstSunTick bool
+	// 它的唯一用途是把 sun_event 的判定从"电平"改成"边沿": 只有
+	// prevTick < fireAt <= now —— 即**这一轮 tick 真的跨过了事件时刻** —— 才触发
+	// (2026-11-17 用户裁决: 不做补发, 要立刻执行请用手动触发)。
+	//
+	// 由此一条规则只在"事件发生前就已生效"时才会被自动执行:
+	//   · 进程重启 (prevTick 为空) 不补发已过事件 (方案 §6.2 / A-3);
+	//   · 规则在事件之后才新建 / 重新启用 / 编辑白名单字段 (sunStates 被清) 也不补发
+	//     —— 旧实现按"now >= fireAt 且本日未触发"判电平, 状态一丢就立刻重放旧事件。
+	// 该字段只在 evalTimeWindows 里读改写一次 (1 分钟 1 次), 不在求值热路径。
+	lastClockTick time.Time
+
+	// configChanged 标记"规则的判定字段在本进程内刚发生变化" (新建 / 重新启用 /
+	// 编辑 sameWindowStateFields 白名单字段), key = rule ID。
+	//
+	// 为什么需要它 (2026-11-17 补充): 仅靠 lastClockTick 不够 —— 编辑可能把
+	// fireAt **往后挪**(例如 offset 0 → +1min), 于是 `prevTick < fireAt` 仍然成立,
+	// 边沿判定会误以为"这一轮跨过了事件"。本标记表达的是事实本身: 这条规则的
+	// 当前配置是在事件之后才生效的, 故本日不触发 (要执行请手动触发)。
+	// 在"事件尚未到达"的那一轮求值里清除 (配置先于事件生效, 后续照常触发)。
+	configChanged map[uint]bool
 
 	// planProvider 是数据字段解析层（sensorfield）控制面（设计 §7.2）。
 	// nil = 未接线：字面量继续走历史 matchField（G-6 逐字节等价），特殊形态
@@ -195,7 +211,7 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 		sunStates:        make(map[uint]string),
 		sunCache:         sun.NewCache(),
 		sunLocationAudit: make(map[uint]string),
-		firstSunTick:     true,
+		configChanged:    make(map[uint]bool),
 		plans:            newPlanCache(),
 		unresolvedAudit:  make(map[unresolvedKey]time.Time),
 		sourceAudit:      make(map[sourceAuditKey]time.Time),
@@ -387,6 +403,19 @@ func (e *Evaluator) LoadRules() {
 	for id := range e.sunStates {
 		if old, ok := prev[id]; !ok || !sameWindowStateFields(old, next[id]) {
 			delete(e.sunStates, id)
+		}
+	}
+	// 配置变更标记 (2026-11-17 不补发): 新进入缓存或判定字段变化 ⇒ 下一次求值
+	// 若事件已过则跳过。载体独立于 sunStates —— 后者记"本日已触发过", 本标记记
+	// "当前配置晚于事件生效" (编辑把 fireAt 往后挪时只有它能拦住)。
+	for id, r := range next {
+		if old, ok := prev[id]; !ok || !sameWindowStateFields(old, r) {
+			e.configChanged[id] = true
+		}
+	}
+	for id := range e.configChanged {
+		if _, ok := next[id]; !ok {
+			delete(e.configChanged, id)
 		}
 	}
 	for id := range e.sunLocationAudit {
@@ -598,7 +627,9 @@ func (e *Evaluator) EvaluateClockRulesAt(now time.Time) {
 // sun_event **复用本 ticker, 不新增 ticker** (方案 §3.1.5): 新增 ticker 会让两条
 // 时钟驱动路径的求值时刻错开, 冷却判定与日熔断的"当日"口径出现竞态。
 func (e *Evaluator) evalTimeWindows(now time.Time) {
-	e.mu.RLock()
+	// 本 tick 的"上一轮求值时刻"在此读取并推进 —— 它是 sun_event 边沿判定的
+	// 左端点 (prevTick < fireAt <= now 才算跨过)。写操作必须在写锁里做。
+	e.mu.Lock()
 	var windowRules, sunRules []models.AutomationRule
 	for _, r := range e.rules {
 		switch r.TriggerType {
@@ -608,38 +639,42 @@ func (e *Evaluator) evalTimeWindows(now time.Time) {
 			sunRules = append(sunRules, r)
 		}
 	}
-	// 首个 sun_event tick 的"保守不触发"标记在此原子翻转: 本 tick 内所有规则
-	// 都按"首 tick"处理, 下一个 tick 起正常求值。
-	firstSunTick := e.firstSunTick
-	if len(sunRules) > 0 {
-		e.firstSunTick = false
-	}
-	e.mu.RUnlock()
+	prevTick := e.lastClockTick
+	e.lastClockTick = now
+	e.mu.Unlock()
 
 	for _, rule := range windowRules {
 		e.evalWindowRule(rule, now)
 	}
 	for _, rule := range sunRules {
-		e.evalSunEventRule(rule, now, firstSunTick)
+		e.evalSunEventRule(rule, now, prevTick)
 	}
 }
 
-// evalSunEventRule 单条 sun_event 规则求值 (方案 §6.2 状态机)。
+// evalSunEventRule 单条 sun_event 规则求值 (方案 §6.2 状态机, 2026-11-17 改为边沿判定)。
 //
 // 状态机:
 //
-//	未求值 ──(tick 且 now >= eventTime+offset)──▶ 已触发
-//	未求值 ──(tick 且 now <  eventTime+offset)──▶ 未求值
-//	已触发 ──(节点本地日期翻转)─────────────────▶ 未求值 (新一日)
-//	任意   ──(极昼/极夜)───────────────────────▶ 本日不触发 + 显式审计
+//	未求值 ──(tick 且 prevTick < fireAt <= now)──▶ 已触发
+//	未求值 ──(tick 且 now <  fireAt)──────────────▶ 未求值
+//	未求值 ──(tick 且 fireAt <= prevTick)─────────▶ 记为"本日已处理", 不触发
+//	已触发 ──(节点本地日期翻转)────────────────────▶ 未求值 (新一日)
+//	任意   ──(极昼/极夜)──────────────────────────▶ 本日不触发 + 显式审计
 //
 // 三条硬约束:
-//  1. **首 tick 保守不触发** (firstSunTick): 重启后无法区分"事件已过且已触发"
-//     与"重启错过了", 一律不补触发 (方案 §6.2)。A-3 门禁钉死。
+//  1. **只在真正跨过事件时刻的那一轮 tick 触发**: 必须 prevTick < fireAt <= now。
+//     · 进程重启 (prevTick 为空) 不补发已过事件 (方案 §6.2 / A-3 门禁钉死);
+//     · 规则在事件之后才新建 / 重新启用 / 编辑白名单字段 (sunStates 被清) 也不补发
+//       —— 2026-11-17 用户裁决: 不做补发, 要立刻执行请用手动触发
+//       (POST /api/v1/automation-rules/:id/trigger)。
+//     旧实现按"now >= fireAt 且本日未触发"判电平, 上述两种情况会把几小时前的
+//     日出/日落**重放**一次并真实下发设备动作 (2026-11-17 22:14:57 生产实测)。
+//     代价(有意接受): 在事件前不足一个 tick 内才新建/修改的规则, 当天也不再自动
+//     触发(无法判定新配置是否赶在事件之前生效, 取保守方向), 需要时手动触发。
 //  2. 每节点本地日**只触发一次**: 由 sunStates[ruleID] = 本地日期 保证。
 //  3. 极昼/极夜**不静默**: 落一条显式审计 (suppressed_no_solar_event, O-6),
 //     每日本事件只落一条 (防刷量)。
-func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, firstSunTick bool) {
+func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, prevTick time.Time) {
 	resolved, err := e.resolveRuleSun(rule)
 	if err != nil {
 		// 运行期解析失败 (节点被删/坐标被清空/时区名失效): 不触发 + 审计,
@@ -689,34 +724,49 @@ func (e *Evaluator) evalSunEventRule(rule models.AutomationRule, now time.Time, 
 	// 本日是否已触发过 (日期翻转即自然复位)。
 	alreadyFiredToday := e.sunStates[rule.ID] == localDate
 
-	// **首 tick 保守不触发** (方案 §6.2 / A-3)。
+	// 边沿判定 (2026-11-17 用户裁决: 不做补发)。两个守卫缺一不可:
 	//
-	// 精确语义 (必须严格照方案): 保守**只适用于"事件时刻已经过去"的情形** ——
-	// 此时无法区分"重启前已触发过"与"重启错过了", 故不补触发, 并把该本地日标记
-	// 为已处理 (否则下一 tick 仍会认为"本日未触发"而补触发, 保守窗口就退化成一个
-	// tick)。
+	//  1. configChanged: 规则(或其判定字段)是在**事件之后**才生效的 (新建 /
+	//     重新启用 / 编辑白名单字段)。编辑可能把 fireAt 往后挪, 使 prevTick <
+	//     fireAt 仍成立, 所以只靠 2 判不出来;
+	//  2. prevTick < fireAt <= now: 这一轮 tick 真的跨过了事件时刻。prevTick 为
+	//     空 = 本进程第一次时钟求值, 无法区分"重启前已触发"与"重启错过了",
+	//     一律不补发 (方案 §6.2 / A-3)。
 	//
-	// 反之, 若首 tick 时**事件尚未到达** (now < fireAt), 说明重启发生在事件之前
-	// —— 这没有任何歧义, 后续 tick 必须正常触发, 否则每到事件前重启一次就永远
-	// 不触发。该条件初版遗漏, 被 A-1/A-2 门禁抓住 (前置 tick 曾把全天标记为已触发)。
-	if firstSunTick && !now.Before(fireAt) {
-		e.sunStates[rule.ID] = localDate
+	// 命中任一守卫都登记"本日已处理"(否则后续 tick 仍会认为"本日未触发"),
+	// 但绝不提交 Planner、不下发设备动作。
+	if now.Before(fireAt) {
+		// 事件尚未到达: 当前配置已先于事件生效, 清掉变更标记, 等跨过它的那一轮 tick。
+		delete(e.configChanged, rule.ID)
 		e.mu.Unlock()
-		logger.Infof("automation: sun_event 首 tick 保守跳过已过事件 rule_id=%d event=%s (方案 §6.2: 重启不补触发)",
-			rule.ID, fireAt.Format(time.RFC3339))
 		return
 	}
-
-	// 边沿判定: 只在 [now-1tick, now] 跨过 fireAt 时触发, 且本日未触发过。
-	// 用 "!now.Before(fireAt)" + 本日未触发 两个条件 —— 前者覆盖"到点且已过",
-	// 后者保证同一本地日只触发一次。绝不使用 "now >= fireAt 恒真" 这种写法。
-	if now.Before(fireAt) || alreadyFiredToday {
-		if !now.Before(fireAt) {
-			// 本日已触发过: 记录但不重复提交 (sunStates 已持有该日期)。
-			e.mu.Unlock()
-			return
-		}
+	if alreadyFiredToday {
+		// 本日已触发过: 不重复提交 (sunStates 已持有该日期)。
 		e.mu.Unlock()
+		return
+	}
+	if e.configChanged[rule.ID] {
+		// 规则的当前配置是在**事件之后**才生效的 (新建 / 重新启用 / 编辑判定字段)。
+		// 即使 fireAt 恰好落在 (prevTick, now] 内也不算"跨越" —— 那一刻这条规则
+		// 还不存在(或是别的参数)。登记本日已处理, 不提交、不下发。
+		delete(e.configChanged, rule.ID)
+		e.sunStates[rule.ID] = localDate
+		e.mu.Unlock()
+		logger.Infof("automation: sun_event 规则在事件之后才生效, 跳过本日(不补发) rule_id=%d event=%s now=%s",
+			rule.ID, fireAt.Format(time.RFC3339), now.Format(time.RFC3339))
+		return
+	}
+	if prevTick.IsZero() || !fireAt.After(prevTick) {
+		e.sunStates[rule.ID] = localDate
+		e.mu.Unlock()
+		if prevTick.IsZero() {
+			logger.Infof("automation: sun_event 首 tick 保守跳过已过事件 rule_id=%d event=%s (方案 §6.2: 重启不补触发)",
+				rule.ID, fireAt.Format(time.RFC3339))
+		} else {
+			logger.Infof("automation: sun_event 跳过已过事件(不补发) rule_id=%d event=%s prev_tick=%s now=%s",
+				rule.ID, fireAt.Format(time.RFC3339), prevTick.Format(time.RFC3339), now.Format(time.RFC3339))
+		}
 		return
 	}
 	e.sunStates[rule.ID] = localDate
@@ -780,10 +830,51 @@ func (e *Evaluator) recordSunNoEvent(rule models.AutomationRule, now time.Time, 
 	}
 }
 
+// ruleTimezone 解析规则自带时区（2026-11-18 D7）。
+//
+// time_window 与 sun_event 共用 automation_rules.timezone。空值/非法值一律
+// fail-closed —— 绝不回落到进程时区：生产容器是 UTC，"静默按 UTC 执行"正是
+// 本次 8 小时偏移的成因，回退只会把错误藏得更深。
+func ruleTimezone(rule models.AutomationRule) (*time.Location, string, error) {
+	if rule.Timezone == nil || strings.TrimSpace(*rule.Timezone) == "" {
+		return nil, "", fmt.Errorf("规则未设置时区（time_window 必填）：请编辑规则选择时区后重新保存")
+	}
+	name := strings.TrimSpace(*rule.Timezone)
+	loc, err := models.ValidateTimezone(name)
+	if err != nil {
+		return nil, "", fmt.Errorf("规则时区非法: %w", err)
+	}
+	return loc, name, nil
+}
+
+// MarkTriggered 把一次**已下发**的触发写回内存冷却态（2026-11-18 D4）。
+//
+// 为什么需要它：求值器只认 e.triggered，而手动触发与确认执行走
+// planner.HandleTrigger / ConfirmEvent，不经过 evalWindowRule/evalSensor，
+// 于是"规则有冷却"对这两条路径不生效 —— 手动触发后自动路径仍 armed，
+// 冷却窗内下一个满足条件的样本会**再动一次设备**。
+// 语义：冷却属于**规则**，不属于某条执行路径；三条路径必须推进同一个锚点。
+func (e *Evaluator) MarkTriggered(ruleID uint, at time.Time) {
+	if ruleID == 0 {
+		return
+	}
+	e.mu.Lock()
+	e.triggered[ruleID] = at
+	e.mu.Unlock()
+}
+
 // evalWindowRule 单条 time_window 规则状态机: 判定当前时刻是否在窗口内,
 // 根据 edge 语义 (enter/exit/inside) 决定是否触发, 受 CooldownSec 抑制。
 func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
-	inside, err := isInWindow(rule.TriggerWindowStart, rule.TriggerWindowEnd, now)
+	// 2026-11-18 D7：窗口按规则自带时区解释；缺时区/时区非法一律 fail-closed
+	// （不回落进程时区 —— 生产容器是 UTC，静默按 UTC 执行正是 8 小时偏移的成因）。
+	loc, _, tzErr := ruleTimezone(rule)
+	if tzErr != nil {
+		logger.Warn("automation: time_window rule skipped",
+			"rule_id", rule.ID, "timezone", rule.Timezone, "error", tzErr)
+		return
+	}
+	inside, err := isInWindow(rule.TriggerWindowStart, rule.TriggerWindowEnd, now.In(loc))
 	if err != nil {
 		logger.Warn("automation: invalid time window format",
 			"rule_id", rule.ID, "start", rule.TriggerWindowStart, "end", rule.TriggerWindowEnd, "error", err)
@@ -811,9 +902,15 @@ func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
 	var edge string
 	switch rule.TriggerWindowEdge {
 	case models.AutomationWindowEnter:
-		// enter: 上次不在窗口内、本次在窗口内 → 触发。
-		// 重启后首次 tick (exists=false): 保守处理 — 当前在窗口内则触发。
-		shouldTrigger = inside && (!exists || !wasInside)
+		// enter: 上次**确实观测到**不在窗口内、本次在窗口内 → 触发（真边沿）。
+		//
+		// exists=false 表示"求值器还没有这条规则的窗口历史"，成因有三种：
+		//   ① 进程刚启动；② 规则在窗口内才被创建/启用；③ 规则被编辑后 windowStates 被清。
+		// 旧实现用 `(!exists || !wasInside)` 把"不知道"当成"刚刚进入"，于是这三种
+		// 情况都会**凭空执行一次设备动作** —— 那是补发，不是边沿。
+		// 2026-11-18 与 sun_event 同一裁决（2026-11-17）：不做补发，要立刻执行请用手动触发
+		// (POST /api/v1/automation-rules/:id/trigger)。
+		shouldTrigger = inside && exists && !wasInside
 		edge = models.AutomationWindowEnter
 	case models.AutomationWindowExit:
 		// exit: 上次在窗口内、本次不在窗口内 → 触发。
@@ -855,7 +952,7 @@ func isInWindow(start, end string, now time.Time) (bool, error) {
 		return false, fmt.Errorf("parse end %q: %w", end, err)
 	}
 
-	// 当日窗口时间点 (本地时间)。
+	// 当日窗口时间点（now 的时区即调用方传入的规则时区）。
 	year, month, day := now.Date()
 	startToday := time.Date(year, month, day, startT.Hour(), startT.Minute(), 0, 0, now.Location())
 	endToday := time.Date(year, month, day, endT.Hour(), endT.Minute(), 0, 0, now.Location())

@@ -430,7 +430,9 @@ func TestInvalidateReloads(t *testing.T) {
 // =====================================================================
 
 func timeWindowRule(id uint, start, end, edge string) models.AutomationRule {
+	tz := testLocalZone()
 	return models.AutomationRule{
+		Timezone:           &tz,
 		ID:                 id,
 		Name:               "时间窗口策略",
 		Enabled:            true,
@@ -594,7 +596,10 @@ func TestTimeWindowCooldownSuppression(t *testing.T) {
 	ev.LoadRules()
 
 	now := time.Now()
-	// 先进窗口触发一次。
+	// 先在窗口外求值建立 wasInside=false，再跨入窗口触发一次
+	// （2026-11-18 起首次 tick 落在窗口内不再触发：不补发）。
+	before := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(before)
 	inside := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
 	ev.evalTimeWindows(inside)
 	if len(h.events) != 1 {
@@ -615,30 +620,44 @@ func TestTimeWindowCooldownSuppression(t *testing.T) {
 	}
 }
 
-// 重启后窗口状态: 清空后首次 tick 保守处理 (enter 规则首次 tick 若在窗口内则触发)。
-func TestTimeWindowRestartConservative(t *testing.T) {
+// 重启后窗口状态: 清空后首个 tick **不补发** (2026-11-18 与 sun_event 同一裁决)。
+//
+// 旧行为是"首次 tick 若在窗口内则触发"，即把"不知道历史"当成"刚刚进入"——
+// 重启一次就会凭空执行一次设备动作。现在要求 exists && !wasInside。
+func TestTimeWindowRestartDoesNotBackfill(t *testing.T) {
 	db := newTestDB(t)
 	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowEnter)
 	if err := db.Create(&r).Error; err != nil {
 		t.Fatal(err)
 	}
 
-	// 第一次启动: 在窗口内触发一次。
+	// 第一次启动: 先在窗口外求值，再跨入窗口 → 触发一次。
 	h1 := &captureHandler{}
 	ev1 := NewEvaluator(db, h1)
 	now := time.Now()
+	before := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, now.Location())
 	inside := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	ev1.evalTimeWindows(before)
 	ev1.evalTimeWindows(inside)
 	if len(h1.events) != 1 {
 		t.Fatalf("expect 1 trigger on first start, got %d", len(h1.events))
 	}
 
-	// 模拟重启: 新建 Evaluator (windowStates 清空), 再次在窗口内 → 保守触发。
+	// 模拟重启: windowStates 清空后，首个 tick 落在窗口内**不得**补发
+	// (2026-11-18 用户裁决: 与 sun_event 同款 —— 重启不是"刚进入窗口")。
 	h2 := &captureHandler{}
 	ev2 := NewEvaluator(db, h2)
 	ev2.evalTimeWindows(inside)
+	if len(h2.events) != 0 {
+		t.Fatalf("重启后首个 tick 落在窗口内补发了 %d 次 —— 裁决: 不补发, 请手动触发", len(h2.events))
+	}
+
+	// 跳过不是永久失效: 重启后仍要能在真正的下一段边沿触发。
+	overnight := time.Date(now.Year(), now.Month(), now.Day(), 19, 0, 0, 0, now.Location())
+	ev2.evalTimeWindows(overnight)
+	ev2.evalTimeWindows(inside.Add(24 * time.Hour))
 	if len(h2.events) != 1 {
-		t.Fatalf("expect 1 trigger after restart (conservative enter), got %d", len(h2.events))
+		t.Fatalf("重启后次日跨入窗口应触发 1 次, got %d", len(h2.events))
 	}
 }
 

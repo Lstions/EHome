@@ -475,4 +475,20 @@ var (
 		Name: "ehome_device_op_stale_ack_total",
 		Help: "Total device op ACKs for an unknown or already-expired request",
 	})
+
+	// AutomationEventsTotal 按 result 统计已落库的自动化事件。
+	//
+	// 为什么必须有（2026-11-18 生产事故）：自动化失败曾静默 11 小时 ——
+	// failed_gate 只写 automation_events 一张表，既没有指标也没有告警，
+	// 前端也只订阅 5 个**具名**推送事件（不含 failed_gate），于是"每天早上
+	// 该开的 BMS 充电 MOS 没开"只能靠用户发现电池没充电。
+	//
+	// result 是**有界枚举**（models.AutomationResult* 常量），禁止把
+	// rule_id / device_id 放进 label（高基数）。递增点在
+	// models.AutomationEvent 的 AfterCreate 钩子里 —— 那里是所有创建路径的
+	// 唯一收口，漏一个创建点就少一个信号，而"靠记得加"正是这次事故的教训。
+	AutomationEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_automation_events_total",
+		Help: "Automation events persisted, by bounded result code",
+	}, []string{"result"})
 )

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/sensorfield"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -49,6 +51,16 @@ var (
 // automationEvaluator 供 CRUD 写路径失效规则缓存 (避免 api→automation 编译期依赖)。
 type automationEvaluator interface {
 	Invalidate()
+}
+
+// automationNextRunner 供列表/详情接口附加「下次执行时间」(只读计算, 无副作用)。
+//
+// 为什么用**可选接口断言**而不是把它并进 automationEvaluator:
+// 现有单测替身 (handler_alert_test.go 的 fakeEvaluator) 只实现 Invalidate()，
+// 直接扩接口会让它们编译失败；而"能算下次执行时间"本来就是实现方的一个可选
+// 能力，缺失时列表照常返回 (前端显示 "-")，不该改变既有契约。
+type automationNextRunner interface {
+	NextRuns(rules []models.AutomationRule, now time.Time) map[uint]models.NextRun
 }
 
 // automationPlanner 供 confirm 端点人工确认执行 pending_confirm 事件 (裁决 4 确认制闭环)。
@@ -168,12 +180,12 @@ type updateAutomationRuleRequest struct {
 func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner, trigger automationManualTrigger, catalog automationCatalogQuerier) {
 	rules := v1.Group("/automation-rules")
 	{
-		rules.GET("", listAutomationRules(db))
+		rules.GET("", listAutomationRules(db, evaluator))
 		rules.POST("", createAutomationRule(db, evaluator, catalog))
 		// 保存前风险预检（修 AU-06）：契约 = frontend-shared/src/api/automation.ts 的
 		// PrecheckResponse{risk_actions,blocking_errors,warnings}。只读、无副作用。
 		rules.POST("/precheck", precheckAutomationRule(db, catalog))
-		rules.GET("/:id", getAutomationRule(db))
+		rules.GET("/:id", getAutomationRule(db, evaluator))
 		rules.PUT("/:id", updateAutomationRule(db, evaluator, catalog))
 		rules.DELETE("/:id", deleteAutomationRule(db, evaluator))
 		rules.PATCH("/:id/enabled", patchAutomationRuleEnabled(db, evaluator))
@@ -187,8 +199,30 @@ func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automa
 	}
 }
 
+// attachNextRuns 为规则附加「下次执行时间」(2026-11-17)。
+//
+// 只读: 计算在 automation.(*Evaluator).NextRuns 内完成, 本函数只负责把结果
+// 贴回响应体。evaluator 为 nil 或未实现 automationNextRunner 时静默跳过 ——
+// 该字段是**附加**能力, 缺失不得让列表接口报错 (老客户端本就不读它)。
+func attachNextRuns(rules []models.AutomationRule, evaluator automationEvaluator) {
+	if len(rules) == 0 || evaluator == nil {
+		return
+	}
+	nr, ok := evaluator.(automationNextRunner)
+	if !ok || nr == nil {
+		return
+	}
+	computed := nr.NextRuns(rules, time.Now())
+	for i := range rules {
+		if v, hit := computed[rules[i].ID]; hit {
+			val := v
+			rules[i].NextRun = &val
+		}
+	}
+}
+
 // GET /api/v1/automation-rules
-func listAutomationRules(db *gorm.DB) gin.HandlerFunc {
+func listAutomationRules(db *gorm.DB, evaluator automationEvaluator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var items []models.AutomationRule
 		q := db.Model(&models.AutomationRule{})
@@ -203,7 +237,7 @@ func listAutomationRules(db *gorm.DB) gin.HandlerFunc {
 		if at := c.Query("action_type"); at != "" {
 			q = q.Where("action_type = ?", at)
 		}
-		if err := q.Order("id DESC").Find(&items).Error; err != nil {
+		if err := q.Order("id DESC").Limit(automationRulesMaxPage).Find(&items).Error; err != nil {
 			Error(c, 500, "查询自动化策略失败")
 			return
 		}
@@ -212,12 +246,17 @@ func listAutomationRules(db *gorm.DB) gin.HandlerFunc {
 			Error(c, 500, "查询策略动作失败")
 			return
 		}
+		if len(items) == automationRulesMaxPage {
+			logger.Warn("automation: rule list hit page cap; response is truncated",
+				"limit", automationRulesMaxPage)
+		}
+		attachNextRuns(items, evaluator)
 		Success(c, items)
 	}
 }
 
 // GET /api/v1/automation-rules/:id
-func getAutomationRule(db *gorm.DB) gin.HandlerFunc {
+func getAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var rule models.AutomationRule
 		if err := db.First(&rule, c.Param("id")).Error; err != nil {
@@ -233,6 +272,7 @@ func getAutomationRule(db *gorm.DB) gin.HandlerFunc {
 			Error(c, 500, "查询策略动作失败")
 			return
 		}
+		attachNextRuns(attached, evaluator)
 		Success(c, attached[0])
 	}
 }
@@ -311,6 +351,10 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
+		if msg := validateWindowRule(req.TriggerType, req.Timezone); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
 		// 坐标来源元数据（2026-11-14）：ip|city；旧客户端不传 = 空串，保持兼容。
 		if msg := validateLocationMeta(req.LocationSource, req.LocationLabel); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
@@ -325,7 +369,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		riskAcknowledged := req.RiskAcknowledged != nil && *req.RiskAcknowledged
 		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
 			actions, createRequireConfirmed, riskAcknowledged); msg != "" {
-			ErrorWithCode(c, 400, code, msg)
+			writeRiskAuthorizationError(c, code, msg)
 			return
 		}
 		rule := models.AutomationRule{
@@ -569,6 +613,10 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
+		if msg := validateWindowRule(tt, sunTZ); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
 		if msg := validateActionsCatalog(c.Request.Context(), catalog, actions); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
@@ -614,7 +662,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		// 逐动作检查: 只看第一个动作会漏掉"第 2 个是风险动作"的规则。
 		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
 			actions, rc, acknowledged); msg != "" {
-			ErrorWithCode(c, 400, code, msg)
+			writeRiskAuthorizationError(c, code, msg)
 			return
 		}
 		updates := map[string]interface{}{}
@@ -1062,6 +1110,26 @@ func automationActionSetChanged(current, incoming []models.AutomationRuleAction)
 	return !actionSetsEqual(current, incoming)
 }
 
+// writeRiskAuthorizationError 把 V7 的拒绝写成**对应**状态码。
+//
+// 两种拒绝的性质完全不同，混用 400 会误导两端：
+//   - risk_action_requires_confirmation：用户的规则配置问题（没勾风险确认）⇒ 400，
+//     调用方应改请求；
+//   - risk_catalog_unavailable：设备能力目录这个**依赖**查不到（DB 抖动/设备被删）⇒
+//     503 + Retry-After，调用方应稍后重试。计成客户端错误会让监控误判、前端也不会
+//     给"稍后重试"的提示。
+//
+// 可达性：公开 API 上通常由上游 validateActionsCatalog 先返回 400，本函数的分列属
+// 纵深防御（TOCTOU 窗口 / 未来调用顺序调整）。一旦真走到这里，语义仍须正确。
+func writeRiskAuthorizationError(c *gin.Context, code, msg string) {
+	if code == "risk_catalog_unavailable" {
+		c.Header("Retry-After", "5")
+		ErrorWithCode(c, http.StatusServiceUnavailable, code, msg)
+		return
+	}
+	ErrorWithCode(c, http.StatusBadRequest, code, msg)
+}
+
 // validateRiskActionAuthorization 实现校验 V7 (方案 §4.1.1 V7 / §8 A-10):
 // **集合中含风险动作** 且 require_confirmed=false 且未授权 → 拒绝保存。
 //
@@ -1090,19 +1158,34 @@ func validateRiskActionAuthorization(ctx context.Context, catalog automationCata
 		}
 		items, err := catalog.Catalog(ctx, a.ActionDeviceID)
 		if err != nil {
-			// Catalog 查不到目标设备时, 前面的 validateActionsCatalog 已经给出
-			// 更准确的报错; 这里不重复报, 也不据此判定风险 (避免误报 V7)。
-			continue
+			// 可达性说明（2026-11-18 复审）：正常请求里上游 validateActionsCatalog 已对
+			// 同一次目录失败返回 400，所以本分支实际只在"两次目录查询之间目录变了/查询
+			// 抖动"的 TOCTOU 窗口触发。仍然保留，是因为"能保存成功即已授权"这条不变式
+			// 必须由**本层**保证，不能依赖调用方碰巧先查过一次目录。
+			// 2026-11-18 收口 (fail-closed): 旧实现此处 `continue` —— 把"无法判定风险
+			// 等级"当成"不是风险动作", 于是照样存下一条永远过不了确认门的规则,
+			// 而那正是 V7 要拦的东西。上游 validateActionsCatalog 通常已拦下同一次
+			// 失败, 这里只是不给"两次目录查询之间失败"留窗口 —— 用户裁定: 能保存成功
+			// 就一定是完成了授权, 该不变式必须由代码保证, 不能靠"上游也会查"。
+			return "无法校验动作风险等级（设备能力目录查询失败），请稍后重试: " + err.Error(),
+				"risk_catalog_unavailable"
 		}
+		found := false
 		for _, item := range items {
 			if item.Definition.ID != a.ActionID {
 				continue
 			}
+			found = true
 			if item.Definition.RiskLevel.RequiresConfirmation() {
 				return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
 					code
 			}
 			break
+		}
+		if !found {
+			// 目录里没有这个动作: 同上, 不得跳过 (跳过 = 未校验就放行)。
+			return "无法校验动作风险等级（设备能力目录中找不到该动作），请刷新后重试",
+				"risk_catalog_unavailable"
 		}
 	}
 	return "", ""
@@ -1140,6 +1223,32 @@ type sunCandidates struct {
 //
 // 本函数是**保存期**判据；运行期由 models.ResolveRuleSunLocation 复算同一套规则，
 // 两处共用唯一实现，不允许出现第二份取值顺序。
+// automationRulesMaxPage 是列表接口的硬上限（2026-11-18 D16）。
+//
+// 为什么需要：GET /automation-rules 没有分页，而 attachNextRuns 让每条规则
+// 多出 1~2 次时区/日出日落计算。规则数一多就是 O(N) 的系统调用 + 纯函数计算，
+// 且响应体无界。上限内行为不变；触到上限会打 WARN（不静默截断而不留痕）。
+const automationRulesMaxPage = 200
+
+// validateWindowRule 校验 time_window 的时区（2026-11-18 D7）。
+//
+// 为什么必须必填：窗口改为按**规则时区**解释执行（evaluator.evalWindowRule /
+// nextrun.nextTimeWindow）。缺时区只能 fail-closed 不执行；而旧行为"静默按
+// 服务器 UTC 执行"曾让东八区用户配 08:00 实际 16:00 生效，且界面毫无提示。
+// 与 sun_event 共用 timezone 列，但两者的必填语义各自独立。
+func validateWindowRule(triggerType string, timezone *string) string {
+	if triggerType != models.AutomationTriggerTimeWindow {
+		return ""
+	}
+	if timezone == nil || strings.TrimSpace(*timezone) == "" {
+		return "time_window 规则必须填写 timezone（时间窗口按该时区解释执行，不再回落到服务器时区）"
+	}
+	if _, err := models.ValidateTimezone(*timezone); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 func validateSunEventRule(cand sunCandidates) string {
 	if cand.TriggerType != models.AutomationTriggerSunEvent {
 		return ""

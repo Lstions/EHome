@@ -287,7 +287,7 @@ func fireSunEvent(t *testing.T, c *e2eChain, kind string) time.Time {
 	if err != nil || status != sun.StatusOK {
 		t.Fatalf("sun event fixture failed: %s %v", status, err)
 	}
-	// 首 tick 保守不触发（A-3），先做一次"事件前"的 tick 把 firstSunTick 消耗掉
+	// 首 tick 不补发已过事件（A-3），先做一次"事件前"的 tick 建立 prevTick
 	c.tickSunAt(t, eventAt.Add(-2*time.Hour))
 	c.tickSunAt(t, eventAt.Add(time.Minute))
 	return eventAt

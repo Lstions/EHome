@@ -60,6 +60,10 @@ docker compose --profile monitoring config --quiet
 | EhomePendingWriteTimeouts | ehome_pendingwrite_timeout_total | warning | rate[5m] > 0, 持续 5m |
 | EhomeMqttPublishFailures | ehome_mqtt_publish_failures_total | warning | rate[5m] > 0, 持续 2m |
 | EhomeAllNodesOffline | ehome_nodes_online | critical | == 0 且有历史上报, 持续 15m |
+| EhomeAutomationGateFailures | ehome_automation_events_total{result="failed_gate"} | warning | increase[5m] >= 2 |
+| EhomeAutomationConfirmationRequired | ehome_automation_events_total{result="confirmation_required"} | warning | increase[10m] >= 1 |
+| EhomeAutomationPartialFailure | ehome_automation_events_total{result="partial_failure"} | critical | increase[10m] >= 1 |
+| EhomeAutomationPendingConfirmExpired | ehome_automation_events_total{result="expired"} | info | increase[15m] >= 3 |
 
 **未覆盖的故障族: retention / purge / 分区任务失败** —— `backend/internal/datalifecycle`
 （含 `partition_mgr.go`）当前未暴露任何 Prometheus 指标, 无法在不编造指标名的前提下
