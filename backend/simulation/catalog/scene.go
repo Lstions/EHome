@@ -773,8 +773,8 @@ func sceneRun002(e *harness.Env) {
 		e.Fatalf("武装后 %s 仍不可用: reason=%q reason_code=%q（夹具未把运行时事实上报齐）",
 			sceneMosAction, item.Reason, item.ReasonCode)
 	}
-	if item.Definition.Risk != "high" {
-		e.Fatalf("%s 的风险等级 = %q，期望 high（确认制的前提）", sceneMosAction, item.Definition.Risk)
+	if item.Definition.RiskLevel != "elevated" {
+		e.Fatalf("%s 的风险等级 = %q，期望 elevated（确认制的前提）", sceneMosAction, item.Definition.RiskLevel)
 	}
 	e.Evidence("SIM-SCNE-002.catalog", item)
 

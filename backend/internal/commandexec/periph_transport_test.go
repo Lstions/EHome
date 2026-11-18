@@ -365,17 +365,13 @@ func itoa(v int) string {
 	return "1"
 }
 
-// TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation 验证 system actor 路径在
-// **规则级显式授权**下跳过 medium risk 的 confirmation (O-2 裁决, 实施计划 §0.1):
-// automation planner 以 ActorKind=system + RiskAcknowledged=true 调 Create,
-// gpio_set (medium) 无需 token 即可下发, 且审计落 ActorType=system。
+// TestSystemActorExecutesMediumRiskAction 验证 system actor 路径的风险动作直接执行：
+// automation planner 以 ActorKind=system 调 Create, gpio_set (elevated) 无需 token
+// 即可下发, 且审计落 ActorType=system。
 //
-// 语义变更说明 (不是放宽断言): 改造前 system 路径按**风险等级**豁免 medium;
-// O-2 裁决后改为按**规则是否被用户显式授权**豁免 —— 风险动作本身仍然要确认,
-// 未授权的自动路径照样被拦 (反向用例见 commandexec/risk_ack_gate_test.go 的
-// TestSystemActorWithoutRiskAcknowledgedStillRequiresConfirmation)。
-// 对照: 同一动作以默认 ActorKind (空=user) 调用则仍须 ErrConfirmationRequired。
-func TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation(t *testing.T) {
+// 2026-11-18 简化: 不再有"规则级授权"旁路字段 —— system 路径本身就不经过确认门;
+// 用户路径 (ActorKind 空) 仍须 ErrConfirmationRequired, 见下方对照断言。
+func TestSystemActorExecutesMediumRiskAction(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := setupPeriphNode(t, db)
 	s := NewService(db, periphActions(t))
@@ -388,7 +384,6 @@ func TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation(t *testing.T) {
 		EdgeDeviceID: node.ID, ActorUserID: 7, ActorKind: ActorKindSystem,
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
 		IdempotencyKey: "system-actor-gpio-1", Reason: "automation:1:test",
-		RiskAcknowledged: true,
 	}
 	exec, replayed, err := s.Create(context.Background(), systemIn)
 	if err != nil {
@@ -420,11 +415,11 @@ func TestSystemActorWithRuleAuthorizationSkipsMediumConfirmation(t *testing.T) {
 	}
 }
 
-// TestSystemActorHighRiskStillRequiresConfirmation 验证 system actor 路径对 high risk 不放行:
-// pwm_set_duty 是 medium, 但若把风险调高(注册一个 high 变体), 即便 ActorKind=system 也须 token。
-// 用现有的 BMS set_mos_policy (risk=high) 等同断言不可行 (其走 channel_cmd_v2 gate 链),
-// 改为注册一个 high risk 的伪 periph 定义直接驱动 confirmation 分支。
-func TestSystemActorHighRiskStillRequiresConfirmation(t *testing.T) {
+// TestSystemActorHighRiskExecutesWithoutConfirmation 验证 2026-11-18 简化后的契约:
+// 风险等级（含驱动层 high/critical）只决定界面是否弹窗，system 路径不再经过确认门。
+// 是否"先问我"由规则上的 require_confirmed 决定（true 在 planner 侧分流为 pending_confirm）。
+// 安全边界因此从"风险等级"上移到"规则策略 + 保存时的一次确认弹窗"。
+func TestSystemActorHighRiskExecutesWithoutConfirmation(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := setupPeriphNode(t, db)
 
@@ -463,8 +458,15 @@ func TestSystemActorHighRiskStillRequiresConfirmation(t *testing.T) {
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
 		IdempotencyKey: "system-actor-gpio-high-1", Reason: "automation:1:test",
 	}
-	if _, _, err := s.Create(context.Background(), in); !errors.Is(err, ErrConfirmationRequired) {
-		t.Fatalf("system actor high-risk action must still require confirmation, got %v", err)
+	exec, replayed, err := s.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("system actor 的 high risk 动作应直接执行, 实际 err=%v", err)
+	}
+	if replayed {
+		t.Fatal("首次调用不应是 replay")
+	}
+	if exec.Status != StatusQueued {
+		t.Fatalf("status=%s want %s", exec.Status, StatusQueued)
 	}
 }
 

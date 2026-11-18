@@ -230,7 +230,7 @@ type cmdActionItem struct {
 	Definition struct {
 		ID        string `json:"id"`
 		Version   int    `json:"version"`
-		Risk      string `json:"risk"`
+		RiskLevel string `json:"risk_level"`
 		Enabled   bool   `json:"enabled"`
 		Transport string `json:"transport"`
 	} `json:"definition"`
@@ -424,8 +424,9 @@ func cmdRun001(e *harness.Env) {
 		t.Fatalf("武装后的目录里 %s 仍不可用: reason=%q reason_code=%q（夹具未把运行时事实上报齐）",
 			cmdActionReadRainfall, read.Reason, read.ReasonCode)
 	}
-	if read.Definition.Risk != "low" {
-		t.Fatalf("%s 的风险等级 = %q，期望 low", cmdActionReadRainfall, read.Definition.Risk)
+	// 2026-11-18 契约收敛：对外只下发 2 级 risk_level（驱动 4 级方言不再输出）。
+	if read.Definition.RiskLevel != "normal" {
+		t.Fatalf("%s 的风险等级 = %q，期望 normal", cmdActionReadRainfall, read.Definition.RiskLevel)
 	}
 	e.Evidence("SIM-CMD-001.catalog", catalog)
 
@@ -649,9 +650,9 @@ func cmdRun004(e *harness.Env) {
 		t.Fatalf("未放行的高风险动作 %s 在目录里被标记为可用（门禁未 fail-closed）：%+v",
 			cmdActionClearRainfall, blocked)
 	}
-	if blocked.Definition.Risk != "high" && blocked.Definition.Risk != "critical" {
-		t.Fatalf("%s 的风险等级 = %q，期望 high 或 critical（本场景要求高风险动作）",
-			cmdActionClearRainfall, blocked.Definition.Risk)
+	if blocked.Definition.RiskLevel != "elevated" {
+		t.Fatalf("%s 的风险等级 = %q，期望 elevated（high/critical 归一化后的对外契约）",
+			cmdActionClearRainfall, blocked.Definition.RiskLevel)
 	}
 	// 该动作带 AvailabilityCode（协议未冻结/仅允许实机证据），
 	// deviceaction 的定义转换会强制 enabled=false（definition.go:571-577），

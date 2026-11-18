@@ -71,9 +71,9 @@ type Definition struct {
 	// semantics/ID 前缀推导（见 Register），避免每个驱动重复声明。
 	Exposure string `json:"exposure,omitempty"`
 	// Risk 是**驱动出厂方言**的 4 级严重度 (low/medium/high/critical)。
-	// 兼容期保留原样输出, 供既有的严重度文案 ("严重风险" vs "高风险") 与
-	// 仿真断言使用; 新的对外契约是下面的 RiskLevel (方案 §3.4 D1)。
-	Risk string `json:"risk"`
+	// 只作注册期归一化的输入 (派生 RiskLevel) 与引擎门禁, **不再对外下发** ——
+	// 对外契约只有一个 risk_level (方案 §3.4 D1; 2026-11-18 收敛)。
+	Risk string `json:"-"`
 	// RiskReason 是风险徽标旁的可读原因（例如"设备会重启并短暂离线"）。
 	RiskReason string `json:"risk_reason,omitempty"`
 	// RiskLevel 是归一化后的 2 级系统契约 (normal/elevated), 由 Register 从

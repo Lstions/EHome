@@ -75,9 +75,9 @@ var _ downlink.Publisher = (*capturePublisher)(nil)
 
 // buildSunMOSRule 造一条"日出关充电 MOS / 日落关放电 MOS"的规则。
 //
-// set_mos_policy 是 Risk=high 的 set 语义动作：按 O-2 裁决，自动路径只有在规则持有
-// risk_acknowledged_at 时才跳过确认门 —— 这里显式写入该列，模拟"用户已授权"。
-func buildSunMOSRule(edgeID uint, kind string, chargeClosed, dischargeClosed bool, acked bool) *models.AutomationRule {
+// set_mos_policy 是 elevated 的 set 语义动作。2026-11-18 起自动路径不再需要任何
+// "规则级授权": system actor 直接执行, 是否等人由 require_confirmed 决定。
+func buildSunMOSRule(edgeID uint, kind string, chargeClosed, dischargeClosed bool) *models.AutomationRule {
 	params, _ := json.Marshal(map[string]interface{}{
 		"charge_software_closed":    chargeClosed,
 		"discharge_software_closed": dischargeClosed,
@@ -98,10 +98,6 @@ func buildSunMOSRule(edgeID uint, kind string, chargeClosed, dischargeClosed boo
 		ActionParamsJSON:    string(params),
 		Latitude:            &lat, Longitude: &lon, Timezone: &tz,
 	}
-	if acked {
-		now := time.Now().UTC()
-		rule.RiskAcknowledgedAt = &now
-	}
 	return rule
 }
 
@@ -112,8 +108,8 @@ func TestBMS_SunEventSwitchesMOS(t *testing.T) {
 
 	// 规则级坐标：北京（日出日落时刻可算），时区 Asia/Shanghai。
 	// 2026-11-13 起节点不再承载坐标，"北京"这个定位跟着规则走。
-	// 规则：日出 → 关充电 MOS（保留放电），并显式授权（O-2）
-	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false, true)
+	// 规则：日出 → 关充电 MOS（保留放电）
+	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false)
 	if err := c.db.Create(rule).Error; err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -232,14 +228,12 @@ func TestBMS_SunEventSwitchesMOS(t *testing.T) {
 	}
 }
 
-// TestBMS_SunEventMOS_RequiresRiskAck 是上面场景的**负对照**：
-// 同一条规则若未显式授权（risk_acknowledged_at 为空），自动路径必须落
-// confirmation_required 而**不执行真实动作**。没有这条，"已授权能跑"就证明不了
-// 授权门真的存在。
-func TestBMS_SunEventMOS_RequiresRiskAck(t *testing.T) {
+// TestBMS_SunEventMOS_ExecutesWithoutAuthorization 是"风险动作在自动路径直接执行"的闭环：
+// 2026-11-18 起不再有规则级授权字段，system 路径不经过确认门，日出事件必须真下发一次。
+func TestBMS_SunEventMOS_ExecutesWithoutAuthorization(t *testing.T) {
 	pub := &capturePublisher{}
 	c := newE2EChainWithPublisher(t, pub)
-	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false, false) // 未授权
+	rule := buildSunMOSRule(c.device.ID, models.AutomationSunKindSunrise, true, false)
 	if err := c.db.Create(rule).Error; err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -254,13 +248,12 @@ func TestBMS_SunEventMOS_RequiresRiskAck(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("automation_events = %d, want 1", len(events))
 	}
-	if events[0].Result != models.AutomationResultConfirmationRequired {
-		t.Fatalf("未授权高风险动作 result = %q, want %q（detail=%q）",
-			events[0].Result, models.AutomationResultConfirmationRequired, events[0].Detail)
+	if events[0].Result != models.AutomationResultExecuted {
+		t.Fatalf("风险动作应直接执行, result=%q (detail=%q)", events[0].Result, events[0].Detail)
 	}
 	c.dispatchOnce(t)
-	if pub.count() != 0 {
-		t.Errorf("未授权的风险动作产生了 %d 个下行帧，应该为 0", pub.count())
+	if pub.count() != 1 {
+		t.Errorf("应产生 1 个下行帧, 实际 %d", pub.count())
 	}
 }
 

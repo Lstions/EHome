@@ -273,26 +273,17 @@ type AutomationRule struct {
 	// "未配置 = 300" 的默认值职责由应用层承担 (handler_automation.go Create 显式
 	// 赋值), 与 Enabled 同理: fail-closed 不依赖 DB 默认值。
 	CooldownSec      int  `gorm:"not null;default:0" json:"cooldown_sec"`
-	RequireConfirmed bool `gorm:"default:false" json:"require_confirmed"` // true=仅生成待确认通知
+	RequireConfirmed bool `gorm:"default:false" json:"require_confirmed"` // true=触发后只生成待确认通知, 不自动执行 (唯一策略开关)
 	MaxDailyExec     int  `gorm:"default:0" json:"max_daily_exec"`        // 每日执行上限, 0=不限 (熔断)
 
-	// ── 风险动作的规则级显式授权 (用户裁决 O-2, 实施计划 §0.1) ──
+	// 2026-11-18 删除规则级风险授权 (原 risk_acknowledged_at)。
 	//
-	// 语义: 该规则**已经过用户在保存时显式确认**，允许其风险动作在自动路径上
-	// 跳过人工确认直接执行。NULL = 未授权 —— 风险动作在自动路径上仍会落
-	// confirmation_required，绝不会静默执行。
+	// 原因: 它不构成新的授权边界 —— 保存规则只要求登录, 而"能否点确认"要求
+	// system_admin, 两者本就不是同一集合; 所谓"授权"只是"某人勾过一个框"。
+	// 现在风险只有等级 (normal/elevated) + 界面弹窗确认, 自动执行是否等人由
+	// RequireConfirmed 决定。
 	//
-	// 为什么是时间戳而不是 bool: 审计需要回答"何时被授权的"。bool 只能回答
-	// "是否授权过"，且 GORM 的 default 陷阱 (见 Enabled/CooldownSec 的既有教训)
-	// 会让 false 无法表达"显式拒绝"。
-	//
-	// 授权失效 (安全关键, 实施计划 §0.1): 规则的**动作集合发生变化**时必须清空该列
-	// (见 handler_automation.go 的 updateAutomationRule)，强制用户重新确认。否则
-	// 用户授权了动作 A, 之后把动作改成 B, 旧授权会静默地把 B 也放行。
-	//
-	// 只读语义: 由保存路径写入/清空, 不接受请求体直接赋值 (API 请求结构体里没有
-	// 该字段, 因此客户端无法自行授权)。
-	RiskAcknowledgedAt *time.Time `json:"risk_acknowledged_at,omitempty"`
+	// DB 列保留一版以保留回滚窗口 (代码零引用), 下一版由 internal/database 的迁移删除。
 
 	// ── 冷却锚点 (清理前置条件 A, docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md) ──
 	//

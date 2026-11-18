@@ -14,8 +14,9 @@ type RiskLevel string
 const (
 	// RiskNormal 普通动作: 无需人工确认, 可直接执行。
 	RiskNormal RiskLevel = "normal"
-	// RiskElevated 风险动作: 默认需要人工确认; 自动化路径可经规则级显式授权
-	// (automation_rules.risk_acknowledged_at) 跳过确认门 (O-2 裁决, 实施计划 §0.1)。
+	// RiskElevated 风险动作: 人工路径 (设备页/手动触发) 需要一次性确认令牌;
+	// system 路径 (自动化自动执行) 直接执行 —— 规则是用户保存时确认过的,
+	// 无人值守时不可能再点一次弹窗。是否等待人工由规则的 require_confirmed 决定。
 	RiskElevated RiskLevel = "elevated"
 )
 

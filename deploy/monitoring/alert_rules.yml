@@ -219,19 +219,7 @@ groups:
           description: >-
             自动化在 5 分钟内至少 2 次被可用性/确认门禁拒绝。常见原因:
             节点能力快照过期(MaxCapabilityAge=15m)、动作不在设备目录、节点离线、
-            规则未授权。查 automation_events.detail 里的 gate 名与 reason_code。
-
-      - alert: EhomeAutomationConfirmationRequired
-        expr: increase(ehome_automation_events_total{result="confirmation_required"}[10m]) >= 1
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "自动化触发被确认门拦下（规则未授权）"
-          description: >-
-            confirmation_required 对 API 保存的规则本应不可达（V7 保证能保存即已授权）。
-            出现即说明存在存量/绕过写入的规则, 或动作风险等级刚被上调。
-            处置: 编辑该规则重新勾选风险确认并保存。
+            规则配置不满足执行条件。查 automation_events.detail 里的 gate 名与 reason_code。
 
       - alert: EhomeAutomationPartialFailure
         expr: increase(ehome_automation_events_total{result="partial_failure"}[10m]) >= 1

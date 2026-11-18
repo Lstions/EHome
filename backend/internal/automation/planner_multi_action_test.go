@@ -35,7 +35,6 @@ func multiActionRule(t *testing.T, pl *Planner, edgeID uint, name string, action
 			t.Fatal(err)
 		}
 	}
-	ackAt := time.Now().UTC()
 	rule := models.AutomationRule{
 		Name:                name,
 		Enabled:             true,
@@ -46,8 +45,6 @@ func multiActionRule(t *testing.T, pl *Planner, edgeID uint, name string, action
 		TriggerThreshold:    80,
 		CooldownSec:         0,
 		RequireConfirmed:    false,
-		// 风险动作的规则级授权 (O-2): gpio_set 是 medium, 未授权会被确认门拦住。
-		RiskAcknowledgedAt: &ackAt,
 		ActionType:         models.AutomationActionDeviceAction,
 		ActionDeviceID:     edgeID,
 		ActionID:           "gpio_set",

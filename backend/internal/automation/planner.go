@@ -221,7 +221,7 @@ func (p *Planner) ensureNodeCapabilityFresh(ctx context.Context, actionID string
 		return
 	}
 	// 离线节点不会回应 QueryResources：别在这里白等满超时（下发无活会话时
-		// downlink 立即报错，但"连着却不回帧"会吃满超时）。
+	// downlink 立即报错，但"连着却不回帧"会吃满超时）。
 	if node.Status != "online" {
 		return
 	}
@@ -560,14 +560,10 @@ func (p *Planner) executeActions(rule models.AutomationRule, at time.Time, value
 			Params:         params,
 			IdempotencyKey: idemKey,
 			Reason:         fmt.Sprintf("automation:%d:%s", rule.ID, rule.Name),
-			// O-2 规则级授权 (实施计划 §0.1): 只有该规则真的持有用户显式授权
-			// (risk_acknowledged_at 非空) 才允许风险动作跳过确认门。NULL = 未授权,
-			// 风险动作仍会被确认门拦住并落 confirmation_required (绝不静默执行)。
-			RiskAcknowledged: rule.RiskAcknowledgedAt != nil,
 		})
 		if err != nil {
 			p.recordActionFailure(rule, at, value, act, executed, len(actions), true,
-				classifyDeviceActionError(err), describeDeviceActionError(rule, err), src)
+				classifyDeviceActionError(err), describeDeviceActionError(err), src)
 			return
 		}
 		executed++
@@ -722,8 +718,8 @@ func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (str
 
 // selectorOutcome 是一次 F4 复核的单 selector 结论。
 type selectorOutcome struct {
-	ok         bool   // 是否拿到了可用于复核的值
-	satisfied  bool   // ok=true 时：条件是否仍满足
+	ok         bool // 是否拿到了可用于复核的值
+	satisfied  bool // ok=true 时：条件是否仍满足
 	value      float64
 	reason     string
 	unresolved bool // true = selector 解析不到（落 unresolved_selector，而不是 condition_changed）
@@ -917,30 +913,20 @@ func isConfirmationGateError(err error) bool {
 
 // describeDeviceActionError 给确认门相关的失败补上「为什么」和「怎么办」。
 //
-// 三类错误的处置方向**完全不同**，所以必须按错误本身分支，而不是按规则有没有授权
-// 猜（2026-11-18 审查指出：早期版本只看 RiskAcknowledgedAt，会把"已授权但没带
-// 令牌"误诊成"令牌无效"，恰好误诊它自己要修的那次事故）：
+// 2026-11-18 简化后 system 路径不再经过确认门, 这里只剩**人工路径**的两类令牌
+// 失败 (两者处置不同, 所以按错误本身分支, 不按规则字段猜):
 //
-//   - ErrConfirmationRequired + 规则无授权：数据异常（V7 保证能保存成功即已授权），
-//     唯一处置是编辑规则重新勾选风险确认；
-//   - ErrConfirmationRequired + 规则已授权：本次请求没带令牌 = 内部错误；
 //   - ErrConfirmationInvalid：令牌无效/过期/已用 = 内部错误；
 //   - ErrConfirmationRateLimited：铸造过于频繁（5 次/分钟），稍后重试。
 //
-// 为什么需要它：旧 detail 只有一句 "confirmation is required"，而事件的确认入口
-// 只对 pending_confirm 开放（ConfirmEvent 对其它结果返回 ErrConfirmNotPending），
-// 用户会照着"到事件表点确认"这种**做不到**的指引反复操作。
-func describeDeviceActionError(rule models.AutomationRule, err error) string {
+// 为什么需要它：旧 detail 只有一句 "confirmation is required"，用户不知道
+// 该重试还是该改规则 —— 两种错误的处置方向完全不同。
+func describeDeviceActionError(err error) string {
 	switch {
 	case errors.Is(err, commandexec.ErrConfirmationInvalid):
 		return err.Error() + "（确认令牌无效或已过期: 内部错误，请重试；若持续出现请上报）"
 	case errors.Is(err, commandexec.ErrConfirmationRateLimited):
 		return err.Error() + "（确认令牌铸造过于频繁，请稍后重试）"
-	case errors.Is(err, commandexec.ErrConfirmationRequired):
-		if rule.RiskAcknowledgedAt == nil {
-			return err.Error() + "（该规则缺少规则级风险授权 —— 不应出现的数据状态: 请编辑该规则并勾选风险确认后重新保存）"
-		}
-		return err.Error() + "（规则已授权，但本次请求未携带确认令牌: 内部错误，请重试或上报）"
 	}
 	return err.Error()
 }
@@ -972,10 +958,10 @@ func classifyDeviceActionError(err error) string {
 // 用无分隔符歧义的定长编码（长度前缀），避免 "a|b" 与 "a" + "b" 撞哈希。
 func automationActionSetHash(actions []models.AutomationRuleAction) string {
 	type entry struct {
-		typ     string
-		target  uint
-		action  string
-		params  string
+		typ    string
+		target uint
+		action string
+		params string
 	}
 	entries := make([]entry, 0, len(actions))
 	for _, a := range actions {
@@ -1573,7 +1559,7 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 			// 可用性检查且不携带门禁名，若在这里终结，事件 detail 会退回那句无信息量的
 			// 通稿。继续无令牌走 Create，由它的 availability gate 给出精确原因。
 			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
-				classifyDeviceActionError(gerr), describeDeviceActionError(rule, gerr))
+				classifyDeviceActionError(gerr), describeDeviceActionError(gerr))
 		}
 		exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
 			EdgeDeviceID:      act.ActionDeviceID,
@@ -1587,7 +1573,7 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 		})
 		if err != nil {
 			return p.recordManualActionFailure(ctx, rule, at, act, executed, len(actions),
-				classifyDeviceActionError(err), describeDeviceActionError(rule, err))
+				classifyDeviceActionError(err), describeDeviceActionError(err))
 		}
 		executed++
 		lastCommandID = exec.CommandID

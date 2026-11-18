@@ -508,9 +508,9 @@ func actnRun002(e *harness.Env) {
 
 	// 起点：武装后目录里 read_rainfall 必须可用（low 风险、单步读、无需确认）。
 	item := actnAssertActionAvailable(e, fx, cmdActionReadRainfall)
-	if item.Definition.Risk != "low" {
-		e.Fatalf("%s 的风险等级 = %q，期望 low（本场景验证下发全链路，不需要确认制介入）",
-			cmdActionReadRainfall, item.Definition.Risk)
+	if item.Definition.RiskLevel != "normal" {
+		e.Fatalf("%s 的风险等级 = %q，期望 normal（本场景验证下发全链路，不需要确认制介入）",
+			cmdActionReadRainfall, item.Definition.RiskLevel)
 	}
 	e.Evidence("SIM-ACTN-002.catalog", item)
 

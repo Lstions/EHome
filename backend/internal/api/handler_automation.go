@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,11 +106,11 @@ type createAutomationRuleRequest struct {
 	LocationSource   string `json:"location_source"`
 	LocationLabel    string `json:"location_label"`
 	ConditionsJSON   string `json:"conditions_json"`
-	ActionType       string   `json:"action_type"`
-	ActionDeviceID   *uint    `json:"action_device_id"`
-	ActionID         string   `json:"action_id"`
-	ActionParamsJSON string   `json:"action_params_json"`
-	ActionLevel      string   `json:"action_level"`
+	ActionType       string `json:"action_type"`
+	ActionDeviceID   *uint  `json:"action_device_id"`
+	ActionID         string `json:"action_id"`
+	ActionParamsJSON string `json:"action_params_json"`
+	ActionLevel      string `json:"action_level"`
 	// Actions 是**多动作**新形态 (方案 §4.1.1 / §3.4 D3)。与旧单动作字段二选一:
 	// 两者都给时以 Actions 为准 (数组是显式的完整集合, 标量字段是兼容形态)。
 	// 两者都缺 → 动作集合为空 → 400 (fail-closed)。
@@ -124,13 +123,6 @@ type createAutomationRuleRequest struct {
 	// source_kind=source_group 时由 handler 校验组并**双写锚点**到 trigger_edge_device_id。
 	SourceKind    *string `json:"source_kind"`
 	SourceGroupID *uint   `json:"source_group_id"`
-	// RiskAcknowledged 是用户在保存时对**风险动作**的显式确认 (O-2 规则级授权,
-	// 实施计划 §0.1)。true = 允许该规则的风险动作在自动路径上跳过人工确认。
-	//
-	// 为什么必须有这个字段: 授权载体是 automation_rules.risk_acknowledged_at,
-	// 但客户端不能直接写时间戳 (那等于自行授权且无法审计"谁在何时确认的")。
-	// 请求只表达"我确认过了", 时间戳由服务端在保存成功时写入。
-	RiskAcknowledged *bool `json:"risk_acknowledged"`
 }
 
 type updateAutomationRuleRequest struct {
@@ -168,9 +160,6 @@ type updateAutomationRuleRequest struct {
 	// ── 数据来源（同创建；显式传空串 source_kind = 解绑回存量老路）──
 	SourceKind    *string `json:"source_kind"`
 	SourceGroupID *uint   `json:"source_group_id"`
-	// RiskAcknowledged 同创建接口: 显式确认/撤回对风险动作的规则级授权。
-	// 动作集合发生变化时, 既有授权会被清空, 必须在本请求里重新确认才能通过 V7。
-	RiskAcknowledged *bool `json:"risk_acknowledged"`
 }
 
 // registerAutomationRoutes 注册自动化策略规则/事件 API (设计/自动化策略引擎方案.md v0.1)。
@@ -364,14 +353,6 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
-		// V7: **任一**风险动作 + require_confirmed=false 且未显式授权 → 拒绝保存
-		// (方案 §4.1.1 V7 / §3.2.5 第 4 步)。杜绝"配了一条永远不会执行的规则"。
-		riskAcknowledged := req.RiskAcknowledged != nil && *req.RiskAcknowledged
-		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
-			actions, createRequireConfirmed, riskAcknowledged); msg != "" {
-			writeRiskAuthorizationError(c, code, msg)
-			return
-		}
 		rule := models.AutomationRule{
 			Name:               req.Name,
 			TriggerType:        req.TriggerType,
@@ -421,10 +402,6 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 		rule.CooldownSec = createCooldown
 		if req.RequireConfirmed != nil {
 			rule.RequireConfirmed = *req.RequireConfirmed
-		}
-		if riskAcknowledged {
-			now := time.Now().UTC()
-			rule.RiskAcknowledgedAt = &now
 		}
 		// 规则行与动作子表必须**同事务**写入: 分两次写会留下"规则已存在、动作
 		// 还没有"的窗口, 该窗口内的触发会按空动作集合处理 (规则静默不执行)。
@@ -621,50 +598,6 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
-		// ── 授权失效 (安全关键, 实施计划 §0.1): 动作集合变化即清空 risk_acknowledged_at ──
-		//
-		// 为什么必须清空: 用户授权的是"这条规则的这些动作"。若把动作从 A 改成 B
-		// (或改目标设备/参数) 而保留旧授权, 旧授权会静默地把 B 也放行 —— 用户从未
-		// 确认过 B, 而 B 可能是完全不同的物理操作。仅改名称/冷却等非动作字段不失效。
-		//
-		// **逐 seq 比较** (B1 遗留债务的收口): 只比第一个动作会让"把第 2 个动作换成
-		// 另一个风险动作"保留旧授权, 那是安全漏洞。
-		changed := automationActionSetChanged(current, actions)
-		// ── P1-D: "同一次请求里既改动作集合、又声明已授权" 必须显式 400 ──
-		//
-		// 缺陷现象 (评审 verify-b2 P1-D): PUT 同时带 actions(已变) + risk_acknowledged=true
-		// + require_confirmed=false 时返回 200, 但落库是「风险动作 + require_confirmed=false
-		// + risk_acknowledged_at IS NULL」——正是 V7 声称要杜绝的规则。
-		//
-		// 根因: V7 看到请求里的 true 而放行; 随后的写入 switch 又因 changed 为真而**无条件**
-		// 清空授权列 (清空优先于请求字段)。两处判定不在同一个分支里, 于是"校验通过"与
-		// "落库结果"不一致。
-		//
-		// 为什么不静默忽略 true 而选择 400: 静默降级会存下一条"永远不会执行、且不 warn"
-		// 的风险规则, 用户以为已授权 (C5 同族)。显式报错把冲突告知用户, 并提供可执行路径:
-		// 先保存动作改动, 再单独提交一次授权确认。
-		//
-		// 与实施计划 §0.1 一致: 动作集合变化即清空授权, 强制用户**重新确认**——
-		// "重新"意味着另一次请求, 而不是在同一次请求里顺手声明。
-		if changed && req.RiskAcknowledged != nil && *req.RiskAcknowledged {
-			ErrorWithCode(c, 400, "action_changed_requires_reconfirmation",
-				"动作集合已变更: 授权已失效, 请先保存动作改动, 再单独提交一次 risk_acknowledged=true 完成重新确认")
-			return
-		}
-		acknowledged := rule.RiskAcknowledgedAt != nil
-		if changed {
-			acknowledged = false
-		}
-		if req.RiskAcknowledged != nil {
-			acknowledged = *req.RiskAcknowledged
-		}
-		// V7: 清空后若仍配 require_confirmed=false 的风险动作 → 拒绝保存, 强制重新确认。
-		// 逐动作检查: 只看第一个动作会漏掉"第 2 个是风险动作"的规则。
-		if msg, code := validateRiskActionAuthorization(c.Request.Context(), catalog,
-			actions, rc, acknowledged); msg != "" {
-			writeRiskAuthorizationError(c, code, msg)
-			return
-		}
 		updates := map[string]interface{}{}
 		if req.Name != nil {
 			updates["name"] = *req.Name
@@ -748,19 +681,6 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog au
 			} else {
 				updates["source_kind"] = nil
 			}
-		}
-		// 授权列的写入必须显式表达"清空"(nil), 不能用 map 的省略语义 ——
-		// 省略 = 保持原值, 那正是"改动作后旧授权仍然生效"的漏洞。
-		switch {
-		case changed:
-			// 动作集合变化 → 强制清空 (无论请求是否带 risk_acknowledged)。
-			// 本条优先于请求字段: 用户不能在"改动作"的同一次请求里顺手沿用旧授权,
-			// 必须重新显式确认。
-			updates["risk_acknowledged_at"] = nil
-		case req.RiskAcknowledged != nil && *req.RiskAcknowledged:
-			updates["risk_acknowledged_at"] = time.Now().UTC()
-		case req.RiskAcknowledged != nil:
-			updates["risk_acknowledged_at"] = nil
 		}
 		// 规则字段更新 + 子表替换 + 镜像列回写必须**同事务**: 任何一步失败都
 		// 整体回滚, 不留"规则已改、动作没换"的中间态。
@@ -1090,107 +1010,6 @@ func validateDeviceActionCatalog(ctx context.Context, catalog automationCatalogQ
 	return ""
 }
 
-// ── 风险动作的规则级授权 (O-2, 实施计划 §0.1) ──────────────────────────────
-
-// automationActionSetChanged 判定更新请求是否**改变了规则的动作集合**。
-//
-// 口径 (实施计划 §0.1 的授权失效规则): 增删动作、或任一动作的 action_id /
-// action_device_id / action_type / action_params_json 变化 → 视为变化。
-// 仅改名称、冷却、触发条件等非动作字段不失效。
-//
-// 【B2 收口 · 原 B1 显式债务】本函数在 B1 期间只比较单动作四列, 并在注释里留下
-// "B2 上子表后必须扩展为逐 seq 比较动作集合" 的债务。现已扩展: 比较对象是
-// **整个动作集合** (长度 + 逐 seq 字段)。为什么必须扩展 —— 只比第一个动作时,
-// 多动作规则"把第 2 个动作换成另一个风险动作"会保留旧授权, 而用户从未确认过
-// 新动作, 旧授权却把它放行 (安全漏洞)。回归锁见
-// TestUpdateSecondActionChangeClearsAcknowledgement。
-//
-// current 必须由调用方按"库中当前动作集合"传入 (子表为空时回落镜像列)。
-func automationActionSetChanged(current, incoming []models.AutomationRuleAction) bool {
-	return !actionSetsEqual(current, incoming)
-}
-
-// writeRiskAuthorizationError 把 V7 的拒绝写成**对应**状态码。
-//
-// 两种拒绝的性质完全不同，混用 400 会误导两端：
-//   - risk_action_requires_confirmation：用户的规则配置问题（没勾风险确认）⇒ 400，
-//     调用方应改请求；
-//   - risk_catalog_unavailable：设备能力目录这个**依赖**查不到（DB 抖动/设备被删）⇒
-//     503 + Retry-After，调用方应稍后重试。计成客户端错误会让监控误判、前端也不会
-//     给"稍后重试"的提示。
-//
-// 可达性：公开 API 上通常由上游 validateActionsCatalog 先返回 400，本函数的分列属
-// 纵深防御（TOCTOU 窗口 / 未来调用顺序调整）。一旦真走到这里，语义仍须正确。
-func writeRiskAuthorizationError(c *gin.Context, code, msg string) {
-	if code == "risk_catalog_unavailable" {
-		c.Header("Retry-After", "5")
-		ErrorWithCode(c, http.StatusServiceUnavailable, code, msg)
-		return
-	}
-	ErrorWithCode(c, http.StatusBadRequest, code, msg)
-}
-
-// validateRiskActionAuthorization 实现校验 V7 (方案 §4.1.1 V7 / §8 A-10):
-// **集合中含风险动作** 且 require_confirmed=false 且未授权 → 拒绝保存。
-//
-// 为什么是 fail-closed: 不拦的话会存下一条"永远不会执行"的规则 —— 自动路径遇
-// 确认门落 confirmation_required, 用户在无人值守场景下等不到任何物理动作。
-// C5 的根因之一正是"用户不知道自己的规则不可能成功", 所以在保存入口收口比事后
-// 通知更强 (方案 §3.2.5 第 4 步)。
-//
-// 为什么**逐动作**检查 (B2): 只看第一个动作时, "第 1 个普通、第 2 个风险"的规则
-// 会绕过 V7 落库, 结局同样是"永远不会执行"。
-//
-// 返回 (错误文案, 错误码)。错误码固定为 risk_action_requires_confirmation (A-10 契约)。
-//
-// catalog 为 nil 时**无法判定风险等级**: 这是单测兼容路径 (与 validateDeviceActionCatalog
-// 同款取舍), 此时跳过 V7 而不是猜测 —— 猜测会把风险动作误判成普通动作 (fail-open)。
-// 生产装配路径上 catalog 恒非 nil (routes.go 注入 commandexec.Service)。
-func validateRiskActionAuthorization(ctx context.Context, catalog automationCatalogQuerier,
-	actions []models.AutomationRuleAction, requireConfirmed, acknowledged bool) (string, string) {
-	const code = "risk_action_requires_confirmation"
-	if requireConfirmed || acknowledged || catalog == nil {
-		return "", ""
-	}
-	for _, a := range actions {
-		if a.ActionType != models.AutomationActionDeviceAction || a.ActionDeviceID == 0 {
-			continue
-		}
-		items, err := catalog.Catalog(ctx, a.ActionDeviceID)
-		if err != nil {
-			// 可达性说明（2026-11-18 复审）：正常请求里上游 validateActionsCatalog 已对
-			// 同一次目录失败返回 400，所以本分支实际只在"两次目录查询之间目录变了/查询
-			// 抖动"的 TOCTOU 窗口触发。仍然保留，是因为"能保存成功即已授权"这条不变式
-			// 必须由**本层**保证，不能依赖调用方碰巧先查过一次目录。
-			// 2026-11-18 收口 (fail-closed): 旧实现此处 `continue` —— 把"无法判定风险
-			// 等级"当成"不是风险动作", 于是照样存下一条永远过不了确认门的规则,
-			// 而那正是 V7 要拦的东西。上游 validateActionsCatalog 通常已拦下同一次
-			// 失败, 这里只是不给"两次目录查询之间失败"留窗口 —— 用户裁定: 能保存成功
-			// 就一定是完成了授权, 该不变式必须由代码保证, 不能靠"上游也会查"。
-			return "无法校验动作风险等级（设备能力目录查询失败），请稍后重试: " + err.Error(),
-				"risk_catalog_unavailable"
-		}
-		found := false
-		for _, item := range items {
-			if item.Definition.ID != a.ActionID {
-				continue
-			}
-			found = true
-			if item.Definition.RiskLevel.RequiresConfirmation() {
-				return "该动作是风险操作: 自动执行需要保存时显式确认 (risk_acknowledged=true), 或改回 require_confirmed=true 走人工确认",
-					code
-			}
-			break
-		}
-		if !found {
-			// 目录里没有这个动作: 同上, 不得跳过 (跳过 = 未校验就放行)。
-			return "无法校验动作风险等级（设备能力目录中找不到该动作），请刷新后重试",
-				"risk_catalog_unavailable"
-		}
-	}
-	return "", ""
-}
-
 // pickStr 合并候选值辅助 (alert 同款风格)。
 func pickStr(p *string, cur string) string {
 	if p != nil {
@@ -1445,11 +1264,11 @@ func precheckAutomationRule(db *gorm.DB, catalog automationCatalogQuerier) gin.H
 	}
 }
 
-// collectPrecheckRiskActions 列出动作集合里所有**风险动作**（不含授权判定）。
+// collectPrecheckRiskActions 列出动作集合里所有**风险动作**。
 //
-// 与 V7 的区别：V7 决定"能不能保存"（未授权 + require_confirmed=false ⇒ 400）；
-// precheck 只负责"把风险清单交给前端弹窗"，保存时前端会带 risk_acknowledged=true。
-// 因此这里**不得**因未授权而把规则判成 blocking（否则风险规则永远存不进去）。
+// 唯一用途是给前端的「保存前一次确认」弹窗提供清单数据, 不参与任何授权判定。
+// 风险等级只决定界面要不要提示; 规则能不能存由 validateActionsCatalog 等硬校验决定。
+
 func collectPrecheckRiskActions(ctx context.Context, db *gorm.DB, catalog automationCatalogQuerier,
 	actions []models.AutomationRuleAction) []precheckRiskAction {
 	out := make([]precheckRiskAction, 0)

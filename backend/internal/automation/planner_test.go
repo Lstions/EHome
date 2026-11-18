@@ -770,16 +770,12 @@ func TestTriggerRuleManualNotification(t *testing.T) {
 	}
 }
 
-// TestHandleTriggerAutoSystemActorSkipsMediumConfirmation 集成断言:
+// TestHandleTriggerAutoSystemActorExecutesRiskyAction 集成断言:
 // planner 自动触发 (executeDeviceAction) 走 ActorKind=system 调 commandexec.Create,
-// 对该规则**已显式授权**的 medium risk 动作跳过 confirmation; command_executions 落库
-// + audit 落 actor_type=system。
-// 用 gpio_set (periph transport, medium) — ChannelCmdV2 transport 只接 low risk, 用 channel 动作过不了 transport gate。
-//
-// 语义变更说明 (O-2 落地, 不是放宽断言): 授权载体是 automation_rules.risk_acknowledged_at,
-// 因此本用例必须给规则**真的写上**授权时间戳。授权缺失时自动路径仍落 confirmation_required
-// —— 该反向用例见 TestHandleTriggerAutoRiskActionWithoutAuthorizationIsNotDispatched。
-func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
+// 风险动作**直接执行**（2026-11-18 起 system 路径不再经过确认门）;
+// command_executions 落库 + audit 落 actor_type=system。
+// 用 gpio_set (periph transport, elevated) — ChannelCmdV2 transport 只接 low risk。
+func TestHandleTriggerAutoSystemActorExecutesRiskyAction(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
 
 	// 配置 gpio_configs 行使 periph gate 通过
@@ -806,10 +802,6 @@ func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
 		ActionID:            "gpio_set",
 		ActionParamsJSON:    `{"pin":5,"level":1}`,
 	}
-	// O-2 规则级授权: 用户在保存时显式确认过该风险动作。
-	// 取指针是必须的 —— 授权时间戳是 *time.Time, 零值表达"未授权"。
-	ackAt := time.Now().UTC()
-	rule.RiskAcknowledgedAt = &ackAt
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1039,9 +1031,9 @@ func TestHandleTriggerAutoSystemActorUnavailableNotifiesOnce(t *testing.T) {
 // 反向验证: 把 classifyDeviceActionError 的确认门分支删掉 (退回 isGateError 单判定)
 // → 本用例红 (结果变成 failed_dispatch)。命令与输出见 commit 正文。
 
-// autoRiskRule 造一条自动触发 + 风险动作 (gpio_set, medium) + require_confirmed=false 的规则。
-// acknowledge=false 时不写 risk_acknowledged_at (未授权)。
-func autoRiskRule(t *testing.T, p *Planner, edgeID uint, acknowledge bool) models.AutomationRule {
+// autoRiskRule 造一条自动触发 + 风险动作 (gpio_set, elevated) + require_confirmed=false 的规则。
+// 2026-11-18 简化后 system 路径不再检查任何"授权", 风险动作直接执行。
+func autoRiskRule(t *testing.T, p *Planner, edgeID uint) models.AutomationRule {
 	t.Helper()
 	if err := p.db.Create(&models.GPIOConfig{
 		NodeID: "node-conf", Pin: 5, Direction: 1, Enabled: true,
@@ -1063,55 +1055,16 @@ func autoRiskRule(t *testing.T, p *Planner, edgeID uint, acknowledge bool) model
 		ActionID:            "gpio_set",
 		ActionParamsJSON:    `{"pin":5,"level":1}`,
 	}
-	if acknowledge {
-		ackAt := time.Now().UTC()
-		rule.RiskAcknowledgedAt = &ackAt
-	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
 	}
 	return rule
 }
 
-// 未授权的风险动作在自动路径上必须落 confirmation_required (而非 failed_dispatch),
-// 且**不得**产生任何 command_executions —— 这是 C5 消除的核心断言。
-func TestHandleTriggerAutoRiskActionWithoutAuthorizationIsNotDispatched(t *testing.T) {
+// 自动路径的风险动作**直接执行**：不再有规则级授权字段，system actor 不走确认门。
+func TestHandleTriggerAutoRiskyActionIsDispatched(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
-	rule := autoRiskRule(t, p, edge.ID, false)
-
-	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
-
-	var ev models.AutomationEvent
-	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
-		t.Fatalf("event missing: %v", err)
-	}
-	if ev.Result != models.AutomationResultConfirmationRequired {
-		t.Fatalf("result = %q, want %q (C5: 确认门不得再落 failed_dispatch; detail=%s)",
-			ev.Result, models.AutomationResultConfirmationRequired, ev.Detail)
-	}
-	if ev.Result == models.AutomationResultFailedDispatch {
-		t.Fatal("确认门被错误地记为 failed_dispatch (C5 复发)")
-	}
-	// 2026-11-18 用户裁定: 这个结果在本系统里**不应出现**(保存入口 V7 保证"能存下=已授权")。
-	// 既然它出现就只能是数据异常, detail 必须同时给出"为什么"和"怎么办",
-	// 否则用户会照旧文案去事件表点确认 —— 那一步做不到(只对 pending_confirm 开放)。
-	if !strings.Contains(ev.Detail, "缺少规则级风险授权") {
-		t.Fatalf("detail 未说明原因(规则缺少规则级授权): %q", ev.Detail)
-	}
-	if !strings.Contains(ev.Detail, "勾选风险确认") {
-		t.Fatalf("detail 未给出可执行的处置(编辑规则重新授权): %q", ev.Detail)
-	}
-	var execs int64
-	p.db.Model(&models.CommandExecution{}).Count(&execs)
-	if execs != 0 {
-		t.Fatalf("未授权的风险动作不得产生 command_executions, 实际 %d 条", execs)
-	}
-}
-
-// 授权后同一条规则必须真的执行 (证明授权是有效的、且 confirmation_required 不是恒真)。
-func TestHandleTriggerAutoRiskActionWithAuthorizationIsDispatched(t *testing.T) {
-	p, edge := setupConfirmPlanner(t)
-	rule := autoRiskRule(t, p, edge.ID, true)
+	rule := autoRiskRule(t, p, edge.ID)
 
 	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
 
@@ -1148,3 +1101,4 @@ func TestClassifyDeviceActionErrorMapsThreeOutcomes(t *testing.T) {
 		t.Errorf("包装后的确认门错误分类 = %q, want %q", got, models.AutomationResultConfirmationRequired)
 	}
 }
+

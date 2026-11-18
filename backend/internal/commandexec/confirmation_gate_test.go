@@ -1,6 +1,6 @@
 package commandexec
 
-// 确认判定唯一性 (方案 §3.3.4 R3 / §8 A-9) 与 O-2 规则级授权 (实施计划 §0.1) 的门禁。
+// 确认判定唯一性 (方案 §3.3.4 R3 / §8 A-9) 与 actor 分流门禁 (2026-11-18 简化)。
 
 import (
 	"context"
@@ -168,17 +168,21 @@ func systemActorRiskEdge(t *testing.T) (*Service, uint, json.RawMessage) {
 	return s, node.ID, json.RawMessage(`{"pin":5,"level":1}`)
 }
 
-// O-2 正向: system actor + 风险动作 + RiskAcknowledged → 跳过确认门, 真的排队。
-func TestSystemActorWithRiskAcknowledgedSkipsConfirmation(t *testing.T) {
+// ═══ 2026-11-18 简化: 确认门只按 actor 分流 ═══════════════════════════
+//
+// 风险等级只决定界面是否弹窗; 自动路径 (system) 是用户保存规则时确认过的,
+// 无人值守时不可能再点一次弹窗, 因此直接执行。用户路径 (设备页/手动触发)
+// 仍然必须持一次性确认令牌 —— 这条是"简化不得变成绕过"的回归锁。
+
+func TestSystemActorExecutesRiskyActionWithoutToken(t *testing.T) {
 	s, nodeID, params := systemActorRiskEdge(t)
 	exec, replayed, err := s.Create(context.Background(), CreateInput{
 		EdgeDeviceID: nodeID, ActorUserID: 7, ActorKind: ActorKindSystem,
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
-		IdempotencyKey: "risk-ack-skip-0001", Reason: "automation:1:rule",
-		RiskAcknowledged: true,
+		IdempotencyKey: "system-risk-direct-0001", Reason: "automation:1:rule",
 	})
 	if err != nil {
-		t.Fatalf("已授权的风险动作必须跳过确认门, 实际 err=%v", err)
+		t.Fatalf("system 路径的风险动作必须直接执行, 实际 err=%v", err)
 	}
 	if replayed {
 		t.Fatal("首次调用不应是 replay")
@@ -188,44 +192,15 @@ func TestSystemActorWithRiskAcknowledgedSkipsConfirmation(t *testing.T) {
 	}
 }
 
-// O-2 反向 (安全关键): 同样的 system actor + 风险动作, 但**未授权** → 仍被确认门拦住。
-// 这条是"授权缺失时绝不静默执行"的回归锁。
-func TestSystemActorWithoutRiskAcknowledgedStillRequiresConfirmation(t *testing.T) {
-	s, nodeID, params := systemActorRiskEdge(t)
-	_, _, err := s.Create(context.Background(), CreateInput{
-		EdgeDeviceID: nodeID, ActorUserID: 7, ActorKind: ActorKindSystem,
-		ActionID: deviceaction.ActionGPIOSet, Params: params,
-		IdempotencyKey: "risk-ack-miss-0001", Reason: "automation:1:rule",
-	})
-	if !errors.Is(err, ErrConfirmationRequired) {
-		t.Fatalf("未授权的风险动作必须被确认门拦住, 实际 err=%v", err)
-	}
-}
-
-// 安全边界: RiskAcknowledged 只对 system 路径生效 —— 人工路径不得借它绕过二次确认。
-func TestRiskAcknowledgedDoesNotBypassUserPathConfirmation(t *testing.T) {
+func TestUserActorRiskyActionStillRequiresToken(t *testing.T) {
 	s, nodeID, params := systemActorRiskEdge(t)
 	_, _, err := s.Create(context.Background(), CreateInput{
 		EdgeDeviceID: nodeID, ActorUserID: 7, // ActorKind 空 = user
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
-		IdempotencyKey: "risk-ack-user-0001", Reason: "manual reason",
-		RiskAcknowledged: true,
+		IdempotencyKey: "user-risk-token-0001", Reason: "manual reason",
 	})
 	if !errors.Is(err, ErrConfirmationRequired) {
-		t.Fatalf("人工路径带 RiskAcknowledged 也必须仍需确认, 实际 err=%v", err)
-	}
-}
-
-// 安全边界: 普通动作本就不需要确认, RiskAcknowledged 不得改变其行为。
-func TestNormalRiskActionUnaffectedByRiskAcknowledged(t *testing.T) {
-	s, edge := setupService(t)
-	if _, _, err := s.Create(context.Background(), CreateInput{
-		EdgeDeviceID: edge.ID, ActorUserID: 7, ActorKind: ActorKindSystem,
-		ActionID: "read_rainfall", Params: json.RawMessage(`{}`),
-		IdempotencyKey: "risk-ack-normal-0001", Reason: "automation:1:rule",
-		RiskAcknowledged: true,
-	}); err != nil {
-		t.Fatalf("普通动作必须照常放行, 实际 err=%v", err)
+		t.Fatalf("人工路径的风险动作必须仍需确认令牌, 实际 err=%v", err)
 	}
 }
 
@@ -253,7 +228,6 @@ func TestAuditRecordsRiskLevelSnapshot(t *testing.T) {
 		EdgeDeviceID: nodeID, ActorUserID: 7, ActorKind: ActorKindSystem,
 		ActionID: deviceaction.ActionGPIOSet, Params: params,
 		IdempotencyKey: "risk-audit-0001", Reason: "automation:1:rule",
-		RiskAcknowledged: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -266,3 +240,4 @@ func TestAuditRecordsRiskLevelSnapshot(t *testing.T) {
 		t.Fatalf("审计 Metadata 未含 risk_level 快照: %s", row.Metadata)
 	}
 }
+

@@ -371,9 +371,9 @@ func auditRun002(e *harness.Env) {
 		e.Fatalf("动作 %s 在武装后的目录里仍不可用: reason=%q reason_code=%q",
 			cmdActionReadRainfall, action.Reason, action.ReasonCode)
 	}
-	if action.Definition.Risk != "low" {
-		e.Fatalf("动作 %s 的风险等级=%q，期望 low（本场景要验证「执行后能回链」，不需要确认制介入）",
-			cmdActionReadRainfall, action.Definition.Risk)
+	if action.Definition.RiskLevel != "normal" {
+		e.Fatalf("动作 %s 的风险等级=%q，期望 normal（本场景要验证「执行后能回链」，不需要确认制介入）",
+			cmdActionReadRainfall, action.Definition.RiskLevel)
 	}
 
 	ruleID := autoCreateRule(e, map[string]any{

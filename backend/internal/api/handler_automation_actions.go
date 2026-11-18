@@ -174,33 +174,6 @@ func loadActionsOrMirror(db *gorm.DB, rule models.AutomationRule) []models.Autom
 	return actions
 }
 
-// actionSetsEqual 逐 seq 比较两个动作集合 (顺序无关: 先按 seq 归一)。
-//
-// 位置说明: 本函数是 automationActionSetChanged 的唯一判据实现, 放在本文件
-// (动作集合工具集) 而调用点在 handler_automation.go 的 update 路径。
-func actionSetsEqual(a, b []models.AutomationRuleAction) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	bySeq := make(map[int]models.AutomationRuleAction, len(a))
-	for _, x := range a {
-		bySeq[x.Seq] = x
-	}
-	for _, y := range b {
-		x, ok := bySeq[y.Seq]
-		if !ok {
-			return false
-		}
-		if x.ActionType != y.ActionType ||
-			x.ActionDeviceID != y.ActionDeviceID ||
-			x.ActionID != y.ActionID ||
-			x.ActionParamsJSON != y.ActionParamsJSON {
-			return false
-		}
-	}
-	return true
-}
-
 // derefUint 解引用可空 uint (nil → 0)。
 func derefUint(p *uint) uint {
 	if p == nil {
