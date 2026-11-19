@@ -3,6 +3,7 @@ package database
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"ehome/backend/internal/hwid"
 	"ehome/backend/pkg/logger"
@@ -38,7 +39,9 @@ type MigrateDMABindToResult struct {
 //   - 只修"与规范 id 仅大小写不同"的值；其它值（拼错、超长、未知控制器）
 //     原样保留并逐条告警 —— 它们应当由**写入校验**拒绝并让用户显式修正，
 //     迁移不做猜测性改写；
-//   - 只改 dma_configs 里每个条目的 bind_to，其它配置键按原始字节保留；
+//   - 只改 dma_configs 里每个条目的 bind_to，其它配置键的值语义保持不变
+//     （顶层用 json.RawMessage 原样回写，避免数字精度/键序被 Go 二次编码改变；
+//     jsonb 列的空白与键序由 PG 自己归一，这一点无法也不应由迁移控制）；
 //   - 不触碰 nodes.updated_at：这是数据修复，不是用户编辑；
 //   - 幂等：修好后重跑扫不到任何"仅大小写不符"的值，Updated=0。
 func MigrateDMABindToCanonicalCase(db *gorm.DB) (*MigrateDMABindToResult, error) {
@@ -58,13 +61,20 @@ func MigrateDMABindToCanonicalCase(db *gorm.DB) (*MigrateDMABindToResult, error)
 
 	// 分批（按主键游标）而不是一次 Find 全表：nodes.config 是 jsonb，
 	// 生产库行数不多但单行可能不小，分批可让内存上界与行数无关。
+	//
+	// ⚠ WHERE 里**只能**用 id 游标与 IS NOT NULL，不能拿 config 做文本比较：
+	//   nodes.config 是 jsonb，PG 会把 `config <> ''` 解析成 ''::jsonb 并报
+	//   "invalid input syntax for type json"，`config LIKE '%…%'` 更直接报
+	//   "operator does not exist: jsonb ~~ unknown"。
+	// 2026-11-19 生产实测：这条 WHERE 让启动迁移直接 FATAL，容器进入 CrashLoop
+	// （镜像 9628b39 部署约 40 秒后被回滚到 b262f744）。因此过滤改在 Go 侧做。
 	const batch = 200
 	var lastID uint
 	for {
 		var rows []row
 		if err := db.Table("nodes").
 			Select("id, node_id, config").
-			Where("id > ? AND config IS NOT NULL AND config <> '' AND config LIKE ?", lastID, "%dma_configs%").
+			Where("id > ? AND config IS NOT NULL", lastID).
 			Order("id ASC").Limit(batch).Scan(&rows).Error; err != nil {
 			return nil, fmt.Errorf("scan nodes.config: %w", err)
 		}
@@ -73,6 +83,10 @@ func MigrateDMABindToCanonicalCase(db *gorm.DB) (*MigrateDMABindToResult, error)
 		}
 		for _, r := range rows {
 			lastID = r.ID
+			// 与旧 WHERE 的 LIKE 过滤等价，只是搬到了 Go 侧（见上面的 jsonb 说明）。
+			if !strings.Contains(r.Config, "dma_configs") {
+				continue
+			}
 			res.Scanned++
 
 			rewritten, changes, unknown, err := canonicalizeDMABindTo(r.Config)
@@ -111,7 +125,8 @@ func MigrateDMABindToCanonicalCase(db *gorm.DB) (*MigrateDMABindToResult, error)
 //
 // 返回 rewritten="" 表示无需改写；unknown 是认识不了的值（原样保留）。
 // 顶层用 map[string]json.RawMessage 而非 map[string]any：未涉及的配置键
-// 按原始字节回写，不因二次 json 编解码而变形（数字精度/字段顺序）。
+// 原样回写，不因二次 json 编解码丢失数字精度或改变字段顺序 —— 对 jsonb 列来说，
+// 数据库本来就会归一空白/键序，我们只需保证**值语义**不被这一层改动。
 func canonicalizeDMABindTo(configJSON string) (string, []string, []string, error) {
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {

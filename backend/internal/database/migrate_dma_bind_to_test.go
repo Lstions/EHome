@@ -71,7 +71,9 @@ func TestMigrateDMABindToCanonicalCaseRewritesLegacyLowercase(t *testing.T) {
 	if got := view.DMAs[2].BindTo; got != "spi/SPI2" {
 		t.Errorf("已是规范值的 bind_to 被改成 %q", got)
 	}
-	if string(view.Other) != `{"keep":true}` {
+	// jsonb 列由 PG 归一化（键序/空白），不能按字节比较；比较语义即可。
+	var other map[string]bool
+	if err := json.Unmarshal(view.Other, &other); err != nil || !other["keep"] {
 		t.Errorf("无关配置键被改动：%s", view.Other)
 	}
 
@@ -113,6 +115,11 @@ func TestMigrateDMABindToCanonicalCaseLeavesUnknownValues(t *testing.T) {
 
 // 单行 JSON 坏掉不能阻断启动：跳过并计数，其它节点照常修。
 func TestMigrateDMABindToCanonicalCaseSkipsBrokenJSON(t *testing.T) {
+	if testutil.IsPostgres() {
+		// nodes.config 在 PG 上是 jsonb：非法 JSON 在**写入时**就被拒绝，
+		// 这种行根本不可能存在。该场景只对 sqlite/历史文本列有意义。
+		t.Skip("jsonb 列不允许非法 JSON，跳过（解析容错本身由 TestCanonicalizeDMABindToReportsBrokenJSON 覆盖）")
+	}
 	db := testutil.OpenTestDB(t)
 	if err := db.Create(&models.Node{NodeID: "BROKEN", Name: "x", Status: "offline", Config: `{"dma_configs":[`}).Error; err != nil {
 		t.Fatalf("create node: %v", err)
@@ -127,7 +134,14 @@ func TestMigrateDMABindToCanonicalCaseSkipsBrokenJSON(t *testing.T) {
 	}
 }
 
-// 没有 dma_configs 的节点连扫描都不该进入（config LIKE 过滤）。
+// 解析容错本身与数据库无关：坏 JSON 必须返回错误，让上层 Skipped++ 并继续。
+func TestCanonicalizeDMABindToReportsBrokenJSON(t *testing.T) {
+	if _, _, _, err := canonicalizeDMABindTo(`{"dma_configs":[`); err == nil {
+		t.Fatal("坏 JSON 必须返回错误（调用方据此跳过该行，而不是让迁移整体失败）")
+	}
+}
+
+// 没有 dma_configs 的节点不该计入扫描数（Go 侧 Contains 过滤）。
 func TestMigrateDMABindToCanonicalCaseIgnoresNodesWithoutDMA(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	if err := db.Create(&models.Node{NodeID: "PLAIN", Name: "x", Status: "online", Config: `{"log_stream_enabled":true}`}).Error; err != nil {

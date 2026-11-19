@@ -234,8 +234,12 @@ func AutoMigrate() error {
 	// 因此可能留着 "uart/uart1" 这类**仅仅大小写不同**的 bind_to。设备端
 	// dma_pool 用 strcmp 比对 ⇒ 该 GDMA 通道被永久占用（2026-10-04 事故同机制）。
 	// 只修"仅大小写不符"的值，未知值原样保留并告警；幂等，修好后重跑零改写。
+	//
+	// ⚠ **失败不阻断启动**：这是数据修复，不是 schema 变更。2026-11-19 实测教训 ——
+	// 迁移里一条 jsonb 文本比较写错就让整套服务 FATAL + CrashLoop 40 秒，代价远大于
+	// "历史坏值多留一会儿"。写入校验仍在（坏值新建不进来），漏修的行下一次启动还会再试。
 	if _, err = MigrateDMABindToCanonicalCase(DB); err != nil {
-		return err
+		logger.Warnf("[migrate] dma_configs.bind_to 大小写规范化失败（不阻断启动，下次启动重试）: %v", err)
 	}
 	// 固件身份 schema（方案《固件与平台更新机制》§5.6 / 附录 B）：
 	// 回填身份 → 以镜像 version 为准 → 按 elf_sha256 去重 → DROP stable/target_model
