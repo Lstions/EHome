@@ -36,67 +36,29 @@ MAIN = os.path.join(ROOT, "main")
 
 # 已登记：组件名 -> dict(what/why/next/test/review_by)
 #
-# 这些都是 3.0 重构"打骨架"阶段的产物：骨架已完成，接线是后续阶段的事。
-# 登记在这里是让这件事**可见**，不是把它藏起来。
+# 登记在这里是让"建好了但没插电"这件事**可见**，不是把它藏起来。
 #
 # ⚠ 2026-10-07 更正：原注释写"**骨架 + 宿主测试已完成**"—— 这句**是错的**。
 # 实测：nvs_helper **一个测试文件都没有**（host_tests/ 里没有 nvs_*，
 # CMakeLists 只挂了它的 include 路径）。也就是说这句话把一个**未经验证的**
 # 说法写成了事实，而恰好它是假的 —— 与"门禁打印 PASS 却什么都没检查"同族。
-#
-# ⇒ 修法：把"有没有测试"从**散文**变成**可核查字段**（test），
-#   并加 review_by（到期必须做决策，不能无限期挂着）。
+# ⇒ 修法：把"有没有测试"从**散文**变成**可核查字段**（test），并加 review_by。
 #   门禁会真的去查 test 指向的文件是否存在、是否真的引用了该组件。
-PENDING_WIRING = {
-    "msgcodec": {
-        "what": "消息编解码原语（纯函数）",
-        # 2026-10-07 更正：原先写的理由 ① 已**过期** ——
-        # 「3.0 payload 是否保留 2.x 类型首字节」已由 §120 决策文档结清
-        # （保留双写 + 两端强制一致性校验），不再是待确认项。
-        "why": ("编解码原语**未接入生产路径**：生产用的是 components/frame/frame_codec.c；"
-                "msgcodec 目前只作 S0 共享向量的 C 侧独立实现。要收口只能二选一 ——"
-                "要么改由它驱动 dispatch，要么把它降为纯测试用件并从组件表移除"),
-        "next": "由 dispatch 表接替 msg_handler 的 switch 时一并决定（P4：一处定义）",
-        # 它是**测试判据**（独立实现与 frame_codec 逐字节对拍），不是待接线产物。
-        "test": "msgcodec_tests.c",
-        "review_by": "2026-11-15",
-    },
-    "dispatch": {
-        "what": "数据驱动的消息分发表",
-        "why": ("实际分发仍在 msg_handler.c 的 switch 里；分发表尚未替换它。"
-                "⚠ 2026-10-07 复核：本组件的**核心语义已由现有实现提供** ——"
-                "未知类型可见失败由 switch 的 default + ESP_LOGW 提供；"
-                "类型编号的权威表已在 frame_codec.h（34 个 MSG_ 定义）。"
-                "⇒ 接线的收益是'路由变成数据'，不是修某个已存在的缺陷"),
-        "next": "用 dispatch 表替换 msg_handler 的 switch（P4：一处定义）；"
-                "注意：只接线而不删 switch 会**增加**一处定义",
-        "test": "dispatch_tests.c",
-        "review_by": "2026-11-15",
-    },
-    # ⚠ 2026-10-08：link_mqtt 条目已删除 —— 该组件连同 MQTT 一起**整体移除**，
-    #   不再是"待接线"，而是**不存在**了。门禁当时报的是"已可达，登记过期"，
-    #   但真实情况比"过期"更彻底：源码已删 ⇒ 登记一条已删组件的条目毫无意义。
-    #   ⚠ 这也说明该门禁的"已可达"判定只区分"可达/不可达"，不区分
-    #     "未接线 / 已删除" —— 两种情况的正确处置不同（前者接线，后者删条目）。
-    #   本次两种情形都落到了"删条目"上，是巧合而非门禁的设计。
-    # （task-21 的 transport_sel 条目此前已按其要求删除，本轮 transport_sel 亦随 MQTT 移除。）
-    "nvs_helper": {
-        "what": "NVS 读写辅助（header-only，6 个 static inline）",
-        "why": ("既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用。"
-                "⚠ 2026-10-07 复核发现两条更硬的事实："
-                "① 它有 **169 行却没有任何测试文件**（不是'测试已完成'）；"
-                "② 它**不含 blob 读写**（nvs_get_blob/nvs_set_blob 零命中），"
-                "而固件唯一真实的 NVS 需求就是 blob 读 ——"
-                "device_link_wiring.c:322 自己手写了 nvs_read_blob_alloc。"
-                "⇒ 它没提供那个唯一被需要的操作"),
-        "next": ("二选一，且请在 review_by 前定："
-                 "① 删除它（证据：无测试 + 不含唯一需要的 blob 读）；"
-                 "② 扩到支持 blob 读并替换 device_link_wiring.c 的手写版本"),
-        "test": None,
-        "test_note": "**无任何测试文件**（原注释'宿主测试已完成'是错的）",
-        "review_by": "2026-11-15",
-    },
-}
+#
+# ── 2026-11-19：三条登记的 review_by（2026-11-15）到期，逐条做了决策 ──────
+# 本清单因此清空。决策 + 证据（同日落地）：
+#   · dispatch  → **接线**。msg_handler.c 的 switch 已换成 s_msg_routes 数据表，
+#                 旧 switch 删除（只接线不删 switch 会变成两处定义）；
+#                 msg_handler 的 REQUIRES 补 dispatch。宿主 dispatch_tests 不变。
+#   · msgcodec  → **降为测试用件**。它唯一的用途是与 frame_codec 逐字节对拍；
+#                 接进生产会让"对拍"退化成自己比自己，判据价值归零。
+#                 源码移到 host_tests/oracle/msgcodec/（理由见该目录 README）。
+#   · nvs_helper → **删除**。169 行 header-only、零测试、零调用者，且不含固件
+#                 唯一需要的 blob 读（device_link_wiring.c 一直自己手写）。
+#                 留着只会让"已经有一套 NVS 封装"的错觉继续存在。
+# ⚠ 写给下一位往这里加条目的人：登记不是免费的 —— review_by 一到，你必须
+#   接或删，**不能再续期**；续期等于把清单变成没人看的公告板。
+PENDING_WIRING = {}
 
 # ⚠ 「可达」的确切含义（2026-10-07，我在这里写错过一次，已按实测更正）
 #
@@ -183,8 +145,8 @@ def includes_of(comp_dir):
 #
 # 给出**下界**：扫描面与可达数低到不可能的程度 ⇒ 直接失败，
 # 并提示"先怀疑扫描器，不要怀疑代码库"。
-MIN_COMPONENTS = 30     # 当前 41
-MIN_REACHABLE = 20      # 当前 24
+MIN_COMPONENTS = 30     # 当前 37（2026-11-19：删 nvs_helper、msgcodec 转测试判据后）
+MIN_REACHABLE = 20      # 当前 37（全部可达；清单为空）
 
 
 def self_check(comps, reachable, main_deps):

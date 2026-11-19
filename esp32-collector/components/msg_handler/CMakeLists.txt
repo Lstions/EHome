@@ -9,7 +9,9 @@ idf_component_register(SRCS "msg_handler.c" "handler_hello.c" "handler_config.c"
 #     删掉 ehome_mqtt 后立刻暴露：fatal error: esp_timer.h: No such file or directory。
 #     ⇒ 这正是 sync_manager.c:15 记过的"靠传递包含活着"形态 —— 改动包含图就静默炸掉。
 #     补成**直接依赖**，不再依赖别人顺便带进来。
-REQUIRES frame config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr device_op esp_timer)
+# ⭐ 2026-11-19：补 dispatch —— msg_handler_process 现在按 dispatch 组件的数据表路由
+#    （原先的 switch 已删除；"有哪些消息类型"只在 msg_handler.c 的 s_msg_routes 里定义一次）。
+REQUIRES frame config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr device_op esp_timer dispatch)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 #

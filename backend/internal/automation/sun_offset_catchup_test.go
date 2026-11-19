@@ -15,6 +15,28 @@ import (
 	"ehome/backend/testutil"
 )
 
+// dbTimePrecision 是数据库能保留的最小时间精度：**PostgreSQL 的 timestamptz
+// 只到微秒**（驱动按 µs 编码，纳秒尾数在落库时就丢了），而 SQLite 存
+// RFC3339Nano、可以保留纳秒。
+//
+// 因此"从库里读回来的时刻 == 内存里的时刻"只能按这个精度断言：日出/日落时刻
+// 来自天文求解，天然带纳秒尾数（合成夹具里是 …19.173351806），回读值必然只剩
+// …19.173351 —— 两者是**同一瞬间**，但 time.Time.Equal 判为不等。
+//
+// ⚠ 这不是放宽门禁：1µs 比本包所有时间断言要抓的真实错误量级小 7 个数量级
+// （事件时刻 vs tick 时刻至少差 1 分钟）。真正的放宽是删掉断言或只判非 nil。
+const dbTimePrecision = time.Microsecond
+
+// sameInstantAtDBPrecision 报告两个时刻在"数据库可保存"的精度上是否是同一瞬间。
+//
+// 只用于**从数据库回读**的时间字段（event_at / last_triggered_at / updated_at …）。
+// 内存里的 TriggerEvent.EventAt 仍要用 time.Time.Equal 精确比较 —— 那条路径没有
+// 经过数据库，没有精度损失的理由，收紧在那里是对的。
+func sameInstantAtDBPrecision(dbTime, want time.Time) bool {
+	d := dbTime.Sub(want)
+	return d > -dbTimePrecision && d < dbTimePrecision
+}
+
 // ── D22: 偏移跨本地午夜仍必须触发 ─────────────────────────────────────────
 //
 // 旧实现只取「now 当日那一场」事件：日出 -600 的 fireAt 落在前一日 18:45，
@@ -129,8 +151,22 @@ func TestSunEventStartupMissedAudit(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("应落恰好 1 条 missed_solar_event，got %d —— 静默跳过正是要消除的形态", len(evs))
 	}
-	if evs[0].EventAt == nil || !evs[0].EventAt.Equal(fx.eventAt) {
-		t.Fatalf("missed 审计的 EventAt 必须是事件时刻 %v，got %v", fx.eventAt, evs[0].EventAt)
+	// 断言「回读的 EventAt 就是事件时刻」：用库精度（µs）比较，不用 Equal。
+	//
+	// 事件时刻由 sun.SunEvent 天文求解得出，带纳秒尾数；本仓两库精度不同：
+	//   · PostgreSQL timestamptz 只到 µs ⇒ 回读 .173351，内存 .173351806；
+	//   · SQLite 存 RFC3339Nano          ⇒ 回读保留纳秒，Equal 恰好成立。
+	// 于是同一个断言"SQLite 绿、PG 红"，2026-11-19 的 CI（真实 PG）就是这样红的
+	// ——差值只有 806ns，两者是同一瞬间。容差取 1µs 仍能抓住"写成了 tick 的 now"
+	// 这类错误（本用例里事件时刻与 tick 相差 11 分钟，任何真实错位都远超容差）。
+	at := evs[0].EventAt
+	if at == nil {
+		t.Fatalf("missed 审计的 EventAt 必须是事件时刻 %v，got nil", fx.eventAt)
+	}
+	if !sameInstantAtDBPrecision(*at, fx.eventAt) {
+		t.Fatalf("missed 审计的 EventAt 必须是事件时刻 %v，got %v（差 %v）"+
+			"—— 不是同一时刻（或精度容差被放大到失去意义）",
+			fx.eventAt, *at, at.Sub(fx.eventAt))
 	}
 	if evs[0].Detail == "" {
 		t.Fatal("missed 审计必须说明原因（前端/运维据此判断停机窗口）")

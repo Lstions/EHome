@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/firmwareid"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/simulation/harness"
 )
@@ -204,6 +205,17 @@ func otaRun002(e *harness.Env) {
 	// 所以"节点在线且库里有记录"是这条链的前置条件，不是可选装饰。
 	fx := rtProvisionFixture(e, "SIM-OTA-002", "target")
 	dev := fx.Node
+
+	// M0 闸门第 3 条（OTA_GATE_HARDWARE_UNKNOWN）：建任务要求节点硬件档案完整
+	//（platform / hw_flash_mb / hw_psram 三者齐备）。仿真节点只上报 platform
+	//（harness 默认 "ESP32-C6"），容量与 PSRAM 在生产里**没有上报来源**——
+	// 唯二写入者是启动迁移 dbschema.BackfillNodeHardware（顺带把 platform
+	// 规范化为芯片名）与运维 CLI `ehomectl node hw set`（直接 UPDATE 这两列）。
+	// 这里复现这两个动作的结果：platform=esp32c6、8MB、无 PSRAM，与
+	// otaFirmwareImage 的 spi_size=3（8MB）和 otaSidecar 的 psram=false 对齐。
+	// 这是**造前置条件**，不是放宽闸门：档案缺失时建任务必须 409（分支 3），
+	// 由 internal/firmwareid 与 internal/ota 的单测按分支覆盖。
+	otaSetTargetHardware(t, e, dev.NodeID, firmwareid.ChipC6, 8, "no")
 
 	// 先记下当前已收帧序号：OtaCmd 是 fire-and-forget 的 MQTT 发布，
 	// AwaitFieldsAfter(startSeq) 只认此后的帧 —— 既不命中历史帧，
@@ -398,6 +410,13 @@ func otaFlipLastChar(s string) string {
 //
 // 偏移表与 internal/firmwareid 必须一致；镜像头之外填充确定性字节，
 // 这样「下载内容 == 上传内容」的断言才有意义。
+//
+// 定长字符串字段必须按真实 esp_app_desc_t 的布局写：C 静态初始化器把字符串字面量
+// 写进 char[N] 后，剩余字节全部是 NUL（PROJECT_NAME 只有 15 字节，project_name[32]
+// 的后 17 字节必然是 0）。解析侧 firmwareid.cString 正是「到 NUL 截断」——
+// 只 copy 字符串而不做 NUL 补齐，后面的确定性填充字节就会被当成字段内容，
+// project 读成 "ehome_collector_" + 填充字节，触发 FW_PROJECT_MISMATCH。
+// 这是夹具不像真镜像，不是闸门过严，所以修夹具而不是放宽校验。
 func otaFirmwareImage(version string, chipID uint16, spiSize uint8, elfSeed string, n int) []byte {
 	if n < 0x200 {
 		n = 0x200
@@ -410,14 +429,39 @@ func otaFirmwareImage(version string, chipID uint16, spiSize uint8, elfSeed stri
 	out[0x03] = spiSize << 4
 	binary.LittleEndian.PutUint16(out[0x0C:], chipID)
 	binary.LittleEndian.PutUint32(out[0x20:], 0xABCD5432)
-	copy(out[0x30:0x50], version)
-	copy(out[0x50:0x70], "ehome_collector")
-	copy(out[0x70:0x80], "07:37:54")
-	copy(out[0x80:0x90], "Oct  5 2026")
-	copy(out[0x90:0xB0], "v6.1")
+	otaPutFixedString(out[0x30:0x50], version)
+	otaPutFixedString(out[0x50:0x70], "ehome_collector")
+	otaPutFixedString(out[0x70:0x80], "07:37:54")
+	otaPutFixedString(out[0x80:0x90], "Oct  5 2026")
+	otaPutFixedString(out[0x90:0xB0], "v6.1")
 	sum := sha256.Sum256([]byte(elfSeed))
 	copy(out[0xB0:0xD0], sum[:])
 	return out
+}
+
+// otaPutFixedString 写入一个定长 char[N] 字段：先清零（NUL 补齐）再写字符串，
+// 与 C 里 char field[N] = "value" 的语义一致。
+func otaPutFixedString(dst []byte, s string) {
+	clear(dst)
+	copy(dst, s)
+}
+
+// otaSetTargetHardware 给仿真节点补齐硬件档案（platform 规范化 + 容量 + PSRAM）。
+//
+// 为什么直连 SQL：这两列在生产里只有启动迁移与 ehomectl 两个写入者，没有任何
+// HTTP 入口；仿真进程里没有 ehomectl，只能用 e.SQL() 复现同一写入。与
+// harness.Device.AgeCapabilitySnapshot 同类——造前置条件，不是断言。
+func otaSetTargetHardware(t *testing.T, e *harness.Env, nodeID, chip string, flashMB uint16, psram string) {
+	t.Helper()
+	res, err := e.SQL().Exec(
+		"UPDATE nodes SET platform = $1, hw_flash_mb = $2, hw_psram = $3 WHERE node_id = $4",
+		chip, flashMB, psram, nodeID)
+	if err != nil {
+		t.Fatalf("写入节点 %s 硬件档案失败: %v", nodeID, err)
+	}
+	if rows, _ := res.RowsAffected(); rows != 1 {
+		t.Fatalf("节点 %s 硬件档案更新影响 %d 行，期望 1 行", nodeID, rows)
+	}
 }
 
 // otaSidecar 生成与镜像自洽的 <bin>.meta.json（psram 是镜像头里唯一没有的位）。

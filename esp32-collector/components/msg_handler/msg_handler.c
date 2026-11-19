@@ -12,6 +12,7 @@
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
+#include "dispatch.h"   /* 2026-11-19：消息路由改为数据表（见文件末尾 msg_handler_process） */
 #include "transport.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
@@ -180,7 +181,62 @@ diag_ack_cb_t msg_handler_get_diag_ack_cb(void)
     return s_diag_ack_cb;
 }
 
-/* === Message dispatch === */
+/* === Message dispatch ===
+ *
+ * 2026-11-19：路由从 switch 改为 dispatch 组件的**数据表**（设计 §2.5 / P4）。
+ * 新增消息类型 = 表里加一行；"有哪些类型"只有本文件这一处定义。
+ *
+ * 集成边界：帧定界/解析仍由 frame 组件完成（frame_decoder_init），
+ * 各 handler 消费的是 frame_decoder_t ⇒ dispatch 的 ctx 就是它的地址。
+ * 适配函数因此忽略 payload/len —— 这两个形参属于 dispatch 的通用契约
+ * （给"已由 wire 定界的 payload"用），本集成点不需要；不要为了它改组件契约。
+ */
+#define MSG_ROUTE(name_, handler_)                                           \
+    static disp_result_t route_##name_(void *ctx, uint8_t type,             \
+                                       const uint8_t *payload, size_t len)   \
+    {                                                                        \
+        (void)type;                                                          \
+        (void)payload;                                                       \
+        (void)len;                                                           \
+        handler_((frame_decoder_t *)ctx);                                    \
+        return DISP_OK;                                                      \
+    }
+
+MSG_ROUTE(device_op, handler_device_op_process)
+MSG_ROUTE(config_manifest, handler_config_process_manifest)
+MSG_ROUTE(write_cmd, handler_writecmd_process)
+MSG_ROUTE(ping, handler_hello_process_ping)
+MSG_ROUTE(ota_cmd, handler_data_process_ota)
+MSG_ROUTE(scan_req, handler_writecmd_process_scan)
+MSG_ROUTE(query_req, handler_writecmd_process_query)
+MSG_ROUTE(config_query, handler_config_process_query)
+MSG_ROUTE(channel_cmd_v2, handler_channel_cmd_v2_process)
+MSG_ROUTE(hello_ack, handler_hello_process_ack)
+MSG_ROUTE(query_resources, handler_config_process_query_resources)
+MSG_ROUTE(periph_cmd, handler_periph_process)
+MSG_ROUTE(diag_ack, handler_diag_process_ack)
+
+#undef MSG_ROUTE
+
+static const disp_route_t s_msg_routes[] = {
+    { MSG_DEVICE_OP,       route_device_op,       "device_op"       },
+    { MSG_CONFIG_MFST,     route_config_manifest, "config_manifest" },
+    { MSG_WRITE_CMD,       route_write_cmd,       "write_cmd"       },
+    { MSG_PING,            route_ping,            "ping"            },
+    { MSG_OTA_CMD,         route_ota_cmd,         "ota_cmd"         },
+    { MSG_SCAN_REQ,        route_scan_req,        "scan_req"        },
+    { MSG_QUERY_REQ,       route_query_req,       "query_req"       },
+    { MSG_CONFIG_QUERY,    route_config_query,    "config_query"    },
+    { MSG_CHANNEL_CMD_V2,  route_channel_cmd_v2,  "channel_cmd_v2"  },
+    { MSG_HELLO_ACK,       route_hello_ack,       "hello_ack"       },
+    { MSG_QUERY_RESOURCES, route_query_resources, "query_resources" },
+    { MSG_PERIPH_CMD,      route_periph_cmd,      "periph_cmd"      },
+    { MSG_DIAG_ACK,        route_diag_ack,        "diag_ack"        },
+};
+
+/* 条数是**手写**的：新增一种消息却忘了加行，编译期就红（而不是静默进 default）。 */
+_Static_assert(sizeof(s_msg_routes) / sizeof(s_msg_routes[0]) == 13,
+               "路由表必须覆盖 msg_handler 认识的每一种消息（新增类型请同时加行）");
 
 void msg_handler_process(const uint8_t *data, size_t len)
 {
@@ -199,67 +255,14 @@ void msg_handler_process(const uint8_t *data, size_t len)
 
     ESP_LOGI(TAG, "Received message type=0x%02X, len=%zu", msg_type, len);
 
-    switch (msg_type) {
-    case MSG_DEVICE_OP:
-        /* v3.0 远程运维（重启 / 恢复出厂）。设备侧策略在 device_op 组件里，
-         * 这里只负责解析字段、注入原语、把结果编成 0x23 送回去。 */
-        handler_device_op_process(&dec);
-        break;
-
-    case MSG_CONFIG_MFST:
-        /* v2.4: config_mgr_apply_manifest moved to handle_config_applied
-         * inside app_state_lock_config() — prevents TOCTOU race between
-         * manifest parse (clear+rebuild) and concurrent StatusReport reads. */
-        handler_config_process_manifest(&dec);
-        break;
-
-    case MSG_WRITE_CMD:
-        handler_writecmd_process(&dec);
-        break;
-
-    case MSG_PING:
-        handler_hello_process_ping(&dec);
-        break;
-
-    case MSG_OTA_CMD:
-        handler_data_process_ota(&dec);
-        break;
-
-    case MSG_SCAN_REQ:
-        handler_writecmd_process_scan(&dec);
-        break;
-
-    case MSG_QUERY_REQ:
-        handler_writecmd_process_query(&dec);
-        break;
-
-    case MSG_CONFIG_QUERY:
-        handler_config_process_query(&dec);
-        break;
-
-    case MSG_CHANNEL_CMD_V2:
-        handler_channel_cmd_v2_process(&dec);
-        break;
-
-    case MSG_HELLO_ACK:
-        handler_hello_process_ack(&dec);
-        break;
-
-    case MSG_QUERY_RESOURCES:
-        handler_config_process_query_resources(&dec);
-        break;
-
-    case MSG_PERIPH_CMD:
-        handler_periph_process(&dec);
-        break;
-
-    case MSG_DIAG_ACK:
-        /* v2.6: 服务端确认崩溃记录已入库 -> 设备释放对应 NVS 占用 */
-        handler_diag_process_ack(&dec);
-        break;
-
-    default:
+    disp_result_t routed = dispatch_frame(s_msg_routes,
+                                          sizeof(s_msg_routes) / sizeof(s_msg_routes[0]),
+                                          msg_type, data, len, &dec);
+    if (routed == DISP_UNKNOWN_TYPE) {
+        /* 与旧 switch 的 default 同语义：未知类型必须可见地失败，不静默 */
         ESP_LOGW(TAG, "Unknown message type: 0x%02X", msg_type);
-        break;
+    } else if (routed != DISP_OK) {
+        ESP_LOGE(TAG, "Dispatch failed for type=0x%02X (%s)", msg_type,
+                 disp_result_name(routed));
     }
 }

@@ -898,23 +898,25 @@ add_test(NAME wire_tests COMMAND wire_tests)
 
 add_executable(msgcodec_tests
     msgcodec_tests.c
-    ../components/msgcodec/msgcodec.c
+    oracle/msgcodec/msgcodec.c
 )
-target_include_directories(msgcodec_tests PRIVATE ../components/msgcodec/include)
+target_include_directories(msgcodec_tests PRIVATE oracle/msgcodec/include)
 target_compile_options(msgcodec_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME msgcodec_tests COMMAND msgcodec_tests)
 
 # ⭐ 两套独立编解码实现的**逐字节对拍**（frame_codec 生产用；msgcodec 是 S0 向量的 C 侧实现）。
+# 2026-11-19：msgcodec 按可达性门禁的要求降为**测试用件**，源码移到 host_tests/oracle/msgcodec/
+#（理由见该目录 README）；它不再是 components/ 下的生产组件。
 # 共享向量只覆盖 20 条固定用例 —— 超出之后"两者一致"只是假定。
 # 本 target 把它变成"在大范围边界输入空间上实测一致"。
 add_executable(codec_equivalence_tests
     codec_equivalence_tests.c
     ../components/frame/frame_codec.c
-    ../components/msgcodec/msgcodec.c
+    oracle/msgcodec/msgcodec.c
 )
 target_include_directories(codec_equivalence_tests PRIVATE
     ../components/frame
-    ../components/msgcodec/include
+    oracle/msgcodec/include
 )
 target_compile_options(codec_equivalence_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME codec_equivalence_tests COMMAND codec_equivalence_tests)
@@ -994,6 +996,9 @@ add_executable(msg_handler_publish_tests
     msg_handler_publish_tests.c
     ../components/transport/transport.c
     ../components/frame/frame_codec.c
+    # 2026-11-19：msg_handler.c 的路由改为 dispatch 的数据表 ⇒ 必须链真实的 dispatch.c，
+    # 否则 undefined reference to dispatch_frame（本用例 #include 了 msg_handler.c）。
+    ../components/dispatch/dispatch.c
     # 本用例 #include 真实的 msg_handler.c，而它现在分发了 MSG_DEVICE_OP；
     # 因此必须把该 handler 也链进来（否则 undefined reference）。
     ../components/msg_handler/handler_device_op.c
@@ -1007,6 +1012,8 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/frame
     ../components/config_mgr
     ../components/dma_pool/include
+    # 2026-11-19：msg_handler.c 现在 #include "dispatch.h"（数据表路由）。
+    ../components/dispatch/include
     ../components/scheduler
     ../components/bus_worker/include
     ../components/report_stats/include
@@ -1023,7 +1030,6 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/periph_owner
     ../components/rgb_led
     ../components/factory_reset
-    ../components/nvs_helper
     ../components/device_op/include
 )
 target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -1054,9 +1060,9 @@ target_compile_options(report_stats_tests PRIVATE -Wall -Wextra -Werror)
 
 add_executable(golden_vectors_tests
     golden_vectors_tests.c
-    ../components/msgcodec/msgcodec.c
+    oracle/msgcodec/msgcodec.c
 )
-target_include_directories(golden_vectors_tests PRIVATE ../components/msgcodec/include)
+target_include_directories(golden_vectors_tests PRIVATE oracle/msgcodec/include)
 target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(sync_manager_uplink_tests
     sync_manager_uplink_tests.c
@@ -1445,6 +1451,8 @@ add_executable(firmware_tcp_e2e_client
     ../components/msg_handler/msg_handler.c
     ../components/msg_handler/handler_device_op.c
     ../components/device_op/device_op.c
+    # 2026-11-19：msg_handler.c 的路由表由 dispatch 组件提供（s_msg_routes）。
+    ../components/dispatch/dispatch.c
     # 真实广播路径的落点（msg_handler_publish_checked → transport_broadcast_ex）。
     ../components/transport/transport.c
 )
@@ -1454,6 +1462,8 @@ target_include_directories(firmware_tcp_e2e_client PRIVATE
     #   真实头里的 msg_handler_process / msg_handler_set_device_op_hooks 等
     #   ⇒ 编译期报 implicit declaration（task-25 实测踩到）。真实头是超集。
     ../components/msg_handler
+    # 2026-11-19：msg_handler.c 现在按 dispatch 的数据表路由 ⇒ 需要它的头。
+    ../components/dispatch/include
     hello_stubs
     stubs
     stubs/rom

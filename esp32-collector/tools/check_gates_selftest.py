@@ -330,6 +330,41 @@ def inject_probe(files):
     return fn
 
 
+_PROBE_COMPONENT = "zz_gate_selftest_probe"   # 与 PROBE_DIR 同名
+_PENDING_ANCHOR = "PENDING_WIRING = {"
+
+
+def inject_probe_pending(entry_body):
+    """建一个**从 main 不可达**的探针组件，并把它登记进 PENDING_WIRING。
+
+    为什么要自带条目（2026-11-19）：
+      本自检原先用**真实登记条目**当注入锚点（link_mqtt → msgcodec → nvs_helper，
+      条目随架构决策逐个被删除）。最后一批条目按 review_by 到期清理后，
+      inject_replace 的"正则必须命中 1 次"断言会把**整个自检**打成 traceback
+      —— 不是"某条配方红"，而是它后面的配方全都不跑（假绿）。
+      ⇒ 锚点改成**结构行** PENDING_WIRING = {，条目内容由本函数现写，
+        与真实登记清单的增删彻底解耦。
+    """
+    def fn(backups, created):
+        note = inject_probe({
+            "CMakeLists.txt": 'idf_component_register(SRCS "probe.c" INCLUDE_DIRS "")\n',
+            "probe.c": "int zz_gate_probe_pending(void) { return 0; }\n",
+        })(backups, created)
+        path = os.path.join(ROOT, "tools", "check_component_reachable.py")
+        def sub(text):
+            hits = text.count(_PENDING_ANCHOR)
+            assert hits == 1, "锚点 %r 命中 %d 次（应为 1）" % (_PENDING_ANCHOR, hits)
+            block = ('    "%s": {\n'
+                     '        "what": "门禁自检探针（不可达 + 已登记；只存在于注入期间）",\n'
+                     '        "why":  "自检配方用：证明登记表判据真的会咬",\n'
+                     '        "next": "无需处理（注入结束即恢复）",\n'
+                     % _PROBE_COMPONENT) + entry_body + '    },\n'
+            return text.replace(_PENDING_ANCHOR, _PENDING_ANCHOR + "\n" + block, 1)
+        _patch_text(backups, path, sub, "往 PENDING_WIRING 注入探针条目")
+        return note + "；PENDING_WIRING 注入探针条目"
+    return fn
+
+
 def inject_insert_after(relpath, anchor, inserted):
     def fn(backups, created):
         path = os.path.join(ROOT, relpath)
@@ -524,46 +559,35 @@ def recipes():
     # 起因：清单注释把"骨架 + 宿主测试已完成"写成了**事实**，而它是**假的**
     # （nvs_helper 一个测试文件都没有）。于是把"有没有测试"改成去文件系统里查。
     # 这三条配方就是证明这些新判据**真的会咬** —— 否则我又加了一条自证不了的检查。
+    # ⚠ 2026-11-19：这四条配方的锚点历史 —— 全都**指向过会消失的输入**：
+    #   link_mqtt 条目（随 MQTT 删除）→ dispatch / msgcodec / nvs_helper 条目
+    #   （按 review_by 到期决策：接线 / 降为测试用件 / 删除）。
+    #   真实条目清空后，inject_replace 的"正则必须命中 1 次"断言会让整个自检
+    #   traceback 退出（后面的配方全不跑 ⇒ 假绿）。
+    #   ⇒ 现在统一用 inject_probe_pending：**自造**不可达探针组件 + 一条针对它的
+    #     登记，判据与真实清单内容彻底解耦。
     add("component_reachable.fake_test_ref",
         "check_component_reachable.py", "file",
-        inject_replace("tools/check_component_reachable.py",
-                       r'"test": "dispatch_tests\.c"',
-                       '"test": "no_such_test_file.c"',
-                       "登记表里的测试引用指向不存在的文件"),
-        "把 dispatch 的 test 改成不存在的文件 ⇒ 门禁必须红（'测试已完成'不能只是嘴上说）")
+        inject_probe_pending('        "test": "no_such_test_file.c",\n'
+                             '        "review_by": "2099-01-01",\n'),
+        "探针组件的 test 指向不存在的文件 ⇒ 必须红（'测试已完成'不能只是嘴上说）")
 
-    # ⚠ 2026-10-08（§194）：本配方原先把锚点打在 link_mqtt 条目上
-    #   （"把 link_mqtt 的 test 换成 sntp_mgr_tests.c"）。
-    #   但 link_mqtt 随 MQTT 一起整体删除了、登记条目也已删除
-    #   ⇒ 正则**打不中任何东西**，inject_replace 抛 AssertionError，
-    #     整个自检**崩掉**（不是"红"，是 traceback 退出）。
-    #   ⚠ 这正是"门禁的判据依赖了一条会消失的输入" —— 自检本身没有兜底。
-    #   ⇒ 锚点改到 dispatch（同一条目类型、同样有 test 字段、长期稳定）。
     add("component_reachable.test_ref_not_mentioning",
         "check_component_reachable.py", "file",
-        inject_replace("tools/check_component_reachable.py",
-                       r'"test": "dispatch_tests\.c"',
-                       '"test": "sntp_mgr_tests.c"',
-                       "登记表里的测试引用是个真文件但并不测该组件"),
-        "把 dispatch 的 test 换成 sntp_mgr_tests.c（真文件但不提 dispatch）⇒ 必须红")
+        inject_probe_pending('        "test": "sntp_mgr_tests.c",\n'
+                             '        "review_by": "2099-01-01",\n'),
+        "探针组件的 test 指向一个真文件、但该文件根本不提它 ⇒ 必须红")
 
-    # ⚠ 同上：原锚点是 link_mqtt 的 review_by: "2026-12-01"（条目已删）。
-    #   现改为把 **msgcodec** 的 review_by 改成过去日期 —— 该条目长期存在。
     add("component_reachable.review_overdue",
         "check_component_reachable.py", "file",
-        inject_replace("tools/check_component_reachable.py",
-                       r'"review_by": "2026-11-15"',
-                       '"review_by": "2026-01-01"',
-                       "决策截止日已过去"),
-        "把 msgcodec 的 review_by 改成过去的日期 ⇒ 门禁必须红（清单不能无限期挂着）")
+        inject_probe_pending('        "test_note": "自检探针无测试（有意）",\n'
+                             '        "review_by": "2026-01-01",\n'),
+        "探针组件的决策截止日已过去 ⇒ 必须红（清单不能无限期挂着）")
 
     add("component_reachable.test_missing_note",
         "check_component_reachable.py", "file",
-        inject_replace("tools/check_component_reachable.py",
-                       r'"test_note": 「?[^」\n]*」?,',
-                       "",
-                       "无测试却连理由都不写"),
-        "删掉 nvs_helper 的 test_note ⇒ 必须红（无测试可以，但要说明原因）")
+        inject_probe_pending('        "review_by": "2099-01-01",\n'),
+        "探针组件既没有测试文件、又不写 test_note ⇒ 必须红（无测试可以，但要说明原因）")
 
     add("databatch.weak_symbol_regression",
         "check_databatch_injected.py", "file",
