@@ -104,6 +104,8 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
   mockDmaToggle: vi.fn(() => Promise.resolve()),
   mockElMessageWarning: vi.fn(),
   // 隔离栈真实快照：CH0=4(SPI only) / CH1=5(UART|SPI, 已绑 uart1) / CH2=4(SPI only)
+  // 注意 CH1 的 bound_to 刻意保留**历史小写值** uart/uart1：它是 2026-11-19 回归
+  // 期间前端写坏的真实数据，用于钉住"比较大小写不敏感、写入规范大小写"两条口径。
   mockDmaChannelsRef: { value: [
     { dma_id: 0, name: 'GDMA_CH0', dma_type: 0, capabilities: 3, max_burst: 4095, state: 0, bound_to: '', compatible_bus: 4 },
     { dma_id: 1, name: 'GDMA_CH1', dma_type: 0, capabilities: 3, max_burst: 4095, state: 1, bound_to: 'uart/uart1', compatible_bus: 5 },
@@ -267,7 +269,9 @@ describe('B1：DMA 必须可选资源（不是只能开关）', () => {
     expect(collector).toBe('F0F5BDFFFE02')
     expect(dma.dma_id, '必须绑定用户选中的那一条，而不是"第一条候选"').toBe(2)
     expect(enabled).toBe(true)
-    expect(bindTo).toBe('spi/spi2')
+    // 写入口径必须是**设备规范 hw_id**：固件 derive_hw_id 产出 spi/SPI2，
+    // dma_pool 用 strcmp 比对，后端也按规范大小写校验 —— 小写会被 400 拒绝。
+    expect(bindTo, 'bind_to 不得被压成小写').toBe('spi/SPI2')
   })
 
   it('UART（只有 1 条候选 CH1）保留开关形态，不退化也不消失', async () => {

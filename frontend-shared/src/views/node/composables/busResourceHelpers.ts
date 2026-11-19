@@ -121,8 +121,26 @@ export function resourceMode(resource: BusResource): string {
   return '—'
 }
 
+/**
+ * 资源 → **设备端规范 hw_id**（即 DMA 的 bind_to 值）。
+ *
+ * 形状与固件 derive_hw_id() 一致：`<总线类型小写>/<资源 id 原样>`，
+ * 例：uart/UART1、spi/SPI2、i2c/I2C0。
+ *
+ * ⚠ 大小写**必须**与设备上报一致，绝不能 toLowerCase()：
+ *   - 固件 dma_pool 的预抢占/释放用 strcmp 比对（大小写敏感）；
+ *   - 后端 PUT /nodes/:id/dma-config 也按规范 id 大小写敏感校验，
+ *     写成 uart/uart1 会被 400 拒绝；即便绕过校验进了库，设备侧那条
+ *     GDMA 通道也会被永久占用（2026-10-04 事故，a001a34d）。
+ *
+ * 2026-11-19 回归：旧实现在这里整串 toLowerCase()，导致「总线配置」页的
+ * DMA 开关/选择器**一律绑定失败**（前端发 uart/uart1，后端要求 uart/UART1）。
+ *
+ * 注意：**比较**"这条 DMA 是否绑在本资源上"请走 isDmaBoundToResource /
+ * resourceDmaBindingOf —— 它们大小写不敏感，历史脏数据也读得出。
+ */
 export function resourceBindingKey(busType: BusType, resource: BusResource): string {
-  return `${busType}/${resource.id}`.toLowerCase()
+  return `${busType}/${resource.id}`
 }
 
 export function canonicalHardwareId(type: BusType, rawId: unknown): number | null {
@@ -229,7 +247,9 @@ export function dmaCandidatesOf(busType: BusType, dmaChannels: DmaChannelInfo[])
 }
 
 export function resourceDmaBindingOf(busType: BusType, resource: BusResource, dmaChannels: DmaChannelInfo[]): DmaChannelInfo | undefined {
-  const key = resourceBindingKey(busType, resource)
+  // 比较用大小写不敏感：resourceBindingKey 是**写入**用的规范值，
+  // 而库里可能残留历史小写值（设备原样回显），两者必须能对上，否则会误判"未绑定"。
+  const key = resourceBindingKey(busType, resource).toLowerCase()
   return dmaCandidatesOf(busType, dmaChannels).find(dma => String(dma.bound_to || '').toLowerCase() === key)
 }
 
@@ -240,7 +260,7 @@ export function resourceDmaBindingOf(busType: BusType, resource: BusResource, dm
  * 选择器仍要把它显示为当前值，否则用户会以为"没绑定"，一改动就等于静默解绑。
  */
 export function isDmaBoundToResource(busType: BusType, dma: DmaChannelInfo, resource: BusResource): boolean {
-  return String(dma.bound_to || '').toLowerCase() === resourceBindingKey(busType, resource)
+  return String(dma.bound_to || '').toLowerCase() === resourceBindingKey(busType, resource).toLowerCase()
 }
 
 /** 选择器当前值：'' = 不使用 DMA，否则是已绑定本资源那条的 dma_id。 */

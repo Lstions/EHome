@@ -229,6 +229,14 @@ func AutoMigrate() error {
 	if _, err = MigrateNodeIDFromJTAGMAC(DB); err != nil {
 		return err
 	}
+	// DMA bind_to 大小写规范化 (2026-11-19 回归): 前端曾把资源 id 整串压成小写
+	// (busResourceHelpers.resourceBindingKey().toLowerCase())，历史 node.Config 里
+	// 因此可能留着 "uart/uart1" 这类**仅仅大小写不同**的 bind_to。设备端
+	// dma_pool 用 strcmp 比对 ⇒ 该 GDMA 通道被永久占用（2026-10-04 事故同机制）。
+	// 只修"仅大小写不符"的值，未知值原样保留并告警；幂等，修好后重跑零改写。
+	if _, err = MigrateDMABindToCanonicalCase(DB); err != nil {
+		return err
+	}
 	// 固件身份 schema（方案《固件与平台更新机制》§5.6 / 附录 B）：
 	// 回填身份 → 以镜像 version 为准 → 按 elf_sha256 去重 → DROP stable/target_model
 	// → 建唯一部分索引 uq_firmwares_elf → 回填 nodes 硬件 → 输出 legacy/duplicate 清单。
