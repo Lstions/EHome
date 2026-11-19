@@ -33,6 +33,10 @@
 #   make release-notes-check - 校验 deploy/release.json 的 notes schema（构建期门禁，不联网）
 #   make verify-release - 对账运行中服务的 commit 与发布清单（BASE_URL 可覆盖）
 #   make blackbox       - 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
+#   make fw-version     - 打印解析出的固件版本 + 来源（FW_VERSION > git tag > VERSION 文件）
+#   make fw-package     - 编译+门禁+打包+自检，产出 dist/<ver>/<profile>/*.ehfw（PROFILE=c6-n8）
+#   make fw-all         - 6 档位全跑，产出 dist/<version>/ 与排序后的 SHA256SUMS
+#   make fw-verify      - 离线校验任意 .ehfw（PKG=<path>，规则与服务端一致）
 #
 # 说明：
 #   - 统一基础设施 = docker-compose.yml 的 postgres，与生产共用。
@@ -127,7 +131,8 @@ FRONTEND_COVERAGE_THRESHOLD ?= 25
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
         status logs backup restore clean help \
-        docs-audit verify-image blackbox release-notes-check verify-release
+        docs-audit verify-image blackbox release-notes-check verify-release \
+        fw-version fw-package fw-all fw-verify
 
 # ---- 一键启动统一环境 ----
 dev: up ## 启动统一环境（历史兼容别名）
@@ -473,6 +478,35 @@ clean: ## 停止本机前后端并清理日志（不删除统一基础设施/数
 	$(call kill_port,$(FRONTEND_PORT))
 	rm -rf $(ROOT)/.logs
 	@echo "==> Cleaned up. (Unified infra & production data untouched; stop via 'make infra-down')"
+
+# ---- 固件包（ESP32；规格 docs/计划/固件单文件包与构建打包规范-2026-11-19.md §7.9）----
+#
+# 版本单一真源：FW_VERSION > exact git tag fw-v* > VERSION 文件（仓库根）> 失败。
+# 一次发版的顺序：make fw-version → make fw-package PROFILE=<档位>（逐个）或 make fw-all
+# → make fw-verify PKG=<包> → 每个档位上传 1 个 .ehfw。
+FW_DIR := $(ROOT)/esp32-collector
+
+fw-version: ## 打印解析出的固件版本 + 来源（FW_VERSION > git tag > VERSION 文件）
+	@bash $(FW_DIR)/build_firmware.sh --version
+
+fw-package: ## 编译+门禁+打包+自检+落 dist（PROFILE=<档位> 必填）
+	@if [ -z "$(PROFILE)" ]; then \
+		echo "用法: make fw-package PROFILE=<档位>"; \
+		echo "  档位: c6-n8 c6-n16 s3-n8 s3-n16 s3p-n8 s3p-n16"; \
+		echo "  例:   FW_VERSION=2.9.0 make fw-package PROFILE=c6-n8"; \
+		exit 1; \
+	fi
+	@bash $(FW_DIR)/build_firmware.sh "$(PROFILE)"
+
+fw-all: ## 6 档位全跑（25–40 分钟），产出 dist/<version>/ 与排序后的 SHA256SUMS
+	@bash $(FW_DIR)/build_firmware.sh all
+
+fw-verify: ## 离线校验任意 .ehfw（PKG=<path>，规则与服务端一致）
+	@if [ -z "$(PKG)" ]; then \
+		echo "用法: make fw-verify PKG=dist/2.9.0/c6-n8/ehome_collector-2.9.0-c6-n8.ehfw"; \
+		exit 1; \
+	fi
+	@python3 $(FW_DIR)/tools/pack_firmware.py --verify "$(PKG)"
 
 # ---- Help ----
 help: ## Show this help

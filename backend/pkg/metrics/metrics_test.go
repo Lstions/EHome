@@ -172,9 +172,9 @@ func TestGateRejectionCounters(t *testing.T) {
 	})
 
 	t.Run("FirmwareUploadRejected_Inc", func(t *testing.T) {
-		labels := map[string]string{"reason": "FW_META_REQUIRED"}
+		labels := map[string]string{"reason": "FW_PKG_INVALID"}
 		before, _ := promCounterValue(t, "ehome_firmware_upload_rejected_total", labels)
-		FirmwareUploadRejected.WithLabelValues("FW_META_REQUIRED").Inc()
+		FirmwareUploadRejected.WithLabelValues("FW_PKG_INVALID").Inc()
 		assertCounterIncrement(t, "ehome_firmware_upload_rejected_total", labels, before, 1)
 	})
 

@@ -69,11 +69,20 @@ export function paginateFirmwares(list: Firmware[], page: number, pageSize: numb
   return list.slice(start, start + size)
 }
 
-/** 上传前置校验：必须选择 .bin（镜像）与 .meta.json（sidecar）**两个**文件。 */
-export function isFirmwareBinFile(file: File | null | undefined): boolean {
-  return Boolean(file && /\.bin$/i.test(file.name))
+/**
+ * 上传前置校验：**一个**固件包（`.ehfw`，或同格式别名 `.zip`，§4.1）。
+ *
+ * 判据只在扩展名一层：真正确认「是不是包」靠服务端按内容嗅探首 4 字节
+ * `PK\x03\x04`（§4.1「识别按内容，不看扩展名」），前端不复制那套规则。
+ */
+export function isFirmwarePackageFile(file: File | null | undefined): boolean {
+  return Boolean(file && /\.(ehfw|zip)$/i.test(file.name))
 }
 
-export function isFirmwareMetaFile(file: File | null | undefined): boolean {
-  return Boolean(file && /\.json$/i.test(file.name))
+/**
+ * 裸镜像（`.bin`）：改造前是「两个必传文件之一」，现在是**最常见的一种拿错**。
+ * 只为给出针对性文案（「需要打包成 .ehfw」）而保留，不参与上传判定。
+ */
+export function isFirmwareBinFile(file: File | null | undefined): boolean {
+  return Boolean(file && /\.bin$/i.test(file.name))
 }

@@ -15,7 +15,8 @@ import (
 type UploadFile struct {
 	// Field 是表单字段名（例如固件上传的 "file"）。
 	Field string
-	// Filename 是客户端文件名，服务端会据此做扩展名校验。
+	// Filename 是客户端文件名：服务端把它记下来做排障（固件包存成 package_name），
+	// 不再按扩展名判定类型 —— 包还是裸镜像由**内容**嗅探决定。
 	Filename string
 	// Content 是文件字节。
 	Content []byte
@@ -58,9 +59,9 @@ func (s *Session) UploadFile(path, field, filename string, content []byte) *Resp
 	return s.UploadMultipart(path, nil, []UploadFile{{Field: field, Filename: filename, Content: content}})
 }
 
-// Upload 是"一个文件 + 若干文本字段"的便捷包装。
-// 固件上传（POST /api/v1/firmwares/upload，服务端用 c.FormFile("file") 取件）
-// 是它的典型调用方。
+// Upload 是"一个文件 + 若干文本字段"的便捷包装，给仍带文本字段的 multipart 端点用。
+// 固件上传已是**单文件**（psram/profile 进了包内清单，没有第二个 meta 字段），
+// 走 UploadFile 即可。
 func (s *Session) Upload(path string, fields map[string]string, field, filename string, content []byte) *Response {
 	return s.UploadMultipart(path, fields, []UploadFile{{Field: field, Filename: filename, Content: content}})
 }

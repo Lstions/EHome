@@ -1,0 +1,30 @@
+{
+  "manifest": {
+    "format": "ehome-firmware",
+    "format_version": 1,
+    "packer": {
+      "name": "pack_firmware.py",
+      "version": "1.0.0"
+    },
+    "artifact": {
+      "name": "ehome_collector.bin",
+      "size": 2256,
+      "sha256": "838357b2b6d503d1770c1dc9a2dd4b2b424557a4380cb97dd9857663c6e84f7e"
+    },
+    "identity": {
+      "psram": false,
+      "profile": "c6-n8"
+    }
+  },
+  "image": {
+    "chip": "esp32c6",
+    "chip_id": 13,
+    "flash_mb": 8,
+    "version": "2.9.0",
+    "project": "ehome_collector",
+    "idf_version": "v6.1.0",
+    "elf_sha256": "a5305b5f8761da319d48dbaf51ee0aaf60c5868316f92b14a8096e2d997c03ab",
+    "size_bytes": 2256,
+    "sha256": "838357b2b6d503d1770c1dc9a2dd4b2b424557a4380cb97dd9857663c6e84f7e"
+  }
+}

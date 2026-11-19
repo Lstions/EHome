@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,7 @@ import (
 
 	"ehome/backend/internal/dbschema"
 	"ehome/backend/internal/firmwareid"
+	"ehome/backend/internal/firmwarepkg"
 	"ehome/backend/internal/firmwareticket"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -31,29 +33,32 @@ import (
 const (
 	// firmwareDir 是固件落盘目录，与启动迁移（dbschema）读取的目录同源。
 	firmwareDir = dbschema.FirmwareDir
-	// firmwareUploadMaxBytes 是 multipart 请求体上限（含 sidecar）。
-	// 槽容量上限最大是 16MB 档的 6.5MB（firmwareid.SlotCapacity），留 ~1.5MB 余量；
+	// firmwareUploadMaxBytes 是 multipart 请求体上限（整个包）。
+	// 16MB 档槽上限 6.5MB（firmwareid.SlotCapacity）+ 清单 ≤64 KiB + ZIP 头 ≈ 6.6 MiB；
 	// 真正「超过该容量槽」的判定按镜像自报的 spi_size 做，返回 FW_TOO_LARGE。
 	firmwareUploadMaxBytes = 8 << 20
-	// firmwareMetaField 是同名 sidecar 的 multipart 字段名（方案 §4.2）。
-	// 客户端也可以把 .meta.json 放在别的字段名下，按文件名兜底识别。
-	firmwareMetaField = "meta"
-	// firmwareMetaSuffix 是 sidecar 的固定后缀：ehome_collector.bin → ehome_collector.meta.json。
-	firmwareMetaSuffix = ".meta.json"
-	// firmwareMetaMaxBytes 防止用超大「sidecar」放大请求体。
-	firmwareMetaMaxBytes = 64 << 10
 	// firmwareTempDirName 是上传临时目录（相对 firmwares/）：
 	// 所有校验在临时文件上做，通过后才 rename 到正式目录，失败即删（AC-6）。
 	firmwareTempDirName = ".tmp"
+	// firmwarePackageNameChars 是 package_name 列的宽度（PG 的 varchar 按字符计）。
+	firmwarePackageNameChars = 128
 )
 
+// firmwareZipMagic 是固件包容器（ZIP，PKZIP 2.0）的本地文件头签名（方案 §4.1）。
+var firmwareZipMagic = []byte{'P', 'K', 0x03, 0x04}
+
 // allowedFirmwareContentTypes 是 multipart 里 file part 允许的 Content-Type。
-// 空值也算合法：部分客户端（含 Go 的 CreateFormFile）不填。
+//
+// 必须认 application/zip 与 application/x-zip-compressed：.ehfw 就是 ZIP，
+// 浏览器/curl 会按容器本身打这两个值，而 Go 的 CreateFormFile 默认 octet-stream
+// —— 两边测试都覆盖不到（§5.8 #1）。空值也算合法：部分客户端不填。
 var allowedFirmwareContentTypes = map[string]bool{
-	"application/octet-stream": true,
-	"application/x-binary":     true,
-	"binary/octet-stream":      true,
-	"":                         true,
+	"application/octet-stream":     true,
+	"application/x-binary":         true,
+	"binary/octet-stream":          true,
+	"application/zip":              true,
+	"application/x-zip-compressed": true,
+	"":                             true,
 }
 
 // registerOTARoutes sets up OTA task + firmware routes
@@ -208,33 +213,31 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	// 管理员取下载票（见 handler_firmware_download.go：公开下载路由只认 HMAC）。
 	v1.POST("/firmwares/:id/download-ticket", firmwareDownloadTicketHandler(db))
 
-	// Upload firmware .bin file
+	// Upload firmware package (.ehfw = ZIP)
 	//
-	// 方案 §3.3 / §4.2：临时文件 → 解析镜像 → sidecar 交叉校验 → 按 elf_sha256 查重
-	// → 唯一命名落盘 → 入库。任一步失败都删临时文件；入库失败连已落盘文件一起删，
-	// 不留孤儿（AC-6 / DEF-14）。
+	// 方案《固件单文件包与构建打包规范》§5.2：一个文件 = 一次构建。顺序是
+	// 落临时文件 → 内容嗅探 → 包结构校验 → 解出 artifact 并算摘要 → 与清单比对
+	// → 镜像自证身份 → profile 交叉核对 → 槽容量 → elf 查重 → 唯一命名落盘 → 入库。
+	// 任一步失败都删临时文件；入库失败连已落盘文件一起删，不留孤儿（步骤 11）。
 	v1.POST("/firmwares/upload", func(c *gin.Context) {
-		// 上限按 multipart 整体算：8MB 覆盖 16MB 档的 6.5MB 槽上限 + sidecar 余量。
+		// 上限按 multipart 整体算：8MB 覆盖 16MB 档的 6.5MB 槽上限 + 清单与 ZIP 头。
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, firmwareUploadMaxBytes)
 
-		// 表单**不再接收 version**（方案 §4.2）：版本一律取自镜像，少一条人工填错路径。
+		// 表单只收一个字段（§4.1：一个包 = 一次构建）；版本仍一律取自镜像。
 		file, err := c.FormFile("file")
 		if err != nil {
 			if isBodyTooLarge(err) {
-				rejectFirmwareUpload(c, http.StatusRequestEntityTooLarge, "FW_TOO_LARGE", "firmware exceeds the maximum upload size")
+				rejectFirmwareUpload(c, http.StatusRequestEntityTooLarge, "FW_TOO_LARGE", "firmware package exceeds the maximum upload size")
 				return
 			}
 			Error(c, http.StatusBadRequest, "file required")
 			return
 		}
-
-		baseName := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(baseName), ".bin") {
-			Error(c, http.StatusBadRequest, "only .bin firmware files are allowed")
-			return
-		}
+		// 扩展名不参与识别（§5.8 #2：删掉旧的 `.bin` 后缀判断），交给内容嗅探；
+		// 但 Content-Type 白名单要认浏览器给 `.ehfw` 打的 application/zip（§5.8 #1）。
 		if contentType := file.Header.Get("Content-Type"); !allowedFirmwareContentTypes[contentType] {
-			Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported content type: %s", contentType))
+			rejectFirmwareUpload(c, http.StatusBadRequest, firmwarepkg.CodePkgInvalid,
+				fmt.Sprintf("unsupported content type: %s", contentType))
 			return
 		}
 
@@ -244,152 +247,136 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			return
 		}
 
-		// 1) 收字节到临时文件，边写边算 SHA256。
-		tmpPath, size, checksum, err := receiveFirmwareUpload(file)
+		// 1) 收字节到临时文件（边写边算整包 sha256；容器摘要不再入库——§5.4 删了 package_sha256 列）。
+		tmpPath, containerSize, _, err := receiveFirmwareUpload(file)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		committed := false
+		// 容器临时文件无论成败都要删：成功时落盘的是解出来的 artifact，不是容器。
+		defer removeFirmwareTemp(tmpPath)
+
+		// 2) 内容嗅探：包按首 4 字节 PK\x03\x04 识别，不看扩展名（§4.1 / §5.2）。
+		if err := sniffFirmwareUpload(tmpPath); err != nil {
+			rejectFirmwareUpload(c, firmwareErrorStatus(firmwareid.Code(err)), firmwareid.Code(err), err.Error())
+			return
+		}
+
+		// 3) 包结构校验：INV-1 / INV-4 / INV-5 + 清单必需字段，**不解压 artifact**。
+		container, err := os.Open(tmpPath)
+		if err != nil {
+			rejectFirmwareUpload(c, http.StatusInternalServerError, "", err.Error())
+			return
+		}
+		defer func() { _ = container.Close() }()
+		pkg, err := firmwarepkg.Open(container, containerSize, firmwarepkg.DefaultLimits())
+		if err != nil {
+			rejectFirmwareUpload(c, firmwareErrorStatus(firmwareid.Code(err)), firmwareid.Code(err), err.Error())
+			return
+		}
+		manifest := pkg.Manifest()
+
+		// 4) 解出 artifact 到临时文件（流式写盘，不驻留内存），得实测 (size, sha)。
+		artifactPath, artifactSize, artifactSHA, err := extractFirmwareArtifact(pkg)
+		if err != nil {
+			rejectFirmwareUpload(c, firmwareErrorStatus(firmwareid.Code(err)), firmwareid.Code(err), err.Error())
+			return
+		}
+		artifactRenamed := false
 		defer func() {
-			if !committed {
-				if rmErr := os.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
-					logger.Warnf("failed to remove rejected upload temp file %s: %v", tmpPath, rmErr)
-				}
+			if !artifactRenamed {
+				removeFirmwareTemp(artifactPath)
 			}
 		}()
 
-		// 2) 解析镜像：身份以二进制自证为准。
-		ident, err := readFirmwareIdentity(tmpPath, size)
-		if err != nil {
-			rejectFirmwareUpload(c, http.StatusBadRequest, firmwareid.Code(err), err.Error())
+		// 5) INV-2：实测摘要与清单不符即拒（比较留在这里，firmwarepkg 只解出不比较）。
+		if artifactSize != manifest.Artifact.Size || !strings.EqualFold(artifactSHA, manifest.Artifact.SHA256) {
+			rejectFirmwareUpload(c, http.StatusBadRequest, firmwarepkg.CodePkgDigestMismatch,
+				fmt.Sprintf("artifact %q is %d bytes / sha256 %s, manifest declares %d / %s",
+					manifest.Artifact.Name, artifactSize, artifactSHA, manifest.Artifact.Size, manifest.Artifact.SHA256))
 			return
 		}
 
-		// 3) sidecar 必填 + 与镜像/内容交叉校验。
-		sidecarRaw, err := readFirmwareSidecar(c, baseName)
+		// 6) 镜像自证身份（chip / flash / version / elf_sha256 全部取自 artifact）。
+		ident, err := readFirmwareIdentity(artifactPath, artifactSize)
 		if err != nil {
-			rejectFirmwareUpload(c, http.StatusBadRequest, firmwareid.Code(err), err.Error())
-			return
-		}
-		sidecar, err := firmwareid.ParseSidecar(sidecarRaw)
-		if err != nil {
-			rejectFirmwareUpload(c, http.StatusBadRequest, firmwareid.Code(err), err.Error())
-			return
-		}
-		if err := firmwareid.CheckSidecar(sidecar, ident, checksum); err != nil {
-			rejectFirmwareUpload(c, http.StatusBadRequest, firmwareid.Code(err), err.Error())
+			rejectFirmwareUpload(c, firmwareErrorStatus(firmwareid.Code(err)), firmwareid.Code(err), err.Error())
 			return
 		}
 
-		// 4) 超过该容量槽上限：镜像自报 spi_size 决定槽位，不信任表单/文件名。
-		if capacity, known := firmwareid.SlotCapacity(ident.FlashMB); known && uint64(size) > capacity {
+		// 7) INV-3：清单的 profile 必须能由镜像的 (chip, flash) + 清单的 psram 还原。
+		psram := manifest.Identity.PSRAMEnabled()
+		if want := firmwareid.BuildProfile(ident.Chip, ident.FlashMB, psram); want != manifest.Identity.Profile {
+			rejectFirmwareUpload(c, http.StatusBadRequest, firmwarepkg.CodePkgConflict,
+				fmt.Sprintf("package profile %q does not match image chip=%s flash_mb=%d psram=%v (want %q)",
+					manifest.Identity.Profile, ident.Chip, ident.FlashMB, psram, want))
+			return
+		}
+
+		// 8) 超过该容量槽上限：镜像自报 spi_size 决定槽位，不信任表单/文件名。
+		if capacity, known := firmwareid.SlotCapacity(ident.FlashMB); known && uint64(artifactSize) > capacity {
 			rejectFirmwareUpload(c, http.StatusRequestEntityTooLarge, "FW_TOO_LARGE",
-				fmt.Sprintf("firmware is %d bytes, larger than the %dMB slot capacity %d", size, ident.FlashMB, capacity))
+				fmt.Sprintf("firmware artifact is %d bytes, larger than the %dMB slot capacity %d", artifactSize, ident.FlashMB, capacity))
 			return
 		}
 
-		// 5) 同 elf_sha256 的处置（方案 §5.5 + R3「未知即不可选」）：
-		//    · verified / duplicate → 409 FW_DUPLICATE（同一份二进制只留一份可选记录）；
-		//    · legacy → **就地补齐**。迁移把回填行一律标 legacy（镜像头没有 psram 位，
-		//      拿不到 R3 要求的 psram ⇒ 不可选），而 elf_sha256 已写、唯一索引已建：
-		//      没有这条分支的话重传必 409，legacy 永远补不回来，R3 的「补 sidecar 重传」
-		//      就是死路一条。补齐保留原 id、不新增行。
-		//    软删行不参与（GORM 软删自动排除：删除后允许重传）。
+		// 9) 同 elf_sha256 一律 409：空库 + 无补齐分支之后不再有「就地补齐」路径
+		//    （§5.2 步骤 9 / §9.2）。软删行不参与（GORM 软删自动排除）。
 		var existing models.Firmware
 		lookupErr := db.Where("elf_sha256 = ?", ident.ElfSHA256).First(&existing).Error
-		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
-			Error(c, http.StatusInternalServerError, lookupErr.Error())
-			return
-		}
-		completingLegacy := lookupErr == nil && existing.IdentityState == dbschema.IdentityLegacy
-		if lookupErr == nil && !completingLegacy {
+		if lookupErr == nil {
 			rejectFirmwareUpload(c, http.StatusConflict, "FW_DUPLICATE",
 				fmt.Sprintf("firmware with elf_sha256 %s already exists", ident.ElfSHA256))
 			return
 		}
+		if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			Error(c, http.StatusInternalServerError, lookupErr.Error())
+			return
+		}
 
-		// 6) 唯一命名（elf 前缀）后落盘：同名重传不会覆盖旧二进制。
-		storageName := firmwareStorageName(ident.ElfSHA256, baseName)
+		// 10) 唯一命名（elf 前缀）后落盘：同名重传不会覆盖旧二进制。
+		//     Filename 存清单声明的 artifact.name、StoragePath 恒非空 —— 否则
+		//     firmwareBinaryDiskPath 会去 firmwares/<artifact>.ehfw 找文件、删固件时留孤儿（A-7）。
+		storageName := firmwareStorageName(ident.ElfSHA256, manifest.Artifact.Name)
 		dst := filepath.Join(firmwareDir, storageName)
-		if err := os.Rename(tmpPath, dst); err != nil {
+		if err := os.Rename(artifactPath, dst); err != nil {
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		committed = true // tmpPath 已不存在，defer 不再删
+		artifactRenamed = true // 临时文件已不存在，defer 不再删
 
-		// 7a) legacy 行就地补齐：身份列 / psram / build_profile / idf_ver / version 全部以
-		//     本次镜像 + sidecar 为准，落盘名换成新的 elf 唯一名；**仍是同一行**（id 不变），
-		//     引用它的历史任务不受影响。旧的迁移前二进制若与新名不同则删掉 ——
-		//     该行已不再引用它，留着就是孤儿。
-		if completingLegacy {
-			updates := map[string]interface{}{
-				"version":        ident.Version, // 版本以镜像为准（方案判断 5）
-				"checksum":       checksum,
-				"size_bytes":     uint64(size),
-				"url":            signedFirmwareURL(baseURL, storageName),
-				"filename":       baseName,
-				"storage_path":   dst,
-				"chip":           ident.Chip,
-				"flash_mb":       ident.FlashMB,
-				"psram":          sidecar.PSRAMValue(),
-				"model_key":      ident.ModelKey(),
-				"build_profile":  sidecar.Profile,
-				"elf_sha256":     ident.ElfSHA256,
-				"built_at_raw":   ident.BuiltAtRaw,
-				"idf_ver":        ident.IDFVersion,
-				"identity_state": dbschema.IdentityVerified,
-			}
-			// channel / changelog / min_from_version 保持原值：补齐身份不该顺手改运营字段。
-			if err := db.Model(&models.Firmware{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-				removeFirmwareBinaryOnFailure(dst)
-				Error(c, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if previous := firmwareBinaryDiskPath(existing.StoragePath, existing.Filename); previous != "" &&
-				filepath.Clean(previous) != filepath.Clean(dst) {
-				if rmErr := os.Remove(previous); rmErr != nil && !os.IsNotExist(rmErr) {
-					logger.Warnf("firmware %d: failed to remove superseded legacy binary %s: %v", existing.ID, previous, rmErr)
-				}
-			}
-			var completed models.Firmware
-			if err := db.First(&completed, existing.ID).Error; err != nil {
-				Error(c, http.StatusInternalServerError, err.Error())
-				return
-			}
-			logger.Infof("[firmware] legacy identity completed in place id=%d name=%q chip=%s flash_mb=%d psram=%s version=%s elf=%s… profile=%s",
-				completed.ID, completed.Filename, completed.Chip, completed.FlashMB, completed.Psram, completed.Version, shortSHA(completed.ElfSHA256), completed.BuildProfile)
-			SuccessWithCode(c, http.StatusOK, firmwareUploadResponse{Firmware: &completed, CompletedLegacy: true})
-			return
-		}
-
-		// 7b) 新行入库。行写失败时把已落盘文件删掉，避免「磁盘有、库里没有」的孤儿。
+		// 11) 入库。行写失败时把已落盘文件删掉，避免「磁盘有、库里没有」的孤儿。
 		fw := models.Firmware{
-			Version:       ident.Version, // 版本以镜像为准（方案判断 5）
-			Checksum:      checksum,
-			SizeBytes:     uint64(size),
+			// 版本以镜像为准（方案判断 5）。
+			Version: ident.Version,
+			// 设备下载的就是 artifact：checksum / size 必须覆盖落盘字节（§5.6 / AC-P9）。
+			Checksum:      artifactSHA,
+			SizeBytes:     uint64(artifactSize),
 			URL:           signedFirmwareURL(baseURL, storageName),
-			Filename:      baseName,
+			Filename:      manifest.Artifact.Name,
 			StoragePath:   dst,
 			Chip:          ident.Chip,
 			FlashMB:       ident.FlashMB,
-			Psram:         sidecar.PSRAMValue(),
+			Psram:         firmwarePSRAMValue(psram),
 			ModelKey:      ident.ModelKey(),
-			BuildProfile:  sidecar.Profile,
+			BuildProfile:  manifest.Identity.Profile,
 			ElfSHA256:     ident.ElfSHA256,
 			BuiltAtRaw:    ident.BuiltAtRaw,
 			IDFVer:        ident.IDFVersion,
 			Channel:       models.FirmwareChannelStable,
 			IdentityState: dbschema.IdentityVerified,
+			// 包来源（排障）：谁传的哪一份；格式版本恒为 1。
+			PackageName:          firmwarePackageName(file.Filename),
+			PackageFormatVersion: firmwarepkg.FormatVersion,
 		}
 		if err := db.Create(&fw).Error; err != nil {
 			removeFirmwareBinaryOnFailure(dst)
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		logger.Infof("[firmware] uploaded id=%d name=%q chip=%s flash_mb=%d psram=%s version=%s elf=%s… profile=%s",
-			fw.ID, fw.Filename, fw.Chip, fw.FlashMB, fw.Psram, fw.Version, shortSHA(ident.ElfSHA256), fw.BuildProfile)
-		SuccessWithCode(c, http.StatusCreated, firmwareUploadResponse{Firmware: &fw})
+		logger.Infof("[firmware] uploaded id=%d package=%q artifact=%q chip=%s flash_mb=%d psram=%s version=%s elf=%s… profile=%s",
+			fw.ID, fw.PackageName, fw.Filename, fw.Chip, fw.FlashMB, fw.Psram, fw.Version, shortSHA(ident.ElfSHA256), fw.BuildProfile)
+		SuccessWithCode(c, http.StatusCreated, &fw)
 	})
 
 	// Update firmware metadata
@@ -509,14 +496,6 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	})
 }
 
-// firmwareUploadResponse 是上传接口的 data 形状：**仍是 Firmware 对象**（既有契约不变，
-// data.id / data.version 照旧可读），只在「legacy 就地补齐」这一条路径上多发一个
-// completed_legacy=true —— 前端据此提示「这条固件的身份已补齐」，而不是「又传了新固件」。
-type firmwareUploadResponse struct {
-	*models.Firmware
-	CompletedLegacy bool `json:"completed_legacy,omitempty"`
-}
-
 // removeFirmwareBinaryOnFailure 删掉「已落盘但入库失败」的二进制，避免孤儿（AC-6）。
 func removeFirmwareBinaryOnFailure(path string) {
 	if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -569,74 +548,126 @@ func readFirmwareIdentity(path string, size int64) (*firmwareid.Identity, error)
 	return firmwareid.ReadIdentity(file, size)
 }
 
-// readFirmwareSidecar 取出与 .bin 同名的 .meta.json 内容。
+// sniffFirmwareUpload 按内容区分三种上传物（方案 §5.2 步骤 2）：
 //
-// 识别顺序：① 字段名 "meta"；② 任意字段里文件名等于 <bin 基名>.meta.json；
-// ③ 任意字段里以 .meta.json 结尾。都找不到即 FW_META_REQUIRED——
-// 缺 sidecar 就没有 psram，而 psram 是必填项（方案 §4.2）。
-func readFirmwareSidecar(c *gin.Context, binBase string) ([]byte, error) {
-	form, err := c.MultipartForm()
+//	PK\x03\x04 → 固件包，继续解包；
+//	0xE9       → 裸 ESP 镜像，FW_PKG_REQUIRED（文案指向 pack_firmware.py）；
+//	其它       → FW_NOT_IMAGE。
+//
+// 不复用 firmwarepkg.Open 做这件事：Open 只认包结构，它无法区分「打包前的裸镜像」
+// （操作者最常犯的错）与「随便一个文件」，而这两种情况该给的指引完全不同。
+func sniffFirmwareUpload(path string) error {
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, &firmwareid.Error{Code: firmwareid.CodeMetaRequired, Detail: "firmware upload is not a valid multipart form"}
+		return err
 	}
-	wantName := strings.TrimSuffix(binBase, filepath.Ext(binBase)) + firmwareMetaSuffix
+	defer func() { _ = file.Close() }()
 
-	var chosen *multipart.FileHeader
-	if files := form.File[firmwareMetaField]; len(files) > 0 {
-		chosen = files[0]
+	head := make([]byte, len(firmwareZipMagic))
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return err
 	}
-	if chosen == nil {
-		for _, files := range form.File {
-			for _, candidate := range files {
-				if strings.EqualFold(filepath.Base(candidate.Filename), wantName) {
-					chosen = candidate
-					break
-				}
-			}
-			if chosen != nil {
-				break
-			}
+	switch {
+	case n == len(firmwareZipMagic) && bytes.Equal(head, firmwareZipMagic):
+		return nil
+	case n > 0 && head[0] == firmwareid.ImageMagic:
+		// 末尾那句「刷新页面」是**服务端**的部署过渡职责（方案 §9.3）：硬切换后
+		// 缓存了旧 JS 的用户仍会拿两个文件来传，而旧前端的文案表里没有这个新码，
+		// 只能原样展示服务端 message —— 这里是唯一能告诉他去刷新页面的地方。
+		return &firmwareid.Error{
+			Code:   firmwarepkg.CodePkgRequired,
+			Detail: "not a firmware package: build one with esp32-collector/tools/pack_firmware.py and upload the .ehfw (若页面仍显示两个文件选择框，请刷新页面后再试)",
+		}
+	default:
+		return &firmwareid.Error{
+			Code:   firmwareid.CodeNotImage,
+			Detail: "uploaded file is neither a firmware package (PK\\x03\\x04) nor an ESP image (0xE9)",
 		}
 	}
-	if chosen == nil {
-		for _, files := range form.File {
-			for _, candidate := range files {
-				if strings.HasSuffix(strings.ToLower(candidate.Filename), firmwareMetaSuffix) {
-					chosen = candidate
-					break
-				}
-			}
-			if chosen != nil {
-				break
-			}
-		}
-	}
-	if chosen == nil {
-		return nil, &firmwareid.Error{
-			Code:   firmwareid.CodeMetaRequired,
-			Detail: fmt.Sprintf("missing companion sidecar %s (multipart field %q)", wantName, firmwareMetaField),
-		}
-	}
+}
 
-	src, err := chosen.Open()
+// extractFirmwareArtifact 把包内 artifact 流式解到临时目录，返回 (路径, 字节数, sha256)。
+//
+// 走临时文件而不是内存：8 MiB 包在 multipart 层已经驻留过一次，解压不再把
+// 解压后内容整块读进内存（§4.5 内存峰值）。
+func extractFirmwareArtifact(pkg *firmwarepkg.Package) (string, int64, string, error) {
+	tempDir := filepath.Join(firmwareDir, firmwareTempDirName)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return "", 0, "", err
+	}
+	tmp, err := os.CreateTemp(tempDir, "artifact-*")
 	if err != nil {
-		return nil, &firmwareid.Error{Code: firmwareid.CodeMetaRequired, Detail: fmt.Sprintf("open sidecar: %v", err)}
+		return "", 0, "", err
 	}
-	defer func() { _ = src.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(src, firmwareMetaMaxBytes+1))
-	if err != nil {
-		return nil, &firmwareid.Error{Code: firmwareid.CodeMetaRequired, Detail: fmt.Sprintf("read sidecar: %v", err)}
+	path := tmp.Name()
+	size, digest, extractErr := pkg.ExtractArtifactTo(tmp)
+	closeErr := tmp.Close()
+	if extractErr != nil {
+		removeFirmwareTemp(path)
+		return "", 0, "", extractErr
 	}
-	if len(raw) > firmwareMetaMaxBytes {
-		return nil, &firmwareid.Error{Code: firmwareid.CodeMetaRequired, Detail: fmt.Sprintf("sidecar is larger than %d bytes", firmwareMetaMaxBytes)}
+	if closeErr != nil {
+		removeFirmwareTemp(path)
+		return "", 0, "", closeErr
 	}
-	return raw, nil
+	return path, size, digest, nil
+}
+
+// removeFirmwareTemp 删掉上传临时文件；不存在不算错。
+func removeFirmwareTemp(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logger.Warnf("failed to remove firmware upload temp file %s: %v", path, err)
+	}
+}
+
+// firmwareErrorStatus 把机器码映射成 HTTP 状态（§5.3）。
+//
+// 空串是「原始 I/O 失败、拿不到机器码」：那是服务端问题，不是 400。
+func firmwareErrorStatus(code string) int {
+	switch code {
+	case firmwarepkg.CodePkgTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case "":
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+// firmwarePSRAMValue 把布尔位翻成固件列取值（只有 yes / no）。
+func firmwarePSRAMValue(psram bool) string {
+	if psram {
+		return firmwareid.PSRAMYes
+	}
+	return firmwareid.PSRAMNo
+}
+
+// firmwarePackageName 取客户端给的原始上传文件名（排障：谁传的哪一份），
+// 并压到 package_name 列的宽度。PG 的 varchar(128) 按**字符**计数，所以按 rune 截断
+// 既不会超列也不会切出半个 UTF-8 字符；超长文件名不该让整次上传 500。
+func firmwarePackageName(raw string) string {
+	name := filepath.Base(strings.TrimSpace(raw))
+	if name == "." || name == string(filepath.Separator) {
+		return ""
+	}
+	if runes := []rune(name); len(runes) > firmwarePackageNameChars {
+		name = string(runes[:firmwarePackageNameChars])
+	}
+	return name
 }
 
 // firmwareStorageName 以 elf_sha256 前 16 位为前缀生成唯一落盘名。
 //
 // 「含 elf 前缀」是刻意的：运维在 firmwares/ 里一眼能看出这个是按 elf 命名的，
 // 同时前 16 位足以区分（32 hex 全用会让文件名过长）。
+//
+// baseName 现在是清单声明的 artifact.name（恒以 .bin 结尾，§4.3）。规则不变：
+// 非 .bin 一律补 .bin、超长按「最后一个扩展名」截断 —— 落盘物必须是裸 app image，
+// 设备下载的字节直接进 esp_ota_write（§5.6，AC-P9）。
 func firmwareStorageName(elfSHA256, baseName string) string {
 	digest := strings.ToLower(strings.TrimSpace(elfSHA256))
 	if len(digest) > 16 {

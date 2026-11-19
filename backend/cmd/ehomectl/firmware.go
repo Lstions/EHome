@@ -1,144 +1,219 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"ehome/backend/internal/dbschema"
 	"ehome/backend/internal/firmwareid"
-	"gorm.io/gorm"
+	"ehome/backend/internal/firmwarepkg"
 )
 
-// runFirmwareCLI 是固件身份相关的运维入口（方案 T0.2 / §5.6 步骤 7）。
+// firmwareUsage 是本子命令唯一的用法串：main.go 的 usage 直接引用它。
+//
+// 从前 ehomectl 里有两份 usage（main.go:71 与 firmware.go:22/30），
+// 改一处忘一处必然腐坏（§5.8 #7），所以收敛成一个常量。
+const firmwareUsage = "usage: ehomectl firmware verify --pkg <file.ehfw>\n" +
+	"       ehomectl firmware inspect --pkg <file.ehfw>"
+
+// runFirmwareCLI 是固件包的离线运维入口（方案 §5.2 / §9.2）。
+//
+// Go 侧**只做 verify / inspect**：打包的唯一实现是
+// esp32-collector/tools/pack_firmware.py，再写一份 Go 打包器只会多一个漂移源（评审 B-7）。
 func runFirmwareCLI() {
 	if len(os.Args) < 3 {
-		fatal("usage: ehomectl firmware <meta-gen|migrate-report>")
+		fatal(firmwareUsage)
 	}
 	switch os.Args[2] {
-	case "meta-gen":
-		runFirmwareMetaGen(os.Args[3:])
-	case "migrate-report":
-		runFirmwareMigrateReport(os.Args[3:])
+	case "verify":
+		runFirmwareVerify(os.Args[3:])
+	case "inspect":
+		runFirmwareInspect(os.Args[3:])
 	default:
-		fatal("usage: ehomectl firmware <meta-gen|migrate-report>")
+		fatal(firmwareUsage)
 	}
 }
 
-// runFirmwareMetaGen 给存量 .bin 补出同名 .meta.json（方案 §4.2）。
-//
-// 镜像头能自证 chip / flash_mb / version / idf_ver / sha256，**只有 psram 不能**
-// ——它是构建期信息，必须人工给定。补出 sidecar 后走正常上传即可。
-func runFirmwareMetaGen(args []string) {
-	fs := flag.NewFlagSet("firmware meta-gen", flag.ExitOnError)
-	binPath := fs.String("bin", "", "path to the firmware .bin (required)")
-	psram := fs.String("psram", "", "yes|no: the one bit the image header cannot prove (required)")
-	_ = fs.Parse(args)
-	if *binPath == "" || *psram == "" {
-		fatal("usage: ehomectl firmware meta-gen --bin <path> --psram yes|no")
-	}
-	psramEnabled, err := parsePSRAMFlag(*psram)
+// runFirmwareVerify 用与服务端**同一套规则**离线校验一个包，不通过即非零退出。
+func runFirmwareVerify(args []string) {
+	pkgPath := firmwarePkgFlag("firmware verify", args)
+	info, err := loadFirmwarePackage(pkgPath)
 	if err != nil {
-		fatal(err.Error())
+		fatal(fmt.Sprintf("FAIL %s: %v", pkgPath, err))
 	}
-
-	file, err := os.Open(*binPath)
-	if err != nil {
-		fatal(fmt.Sprintf("open %s: %v", *binPath, err))
+	if err := info.checkAgainstManifest(); err != nil {
+		fatal(fmt.Sprintf("FAIL %s: %v", pkgPath, err))
 	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		fatal(fmt.Sprintf("stat %s: %v", *binPath, err))
-	}
-	ident, err := firmwareid.ReadIdentity(file, info.Size())
-	if err != nil {
-		fatal(fmt.Sprintf("parse %s: %v (not a supported ehome_collector image)", *binPath, err))
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		fatal(fmt.Sprintf("seek %s: %v", *binPath, err))
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		fatal(fmt.Sprintf("hash %s: %v", *binPath, err))
-	}
-
-	profile := firmwareid.BuildProfile(ident.Chip, ident.FlashMB, psramEnabled)
-	sidecar := firmwareid.Sidecar{
-		Profile: profile,
-		Chip:    ident.Chip,
-		FlashMB: ident.FlashMB,
-		PSRAM:   &psramEnabled,
-		Version: ident.Version,
-		IDFVer:  ident.IDFVersion,
-		SHA256:  hex.EncodeToString(hasher.Sum(nil)),
-	}
-	outPath := strings.TrimSuffix(*binPath, filepath.Ext(*binPath)) + ".meta.json"
-	encoded, err := json.MarshalIndent(sidecar, "", "  ")
-	if err != nil {
-		fatal(fmt.Sprintf("encode sidecar: %v", err))
-	}
-	encoded = append(encoded, '\n')
-	if err := os.WriteFile(outPath, encoded, 0o644); err != nil {
-		fatal(fmt.Sprintf("write %s: %v", outPath, err))
-	}
-	fmt.Printf("wrote %s\n  chip=%s flash_mb=%d psram=%s version=%s idf_ver=%s profile=%s\n",
-		outPath, sidecar.Chip, sidecar.FlashMB, sidecar.PSRAMValue(), sidecar.Version, sidecar.IDFVer, sidecar.Profile)
+	manifest := info.Manifest
+	fmt.Printf("OK %s\n", pkgPath)
+	fmt.Printf("  artifact: %s (%d bytes, sha256 %s)\n", manifest.Artifact.Name, info.ArtifactSize, info.ArtifactSHA)
+	fmt.Printf("  image:    version=%s chip=%s flash_mb=%d psram=%t profile=%s\n",
+		info.Image.Version, info.Image.Chip, info.Image.FlashMB, manifest.Identity.PSRAMEnabled(),
+		firmwareid.BuildProfile(info.Image.Chip, info.Image.FlashMB, manifest.Identity.PSRAMEnabled()))
+	fmt.Printf("  manifest: format=%s format_version=%d packer=%s %s\n",
+		manifest.Format, manifest.FormatVersion, manifest.Packer.Name, manifest.Packer.Version)
 }
 
-// runFirmwareMigrateReport 复现启动迁移报告（只读，方案 §5.6 步骤 7）。
+// runFirmwareInspect 打印包的清单 + 从 artifact 现读的镜像身份（不做通过判定）。
 //
-// 刻意用 connectDBNoMigrate：本命令承诺不改库。它要求库已由新版本服务迁移过
-// （schema 检查会明确提示），因此在**维护窗口里先起一次新容器**再跑它。
-func runFirmwareMigrateReport(args []string) {
-	fs := flag.NewFlagSet("firmware migrate-report", flag.ExitOnError)
-	_ = fs.Parse(args)
-
-	db := connectDBNoMigrate()
-	requireFirmwareIdentitySchema(db, "firmware migrate-report")
-	report, err := dbschema.ReportFirmwareIdentity(db)
+// 与 verify 的分工：verify 回答「能不能上传」，inspect 回答「这个包里到底是什么」。
+// 摘要不符时 inspect 照样打印，只把 digest_ok 标成 false —— 排障正需要看到这份证据。
+func runFirmwareInspect(args []string) {
+	pkgPath := firmwarePkgFlag("firmware inspect", args)
+	info, err := loadFirmwarePackage(pkgPath)
 	if err != nil {
-		fatal(err.Error())
+		fatal(fmt.Sprintf("inspect %s: %v", pkgPath, err))
 	}
-	encoded, err := json.MarshalIndent(report, "", "  ")
+	result := struct {
+		Package  string                `json:"package"`
+		Manifest *firmwarepkg.Manifest `json:"manifest"`
+		Artifact firmwareArtifactDump  `json:"artifact"`
+		Image    firmwareImageDump     `json:"image"`
+	}{
+		Package:  pkgPath,
+		Manifest: info.Manifest,
+		Artifact: firmwareArtifactDump{
+			Name:       info.Manifest.Artifact.Name,
+			SizeBytes:  info.ArtifactSize,
+			SHA256:     info.ArtifactSHA,
+			DigestOkay: info.digestMatches(),
+		},
+		Image: firmwareImageDump{
+			Chip:         info.Image.Chip,
+			FlashMB:      info.Image.FlashMB,
+			Version:      info.Image.Version,
+			Project:      info.Image.Project,
+			ElfSHA256:    info.Image.ElfSHA256,
+			IDFVersion:   info.Image.IDFVersion,
+			BuiltAtRaw:   info.Image.BuiltAtRaw,
+			SizeBytes:    info.Image.SizeBytes,
+			BuildProfile: firmwareid.BuildProfile(info.Image.Chip, info.Image.FlashMB, info.Manifest.Identity.PSRAMEnabled()),
+		},
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		fatal(fmt.Sprintf("encode report: %v", err))
+		fatal(fmt.Sprintf("encode inspect result: %v", err))
 	}
 	fmt.Println(string(encoded))
-	fmt.Fprintf(os.Stderr, "legacy=%d duplicate=%d (legacy rows must be re-uploaded with a sidecar)\n",
-		len(report.Legacy), len(report.Duplicate))
 }
 
-// requireFirmwareIdentitySchema 给只读命令一个可执行的失败信息。
-//
-// 只读命令不跑迁移（本仓既有纪律：自称只读的工具绝不偷偷改 schema），
-// 所以列不存在时必须说清「先让新版本服务完成迁移」，而不是抛一句
-// "no such column: identity_state"。
-func requireFirmwareIdentitySchema(db *gorm.DB, command string) {
-	if !db.Migrator().HasTable("firmwares") {
-		fatal(fmt.Sprintf("%s: firmwares table does not exist yet; start the new backend once so migrations run", command))
+// firmwarePackageInfo 是「打开并解出过一个包」的结果。
+type firmwarePackageInfo struct {
+	Manifest     *firmwarepkg.Manifest
+	Image        *firmwareid.Identity
+	ArtifactSize int64
+	ArtifactSHA  string
+}
+
+// firmwareArtifactDump / firmwareImageDump 是 inspect 的 JSON 形状。
+type firmwareArtifactDump struct {
+	Name       string `json:"name"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SHA256     string `json:"sha256"`
+	DigestOkay bool   `json:"digest_ok"`
+}
+
+type firmwareImageDump struct {
+	Chip         string `json:"chip"`
+	FlashMB      uint16 `json:"flash_mb"`
+	Version      string `json:"version"`
+	Project      string `json:"project"`
+	ElfSHA256    string `json:"elf_sha256"`
+	IDFVersion   string `json:"idf_ver"`
+	BuiltAtRaw   string `json:"built_at_raw"`
+	SizeBytes    int64  `json:"size_bytes"`
+	BuildProfile string `json:"build_profile"`
+}
+
+func firmwarePkgFlag(command string, args []string) string {
+	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	pkgPath := fs.String("pkg", "", "path to the .ehfw firmware package (required)")
+	_ = fs.Parse(args)
+	if *pkgPath == "" {
+		fatal("usage: ehomectl " + command + " --pkg <file.ehfw>")
 	}
-	for _, column := range []string{"identity_state", "elf_sha256", "channel"} {
-		if !db.Migrator().HasColumn("firmwares", column) {
-			fatal(fmt.Sprintf("%s: firmwares.%s is missing; start the new backend once so firmware identity migrations run, then retry", command, column))
+	return *pkgPath
+}
+
+// loadFirmwarePackage 打开包、解出 artifact 到临时文件、解析镜像身份，然后清理临时文件。
+//
+// 解压落临时文件而不是内存：与服务端同一条路径，也顺便验证「这个包真的能解出
+// 一个可解析的 ESP 镜像」。临时文件用 defer 删，任何失败路径都不留残余。
+func loadFirmwarePackage(pkgPath string) (*firmwarePackageInfo, error) {
+	container, err := os.Open(pkgPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = container.Close() }()
+	info, err := container.Stat()
+	if err != nil {
+		return nil, err
+	}
+	pkg, err := firmwarepkg.Open(container, info.Size(), firmwarepkg.DefaultLimits())
+	if err != nil {
+		return nil, err
+	}
+
+	tempDir, err := os.MkdirTemp("", "ehomectl-fwverify-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+	artifactPath := filepath.Join(tempDir, "artifact")
+	artifact, err := os.Create(artifactPath)
+	if err != nil {
+		return nil, err
+	}
+	size, digest, extractErr := pkg.ExtractArtifactTo(artifact)
+	closeErr := artifact.Close()
+	if extractErr != nil {
+		return nil, extractErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
+	image, err := os.Open(artifactPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = image.Close() }()
+	ident, err := firmwareid.ReadIdentity(image, size)
+	if err != nil {
+		return nil, err
+	}
+	return &firmwarePackageInfo{
+		Manifest:     pkg.Manifest(),
+		Image:        ident,
+		ArtifactSize: size,
+		ArtifactSHA:  digest,
+	}, nil
+}
+
+// digestMatches 是 INV-2 的判据（大小与 sha256 都要对）。
+func (i *firmwarePackageInfo) digestMatches() bool {
+	return i.ArtifactSize == i.Manifest.Artifact.Size &&
+		strings.EqualFold(i.ArtifactSHA, i.Manifest.Artifact.SHA256)
+}
+
+// checkAgainstManifest 复现服务端的 INV-2 + INV-3，让离线结论与线上一致（G6）。
+func (i *firmwarePackageInfo) checkAgainstManifest() error {
+	if !i.digestMatches() {
+		return &firmwareid.Error{
+			Code: firmwarepkg.CodePkgDigestMismatch,
+			Detail: fmt.Sprintf("artifact is %d bytes / sha256 %s, manifest declares %d / %s",
+				i.ArtifactSize, i.ArtifactSHA, i.Manifest.Artifact.Size, i.Manifest.Artifact.SHA256),
 		}
 	}
-}
-
-// parsePSRAMFlag 只接受 yes/no（方案 §5.2：固件列只有两值）。
-func parsePSRAMFlag(value string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "yes":
-		return true, nil
-	case "no":
-		return false, nil
-	default:
-		return false, fmt.Errorf("--psram must be yes or no (got %q): the image header has no PSRAM bit", value)
+	if want := firmwareid.BuildProfile(i.Image.Chip, i.Image.FlashMB, i.Manifest.Identity.PSRAMEnabled()); want != i.Manifest.Identity.Profile {
+		return &firmwareid.Error{
+			Code: firmwarepkg.CodePkgConflict,
+			Detail: fmt.Sprintf("manifest profile %q does not match image (%s, %dMB, psram=%t → %q)",
+				i.Manifest.Identity.Profile, i.Image.Chip, i.Image.FlashMB, i.Manifest.Identity.PSRAMEnabled(), want),
+		}
 	}
+	return nil
 }

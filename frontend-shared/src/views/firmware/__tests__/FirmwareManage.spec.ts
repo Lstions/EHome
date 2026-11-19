@@ -2,22 +2,31 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import FirmwareManage from '../FirmwareManage.vue'
+import FirmwareUploadDialog from '../components/FirmwareUploadDialog.vue'
 
-vi.mock('@/api/firmware', () => ({
-  firmwareApi: {
-    getList: vi.fn(() => Promise.resolve({
-      list: [
-        { id: 1, version: '1.0.0', checksum: 'abc123', size_bytes: 1024, url: 'http://test/fw1.bin', created_at: '2024-01-01T00:00:00Z' },
-        { id: 2, version: '1.1.0', checksum: 'def456', size_bytes: 2048, url: 'http://test/fw2.bin', created_at: '2024-01-02T00:00:00Z' },
-      ],
-      total: 2,
-    })),
-    delete: vi.fn(() => Promise.resolve()),
-    update: vi.fn(() => Promise.resolve()),
-    upload: vi.fn(() => Promise.resolve()),
-    createDownloadTicket: vi.fn(() => Promise.resolve({ url: 'http://test/fw.bin', expires_at: '2026-11-19T12:00:00Z' })),
-  },
-}))
+// 只替掉要断言的网络方法，其余导出（FIRMWARE_ERROR_TEXT / buildFirmwareUploadFormData …）
+// 保持真实：上传对话框在挂载时就会 import 它们，整体替换会让这些导入变成 undefined ——
+// 现在是「不点上传所以不炸」，将来点一次就是一句莫名其妙的 TypeError。
+vi.mock('@/api/firmware', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/firmware')>()
+  return {
+    ...actual,
+    firmwareApi: {
+      ...actual.firmwareApi,
+      getList: vi.fn(() => Promise.resolve({
+        list: [
+          { id: 1, version: '1.0.0', checksum: 'abc123', size_bytes: 1024, url: 'http://test/fw1.bin', created_at: '2024-01-01T00:00:00Z' },
+          { id: 2, version: '1.1.0', checksum: 'def456', size_bytes: 2048, url: 'http://test/fw2.bin', created_at: '2024-01-02T00:00:00Z' },
+        ],
+        total: 2,
+      })),
+      delete: vi.fn(() => Promise.resolve()),
+      update: vi.fn(() => Promise.resolve()),
+      upload: vi.fn(() => Promise.resolve()),
+      createDownloadTicket: vi.fn(() => Promise.resolve({ url: 'http://test/fw.bin', expires_at: '2026-11-19T12:00:00Z' })),
+    },
+  }
+})
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -153,5 +162,21 @@ describe('FirmwareManage.vue', () => {
     await flushPromises()
     // Mock returns total: 2, so pagination renders (v-if="total > 0")
     expect(wrapper.find('.el-pagination').exists()).toBe(true)
+  })
+
+  // 上传成功后必须重新拉列表：列表 store 带 60s 缓存，只有 force 才会真的命中网络。
+  // （原 FirmwareUploadLegacyCompletion.spec 唯一存活的用例：legacy 补齐语义随空库与
+  //   API 字段一起删除，但「uploaded → 重新取数」这条回归点与补齐无关，搬到这里。）
+  it('uploaded 之后强制重新拉列表（绕过 60s 缓存）', async () => {
+    const { firmwareApi } = await import('@/api/firmware')
+    const wrapper = mount(FirmwareManage, { global: { stubs } })
+    await flushPromises()
+    expect(vi.mocked(firmwareApi.getList)).toHaveBeenCalledTimes(1)
+
+    wrapper.findComponent(FirmwareUploadDialog).vm.$emit('uploaded')
+    await flushPromises()
+
+    expect(vi.mocked(firmwareApi.getList)).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
   })
 })

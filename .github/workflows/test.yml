@@ -102,6 +102,22 @@ jobs:
           name: backend-coverage
           path: backend/coverage.out
 
+      # 固件包格式的 Python 侧回归（方案 §5.8#11）：打包器（构建机）与 Go 的
+      # firmwarepkg（服务端）消费**同一批** vectors（protocol/firmware-package/），
+      # 只跑一侧，RK-2「两份实现各自自洽却互相不通」就没人拦。
+      # working-directory 覆盖 job 默认的 backend/：被测代码在仓库根的两侧。
+      # PYTHONDONTWRITEBYTECODE：不在 vectors/ 与 tools/ 留 __pycache__（等价 python3 -B）。
+      # gen_vectors.py --check：向量必须能由生成器逐字节重建，否则「固定输入」是句空话。
+      - name: Firmware package vectors + packer (Python)
+        working-directory: ${{ github.workspace }}
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m pytest --version >/dev/null 2>&1 \
+            || python3 -m pip install --quiet --break-system-packages pytest
+          python3 protocol/firmware-package/vectors/gen_vectors.py --check
+          python3 -m pytest esp32-collector/tools/test_pack_firmware.py -q
+
   # ─── Backend: PostgreSQL integration tests ───────────────────────
   backend-integration:
     name: Backend (PostgreSQL integration)

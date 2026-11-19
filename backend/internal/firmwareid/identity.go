@@ -25,8 +25,6 @@ const (
 	CodeProjectMismatch  = "FW_PROJECT_MISMATCH"
 	CodeChipUnsupported  = "FW_CHIP_UNSUPPORTED"
 	CodeFlashUnsupported = "FW_FLASH_UNSUPPORTED"
-	CodeMetaRequired     = "FW_META_REQUIRED"
-	CodeMetaConflict     = "FW_META_CONFLICT"
 )
 
 // 支持的芯片。chip_id 取自镜像头 0x0C 的 u16 LE。
@@ -64,17 +62,20 @@ var flashMBBySpiSize = map[uint8]uint16{
 
 // 镜像内偏移表（方案 §4.1，已用 4 份真实产物逐字节核对）。
 const (
-	offMagic      = 0x00
-	offSpiSize    = 0x03
-	offChipID     = 0x0C
-	offDescMagic  = 0x20
-	offVersion    = 0x30
-	offProject    = 0x50
-	offTime       = 0x70
-	offDate       = 0x80
-	offIDFVer     = 0x90
-	offElfSHA256  = 0xB0
-	imageMagic    = 0xE9
+	offMagic     = 0x00
+	offSpiSize   = 0x03
+	offChipID    = 0x0C
+	offDescMagic = 0x20
+	offVersion   = 0x30
+	offProject   = 0x50
+	offTime      = 0x70
+	offDate      = 0x80
+	offIDFVer    = 0x90
+	offElfSHA256 = 0xB0
+	// ImageMagic 是 ESP 应用镜像的首字节 0xE9。导出它是为了让上传层在解包之前
+	// 区分「打包前的裸镜像」（FW_PKG_REQUIRED）与「别的什么文件」（FW_NOT_IMAGE），
+	// 而不是在 api 里再抄一份魔数。
+	ImageMagic    = 0xE9
 	descMagicWord = 0xABCD5432
 	// HeaderSize 是 Parse 需要的字节数：esp_app_desc_t 的最后一个字段
 	// app_elf_sha256[32] 结束于 0xB0+0x20 = 0xD0。
@@ -110,7 +111,7 @@ func Code(err error) string {
 }
 
 // Identity 是固件自证的身份。PSRAM 不在这里——镜像头里没有这一位，
-// 它只能来自构建期 sidecar（方案判断 1）。
+// 它只能来自构建期元数据（单文件包之后是包内清单的 identity.psram，方案判断 1）。
 type Identity struct {
 	ChipID     uint16 // 0x0009=S3, 0x000D=C6
 	Chip       string // "esp32c6" / "esp32s3"
@@ -160,8 +161,8 @@ func Parse(header []byte, sizeBytes int64) (*Identity, error) {
 	if len(header) < HeaderSize || sizeBytes < HeaderSize {
 		return nil, newError(CodeTruncated, "image is %d bytes, need at least %d", minInt64(int64(len(header)), sizeBytes), HeaderSize)
 	}
-	if header[offMagic] != imageMagic {
-		return nil, newError(CodeNotImage, "magic 0x%02x, want 0x%02x", header[offMagic], imageMagic)
+	if header[offMagic] != ImageMagic {
+		return nil, newError(CodeNotImage, "magic 0x%02x, want 0x%02x", header[offMagic], ImageMagic)
 	}
 	if got := binary.LittleEndian.Uint32(header[offDescMagic:]); got != descMagicWord {
 		return nil, newError(CodeTruncated, "app descriptor magic 0x%08x, want 0x%08x", got, uint32(descMagicWord))

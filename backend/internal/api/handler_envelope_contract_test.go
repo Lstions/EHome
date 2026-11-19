@@ -284,12 +284,12 @@ func TestEnvelopeContract_FirmwareUploadReturnsObjectData(t *testing.T) {
 	r, _ := setupEnvelopeContractRouter(t)
 	t.Setenv("EHOME_EXTERNAL_HOST", "127.0.0.1:8080")
 
-	// 2026-11-18（M0）：上传要求「合法 ESP 镜像 + 同名 sidecar」，版本取自镜像；
-	// 本用例只锁信封形状，所以用夹具造一份最小合法镜像。
-	const fwName = "contract-upload.bin"
+	// 2026-11-19（单文件包）：上传只收一个 .ehfw，版本取自镜像、Filename 取自清单；
+	// 本用例只锁信封形状，所以用夹具造一份最小合法包。
+	const artifactName = "ehome_collector.bin"
 	image := firmwareTestImage(0x000D, 3, "9.9.9", "envelope-contract")
-	sidecar := firmwareTestSidecar(t, image, "esp32c6", 8, false, "9.9.9", "c6-n8")
-	body, contentType := firmwareUploadMultipart(t, fwName, image, sidecar)
+	pkg := firmwareTestPackage(t, artifactName, image, false, "c6-n8")
+	body, contentType := firmwareUploadMultipart(t, "contract-upload.ehfw", pkg)
 
 	w := authenticated(t, r, http.MethodPost, "/api/v1/firmwares/upload", body.Bytes(), contentType)
 	t.Cleanup(func() {
@@ -305,8 +305,8 @@ func TestEnvelopeContract_FirmwareUploadReturnsObjectData(t *testing.T) {
 	if err := json.Unmarshal(data, &fw); err != nil {
 		t.Fatalf("data must be an object with firmware fields: %v (%s)", err, data)
 	}
-	if fw.ID == 0 || fw.Version != "9.9.9" || fw.Filename != fwName {
-		t.Fatalf("unexpected firmware data: %+v", fw)
+	if fw.ID == 0 || fw.Version != "9.9.9" || fw.Filename != artifactName {
+		t.Fatalf("unexpected firmware data: %+v (filename must come from the manifest artifact.name)", fw)
 	}
 }
 

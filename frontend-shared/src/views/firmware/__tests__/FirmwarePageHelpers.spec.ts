@@ -15,7 +15,7 @@ import {
   createFirmwareFilters,
   hasActiveFirmwareFilters,
   isFirmwareBinFile,
-  isFirmwareMetaFile,
+  isFirmwarePackageFile,
   paginateFirmwares,
 } from '../firmwarePage'
 
@@ -86,22 +86,30 @@ describe('firmwarePage · 前端分页', () => {
   })
 })
 
-describe('firmwarePage · 上传文件校验', () => {
-  it('只认 .bin 与 .json', () => {
-    expect(isFirmwareBinFile(new File(['x'], 'ehome.bin'))).toBe(true)
-    expect(isFirmwareBinFile(new File(['x'], 'ehome.BIN'))).toBe(true)
-    expect(isFirmwareBinFile(new File(['x'], 'ehome.meta.json'))).toBe(false)
-    expect(isFirmwareMetaFile(new File(['{}'], 'ehome.meta.json'))).toBe(true)
-    expect(isFirmwareMetaFile(new File(['{}'], 'ehome.bin'))).toBe(false)
+describe('firmwarePage · 上传文件校验（单文件包）', () => {
+  it('固件包只认 .ehfw 与同格式别名 .zip（大小写不敏感）', () => {
+    expect(isFirmwarePackageFile(new File(['PK'], 'ehome_collector-2.9.0-c6-n8.ehfw'))).toBe(true)
+    expect(isFirmwarePackageFile(new File(['PK'], 'ehome.EHFW'))).toBe(true)
+    expect(isFirmwarePackageFile(new File(['PK'], 'ehome.zip'))).toBe(true)
+    expect(isFirmwarePackageFile(new File(['PK'], 'ehome.meta.json'))).toBe(false)
+    expect(isFirmwarePackageFile(new File(['\xE9'], 'ehome.bin'))).toBe(false)
+    expect(isFirmwarePackageFile(null)).toBe(false)
+    expect(isFirmwarePackageFile(undefined)).toBe(false)
+  })
+
+  it('裸镜像（.bin）可被识别：只为给出「需要打包成 .ehfw」的针对性文案', () => {
+    expect(isFirmwareBinFile(new File(['\xE9'], 'ehome.bin'))).toBe(true)
+    expect(isFirmwareBinFile(new File(['\xE9'], 'ehome.BIN'))).toBe(true)
+    expect(isFirmwareBinFile(new File(['PK'], 'ehome.ehfw'))).toBe(false)
     expect(isFirmwareBinFile(null)).toBe(false)
   })
 
-  it('上传体携带 bin + sidecar 两个字段（字段名是前后端唯一契约点）', () => {
-    const bin = new File(['bin'], 'ehome.bin')
-    const meta = new File(['{}'], 'ehome.meta.json')
-    const formData = buildFirmwareUploadFormData(bin, meta)
-    expect(formData.get('file')).toBe(bin)
-    expect(formData.get('meta')).toBe(meta)
+  it('上传体只有 file 一个字段（字段名是前后端唯一契约点）', () => {
+    const pkg = new File(['PK'], 'ehome_collector-2.9.0-c6-n8.ehfw')
+    const formData = buildFirmwareUploadFormData(pkg)
+    expect([...formData.keys()]).toEqual(['file'])
+    expect(formData.get('file')).toBe(pkg)
+    expect(formData.get('meta')).toBeNull()
   })
 })
 
@@ -147,6 +155,12 @@ describe('闸门原因与文案', () => {
     }
   })
 
+  it('身份未验证的闸门文案指向 .ehfw，不再指回已废弃的 .meta.json', () => {
+    const text = describeGateReasons(['OTA_GATE_FIRMWARE_UNVERIFIED'])[0]
+    expect(text).toContain('.ehfw')
+    expect(text).not.toContain('.meta.json')
+  })
+
   it('去重、忽略非字符串与空串', () => {
     expect(describeGateReasons(['OTA_GATE_WITHDRAWN', 'OTA_GATE_WITHDRAWN', '', null as never])).toHaveLength(1)
     expect(describeGateReasons(undefined)).toEqual([])
@@ -158,9 +172,25 @@ describe('闸门原因与文案', () => {
 })
 
 describe('上传与撤回/删除的错误文案', () => {
-  it('FW_META_REQUIRED / FW_META_CONFLICT 给出可执行动作', () => {
-    expect(uploadErrorMessage({ errorCode: 'FW_META_REQUIRED' })).toContain('.meta.json')
-    expect(uploadErrorMessage({ errorCode: 'FW_META_CONFLICT' })).toContain('不一致')
+  it('6 条 FW_PKG_* 都有逐字文案，且指向可执行的下一步（§5.3 建议列）', () => {
+    const codes = [
+      'FW_PKG_REQUIRED',
+      'FW_PKG_INVALID',
+      'FW_PKG_UNSUPPORTED',
+      'FW_PKG_DIGEST_MISMATCH',
+      'FW_PKG_CONFLICT',
+      'FW_PKG_TOO_LARGE',
+    ]
+    for (const code of codes) {
+      expect(FIRMWARE_ERROR_TEXT[code], code + ' 缺少文案').toBeTruthy()
+      // 已知码必须走文案表，不能退回服务端英文 message
+      expect(uploadErrorMessage({ errorCode: code, message: 'server message' })).toBe(FIRMWARE_ERROR_TEXT[code])
+    }
+    // 裸 .bin 上传：文案必须给出打包工具（否则用户只知道失败、不知道怎么办）
+    expect(uploadErrorMessage({ errorCode: 'FW_PKG_REQUIRED' })).toContain('pack_firmware.py')
+    // 档位冲突：保留「不一致」这个事实描述
+    expect(uploadErrorMessage({ errorCode: 'FW_PKG_CONFLICT' })).toContain('不一致')
+    expect(uploadErrorMessage({ errorCode: 'FW_PKG_INVALID' })).toContain('verify')
   })
 
   it('未知错误码退回服务端 message，再退回兜底', () => {

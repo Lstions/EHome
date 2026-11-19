@@ -3,14 +3,14 @@
 #
 # 功能:
 #   1. 登录获取 JWT token
-#   2. 上传固件获取 firmware_id
+#   2. 上传固件包（.ehfw）获取 firmware_id
 #   3. 循环执行 100 次 OTA 测试
 #   4. 统计成功率、失败率、超时率
 #   5. 生成 CSV 结果文件
 #
 # 用法: ./scripts/ota-test-100.sh
 #
-# 依赖: curl, python3
+# 依赖: curl, python3；现场打包时还要 esp32-collector/tools/pack_firmware.py
 
 set -e
 
@@ -26,12 +26,18 @@ $1" 2>/dev/null
 # ========================================
 API_BASE="http://localhost:8080/api/v1"
 NODE_ID=1
-# 仅用于展示/期望值：上传的版本以**镜像内 version** 为准（方案 §4.2，表单不再接收 version）。
-FIRMWARE_VERSION="2.2.5"
-# 上传必须带同名 sidecar（方案 §4.2）。镜像头能自证 chip/flash_mb/version，
-# **只有 psram 不可导出**，所以这一位只能人工给：yes|no。
-# 默认 no：本仓 C6 档位无 PSRAM，S3 的非 PSRAM 版也是 no；PSRAM 版请 EHOME_FW_PSRAM=yes。
-FIRMWARE_PSRAM="${EHOME_FW_PSRAM:-no}"
+# 期望版本；实际上传的版本取自镜像头（方案 §4.3，表单/清单都不再收 version）。
+# 只有"现场打包"这条路才用它当 pack_firmware.py 的 --version：打包器会核对镜像内
+# 版本，对不上就按 "stale .bin" 拒绝。所以**留空**而不是给一个会过期的常量——
+# 一个写死的旧版本会让运维误以为是 .bin 陈旧；现场打包请 EHOME_FW_VERSION=2.9.0。
+FIRMWARE_VERSION="${EHOME_FW_VERSION:-}"
+# 固件包（.ehfw，方案 §4.1）：显式指定优先；留空则复用 dist/ 里已打好的包，
+# 一份都没有时才现场调 esp32-collector/tools/pack_firmware.py 打包。
+# psram 不必再由这里人工给——那是构建期事实，打包器从 sdkconfig 的 CONFIG_SPIRAM 读。
+FIRMWARE_PACKAGE="${EHOME_FW_PACKAGE:-}"
+# 档位名（c6-n8 / c6-n16 / s3-n8 …）：只在现场打包时用，pack_firmware.py 会拿它
+# 与镜像头反推出来的档位交叉核对。留空 = 不做现场打包，只复用已有包。
+FIRMWARE_PROFILE="${EHOME_FW_PROFILE:-}"
 USERNAME="${ADMIN_USERNAME:-admin}"
 PASSWORD="${ADMIN_PASSWORD:-admin123}"
 AUTH_TOKEN=""
@@ -48,6 +54,7 @@ MAX_CONSECUTIVE_FAILURES=10
 # ========================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# 源镜像：只有"现场打包"路径需要它（档位布局是 build/<profile>/ehome_collector.bin）。
 FIRMWARE_FILE="$PROJECT_ROOT/esp32-collector/build/ehome_collector.bin"
 RESULTS_DIR="$SCRIPT_DIR/ota-results"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -178,87 +185,145 @@ login() {
 }
 
 # ========================================
-# sidecar 助手（M0：上传必须带同名 .meta.json）
+# 固件包助手（方案 §4 / §7.5：上传物是单个 .ehfw）
 # ========================================
 
-# find_ehomectl 解析可用的 ehomectl 二进制。
-# 顺序：EHOMECTL_BIN（显式指定）→ 仓库内构建产物 → PATH。
-find_ehomectl() {
-    local candidates=()
-    if [[ -n "${EHOMECTL_BIN:-}" ]]; then
-        candidates+=("$EHOMECTL_BIN")
-    fi
-    candidates+=("$PROJECT_ROOT/backend/ehomectl")
-    if command -v ehomectl >/dev/null 2>&1; then
-        candidates+=("$(command -v ehomectl)")
-    fi
+# ota_pick_package <dir> 在目录里挑出**唯一**的 .ehfw，结果写进 FIRMWARE_PACKAGE。
+#
+# 恰好一个才认，多个直接报错：同一目录里躺着两个包时"按 mtime 挑最新的"会把上一次的
+# 产物当成这一次的，这种假绿灯比直接失败难查得多。
+# 返回码：0=找到，1=没有，2=歧义（已报错）。
+ota_pick_package() {
+    local dir="$1"
+    local found=()
     local candidate
-    for candidate in "${candidates[@]}"; do
-        if [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
+    for candidate in "$dir"/*.ehfw; do
+        [[ -e "$candidate" ]] && found+=("$candidate")
     done
-    return 1
+    if [[ ${#found[@]} -eq 0 ]]; then
+        return 1
+    fi
+    if [[ ${#found[@]} -gt 1 ]]; then
+        log_error "目录 $dir 里有 ${#found[@]} 个 .ehfw，无法判断该传哪个："
+        printf '  %s\n' "${found[@]}"
+        log_error "用 EHOME_FW_PACKAGE=<path> 显式指定要上传的包。"
+        return 2
+    fi
+    FIRMWARE_PACKAGE="${found[0]}"
+    return 0
 }
 
-# ensure_firmware_sidecar 保证 <bin>.meta.json 存在。
+# ensure_firmware_package 保证 FIRMWARE_PACKAGE 指向一个可上传的 .ehfw。
 #
-# 已存在则不覆盖：构建脚本 build_firmware.sh 从 sdkconfig 产出的那份比这里推的更权威。
-# 缺失时才用 ehomectl firmware meta-gen 从镜像解析 chip/flash_mb/version，psram 用上面的旋钮。
-ensure_firmware_sidecar() {
-    local bin_path="$1"
-    # 与 ehomectl firmware meta-gen 同口径：去掉任意扩展名再拼 .meta.json。
-    SIDECAR_FILE="${bin_path%.*}.meta.json"
-    if [[ -f "$SIDECAR_FILE" ]]; then
-        log_info "sidecar 已存在: $SIDECAR_FILE"
+# 复用优先：dist/<version>/<profile>/ 里的包是构建机产出、含 pack_firmware.py 自检与
+# build 溯源的那一份，比现场重打可信，也省掉一次几十分钟的 IDF 构建。
+# 一份都找不到时才现场打包——pack_firmware.py 是这套格式**唯一**的包写方（方案 §7.5）。
+ensure_firmware_package() {
+    if [[ -n "$FIRMWARE_PACKAGE" ]]; then
+        if [[ ! -f "$FIRMWARE_PACKAGE" ]]; then
+            log_error "EHOME_FW_PACKAGE 指向的固件包不存在: $FIRMWARE_PACKAGE"
+            return 1
+        fi
+        log_info "使用指定的固件包: $FIRMWARE_PACKAGE"
         return 0
     fi
 
-    local ehomectl_bin
-    if ! ehomectl_bin=$(find_ehomectl); then
-        log_error "找不到 ehomectl，无法生成 sidecar（可用 EHOMECTL_BIN 指定）。先构建："
-        log_error "  cd backend && go build -o ehomectl ./cmd/ehomectl"
+    # ① 与源镜像同目录；② dist/<version>/<profile>/（方案 §7.2 的发布布局）。
+    local candidates=()
+    candidates+=("$(dirname "$FIRMWARE_FILE")")
+    if [[ -n "$FIRMWARE_VERSION" && -n "$FIRMWARE_PROFILE" ]]; then
+        candidates+=("$PROJECT_ROOT/esp32-collector/dist/$FIRMWARE_VERSION/$FIRMWARE_PROFILE")
+    fi
+
+    local dir rc
+    for dir in "${candidates[@]}"; do
+        [[ -d "$dir" ]] || continue
+        rc=0
+        ota_pick_package "$dir" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            return 1
+        fi
+        if [[ $rc -eq 0 ]]; then
+            log_info "复用已打包的固件包: $FIRMWARE_PACKAGE"
+            return 0
+        fi
+    done
+
+    # ③ 现场打包。
+    local pack_tool="$PROJECT_ROOT/esp32-collector/tools/pack_firmware.py"
+    if [[ ! -f "$pack_tool" ]]; then
+        log_error "找不到固件打包器: $pack_tool"
+        log_error "它是方案 §7.5 规定的唯一包写方；没有它 .bin 变不成可上传的 .ehfw。"
         return 1
     fi
-    log_info "生成 sidecar: $SIDECAR_FILE (psram=$FIRMWARE_PSRAM, ehomectl=$ehomectl_bin)"
-    if ! "$ehomectl_bin" firmware meta-gen --bin "$bin_path" --psram "$FIRMWARE_PSRAM" >/dev/null; then
-        log_error "ehomectl firmware meta-gen 失败；若提示 unknown 子命令，说明 $ehomectl_bin 是旧二进制，重新 go build 即可"
+    if [[ -z "$FIRMWARE_PROFILE" ]]; then
+        log_error "现场打包需要档位名，例如 EHOME_FW_PROFILE=c6-n8"
+        log_error "也可以用 EHOME_FW_PACKAGE=<path> 直接指定一个已打好的 .ehfw。"
         return 1
     fi
-    if [[ ! -f "$SIDECAR_FILE" ]]; then
-        log_error "meta-gen 未产出 $SIDECAR_FILE"
+    if [[ -z "$FIRMWARE_VERSION" ]]; then
+        log_error "现场打包需要 FIRMWARE_VERSION：打包器会核对镜像内版本与它是否一致。"
         return 1
     fi
+    if [[ ! -f "$FIRMWARE_FILE" ]]; then
+        local profiled_bin="$PROJECT_ROOT/esp32-collector/build/$FIRMWARE_PROFILE/ehome_collector.bin"
+        if [[ -f "$profiled_bin" ]]; then
+            FIRMWARE_FILE="$profiled_bin"
+        else
+            log_error "找不到要打包的镜像: $FIRMWARE_FILE"
+            log_error "档位布局应为 esp32-collector/build/$FIRMWARE_PROFILE/ehome_collector.bin"
+            return 1
+        fi
+    fi
+
+    # psram 从 sdkconfig 的 CONFIG_SPIRAM 读（镜像头没有这一位），所以 sdkconfig 必给。
+    local sdkconfig_path
+    sdkconfig_path="$(dirname "$FIRMWARE_FILE")/sdkconfig"
+    if [[ ! -f "$sdkconfig_path" ]]; then
+        sdkconfig_path="$PROJECT_ROOT/esp32-collector/sdkconfig"
+    fi
+    if [[ ! -f "$sdkconfig_path" ]]; then
+        log_error "找不到 sdkconfig（$FIRMWARE_FILE 同目录或 esp32-collector/sdkconfig）"
+        return 1
+    fi
+
+    local out_dir="$PROJECT_ROOT/esp32-collector/dist/$FIRMWARE_VERSION/$FIRMWARE_PROFILE"
+    local out_pkg="$out_dir/ehome_collector-$FIRMWARE_VERSION-$FIRMWARE_PROFILE.ehfw"
+    mkdir -p "$out_dir"
+    log_info "现场打包: $FIRMWARE_FILE ($FIRMWARE_PROFILE, $FIRMWARE_VERSION) → $out_pkg"
+    if ! python3 "$pack_tool" \
+        --bin "$FIRMWARE_FILE" \
+        --sdkconfig "$sdkconfig_path" \
+        --profile "$FIRMWARE_PROFILE" \
+        --version "$FIRMWARE_VERSION" \
+        --out "$out_pkg"; then
+        log_error "pack_firmware.py 失败，错因在上面的 ERROR 行：stale .bin = 镜像版本 ≠ EHOME_FW_VERSION，"
+        log_error "profile 不符 = EHOME_FW_PROFILE 选错；也可以直接用 EHOME_FW_PACKAGE 指定已打好的包。"
+        return 1
+    fi
+    if [[ ! -f "$out_pkg" ]]; then
+        log_error "pack_firmware.py 未产出 $out_pkg"
+        return 1
+    fi
+    FIRMWARE_PACKAGE="$out_pkg"
+    log_info "现场打包完成: $FIRMWARE_PACKAGE"
     return 0
 }
 
 # ========================================
-# 上传固件获取 firmware_id
+# 上传固件包（.ehfw）获取 firmware_id
 # ========================================
 upload_firmware() {
-    log_info "正在上传固件..."
-    
-    # 检查固件文件
-    if [[ ! -f "$FIRMWARE_FILE" ]]; then
-        # 尝试其他路径
-        local alt_path="$PROJECT_ROOT/firmware/build/esp32-collector.bin"
-        if [[ -f "$alt_path" ]]; then
-            FIRMWARE_FILE="$alt_path"
-        else
-            log_error "固件文件不存在: $FIRMWARE_FILE"
-            return 1
-        fi
-    fi
-    
-    local firmware_size
-    firmware_size=$(wc -c < "$FIRMWARE_FILE")
-    log_info "固件文件: $FIRMWARE_FILE ($firmware_size bytes)"
+    log_info "正在上传固件包..."
 
-    # M0（方案 §4.2）：上传**必须**带同名 sidecar；没带就是 400 FW_META_REQUIRED。
-    if ! ensure_firmware_sidecar "$FIRMWARE_FILE"; then
+    # 上传物是包不是 .bin（方案 §4）：没有包就现找一个，找不到再现场打包。
+    if ! ensure_firmware_package; then
         return 1
     fi
+
+    local package_size
+    package_size=$(wc -c < "$FIRMWARE_PACKAGE")
+    log_info "固件包: $FIRMWARE_PACKAGE ($package_size bytes)"
 
     local response
     # The Host header must match the backend's EHOME_EXTERNAL_HOST, because the
@@ -275,24 +340,21 @@ upload_firmware() {
     response=$(curl -s -X POST \
         -H "Authorization: Bearer $AUTH_TOKEN" \
         -H "Host: $ext_host" \
-        -F "file=@$FIRMWARE_FILE" \
-        -F "meta=@$SIDECAR_FILE" \
+        -F "file=@$FIRMWARE_PACKAGE" \
         "${API_BASE}/firmwares/upload" 2>/dev/null)
     
     FIRMWARE_ID=$(echo "$response" | json_val "print(d.get('id','') or (d.get('data',{}).get('id','')))")
     
     if [[ -z "$FIRMWARE_ID" ]] || [[ "$FIRMWARE_ID" == "null" ]]; then
-        log_error "上传固件失败，无法获取 firmware_id"
-        log_debug "响应: $response"
+        log_error "上传固件包失败，无法获取 firmware_id"
+        # 服务端的新错误码（FW_PKG_REQUIRED / FW_PKG_INVALID …）文案本身就可操作，
+        # 失败即中止，所以这里必须把响应体打出来（而不是只在 DEBUG=1 时打）。
+        log_error "服务端响应: $response"
         return 1
     fi
-    
-    # legacy 行补 sidecar 重传时接口返回 200 + completed_legacy=true（同一行、id 不变）。
-    if echo "$response" | grep -q '"completed_legacy":true'; then
-        log_info "固件上传成功（legacy 行身份已就地补齐，未新增记录），firmware_id: $FIRMWARE_ID"
-    else
-        log_info "固件上传成功，firmware_id: $FIRMWARE_ID"
-    fi
+
+    # 硬切换：没有 200 补齐分支，同一个包重传只会是 409（方案 §5.3）。
+    log_info "固件上传成功，firmware_id: $FIRMWARE_ID"
     return 0
 }
 
@@ -562,9 +624,10 @@ main() {
     echo "配置:"
     echo "  API_BASE:         $API_BASE"
     echo "  NODE_ID:          $NODE_ID"
-    echo "  FIRMWARE_FILE:    $FIRMWARE_FILE"
-    echo "  FIRMWARE_VERSION: $FIRMWARE_VERSION (仅期望值；实际上传版本取自镜像)"
-    echo "  FIRMWARE_PSRAM:   $FIRMWARE_PSRAM (sidecar 里唯一要人工给的位)"
+    echo "  FIRMWARE_PACKAGE: ${FIRMWARE_PACKAGE:-<自动：复用 dist/ 里已打好的包，缺失时现场打包>}"
+    echo "  FIRMWARE_FILE:    $FIRMWARE_FILE (仅现场打包时作为源镜像)"
+    echo "  FIRMWARE_VERSION: ${FIRMWARE_VERSION:-<未设置：仅现场打包需要，须等于镜像内版本>}"
+    echo "  psram/档位:       在包内清单里，由 pack_firmware.py 从 sdkconfig 与镜像导出"
     echo "  TEST_COUNT:       $TEST_COUNT"
     echo "  TIMEOUT_PER_OTA:  ${TIMEOUT_PER_OTA}s"
     echo ""

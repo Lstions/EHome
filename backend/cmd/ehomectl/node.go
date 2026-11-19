@@ -89,3 +89,22 @@ func runNodeHWBackfill(args []string) {
 	}
 	fmt.Printf("node hardware backfilled: %d row(s)\n", updated)
 }
+
+// requireFirmwareIdentitySchema 给只读/半只读命令一个可执行的失败信息。
+//
+// 这类命令不跑迁移（本仓既有纪律：自称只读的工具绝不偷偷改 schema），
+// 所以列不存在时必须说清「先让新版本服务完成迁移」，而不是抛一句
+// "no such column: identity_state"。
+//
+// 原先它同时服务 firmware migrate-report；该命令随单文件包删除后，
+// 只剩 node hw set / node hw backfill 两个消费方（方案 §9.2）。
+func requireFirmwareIdentitySchema(db *gorm.DB, command string) {
+	if !db.Migrator().HasTable("firmwares") {
+		fatal(fmt.Sprintf("%s: firmwares table does not exist yet; start the new backend once so migrations run", command))
+	}
+	for _, column := range []string{"identity_state", "elf_sha256", "channel"} {
+		if !db.Migrator().HasColumn("firmwares", column) {
+			fatal(fmt.Sprintf("%s: firmwares.%s is missing; start the new backend once so firmware identity migrations run, then retry", command, column))
+		}
+	}
+}

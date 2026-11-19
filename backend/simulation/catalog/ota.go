@@ -12,6 +12,7 @@
 package catalog
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
@@ -22,7 +23,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -81,13 +81,16 @@ func otaRun001(e *harness.Env) {
 
 	// 文件名带 RunID 命名空间：上传会真实落盘到服务进程 cwd/firmwares/，
 	// 场景内的清理与遗留排查都依赖这个名字可辨识（§7 红线 4 之外的运维要求）。
-	filename := e.NS("SIM-OTA-001", "fw") + ".bin"
+	base := e.NS("SIM-OTA-001", "fw")
+	filename := base + ".bin"     // 包内 artifact 名；服务端把它登记为 Filename（§5.2）
+	packageName := base + ".ehfw" // 上传的包文件名，只进 package_name 供排障
 	version := "9.9.1"
-	// M0：上传必须是合法镜像（服务端解析镜像头）+ 同名 sidecar，版本取自镜像。
+	// 单文件包（方案 §4.3）：一个 .ehfw = 清单 + 镜像。版本与 chip/flash 取自镜像头，
+	// psram/profile 取自包内清单；表单不再有第二个字段。
 	body := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-001", "elf"), 2048)
-	sidecar := otaSidecar(t, body, "esp32c6", 8, false, version, "c6-n8")
+	pkg := otaFirmwarePackage(t, filename, body, version, false, "c6-n8")
 
-	created := otaUploadFirmware(e, filename, body, sidecar).
+	created := otaUploadFirmware(e, packageName, pkg).
 		Expect(http.StatusCreated)
 	var fw otaFirmwareEnvelope
 	created.Decode(&fw)
@@ -183,14 +186,16 @@ func otaRun002(e *harness.Env) {
 	t := e.T
 
 	version := "9.9.2"
-	filename := e.NS("SIM-OTA-002", "fw") + ".bin"
-	// M0：上传必须是合法镜像 + sidecar；OtaCmd 的 version 来自镜像。
+	base := e.NS("SIM-OTA-002", "fw")
+	filename := base + ".bin"
+	packageName := base + ".ehfw"
+	// 单文件包（方案 §4.3）：OtaCmd 的 version 来自镜像头，psram/profile 来自包内清单。
 	body := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-002", "elf"), 1024)
-	sidecar := otaSidecar(t, body, "esp32c6", 8, false, version, "c6-n8")
+	pkg := otaFirmwarePackage(t, filename, body, version, false, "c6-n8")
 	sum := sha256.Sum256(body)
 	wantChecksum := hex.EncodeToString(sum[:])
 
-	created := otaUploadFirmware(e, filename, body, sidecar).
+	created := otaUploadFirmware(e, packageName, pkg).
 		Expect(http.StatusCreated)
 	var fw otaFirmwareEnvelope
 	created.Decode(&fw)
@@ -212,7 +217,7 @@ func otaRun002(e *harness.Env) {
 	// 唯二写入者是启动迁移 dbschema.BackfillNodeHardware（顺带把 platform
 	// 规范化为芯片名）与运维 CLI `ehomectl node hw set`（直接 UPDATE 这两列）。
 	// 这里复现这两个动作的结果：platform=esp32c6、8MB、无 PSRAM，与
-	// otaFirmwareImage 的 spi_size=3（8MB）和 otaSidecar 的 psram=false 对齐。
+	// otaFirmwareImage 的 spi_size=3（8MB）和包内清单的 psram=false 对齐。
 	// 这是**造前置条件**，不是放宽闸门：档案缺失时建任务必须 409（分支 3），
 	// 由 internal/firmwareid 与 internal/ota 的单测按分支覆盖。
 	otaSetTargetHardware(t, e, dev.NodeID, firmwareid.ChipC6, 8, "no")
@@ -316,16 +321,18 @@ func otaRun003(e *harness.Env) {
 	t := e.T
 
 	version := "9.9.3"
-	filenameA := e.NS("SIM-OTA-003", "fw-a") + ".bin"
-	filenameB := e.NS("SIM-OTA-003", "fw-b") + ".bin"
-	// M0：两份内容不同、elf_sha256 不同的合法镜像（唯一键是 elf，不是文件名）。
+	baseA := e.NS("SIM-OTA-003", "fw-a")
+	baseB := e.NS("SIM-OTA-003", "fw-b")
+	filenameA := baseA + ".bin"
+	filenameB := baseB + ".bin"
+	// 两份内容不同、elf_sha256 不同的合法镜像（唯一键是 elf，不是文件名）。
 	bodyA := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-003", "elf-a"), 512)
 	bodyB := otaFirmwareImage(version+"-b", 0x000D, 3, e.NS("SIM-OTA-003", "elf-b"), 768)
-	sidecarA := otaSidecar(t, bodyA, "esp32c6", 8, false, version, "c6-n8")
-	sidecarB := otaSidecar(t, bodyB, "esp32c6", 8, false, version+"-b", "c6-n8")
+	pkgA := otaFirmwarePackage(t, filenameA, bodyA, version, false, "c6-n8")
+	pkgB := otaFirmwarePackage(t, filenameB, bodyB, version+"-b", false, "c6-n8")
 
-	fwA := otaUploadFirmware(e, filenameA, bodyA, sidecarA).Expect(http.StatusCreated)
-	fwB := otaUploadFirmware(e, filenameB, bodyB, sidecarB).Expect(http.StatusCreated)
+	fwA := otaUploadFirmware(e, baseA+".ehfw", pkgA).Expect(http.StatusCreated)
+	fwB := otaUploadFirmware(e, baseB+".ehfw", pkgB).Expect(http.StatusCreated)
 	var fwAEnvelope, fwBEnvelope otaFirmwareEnvelope
 	fwA.Decode(&fwAEnvelope)
 	fwB.Decode(&fwBEnvelope)
@@ -464,23 +471,122 @@ func otaSetTargetHardware(t *testing.T, e *harness.Env, nodeID, chip string, fla
 	}
 }
 
-// otaSidecar 生成与镜像自洽的 <bin>.meta.json（psram 是镜像头里唯一没有的位）。
-func otaSidecar(t *testing.T, image []byte, chip string, flashMB uint16, psram bool, version, profile string) []byte {
+// ---------------------------------------------------------------------------
+// 固件包写方（测试夹具，方案 §4.3）
+// ---------------------------------------------------------------------------
+
+// otaFirmwareManifest 是包内 fw-manifest.json 的**测试用写方**（format_version = 1）。
+//
+// 生产写方只有一个：esp32-collector/tools/pack_firmware.py —— 真正决定"一个包 = 一次构建"
+// 的是构建机，清单里的 artifact 摘要与 psram/profile 都来自 sdkconfig 与产物本身。
+//
+// 这里**刻意不 import** backend/internal/firmwarepkg：那是服务端的读方，测试夹具复用读方
+// 的代码就成了"自己验自己"（包结构写错时两边一起错、谁也不会红）；而且两条支线并行开发
+// 时会互相阻塞。
+//
+// 只保留服务端真正消费的字段：artifact.* 与 identity.*。build.* 是可选溯源块
+// （服务端不据此拒绝、也不入库），这里写确定性字段，形状与 pack_firmware.py 的产物一致。
+type otaFirmwareManifest struct {
+	Format        string              `json:"format"`
+	FormatVersion int                 `json:"format_version"`
+	Packer        otaFirmwarePacker   `json:"packer"`
+	Artifact      otaFirmwareArtifact `json:"artifact"`
+	Identity      otaFirmwareIdentity `json:"identity"`
+	Build         *otaFirmwareBuild   `json:"build,omitempty"`
+}
+
+// otaFirmwarePacker 记录谁打的包（方案 §4.3 packer）。
+type otaFirmwarePacker struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// otaFirmwareArtifact 描述包内那条 OTA 应用镜像；摘要与大小必须与实测一致（INV-2）。
+type otaFirmwareArtifact struct {
+	Name   string `json:"name"`
+	Size   int    `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// otaFirmwareIdentity 只放镜像头说不了的两件事（方案 §4.3）：psram 与档位名。
+// profile 编码 (chip, flash, psram)，服务端用它跟镜像头交叉核对（INV-3）。
+type otaFirmwareIdentity struct {
+	PSRAM   bool   `json:"psram"`
+	Profile string `json:"profile"`
+}
+
+// otaFirmwareBuild 是可选溯源块（§4.3 build.*）。
+type otaFirmwareBuild struct {
+	GitTag       string `json:"git_tag"`
+	SourceBranch string `json:"source_branch"`
+	SourceDirty  bool   `json:"source_dirty"`
+	IDFVersion   string `json:"idf_version"`
+}
+
+const (
+	// otaFirmwareFormatName / otaFirmwareFormatVersion 见方案 §4.1（本期只认 1）。
+	otaFirmwareFormatName    = "ehome-firmware"
+	otaFirmwareFormatVersion = 1
+	// otaFirmwareManifestEntry 是包内清单的固定条目名（§4.2，刻意不叫 manifest.json）。
+	otaFirmwareManifestEntry = "fw-manifest.json"
+)
+
+// otaFirmwareZipTime 固定条目时间戳，让同一个镜像打出的包逐字节可复现
+// （与 pack_firmware.py 的 date_time=(1980,1,1) 同口径，INV-6 的测试侧对应物）。
+var otaFirmwareZipTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// otaFirmwarePackage 把一个镜像打成**两条目**固件包（方案 §4.2/§4.3）：
+// 清单 + artifact，两条都在根、无目录，ZIP STORE —— 服务端只把条目名当键，
+// 扁平命名空间让 zip slip 的前提不存在。
+//
+// version 只用于 build.git_tag 溯源：真正的版本在镜像头 version[32] 里，服务端从镜像读，
+// 清单里不再存第二份（双真源正是本次改造要消掉的东西）。
+func otaFirmwarePackage(t *testing.T, artifactName string, image []byte, version string, psram bool, profile string) []byte {
 	t.Helper()
 	sum := sha256.Sum256(image)
-	raw, err := json.Marshal(map[string]any{
-		"profile":  profile,
-		"chip":     chip,
-		"flash_mb": flashMB,
-		"psram":    psram,
-		"version":  version,
-		"idf_ver":  "v6.1",
-		"sha256":   hex.EncodeToString(sum[:]),
+	manifest, err := json.Marshal(otaFirmwareManifest{
+		Format:        otaFirmwareFormatName,
+		FormatVersion: otaFirmwareFormatVersion,
+		Packer:        otaFirmwarePacker{Name: "ota_test_writer", Version: "1.0.0"},
+		Artifact: otaFirmwareArtifact{
+			Name:   artifactName,
+			Size:   len(image),
+			SHA256: hex.EncodeToString(sum[:]),
+		},
+		Identity: otaFirmwareIdentity{PSRAM: psram, Profile: profile},
+		Build: &otaFirmwareBuild{
+			GitTag:       "fw-v" + version,
+			SourceBranch: "main",
+			SourceDirty:  false,
+			IDFVersion:   "v6.1",
+		},
 	})
 	if err != nil {
-		t.Fatalf("编码 sidecar 失败: %v", err)
+		t.Fatalf("编码包内清单失败: %v", err)
 	}
-	return raw
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, entry := range []struct {
+		name    string
+		content []byte
+	}{
+		{otaFirmwareManifestEntry, manifest},
+		{artifactName, image},
+	} {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Store, Modified: otaFirmwareZipTime}
+		part, createErr := zw.CreateHeader(header)
+		if createErr != nil {
+			t.Fatalf("创建包内条目 %s 失败: %v", entry.name, createErr)
+		}
+		if _, writeErr := part.Write(entry.content); writeErr != nil {
+			t.Fatalf("写入包内条目 %s 失败: %v", entry.name, writeErr)
+		}
+	}
+	if closeErr := zw.Close(); closeErr != nil {
+		t.Fatalf("关闭固件包写入器失败: %v", closeErr)
+	}
+	return buf.Bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -503,15 +609,10 @@ func otaFieldUint(fields map[uint8]frame.Field, num uint8) uint64 {
 // harness 适配点
 // ---------------------------------------------------------------------------
 
-// otaUploadFirmware 走 harness 的 multipart 助手（harness/upload.go）。
+// otaUploadFirmware 按方案 §5.2 上传**单个**固件包：multipart 只有 "file" 一个文件字段。
 //
-// 设计 §5.2 的 Session.Post 只覆盖 JSON body，而固件上传是 multipart/form-data，
-// 文件字段名固定为 "file"（生产端 c.FormFile("file")）。
-func otaUploadFirmware(e *harness.Env, filename string, image, sidecar []byte) *harness.Response {
-	// M0（方案 §4.2）：sidecar 必填，字段名 "meta"，文件名与 .bin 同名（fw.bin → fw.meta.json）。
-	metaName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".meta.json"
-	return e.Admin.UploadMultipart("/api/v1/firmwares/upload", nil, []harness.UploadFile{
-		{Field: "file", Filename: filename, Content: image},
-		{Field: "meta", Filename: metaName, Content: sidecar},
-	})
+// 身份（psram/profile）与 artifact 摘要都在包内清单里，服务端解包自取；
+// 旧的 "meta" 第二字段随 sidecar 一起删除（§5.3：FW_META_* 已废弃，没有第二条上传路径）。
+func otaUploadFirmware(e *harness.Env, packageName string, pkg []byte) *harness.Response {
+	return e.Admin.UploadFile("/api/v1/firmwares/upload", "file", packageName, pkg)
 }

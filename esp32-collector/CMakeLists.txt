@@ -10,7 +10,22 @@ cmake_minimum_required(VERSION 3.16)
 # 2.6.0 (2026-10-04): 崩溃诊断通道 (MSG_DIAG_REPORT 0x1E / MSG_DIAG_ACK 0x1F)。
 # 次版本号 +1 而非修订号：协议新增了两种消息类型，服务端需要同步支持，
 # 因此这是一次前后端必须一起升级的变更，不是纯修复。
-set(PROJECT_VER "2.8.0")
+#
+# ---- 版本注入（2026-11-19 起）------------------------------------------------
+# 唯一真源是构建脚本传入的 -D FW_VERSION；缺省值只保证「直接 idf.py build 也能编」，
+# 但它不是可发布产物：pack_firmware.py 会拒绝 0.0.0-dev。
+# 落点要求（方案 §7.3 / 评审 A-5）：必须写在 include(project.cmake) 与 project()
+# **之前** —— 写晚了镜像里仍是旧版本，而且无声。
+# （上面 2.6.x 那段版本史自 2026-11-19 起只是历史：版本不再手写在 CMakeLists 里。）
+set(FW_VERSION "" CACHE STRING "firmware version injected by build_firmware.sh")
+if(FW_VERSION STREQUAL "")
+    set(PROJECT_VER "0.0.0-dev")
+else()
+    set(PROJECT_VER "${FW_VERSION}")
+endif()
+if(NOT PROJECT_VER MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "PROJECT_VER=${PROJECT_VER} is not X.Y.Z; pass -DFW_VERSION=<x.y.z>")
+endif()
 
 # 诊断探针开关必须在这里（project() 之前）定义：main/CMakeLists.txt 的
 # target_compile_definitions 只作用于 main 组件，而 EHOME_MEM_DIAG 还门控

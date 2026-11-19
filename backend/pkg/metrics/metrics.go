@@ -91,8 +91,9 @@ var (
 
 	// FirmwareUploadRejected counts firmware upload rejections by machine code.
 	//
-	// 埋在 handler 的统一拒绝出口 rejectFirmwareUpload：FW_META_REQUIRED /
-	// FW_META_CONFLICT / FW_DUPLICATE / FW_TOO_LARGE / FW_NOT_IMAGE … 全部经此，
+	// 埋在 handler 的统一拒绝出口 rejectFirmwareUpload：FW_PKG_REQUIRED /
+	// FW_PKG_INVALID / FW_PKG_UNSUPPORTED / FW_PKG_DIGEST_MISMATCH / FW_PKG_CONFLICT /
+	// FW_PKG_TOO_LARGE / FW_DUPLICATE / FW_TOO_LARGE / FW_NOT_IMAGE … 全部经此，
 	// 不会因为新增校验分支而漏埋。reason 是机器码而不是 HTTP 状态码 —— 400/409/413
 	// 的语义差异远小于机器码（§9.5 的「上传拦截原因」维度）。
 	FirmwareUploadRejected = promauto.NewCounterVec(prometheus.CounterOpts{

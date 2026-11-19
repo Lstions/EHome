@@ -189,7 +189,7 @@ fx.Cleanup()
 // WebSocket / multipart
 ws, _ := env.DialWSConn("/api/v1/ws"); ws.AwaitEvent("data_update", 5*time.Second)
 env.DialWS("/api/v1/ws")                              // 原始拨号，可拿到握手 401
-env.Admin.Upload("/api/v1/firmwares/upload", fields, "file", "fw.bin", content)
+env.Admin.UploadFile("/api/v1/firmwares/upload", "file", "fw.ehfw", pkgBytes) // 单文件固件包
 
 // 证据
 env.Evidence("node_status", "online")                 // 进 summary.json

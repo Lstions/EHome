@@ -63,15 +63,20 @@ func TestMigrateFirmwareIdentity_BackfillAndDedupe(t *testing.T) {
 	}
 
 	// ① 能解析出身份的旧行：库内版本是错的，必须以镜像为准。
+	//
+	// IdentityState 必须**显式**写 legacy：单文件包之后 `default:verified`（§5.4），
+	// legacy 只能由历史行显式带着，这正是 BackfillFirmwareIdentity 要处理的那批数据。
 	if err := db.Create(&models.Firmware{
 		Version: "0.0.0", Checksum: "c", URL: "http://legacy.invalid/fw.bin",
 		Filename: "fw.bin", StoragePath: filepath.Join("unused", "fw.bin"),
+		IdentityState: dbschema.IdentityLegacy,
 	}).Error; err != nil {
 		t.Fatalf("seed parseable firmware row: %v", err)
 	}
-	// ② 二进制缺失的旧行：必须保持 legacy（不可选），由迁移报告列出。
+	// ② 二进制缺失的旧行：必须保持 legacy（不可选）。
 	if err := db.Create(&models.Firmware{
 		Version: "1.0.0", Checksum: "c", URL: "http://legacy.invalid/missing.bin", Filename: "missing.bin",
+		IdentityState: dbschema.IdentityLegacy,
 	}).Error; err != nil {
 		t.Fatalf("seed orphan firmware row: %v", err)
 	}
@@ -127,17 +132,20 @@ func TestMigrateFirmwareIdentity_BackfillAndDedupe(t *testing.T) {
 	if len(parsed.ElfSHA256) != 64 {
 		t.Fatalf("parseable row elf_sha256 = %q, want 64 hex chars", parsed.ElfSHA256)
 	}
-	// 镜像头里没有 psram：回填行只能是 ""，由 sidecar 重传补齐（报告里点明）。
+	// 镜像头里没有 psram：回填行只能是 ""，且单文件包之后没有自动补齐路径。
 	if parsed.Psram != "" {
 		t.Fatalf("backfilled row psram = %q, want empty (the image header carries no PSRAM bit)", parsed.Psram)
 	}
-	// 缺文件的行走 legacy（RK-1）。
+	// 缺文件的行走 legacy，且身份列保持为空（RK-1：解析不出来就留空，不猜）。
 	var orphan models.Firmware
 	if err := db.First(&orphan, "filename = ?", "missing.bin").Error; err != nil {
 		t.Fatalf("reload orphan row: %v", err)
 	}
 	if orphan.IdentityState != dbschema.IdentityLegacy {
 		t.Fatalf("orphan row identity_state = %q, want %q", orphan.IdentityState, dbschema.IdentityLegacy)
+	}
+	if orphan.Chip != "" || orphan.ElfSHA256 != "" {
+		t.Fatalf("orphan row = chip %q elf %q, want both empty (unreadable binary proves nothing)", orphan.Chip, orphan.ElfSHA256)
 	}
 
 	// 3) 去重：留最小 id，其余置空并标 duplicate。
@@ -154,27 +162,12 @@ func TestMigrateFirmwareIdentity_BackfillAndDedupe(t *testing.T) {
 	if dropped.IdentityState != dbschema.IdentityDuplicate || dropped.ElfSHA256 != "" {
 		t.Fatalf("dropped row = state %q elf %q, want duplicate/empty", dropped.IdentityState, dropped.ElfSHA256)
 	}
-	// 回填行 + 缺文件行都是 legacy（前者身份已解析、只缺 psram；后者身份未知）。
-	if len(report.Legacy) != 2 || len(report.Duplicate) != 1 || report.Deduplicated != 1 {
-		t.Fatalf("report = legacy %d duplicate %d deduplicated %d, want 2/1/1",
-			len(report.Legacy), len(report.Duplicate), report.Deduplicated)
+	// 迁移报告只保留计数（legacy/duplicate 清单随 migrate-report 一起删除，方案 §9.2）。
+	if report.Deduplicated != 1 {
+		t.Fatalf("report.Deduplicated = %d, want 1", report.Deduplicated)
 	}
 	if report.Backfilled != 1 {
 		t.Fatalf("report.Backfilled = %d, want 1 (only the parseable row gets identified this run)", report.Backfilled)
-	}
-	// 报告要能区分两种 legacy：身份已解析的行带 chip/elf（只需补 sidecar 重传），
-	// 身份未知的行两者皆空（需先找回原始二进制）。
-	for _, row := range report.Legacy {
-		switch row.Filename {
-		case "fw.bin":
-			if row.Chip != "esp32s3" || row.FlashMB != 16 || len(row.ElfSHA256) != 64 || row.Psram != "" {
-				t.Fatalf("parsed legacy report row = %+v, want chip/flash/elf filled and psram empty", row)
-			}
-		case "missing.bin":
-			if row.Chip != "" || row.ElfSHA256 != "" {
-				t.Fatalf("unreadable legacy report row = %+v, want empty chip/elf", row)
-			}
-		}
 	}
 
 	// 唯一性真的生效：同一 elf 再插一行必须被拒。
@@ -253,7 +246,11 @@ func TestMigrateFirmwareIdentity_Idempotent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "fw.bin"), buildTestImage(t, 0x000D, 3, "2.8.0"), 0o644); err != nil {
 		t.Fatalf("write test image: %v", err)
 	}
-	row := models.Firmware{Version: "2.8.0", Checksum: "c", URL: "http://legacy.invalid/fw.bin", Filename: "fw.bin"}
+	// 显式 legacy：这是历史行的形态（`default:verified` 之后 legacy 不再自然产生）。
+	row := models.Firmware{
+		Version: "2.8.0", Checksum: "c", URL: "http://legacy.invalid/fw.bin", Filename: "fw.bin",
+		IdentityState: dbschema.IdentityLegacy,
+	}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatalf("seed firmware row: %v", err)
 	}
@@ -268,14 +265,7 @@ func TestMigrateFirmwareIdentity_Idempotent(t *testing.T) {
 	if second.Backfilled != 0 || second.VersionOverridden != 0 || second.Deduplicated != 0 {
 		t.Fatalf("second run was not a no-op: %+v", second)
 	}
-	// legacy 行会一直列在报告里，直到补 sidecar 重传 —— 那是待办清单，不是副作用。
-	// 幂等的判据是「没有新的写入动作」：Backfilled / VersionOverridden / Deduplicated 都为 0。
-	if len(second.Legacy) != 1 || second.Legacy[0].ID != row.ID {
-		t.Fatalf("re-run report = %+v, want the same single legacy row still listed", second.Legacy)
-	}
-	if len(second.Duplicate) != 0 {
-		t.Fatalf("re-run created duplicate rows: %+v", second.Duplicate)
-	}
+	// 幂等的判据是「没有新的写入动作」：三个计数都为 0。
 
 	var stored models.Firmware
 	if err := db.First(&stored, row.ID).Error; err != nil {

@@ -52,7 +52,7 @@ func buildImage(o imageOpts) []byte {
 		o.elfSeed = o.project + o.version
 	}
 	buf := make([]byte, o.size)
-	buf[offMagic] = imageMagic
+	buf[offMagic] = ImageMagic
 	buf[offSpiSize] = o.spiSize << 4
 	binary.LittleEndian.PutUint16(buf[offChipID:], o.chipID)
 	binary.LittleEndian.PutUint32(buf[offDescMagic:], descMagicWord)

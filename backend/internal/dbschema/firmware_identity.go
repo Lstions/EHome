@@ -39,34 +39,19 @@ const (
 	IdentityDuplicate = "duplicate"
 )
 
-// FirmwareIdentityRow 是迁移报告里的一行。
+// FirmwareIdentityReport 是启动迁移的计数结果（只用于日志与测试断言）。
 //
-// legacy 行有两种：elf_sha256 非空 = 身份已解析、只缺 sidecar 的 psram；
-// elf_sha256 为空 = 二进制缺失/不可解析，身份仍未知。报告里把两者的诊断字段都带上，
-// 运维才知道「补 sidecar 重传」还是「找回原始二进制再来一次」。
-type FirmwareIdentityRow struct {
-	ID            uint   `json:"id"`
-	Version       string `json:"version"`
-	Filename      string `json:"filename"`
-	StoragePath   string `json:"storage_path"`
-	IdentityState string `json:"identity_state"`
-	Chip          string `json:"chip,omitempty"`
-	FlashMB       uint16 `json:"flash_mb,omitempty"`
-	Psram         string `json:"psram,omitempty"`
-	ElfSHA256     string `json:"elf_sha256,omitempty"`
-}
-
-// FirmwareIdentityReport 是步骤 7 的产物：legacy 行需重传，duplicate 行是历史重复。
+// legacy / duplicate 清单随 ehomectl firmware migrate-report 一起删除（方案 §9.2）：
+// 空库前提下它永远输出 0 行；单文件包之后也不再存在「补 sidecar 重传」这条出口，
+// 一份随时为空、且指不回任何可执行动作的清单只会让人以为还有待办。
 type FirmwareIdentityReport struct {
-	Legacy                 []FirmwareIdentityRow `json:"legacy"`
-	Duplicate              []FirmwareIdentityRow `json:"duplicate"`
-	Backfilled             int                   `json:"backfilled"`
-	VersionOverridden      int                   `json:"version_overridden"`
-	Deduplicated           int                   `json:"deduplicated"`
-	NodeHardwareBackfilled int                   `json:"node_hardware_backfilled"`
+	Backfilled             int `json:"backfilled"`
+	VersionOverridden      int `json:"version_overridden"`
+	Deduplicated           int `json:"deduplicated"`
+	NodeHardwareBackfilled int `json:"node_hardware_backfilled"`
 }
 
-// MigrateFirmwareIdentity 按方案 §5.6 的顺序跑完 0–7 步，全程单事务。
+// MigrateFirmwareIdentity 按方案 §5.6 的顺序跑完 0–6 步，全程单事务。
 func MigrateFirmwareIdentity(db *gorm.DB, firmwareDir string) (FirmwareIdentityReport, error) {
 	if db == nil {
 		return FirmwareIdentityReport{}, fmt.Errorf("firmware identity: database is nil")
@@ -112,35 +97,20 @@ func MigrateFirmwareIdentity(db *gorm.DB, firmwareDir string) (FirmwareIdentityR
 		if err != nil {
 			return err
 		}
-		// 7) 输出 legacy / duplicate 清单。
-		rep, err := ReportFirmwareIdentity(tx)
-		if err != nil {
-			return err
+		report = FirmwareIdentityReport{
+			Backfilled:             backfilled,
+			VersionOverridden:      overridden,
+			Deduplicated:           deduped,
+			NodeHardwareBackfilled: nodeBackfilled,
 		}
-		rep.Backfilled = backfilled
-		rep.VersionOverridden = overridden
-		rep.Deduplicated = deduped
-		rep.NodeHardwareBackfilled = nodeBackfilled
-		report = rep
 		return nil
 	})
 	if err != nil {
 		return FirmwareIdentityReport{}, err
 	}
 
-	logger.Infof("[firmware-migrate] done: backfilled=%d version_overridden=%d deduplicated=%d node_hw_backfilled=%d legacy=%d duplicate=%d",
-		report.Backfilled, report.VersionOverridden, report.Deduplicated, report.NodeHardwareBackfilled,
-		len(report.Legacy), len(report.Duplicate))
-	for _, row := range report.Legacy {
-		detail := "identity unknown, find the original binary first"
-		if strings.TrimSpace(row.ElfSHA256) != "" {
-			detail = fmt.Sprintf("identity parsed (chip=%s flash_mb=%d) but psram is only known at build time", row.Chip, row.FlashMB)
-		}
-		logger.Warnf("[firmware-migrate] legacy firmware id=%d version=%q file=%q: %s — run ehomectl firmware meta-gen --bin <file> --psram yes|no, then re-upload (it completes this row in place)", row.ID, row.Version, row.Filename, detail)
-	}
-	for _, row := range report.Duplicate {
-		logger.Warnf("[firmware-migrate] duplicate firmware id=%d version=%q file=%q: same elf_sha256 as an older row, not selectable", row.ID, row.Version, row.Filename)
-	}
+	logger.Infof("[firmware-migrate] done: backfilled=%d version_overridden=%d deduplicated=%d node_hw_backfilled=%d",
+		report.Backfilled, report.VersionOverridden, report.Deduplicated, report.NodeHardwareBackfilled)
 	return report, nil
 }
 
@@ -150,8 +120,8 @@ func MigrateFirmwareIdentity(db *gorm.DB, firmwareDir string) (FirmwareIdentityR
 // 镜像头里没有 PSRAM 位（方案判断 1），回填行拿不到 psram ⇒ 不具备可选资格。
 // 标成 verified 会造出「verified 但 psram=”」的半可信状态，而闸门的
 // PSRAM 两条判定（要求 yes / 拒绝 no+yes）对 ” 都不命中 ⇒ 等于静默放行，
-// 正是 v1.4 要关掉的那条误刷通道。补齐 sidecar 重传是它唯一的出口
-// （api 上传的 legacy 就地补齐分支），因此这里只写**诊断与去重**用的列。
+// 正是 v1.4 要关掉的那条误刷通道。单文件包之后 api 已删除「legacy 就地补齐」
+// 分支（方案 §9.2），legacy 行只剩人工处理一条路 —— 因此这里只写**诊断与去重**用的列。
 //
 // version 也按镜像写：RK-8「回填与库内版本不一致 → 镜像为准」的意图不能因为
 // 状态从 verified 改成 legacy 而失效（否则列表会给 legacy 行显示一个错版本）。
@@ -168,7 +138,7 @@ func BackfillFirmwareIdentity(tx *gorm.DB, firmwareDir string) (int, error) {
 	for i := range rows {
 		row := &rows[i]
 		if strings.TrimSpace(row.ElfSHA256) != "" {
-			continue // 已识别，缺的只有 sidecar 里的 psram
+			continue // 已识别，缺的只有构建期 psram（单文件包之前来自 sidecar）
 		}
 		path := ResolveFirmwareBinaryPath(firmwareDir, row.StoragePath, row.Filename)
 		ident, err := parseImageFile(path)
@@ -189,7 +159,7 @@ func BackfillFirmwareIdentity(tx *gorm.DB, firmwareDir string) (int, error) {
 		if err := tx.Model(&models.Firmware{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
 			return done, fmt.Errorf("firmware identity: step 1 backfill id=%d: %w", row.ID, err)
 		}
-		logger.Infof("[firmware-migrate] id=%d %q identified (chip=%s flash_mb=%d version=%s) but stays legacy until a sidecar re-upload supplies psram",
+		logger.Infof("[firmware-migrate] id=%d %q identified (chip=%s flash_mb=%d version=%s) but stays legacy: psram is a build-time fact and no re-upload path exists any more",
 			row.ID, row.Filename, ident.Chip, ident.FlashMB, ident.Version)
 		done++
 	}
@@ -198,8 +168,7 @@ func BackfillFirmwareIdentity(tx *gorm.DB, firmwareDir string) (int, error) {
 
 // EnforceImageVersion 用镜像内 version 覆盖库内 version（方案 §5.6 步骤 2 / RK-8）。
 //
-// 只处理 verified 行：legacy 行的 version 已由步骤 1 按镜像写好（并会随 sidecar
-// 重传再校正一次），这里不再重复读盘。它现在的定位是**安全网**——兜住
+// 只处理 verified 行：legacy 行的 version 已由步骤 1 按镜像写好，这里不再重复读盘。它现在的定位是**安全网**——兜住
 // 「上一版代码把回填行标成 verified、或历史上传手填版本」这类遗留行。
 //
 // 不保留「以库内为准」的分支：历史上传手填版本正是 DEF-6 的来源，
@@ -368,28 +337,6 @@ func BackfillNodeHardware(tx *gorm.DB) (int, error) {
 		updated++
 	}
 	return updated, nil
-}
-
-// ReportFirmwareIdentity 输出 legacy / duplicate 清单（只读，ehomectl 可复现）。
-func ReportFirmwareIdentity(tx *gorm.DB) (FirmwareIdentityReport, error) {
-	var report FirmwareIdentityReport
-	load := func(state string, out *[]FirmwareIdentityRow) error {
-		if err := tx.Model(&models.Firmware{}).
-			Select("id", "version", "filename", "storage_path", "identity_state", "chip", "flash_mb", "psram", "elf_sha256").
-			Where("identity_state = ?", state).
-			Order("id ASC").
-			Scan(out).Error; err != nil {
-			return fmt.Errorf("firmware identity: step 7 list %s rows: %w", state, err)
-		}
-		return nil
-	}
-	if err := load(IdentityLegacy, &report.Legacy); err != nil {
-		return FirmwareIdentityReport{}, err
-	}
-	if err := load(IdentityDuplicate, &report.Duplicate); err != nil {
-		return FirmwareIdentityReport{}, err
-	}
-	return report, nil
 }
 
 // ResolveFirmwareBinaryPath 由存储元数据解析磁盘路径。

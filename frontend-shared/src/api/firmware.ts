@@ -19,7 +19,7 @@ export interface Firmware {
   min_from_version?: string
   created_at: string
 
-  // ── 身份（来自镜像头 + sidecar 交叉校验，不接受人手填写）──────────────────
+  // ── 身份（镜像头 + 包内清单交叉校验，不接受人手填写）──────────────────────
   /** `esp32c6` / `esp32s3` */
   chip?: string
   /** 8 / 16；0 = 未知（只有 legacy 行会如此） */
@@ -28,7 +28,7 @@ export interface Firmware {
   psram?: string
   /** chip-flash，如 `esp32c6-n8`；**不含 p** */
   model_key?: string
-  /** sidecar 的 profile，如 `s3p-n16`；仅展示与排障 */
+  /** 包内清单的 `identity.profile`，如 `s3p-n16`；仅展示与排障 */
   build_profile?: string
   elf_sha256?: string
   built_at_raw?: string
@@ -66,41 +66,6 @@ export interface FirmwareListParams {
   include_withdrawn?: boolean
 }
 
-/**
- * 上传结果（契约补充：命中同 `elf_sha256` 的 legacy 行时**就地补齐**，不新增记录）。
- *
- * 后端此时返回 200 且 `data.completed_legacy = true`（而不是 409 FW_DUPLICATE）——
- * 语义是「这份固件以前就在库里，只缺 sidecar，这次补上了」。
- * 前端必须把这两件事说清楚：
- *   · 说成「上传成功」→ 运维会以为库里多了一条；
- *   · 说成「重复上传」→ 运维会以为这次没生效，反复重传。
- * 缺省（字段不存在 / false）时保持既有文案「上传成功」，向后兼容旧后端。
- */
-export interface FirmwareUploadResult extends Firmware {
-  completed_legacy?: boolean
-}
-
-/** 上传成功后的提示（level 决定 ElMessage 类型：补齐是 info，普通上传是 success）。 */
-export interface FirmwareUploadOutcome {
-  level: 'success' | 'info'
-  message: string
-}
-
-/**
- * 上传结果的提示文案真源（单一出口，便于单测；组件只负责发消息）。
- *
- * 只有 **严格 true** 才走「补齐」分支：后端字段若为 missing / false / 字符串 "true"
- * 都按普通上传处理 —— 宁可少一次特殊提示，不可把普通上传误报成「补了身份」。
- */
-export function firmwareUploadOutcome(
-  result?: Pick<FirmwareUploadResult, 'completed_legacy'> | null,
-): FirmwareUploadOutcome {
-  if (result?.completed_legacy === true) {
-    return { level: 'info', message: '已补齐该固件的身份信息（未新增记录）' }
-  }
-  return { level: 'success', message: '上传成功' }
-}
-
 /** PUT {id} 只允许这三项（version 由镜像决定、target_model/stable 列已删）。 */
 export interface FirmwareUpdatePayload {
   changelog?: string
@@ -111,18 +76,16 @@ export interface FirmwareUpdatePayload {
 /**
  * 上传表单字段名（multipart）。
  *
- * ⚠️ 与后端 handler 的契约点：bin 走 `file`（沿用既有实现），sidecar 走 `meta`。
- * 只在这里改一次即可全链路生效（FirmwareUploadDialog 也用它），
- * 避免「前端发 meta、后端读 sidecar」这种只有联调才会发现的错配。
+ * ⚠️ 与后端 handler 的契约点：**只有一个字段** `file`，装着固件包本身
+ * （包=镜像+清单，配对由包结构保证，不再有第二个文件）。只在这里改一次即可
+ * 全链路生效（FirmwareUploadDialog 也用它）。
  */
-export const FIRMWARE_UPLOAD_BIN_FIELD = 'file'
-export const FIRMWARE_UPLOAD_META_FIELD = 'meta'
+export const FIRMWARE_UPLOAD_FIELD = 'file'
 
-/** 组装上传体（bin 必填 + sidecar 必填，§4.2「sidecar 必填」）。 */
-export function buildFirmwareUploadFormData(bin: File, meta: File): FormData {
+/** 组装上传体（单文件：§6.5「上传体只有 file」）。 */
+export function buildFirmwareUploadFormData(pkg: File): FormData {
   const formData = new FormData()
-  formData.append(FIRMWARE_UPLOAD_BIN_FIELD, bin)
-  formData.append(FIRMWARE_UPLOAD_META_FIELD, meta)
+  formData.append(FIRMWARE_UPLOAD_FIELD, pkg)
   return formData
 }
 
@@ -135,7 +98,9 @@ export function buildFirmwareUploadFormData(bin: File, meta: File): FormData {
  * ──────────────────────────────────────────────────────────────────────────── */
 export const OTA_GATE_REASON_TEXT: Record<string, string> = {
   OTA_GATE_WITHDRAWN: '该固件已撤回，不能再用于升级',
-  OTA_GATE_FIRMWARE_UNVERIFIED: '固件身份未验证（旧上传或重复构建），需重新上传带 .meta.json 的产物',
+  // 单文件包改造后用户手上只有 .ehfw：D-6 保留下来的 identity_state 列让
+  // 「从备份恢复的旧行」仍会走到这条闸门，文案必须指向现在真实存在的产物形态。
+  OTA_GATE_FIRMWARE_UNVERIFIED: '固件身份未验证（历史数据），需重新上传固件包（.ehfw）',
   OTA_GATE_HARDWARE_UNKNOWN: '节点硬件档案不完整（芯片/容量/PSRAM 有缺失），需先补录',
   OTA_GATE_MODEL_MISMATCH: '芯片型号与节点不一致',
   OTA_GATE_FLASH_MISMATCH: 'Flash 容量档位与节点不一致',
@@ -212,8 +177,13 @@ export function firmwareProfileText(firmware: Firmware): string {
  * 而是给出「发生了什么 + 该怎么修」。未知码退回服务端 message。
  * ──────────────────────────────────────────────────────────────────────────── */
 export const FIRMWARE_ERROR_TEXT: Record<string, string> = {
-  FW_META_REQUIRED: '缺少 .meta.json 侧车文件：请把构建产出的同名 .meta.json 与 .bin 一起上传',
-  FW_META_CONFLICT: '侧车与镜像不一致（chip / flash_mb / version / sha256 至少一项对不上）：请用构建产出的原始 .meta.json 重传',
+  // ── 固件包（单文件，§5.3 建议列的逐字对应；`FW_META_*` 已废弃、服务端不再产生）──
+  FW_PKG_REQUIRED: '这是裸镜像；用 `esp32-collector/tools/pack_firmware.py` 打包后上传',
+  FW_PKG_INVALID: '包结构不合法；用 `ehomectl firmware verify --pkg <file>` 看第一个错误',
+  FW_PKG_UNSUPPORTED: '包格式版本高于服务端，请升级平台',
+  FW_PKG_DIGEST_MISMATCH: '包已损坏或被改动，重新打包',
+  FW_PKG_CONFLICT: '包内档位与镜像不一致，用构建产出的原始包重传',
+  FW_PKG_TOO_LARGE: '包异常膨胀',
   FW_NOT_IMAGE: '不是 ESP 固件镜像（magic 不是 0xE9）',
   FW_TRUNCATED: '固件文件被截断或过短，无法解析镜像头',
   FW_PROJECT_MISMATCH: '固件 project 不是 ehome_collector，传错项目的产物了',
@@ -284,9 +254,16 @@ export const firmwareApi = {
     return { total: list.length, list }
   },
 
-  async upload(formData: FormData): Promise<FirmwareUploadResult> {
-    // 后端统一 envelope: {code, data: Firmware & {completed_legacy?: boolean}, message}
-    const response = await client.post<unknown, ApiEnvelope<FirmwareUploadResult>>(
+  /**
+   * 上传固件包，返回新增的那一条 `Firmware`。
+   *
+   * 没有第二形态：历史上命中同 `elf_sha256` 的 legacy 行会 200 + 就地补齐
+   * （响应带 `completed_legacy`），空库之后服务端不再产生该字段（§9.2），
+   * 同 `elf_sha256` 一律 409 `FW_DUPLICATE` —— 没有生产者的分支一并删除。
+   */
+  async upload(formData: FormData): Promise<Firmware> {
+    // 后端统一 envelope: {code, data: Firmware, message}
+    const response = await client.post<unknown, ApiEnvelope<Firmware>>(
       '/api/v1/firmwares/upload',
       formData
     )

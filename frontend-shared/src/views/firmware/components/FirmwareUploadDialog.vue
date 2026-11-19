@@ -9,55 +9,27 @@
     @update:model-value="emit('update:modelValue', $event)"
     @close="resetForm"
   >
-    <el-form label-width="120px" @submit.prevent>
-      <!-- 版本号/目标型号**不再由人手填写**（§4.2）：version 取自镜像，
-           sidecar 只做交叉校验；target_model 列已随 M0 删除。 -->
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        class="upload-alert"
-        title="必须同时选择 .bin 与同名 .meta.json"
-      >
-        <template #default>
-          版本、芯片与容量全部从镜像与侧车读取，不再手填。存量固件可用
-          <code>ehomectl firmware meta-gen --bin &lt;file&gt;</code> 补出侧车后重传。
-        </template>
-      </el-alert>
-
-      <el-form-item label="固件镜像" required>
+    <el-form label-width="140px" @submit.prevent>
+      <!-- 版本号 / 目标型号 / psram **不再由人手填写**：前三项由包内清单与镜像头决定
+           （§4.3「清单只保留镜像说不了的两项」），人手只负责选对那个文件。 -->
+      <el-form-item label="固件包 *.ehfw" required>
         <el-upload
-          ref="binUploadRef"
+          ref="uploadRef"
           :auto-upload="false"
           :limit="1"
-          accept=".bin"
-          :on-change="(file: UploadFile) => onBinChange(file)"
-          :on-exceed="onBinExceed"
+          :show-file-list="false"
+          accept=".ehfw,.zip"
+          :on-change="(file: UploadFile) => applySelection(file.raw)"
+          :on-exceed="onExceed"
         >
-          <el-button :icon="Upload">选择 .bin</el-button>
+          <el-button :icon="Upload">选择固件包</el-button>
         </el-upload>
-        <div v-if="binFile" class="file-info" data-testid="firmware-bin-file">
-          已选择: {{ binFile.name }} ({{ formatFileSize(binFile.size) }})
+        <div v-if="packageFile" class="file-info" data-testid="firmware-package-file">
+          已选择: {{ packageFile.name }} ({{ formatFileSize(packageFile.size) }})
         </div>
       </el-form-item>
 
-      <el-form-item label="侧车元数据" required>
-        <el-upload
-          ref="metaUploadRef"
-          :auto-upload="false"
-          :limit="1"
-          accept=".json"
-          :on-change="(file: UploadFile) => onMetaChange(file)"
-          :on-exceed="onMetaExceed"
-        >
-          <el-button :icon="Upload">选择 .meta.json</el-button>
-        </el-upload>
-        <div v-if="metaFile" class="file-info" data-testid="firmware-meta-file">
-          已选择: {{ metaFile.name }} ({{ formatFileSize(metaFile.size) }})
-        </div>
-      </el-form-item>
-
-      <!-- 服务端拒绝原因（FW_META_REQUIRED / FW_META_CONFLICT 等）常驻显示：
+      <!-- 拒绝原因（本地预校验与 FW_PKG_* 服务端拒绝）常驻显示：
            一次性 toast 会消失，用户回来再看就只剩「上传失败」四个字。 -->
       <el-alert
         v-if="uploadError"
@@ -72,7 +44,13 @@
 
     <template #footer>
       <el-button :disabled="uploading" @click="close">取消</el-button>
-      <el-button type="primary" :loading="uploading" data-testid="firmware-upload-submit" @click="handleUpload">
+      <el-button
+        type="primary"
+        :loading="uploading"
+        :disabled="!canUpload"
+        data-testid="firmware-upload-submit"
+        @click="handleUpload"
+      >
         上传
       </el-button>
     </template>
@@ -80,27 +58,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Upload } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { feedback } from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
-import {
-  FIRMWARE_ERROR_TEXT,
-  buildFirmwareUploadFormData,
-  firmwareUploadOutcome,
-  uploadErrorMessage,
-} from '@/api/firmware'
+import { buildFirmwareUploadFormData, uploadErrorMessage } from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
-import { isFirmwareBinFile, isFirmwareMetaFile } from '../firmwarePage'
+import { isFirmwareBinFile, isFirmwarePackageFile } from '../firmwarePage'
 
 /**
- * 上传固件对话框（M1b / T0.6：表单不再接收 version / target_model）。
+ * 上传固件对话框（单文件包，§6）。
  *
- * 两个文件缺一不可：缺 .bin 无从解析；缺 .meta.json 后端直接 400 FW_META_REQUIRED
- * （§4.2「sidecar 必填」—— 不再有「入库但身份未知」的第三条路）。
- * 前端先做同构校验，是为了让用户在**点上传之前**就知道少了什么，
- * 而不是等一次来回才看到错误码。
+ * 一个文件、一次选择：固件包自带清单，配对由包结构保证，不再有「.bin 与 .meta.json
+ * 缺一不可」这一层。前端只做一处同构校验——**选中的是不是固件包**——好让用户在
+ * 点上传之前就知道拿错了文件，而不是等一次来回才看到 `FW_PKG_REQUIRED`。
  */
 const props = defineProps<{
   modelValue: boolean
@@ -113,12 +85,16 @@ const emit = defineEmits<{
 
 const firmwareStore = useFirmwareStore()
 
-const binUploadRef = ref()
-const metaUploadRef = ref()
-const binFile = ref<File | null>(null)
-const metaFile = ref<File | null>(null)
+/** 裸镜像的针对性文案：这是最常见的「拿错了」，必须直接指向 .ehfw（§6.1 第 1 条）。 */
+const RAW_IMAGE_HINT = '这是裸镜像，需要打包成 .ehfw 后上传'
+const NOT_PACKAGE_HINT = '不是固件包：请选择 .ehfw（或同格式的 .zip）文件'
+
+const uploadRef = ref()
+const packageFile = ref<File | null>(null)
 const uploading = ref(false)
 const uploadError = ref('')
+
+const canUpload = computed(() => Boolean(packageFile.value) && !uploading.value)
 
 const formatFileSize = (bytes: number | undefined | null) => {
   if (!bytes && bytes !== 0) return UNKNOWN
@@ -129,35 +105,37 @@ const formatFileSize = (bytes: number | undefined | null) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-const onBinExceed = () => feedback.warning('只能选择一个镜像文件')
-const onMetaExceed = () => feedback.warning('只能选择一个侧车文件')
-
-const onBinChange = (file: UploadFile) => {
-  if (!file.raw) return
-  if (!isFirmwareBinFile(file.raw)) {
-    feedback.warning('固件镜像必须是 .bin 文件')
+/**
+ * 一次选择的唯一处置点（on-change 与 on-exceed 共用）。
+ *
+ * 先清掉上一次的选择与错误：选错一次不该让「上一个文件仍可上传」残留下来——
+ * 否则用户看到文件名换成新的、上传的却是旧的。
+ */
+const applySelection = (raw?: File | null) => {
+  packageFile.value = null
+  uploadError.value = ''
+  if (!raw) return
+  if (isFirmwarePackageFile(raw)) {
+    packageFile.value = raw
     return
   }
-  binFile.value = file.raw
-  uploadError.value = ''
+  uploadError.value = isFirmwareBinFile(raw) ? RAW_IMAGE_HINT : NOT_PACKAGE_HINT
 }
 
-const onMetaChange = (file: UploadFile) => {
-  if (!file.raw) return
-  if (!isFirmwareMetaFile(file.raw)) {
-    feedback.warning('侧车文件必须是 .meta.json')
-    return
-  }
-  metaFile.value = file.raw
-  uploadError.value = ''
+/**
+ * 重选必须生效（评审 A-8）：`:limit="1"` 下第二次选择**只**触发 on-exceed，
+ * 不会触发 on-change —— 旧实现在这里只弹一句警告，等于「选错一次后无法换文件」。
+ * 先清空 el-upload 的内部列表（让下一次选择重新变成「第一次」），再手动接管这个文件。
+ */
+const onExceed = (files: File[]) => {
+  uploadRef.value?.clearFiles?.()
+  applySelection(files?.[0])
 }
 
 const resetForm = () => {
-  binFile.value = null
-  metaFile.value = null
+  packageFile.value = null
   uploadError.value = ''
-  binUploadRef.value?.clearFiles?.()
-  metaUploadRef.value?.clearFiles?.()
+  uploadRef.value?.clearFiles?.()
 }
 
 const close = () => {
@@ -166,28 +144,16 @@ const close = () => {
 }
 
 const handleUpload = async () => {
-  if (uploading.value) return
-  if (!binFile.value) {
-    uploadError.value = '请选择固件镜像（.bin）'
-    return
-  }
-  if (!metaFile.value) {
-    // 与服务端 FW_META_REQUIRED 同一句话：避免「前端说少文件、后端说另一个词」
-    uploadError.value = FIRMWARE_ERROR_TEXT.FW_META_REQUIRED
-    return
-  }
+  const pkg = packageFile.value
+  if (!pkg || uploading.value) return
 
   uploading.value = true
   uploadError.value = ''
   try {
-    const result = await firmwareStore.upload(buildFirmwareUploadFormData(binFile.value, metaFile.value))
-    // 命中 legacy 行并就地补齐时（completed_legacy=true）走 info：
-    // 这不是「新增了一条」，也不是「重复上传被忽略」，是「补上了身份信息」。
-    // 无论哪种成功都要 emit('uploaded') —— 补齐路径更新的是同一 id，
-    // 页面必须重新拉列表才能看到 psram / 身份状态的变化。
-    const outcome = firmwareUploadOutcome(result)
-    if (outcome.level === 'info') feedback.info(outcome.message)
-    else feedback.success(outcome.message)
+    await firmwareStore.upload(buildFirmwareUploadFormData(pkg))
+    // 只有一种成功：新增一条。旧后端可能返回「补齐身份」的 info 提示，那种语义
+    // 随空库与 API 字段一起删除（§9.2），这里不再分支。
+    feedback.success('上传成功')
     resetForm()
     emit('update:modelValue', false)
     emit('uploaded')
@@ -202,9 +168,6 @@ const handleUpload = async () => {
 </script>
 
 <style scoped>
-.upload-alert {
-  margin-bottom: 16px;
-}
 .upload-error {
   margin-top: 4px;
 }

@@ -13,6 +13,10 @@ import (
 )
 
 // ==================== Firmware delete: disk cleanup ====================
+
+// firmwareDeleteArtifactName 是夹具包的 artifact 名（§4.2：包内恒为 ehome_collector.bin）。
+const firmwareDeleteArtifactName = "ehome_collector.bin"
+
 //
 // Regression cover for the disk leak in DELETE /api/v1/firmwares/:id: the handler
 // derived the file name from fw.URL, which is a signed download ticket
@@ -22,16 +26,16 @@ import (
 
 // firmwareUploadRequest builds an authenticated multipart POST /api/v1/firmwares/upload.
 //
-// 2026-11-18（M0）：上传契约改成「合法 ESP 镜像 + 同名 sidecar 必填、版本取自镜像」，
-// 表单不再接收 version。本用例只关心「上传落盘 → 删除清盘」，因此这里不再使用
-// 调用方给的任意字节（那会被解析器拒成 FW_NOT_IMAGE），而是造一份最小合法镜像；
-// payload 参数保留只为不改调用点的语义（上传内容大小）。
+// 2026-11-19（单文件包）：上传契约改成「一个 .ehfw = 一次构建」，表单不再接收
+// version/sidecar，DB 里的 Filename 也改由清单的 artifact.name 决定。本用例只关心
+// 「上传落盘 → 删除清盘」，所以造一份最小合法包；filename 参数现在只作为上传时的
+// 原始包名（落进 package_name），payload 保留只为不改调用点的语义。
 func firmwareUploadRequest(t *testing.T, version, filename string, payload []byte) *http.Request {
 	t.Helper()
 	_ = payload
 	image := firmwareTestImage(0x000D, 3, version, "firmware-delete-test")
-	sidecar := firmwareTestSidecar(t, image, "esp32c6", 8, false, version, "c6-n8")
-	body, contentType := firmwareUploadMultipart(t, filename, image, sidecar)
+	pkg := firmwareTestPackage(t, firmwareDeleteArtifactName, image, false, "c6-n8")
+	body, contentType := firmwareUploadMultipart(t, filename, pkg)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/firmwares/upload", body)
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", authHeader(t))
@@ -63,25 +67,30 @@ func TestFirmwareDelete_RemovesUploadedBinaryFromDisk(t *testing.T) {
 	r, db, _ := setupOTATest(t)
 
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, firmwareUploadRequest(t, "9.9.9", "delete-me.bin", []byte("FIRMWARE-BYTES")))
+	r.ServeHTTP(w, firmwareUploadRequest(t, "9.9.9", "delete-me.ehfw", []byte("FIRMWARE-BYTES")))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("upload: expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 
 	var fw models.Firmware
-	if err := db.First(&fw, "filename = ?", "delete-me.bin").Error; err != nil {
+	if err := db.First(&fw, "package_name = ?", "delete-me.ehfw").Error; err != nil {
 		t.Fatalf("uploaded firmware row not found: %v", err)
 	}
-	// 落盘名带 elf 前缀（M0：同名重传不得覆盖旧二进制），但仍是 firmwares/ 下的真实文件。
+	// 落盘名带 elf 前缀（同名重传不得覆盖旧二进制），但仍是 firmwares/ 下的真实文件。
 	stored := filepath.Base(fw.StoragePath)
-	if !strings.HasPrefix(stored, "elf") || !strings.HasSuffix(stored, "_delete-me.bin") {
-		t.Fatalf("StoragePath basename = %q, want an elf-prefixed unique name ending in _delete-me.bin", stored)
+	wantStored := "_" + firmwareDeleteArtifactName
+	if !strings.HasPrefix(stored, "elf") || !strings.HasSuffix(stored, wantStored) {
+		t.Fatalf("StoragePath basename = %q, want an elf-prefixed unique name ending in %q", stored, wantStored)
 	}
 	if dir := filepath.Dir(fw.StoragePath); dir != "firmwares" {
 		t.Fatalf("StoragePath dir = %q, want firmwares", dir)
 	}
-	if fw.Filename != "delete-me.bin" {
-		t.Fatalf("Filename = %q, want %q (existing semantics must not change)", fw.Filename, "delete-me.bin")
+	// Filename 现在存清单声明的 artifact.name（§5.2）：落盘物必须是裸 app image。
+	if fw.Filename != firmwareDeleteArtifactName {
+		t.Fatalf("Filename = %q, want the manifest artifact.name %q", fw.Filename, firmwareDeleteArtifactName)
+	}
+	if fw.PackageName != "delete-me.ehfw" {
+		t.Fatalf("PackageName = %q, want the uploaded package name", fw.PackageName)
 	}
 	if _, err := os.Stat(fw.StoragePath); err != nil {
 		t.Fatalf("uploaded binary missing on disk at %s: %v", fw.StoragePath, err)

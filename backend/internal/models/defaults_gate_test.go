@@ -79,7 +79,8 @@ var registeredNonZeroDefaults = map[string]string{"alert.go:AlertRule.Comparator
 	"models.go:OTATask.Status":                                 "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	// 固件身份（方案《固件与平台更新机制》§5.2/§5.4，2026-11-18 M0）
 	"models.go:Firmware.Channel":                              "非数值枚举（stable/beta/internal）。stable 是上传默认渠道；零值空串不是合法取值，且渠道已无第二真源（stable 列已删）",
-	"models.go:Firmware.IdentityState":                        "非数值枚举（verified/legacy/duplicate）。default legacy 是**故意的安全默认**：存量/来源不明的行一律不可选，只有上传与迁移回填显式写成 verified",
+	"models.go:Firmware.IdentityState":                        "非数值枚举（verified/legacy/duplicate）。default verified 是**单文件包之后的唯一可达状态**：空库 + 无 legacy 补齐分支，落库的行只有上传一条路径，显式零值空串非法",
+	"models.go:Firmware.PackageFormatVersion":                 "包格式版本恒为 1（方案《固件单文件包》§5.4）；0 非法（没有 format_version=0 的包），升版时同步改默认值与 firmwarepkg.FormatVersion",
 	"models.go:OTATask.Source":                                "非数值枚举（user/system）。default user 是安全默认：系统回滚必须显式标 system 才能跳过版本方向判定，否则等于给普通建任务留后门",
 	"models.go:PWMConfig.Enabled":                             "bool default:true —— 显式 false 会被回填成 true；调用方须自行补偿（见 handler_periph.go 的 desiredEnabled 兜底）",
 	"models.go:PWMConfig.Resolution":                          "PWM 分辨率默认 14 位（4-20）",

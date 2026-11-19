@@ -91,39 +91,72 @@ func TestGateRejectionMetric_HTTPPath(t *testing.T) {
 	logGateMetricExposition(t)
 }
 
-// TestFirmwareUploadRejectionMetric_HTTPPath：上传拒绝的统一出口覆盖多个 FW_* 码。
-func TestFirmwareUploadRejectionMetric_HTTPPath(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("EHOME_EXTERNAL_HOST", "firmware-metrics-test.local")
-	r, _, _ := setupOTATest(t)
+// TestFirmwareUpload_RejectionMetrics 覆盖 §5.7 最后一条（评审 A-3 的回归锁）：
+//
+// 新增的 FW_PKG_* 码必须真的出现在 ehome_firmware_upload_rejected_total{reason} 里，
+// **而不是**落到 FW_UNCLASSIFIED。后者是「拿不到机器码」的兜底标签：若 firmwarepkg
+// 另造一个 Error 类型，firmwareid.Code(err) 会返回空串，所有包格式拒绝都会挤进
+// 这一个无意义的维度，排障断链。
+func TestFirmwareUpload_RejectionMetrics(t *testing.T) {
+	unclassified := map[string]string{"reason": "FW_UNCLASSIFIED"}
+	unclassifiedBefore := metricCounterValue(t, "ehome_firmware_upload_rejected_total", unclassified)
 
-	image := firmwareTestImage(0x0009, 4, "2.8.0", "metrics-upload")
+	image := firmwareTestImage(0x000D, 3, "2.8.0", "metrics-upload")
+	wrongDigest := firmwareTestManifest(t, "ehome_collector.bin", image, false, "c6-n8")
+	wrongDigest["artifact"].(map[string]interface{})["sha256"] = strings.Repeat("ab", 32)
 
-	// 1) 合法镜像但缺 sidecar → FW_META_REQUIRED
-	missingSidecar := map[string]string{"reason": "FW_META_REQUIRED"}
-	before := metricCounterValue(t, "ehome_firmware_upload_rejected_total", missingSidecar)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, firmwareUploadWithSidecar(t, "metric-fw.bin", image, nil))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	cases := []struct {
+		name    string
+		file    string
+		reason  string
+		payload []byte
+	}{
+		{
+			name:   "bare image is not a package",
+			file:   "metric-fw.bin",
+			reason: "FW_PKG_REQUIRED",
+			// 合法 ESP 镜像但没打包：最常犯的错，必须有专属机器码。
+			payload: image,
+		},
+		{
+			name:    "manifest digest differs",
+			file:    "metric-fw.ehfw",
+			reason:  "FW_PKG_DIGEST_MISMATCH",
+			payload: firmwareTestPackageFromManifest(t, wrongDigest, "ehome_collector.bin", image),
+		},
+		{
+			name:   "neither package nor image",
+			file:   "metric-junk.bin",
+			reason: "FW_NOT_IMAGE",
+			// 0x100 字节且首字节既不是 PK 也不是 0xE9 → 内容嗅探给出 FW_NOT_IMAGE。
+			payload: make([]byte, 0x100),
+		},
 	}
-	if got := metricCounterValue(t, "ehome_firmware_upload_rejected_total", missingSidecar) - before; got != 1 {
-		t.Errorf("ehome_firmware_upload_rejected_total{reason=\"FW_META_REQUIRED\"} increment = %v, want 1", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			t.Setenv("EHOME_EXTERNAL_HOST", "firmware-metrics-test.local")
+			r, _, _ := setupOTATest(t)
+
+			labels := map[string]string{"reason": tc.reason}
+			before := metricCounterValue(t, "ehome_firmware_upload_rejected_total", labels)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, firmwareUploadWithPackage(t, tc.file, tc.payload))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			if _, code := decodeEnvelopeErrorCode(t, w.Body.String()); code != tc.reason {
+				t.Fatalf("error_code = %q, want %q (%s)", code, tc.reason, truncateBody(w.Body.String()))
+			}
+			if got := metricCounterValue(t, "ehome_firmware_upload_rejected_total", labels) - before; got != 1 {
+				t.Errorf("ehome_firmware_upload_rejected_total{reason=%q} increment = %v, want 1", tc.reason, got)
+			}
+		})
 	}
 
-	// 2) 非镜像 → FW_NOT_IMAGE（证明统一拒绝出口不止覆盖 sidecar 分支）
-	notImage := map[string]string{"reason": "FW_NOT_IMAGE"}
-	before = metricCounterValue(t, "ehome_firmware_upload_rejected_total", notImage)
-	w = httptest.NewRecorder()
-	// 0x100 字节且 magic 不是 0xE9 → FW_NOT_IMAGE（短于 0xD0 会先报 FW_TRUNCATED）。
-	notAnImage := make([]byte, 0x100)
-	r.ServeHTTP(w, firmwareUploadWithSidecar(t, "not-an-image.bin", notAnImage, nil))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	// 以上三次拒绝都必须带得出机器码：兜底维度一次都不许涨。
+	if got := metricCounterValue(t, "ehome_firmware_upload_rejected_total", unclassified) - unclassifiedBefore; got != 0 {
+		t.Errorf("ehome_firmware_upload_rejected_total{reason=\"FW_UNCLASSIFIED\"} increment = %v, want 0 (a typed *firmwareid.Error must carry a code)", got)
 	}
-	if got := metricCounterValue(t, "ehome_firmware_upload_rejected_total", notImage) - before; got != 1 {
-		t.Errorf("ehome_firmware_upload_rejected_total{reason=\"FW_NOT_IMAGE\"} increment = %v, want 1", got)
-	}
-
 	logGateMetricExposition(t)
 }

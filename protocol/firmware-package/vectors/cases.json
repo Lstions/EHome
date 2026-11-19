@@ -1,0 +1,45 @@
+{
+  "generator": "protocol/firmware-package/vectors/gen_vectors.py",
+  "format": "ehome-firmware",
+  "format_version": 1,
+  "note": "open_error = firmwarepkg.Open 期望的错误码（空串 = 必须成功）；handler_error = 摘要比对那一步（§5.2 步骤 5）期望的错误码。",
+  "cases": [
+    {
+      "file": "ok_c6-n8.ehfw",
+      "open_error": "",
+      "handler_error": "",
+      "expected_file": "ok_c6-n8.expected.json",
+      "note": "两条目正例；ExtractArtifactTo 的 (size, sha256) 与清单一致"
+    },
+    {
+      "file": "bad_digest.ehfw",
+      "open_error": "",
+      "handler_error": "FW_PKG_DIGEST_MISMATCH",
+      "note": "结构合法但 artifact.sha256 与实测不符 → handler 第 5 步拒绝（Open 只解出不比较，见评审 B-2）"
+    },
+    {
+      "file": "bad_entry_count.ehfw",
+      "open_error": "FW_PKG_INVALID",
+      "handler_error": "",
+      "note": "3 个条目（多一个 extra.txt）→ INV-1「恰好两条」"
+    },
+    {
+      "file": "bad_entry_name.ehfw",
+      "open_error": "FW_PKG_INVALID",
+      "handler_error": "",
+      "note": "条目名 ../evil.bin → INV-4 ^[a-z0-9][a-z0-9._-]{0,63}$（无目录、全小写）"
+    },
+    {
+      "file": "bad_format_version.ehfw",
+      "open_error": "FW_PKG_UNSUPPORTED",
+      "handler_error": "",
+      "note": "format_version 99 > 1 → FW_PKG_UNSUPPORTED（§4.6 升版规则）"
+    },
+    {
+      "file": "bad_compression_ratio.ehfw",
+      "open_error": "FW_PKG_TOO_LARGE",
+      "handler_error": "",
+      "note": "200 KiB 全零 → Deflate 约 200 B，压缩比 > 100:1 → INV-5（解压前拒绝）"
+    }
+  ]
+}

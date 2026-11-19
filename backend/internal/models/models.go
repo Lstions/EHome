@@ -430,16 +430,16 @@ const (
 // Firmware 固件版本
 //
 // 身份列是方案《固件与平台更新机制》§5.2 的落地：chip / flash_mb / version /
-// elf_sha256 来自**镜像自证**，psram 来自**构建期 sidecar**，两处都不接受人手填写
-// （§3.4 判断 5）。identity_state 把「不知道」放进数据状态而不是请求路径：
-// 只有 verified 的行才可选。
+// elf_sha256 来自**镜像自证**，psram 来自**包内清单的 identity.psram**（单文件包
+// 之前是构建期 sidecar），两处都不接受人手填写（§3.4 判断 5）。identity_state 把
+// 「不知道」放进数据状态而不是请求路径：只有 verified 的行才可选。
 //
 // stable / target_model 两列已在本方案的启动迁移里 DROP（v1.4 §2.4 R1：不留双真源）；
 // 渠道真源是 channel，展示真源是 model_key + build_profile。
 type Firmware struct {
 	ID             uint   `gorm:"primaryKey" json:"id"`
 	Version        string `gorm:"size:32;not null" json:"version"`
-	Checksum       string `gorm:"size:64;not null" json:"checksum"` // 上传内容的 SHA256 hex
+	Checksum       string `gorm:"size:64;not null" json:"checksum"` // 落盘 artifact 的 SHA256 hex（设备下载的就是它）
 	SizeBytes      uint64 `json:"size_bytes"`
 	URL            string `gorm:"size:256;not null" json:"url"`
 	Filename       string `gorm:"size:256" json:"filename,omitempty"`
@@ -457,13 +457,22 @@ type Firmware struct {
 	BuiltAtRaw string `gorm:"column:built_at_raw;size:32;default:''" json:"built_at_raw"`
 	IDFVer     string `gorm:"column:idf_ver;size:32;default:''" json:"idf_ver"`
 
-	// ── 构建期 sidecar ──
+	// ── 包内清单（方案《固件单文件包》§5.4）──
+	// psram 是清单里唯一「镜像说不了」的一位；profile 用于与镜像交叉核对（INV-3）。
 	Psram        string `gorm:"column:psram;size:8;default:''" json:"psram"` // 只有 yes / no；"" 只出现在 legacy 行
 	BuildProfile string `gorm:"column:build_profile;size:32;default:''" json:"build_profile"`
 
-	Channel       string         `gorm:"column:channel;size:16;default:stable" json:"channel"` // stable / beta / internal
-	WithdrawnAt   *time.Time     `gorm:"column:withdrawn_at" json:"withdrawn_at"`              // 撤回状态由该列表达
-	IdentityState string         `gorm:"column:identity_state;size:16;default:legacy" json:"identity_state"`
+	// ── 固件包来源（§5.4）──
+	// package_name 只进排障（谁传的哪一份）；格式版本恒为 1，将来升版时用于区分。
+	PackageName          string `gorm:"column:package_name;size:128;default:''" json:"package_name,omitempty"`
+	PackageFormatVersion int16  `gorm:"column:package_format_version;default:1" json:"package_format_version"`
+
+	Channel     string     `gorm:"column:channel;size:16;default:stable" json:"channel"` // stable / beta / internal
+	WithdrawnAt *time.Time `gorm:"column:withdrawn_at" json:"withdrawn_at"`              // 撤回状态由该列表达
+	// IdentityState 的默认值必须是 verified：空库 + 无 legacy 补齐分支之后，legacy 是
+	// 不可达状态；若保留 default:legacy，任何漏写该字段的 INSERT（种子、夹具、导入）
+	// 都会造出「不可选」的行（§5.4 / RK-7）。
+	IdentityState string         `gorm:"column:identity_state;size:16;default:verified" json:"identity_state"`
 	CreatedAt     time.Time      `json:"created_at"`
 	DeletedAt     gorm.DeletedAt `json:"-"`
 }

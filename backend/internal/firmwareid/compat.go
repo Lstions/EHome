@@ -194,16 +194,19 @@ func CheckCompat(req CompatRequest) CompatResult {
 	// 2. 固件身份未验证：legacy/duplicate 不可选（方案 §2.4 R3）。
 	//
 	// 防御：identity_state=verified 但 psram 不是 yes/no 的「半可信行」也按本条拒绝。
-	// 迁移曾产生过这种行（回填拿不到 psram 位，而 verified 只应来自 sidecar），
+	// 迁移曾产生过这种行（回填拿不到 psram 位，而 verified 只应来自构建期元数据），
 	// 放过去会让第 6/7 条在 psram="" 时静默不判，等于给误刷留一条通道。
+	//
+	// 出口是**重传一个固件包**（.ehfw）：单文件包之后 psram 随包内清单一起进来，
+	// 不再有「补 .meta.json 侧车后重传」这条路（方案 §5.3 废弃 FW_META_*）。
 	if req.Firmware.IdentityState != IdentityVerified {
 		return reject(BranchFirmwareUnverified, fmt.Sprintf(
-			"firmware identity is not verified (identity_state=%q); re-upload it with a .meta.json sidecar",
+			"firmware identity is not verified (identity_state=%q); re-upload it as a firmware package (.ehfw)",
 			req.Firmware.IdentityState))
 	}
 	if !validPSRAM(fwPSRAM) {
 		return reject(BranchFirmwareUnverified, fmt.Sprintf(
-			"firmware is marked verified but psram=%q; re-upload it with a .meta.json sidecar",
+			"firmware is marked verified but psram=%q; re-upload it as a firmware package (.ehfw)",
 			req.Firmware.Psram))
 	}
 

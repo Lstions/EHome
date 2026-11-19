@@ -92,9 +92,162 @@ PROJECT_DIR="$(to_native_path "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
 BUILD_ROOT="${BUILD_ROOT:-$PROJECT_DIR/build}"
 BUILD_ROOT="$(to_native_path "$BUILD_ROOT")"
 
+# 仓库根：VERSION 文件与 git tag 都在这里找。
+REPO_ROOT="$(to_native_path "$(cd "$PROJECT_DIR/.." && pwd)")"
+
+# 发布产物根（方案 §7.2）：dist/<version>/<profile>/，dist/ 已 gitignore。
+DIST_ROOT="${DIST_ROOT:-$PROJECT_DIR/dist}"
+DIST_ROOT="$(to_native_path "$DIST_ROOT")"
+
+# ---------------------------------------------------------------------------
+# 版本：单一真源（方案 §7.3）
+#
+#   1. FW_VERSION 环境变量                                <- CI / 一次性发版
+#   2. git describe --tags --exact-match --match 'fw-v*'  <- 打 tag 发布
+#   3. VERSION 文件（仓库根）                              <- 日常
+#   4. 都没有 -> 构建失败（不猜，也不退回 CMakeLists 里的常量）
+#
+# 版本串必须严格 X.Y.Z：IDF 会把 PROJECT_VER 写进镜像，而
+# firmwareid.CompareVersion 只比前 3 段数字 —— "2.9.0-dirty.abc" 与 "2.9.0"
+# 会被判**相等**，OTA 闸门于是当成「不是升级」。commit/dirty 只进包内清单。
+# ---------------------------------------------------------------------------
+# 环境变量先存下来再清空 FW_VERSION：下面解析出的才叫「已解析的版本」，
+# 否则 FW_VERSION="" 会把调用方传进来的值直接抹掉（静默退回 VERSION 文件）。
+FW_VERSION_ENV="${FW_VERSION:-}"
+FW_VERSION=""
+FW_VERSION_SOURCE=""
+
+repo_dirty() {
+    if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        printf 'unknown'
+        return 0
+    fi
+    # --untracked-files=no：未跟踪文件（dist/、构建日志）不算源码被改。
+    if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        printf 'dirty'
+    else
+        printf 'clean'
+    fi
+}
+
+resolve_fw_version() {
+    local value="" source="" tag=""
+    if [[ -n "$FW_VERSION_ENV" ]]; then
+        value="$FW_VERSION_ENV"
+        source="env FW_VERSION"
+    elif tag="$(git -C "$REPO_ROOT" describe --tags --exact-match --match 'fw-v*' 2>/dev/null)" \
+            && [[ -n "$tag" ]]; then
+        value="${tag#fw-v}"
+        source="git $tag"
+    elif [[ -f "$REPO_ROOT/VERSION" ]]; then
+        value="$(head -n1 "$REPO_ROOT/VERSION" | tr -d '[:space:]')"
+        source="VERSION file"
+    else
+        echo "ERROR: cannot determine the firmware version. Give one of:" >&2
+        echo "         1) FW_VERSION=x.y.z $0 <profile>" >&2
+        echo "         2) git tag fw-v<x.y.z> on this commit" >&2
+        echo "         3) $REPO_ROOT/VERSION containing x.y.z" >&2
+        return 1
+    fi
+    if ! printf '%s' "$value" | grep -qE "^[0-9]+[.][0-9]+[.][0-9]+$"; then
+        echo "ERROR: firmware version '$value' (from $source) is not X.Y.Z." >&2
+        echo "       A suffix such as -dirty or +<sha> would make CompareVersion" >&2
+        echo "       treat two different builds as the same version (方案 §7.3)." >&2
+        return 1
+    fi
+    FW_VERSION="$value"
+    FW_VERSION_SOURCE="$source"
+}
+
+# 打印解析结果。$1=1 时带构建日志前缀，否则裸版本（供 `make fw-version`）。
+print_fw_version() {
+    if [[ "${1:-}" == "1" ]]; then
+        printf '==> version %s (source: %s, %s)\n' "$FW_VERSION" "$FW_VERSION_SOURCE" "$(repo_dirty)"
+    else
+        printf '%s (source: %s, %s)\n' "$FW_VERSION" "$FW_VERSION_SOURCE" "$(repo_dirty)"
+    fi
+}
+
+# 复制一个发布产物到 dist/<version>/<profile>/；缺文件直接失败
+# （一个「看起来完整」的 dist 目录比报错更危险）。
+copy_dist_file() {
+    local src="$1" dst="$2"
+    if [[ ! -f "$src" ]]; then
+        echo "ERROR: missing build artifact: $src" >&2
+        return 1
+    fi
+    cp -f "$src" "$dst"
+}
+
+# SHA256SUMS：必须 sort（AC-P8），但排的是**路径列**（等价 `sort -k2`），不是整行。
+# 按整行排会以 sha256 开头排 —— 那么「任何一个文件变了」都会重排整个文件，
+# 两次构建的 diff 就失去意义；按路径排则一处变更只动一行，且仍与构建顺序无关。
+# 路径相对 dist/<version>/，因此 `cd dist/<version> && sha256sum -c SHA256SUMS` 直接可用。
+write_sha256sums() {
+    local version="$1" dir sums tmp file
+    dir="$DIST_ROOT/$version"
+    sums="$dir/SHA256SUMS"
+    tmp="$sums.tmp"
+    : > "$tmp"
+    while IFS= read -r file; do
+        printf '%s  %s\n' "$(sha256sum "$file" | cut -d' ' -f1)" "${file#"$dir"/}" >> "$tmp"
+    done < <(find "$dir" -type f ! -name 'SHA256SUMS*' | LC_ALL=C sort)
+    mv -f "$tmp" "$sums"
+    echo "==> SHA256SUMS: $sums ($(wc -l < "$sums") lines)"
+}
+
+# dist/<version>/ 完整性门禁（方案 §7.6）：6 个档位缺一却当成全量发布。
+# 判据是「每个档位的 5 个文件都在 SUM 里 + sha256sum -c 通过 + SUM 已排序」。
+check_dist_complete() {
+    local version="$1" dir sums profile line missing=""
+    dir="$DIST_ROOT/$version"
+    sums="$dir/SHA256SUMS"
+    if [[ ! -f "$sums" ]]; then
+        echo "ERROR: $sums is missing" >&2
+        return 1
+    fi
+    # 排序判据是**路径列**（awk 取 $2 后再 sort -c）：见 write_sha256sums 的说明。
+    if ! awk '{print $2}' "$sums" | LC_ALL=C sort -c 2>/dev/null; then
+        echo "ERROR: $sums is not sorted by path (column 2)" >&2
+        return 1
+    fi
+    for profile in c6-n8 c6-n16 s3-n8 s3-n16 s3p-n8 s3p-n16; do
+        for line in ehome_collector.bin bootloader.bin partition-table.bin flash_args \
+                    "ehome_collector-$version-$profile.ehfw"; do
+            if ! grep -qE "  ${profile}/${line}$" "$sums"; then
+                missing="$missing $profile/$line"
+            fi
+        done
+    done
+    if [[ -n "$missing" ]]; then
+        echo "ERROR: dist/$version is incomplete; missing:$missing" >&2
+        echo "       (a full release needs 6 profiles x 5 files)" >&2
+        return 1
+    fi
+    if ! ( cd "$dir" && sha256sum -c SHA256SUMS >/dev/null ); then
+        echo "ERROR: sha256sum -c failed in $dir" >&2
+        return 1
+    fi
+    echo "==> dist/$version complete: 6/6 profiles, $(wc -l < "$sums") files verified"
+}
+
 usage() {
     cat <<'EOF'
 Usage: ./build_firmware.sh <profile|all>
+       ./build_firmware.sh --version        print the resolved version and exit
+
+Version (single source of truth, 方案 §7.3):
+  FW_VERSION > exact git tag "fw-v*" > VERSION file (repo root) > fail.
+  Must be plain X.Y.Z: a suffix like -dirty would make CompareVersion treat
+  two different builds as the same version.  commit/dirty go into the
+  package manifest only, never into the version string.
+
+Output:
+  build/<profile>/                        intermediate build tree
+  dist/<version>/<profile>/*.ehfw         the package to upload (one file)
+  dist/<version>/<profile>/ehome_collector.bin, bootloader.bin,
+      partition-table.bin, flash_args    for factory flashing (not packed)
+  dist/<version>/SHA256SUMS               sorted; `sha256sum -c` verifies
 
 Profiles:
   c6-n8    ESP32-C6 with 8MB flash
@@ -391,12 +544,16 @@ build_profile() {
     fi
 
     echo "==> Building $profile (target=$target, flash=$flash_profile)"
+    # -D FW_VERSION 是版本**唯一**的入口（方案 §7.3）：CMakeLists 只在 project()
+    # 之前读它，写晚了镜像里仍是旧版本且无声。缺省 0.0.0-dev 只保证
+    # `idf.py build` 能直接编，pack_firmware.py 会拒绝这种产物。
     idf_py \
         --project-dir "$PROJECT_DIR" \
         -B "$build_dir" \
         -D "IDF_TARGET=$target" \
         -D "SDKCONFIG=$sdkconfig" \
         -D "SDKCONFIG_DEFAULTS=$defaults" \
+        -D "FW_VERSION=$FW_VERSION" \
         build
     echo "==> Firmware: $build_dir/ehome_collector.bin"
 
@@ -481,40 +638,64 @@ build_profile() {
         fi
     fi
 
-    # ---- 构建期 sidecar：<bin> 同名 .meta.json（方案 §4.2 / WBS T0.2）----
+    # ---- 打包 + 落 dist（方案 §7.4 / §7.5 / §7.2）----
     #
-    # 后端上传**必须**带 sidecar（缺 -> 400 FW_META_REQUIRED），而"这块产物是
-    # 不是 PSRAM 型号"镜像头里没有（方案判断 1：spi_size/chip_id 在头里，SPIRAM 不在）
-    # ⇒ 只能由构建现场记录。此前只有 `ehomectl firmware meta-gen` 能补，等于每个
-    # 版本手工补一次；忘了的表现是"上传被 400 拒绝"，不是"固件坏了"，很容易漏。
+    # 为什么放在**所有门禁之后**：被 IRAM/内存/落地核查拒掉的产物不该变成
+    # 一个「看起来可上传」的包。与旧 sidecar 同一理由（方案 §7.4 末段）。
     #
-    # 为什么放在**所有门禁之后**：被 IRAM/内存/落地核查拒掉的产物不该留下 sidecar
-    # —— 否则它在目录里看起来就是"一份可上传的固件"。
-    # 失败必须让构建失败：半份 sidecar 比没有更糟（上传时才 400，且更难查）。
-    local _emit="$PROJECT_DIR/scripts/emit_meta.py"
-    if [[ ! -f "$_emit" ]]; then
-        echo "ERROR: $profile: sidecar emitter not found: $_emit" >&2
+    # 顺序：打包 → 立即 --verify（与服务端同规则的自检）→ 把包与裸产物一起
+    # 复制到 dist/<version>/<profile>/ → 重算 SHA256SUMS（必须 sort，AC-P8）。
+    # 自检失败要**删包**：半个/坏包比没有更糟（上传时才 400，且更难查）。
+    local _pack="$PROJECT_DIR/tools/pack_firmware.py"
+    local _dist_dir="$DIST_ROOT/$FW_VERSION/$profile"
+    local _bin="$build_dir/ehome_collector.bin"
+    local _pkg="$_dist_dir/ehome_collector-$FW_VERSION-$profile.ehfw"
+    if [[ ! -f "$_pack" ]]; then
+        echo "ERROR: $profile: packer not found: $_pack" >&2
         return 1
     fi
-    echo "==> Emitting firmware sidecar ($profile)"
-    if ! "${IDF_PY_CMD[0]}" "$_emit" \
-            --bin "$build_dir/ehome_collector.bin" \
+    mkdir -p "$_dist_dir"
+    echo "==> Packing $(basename "$_pkg")"
+    if ! "${IDF_PY_CMD[0]}" "$_pack" \
+            --bin "$_bin" \
             --sdkconfig "$sdkconfig" \
             --profile "$profile" \
-            --project-cmakelists "$PROJECT_DIR/CMakeLists.txt"; then
-        echo "ERROR: $profile: sidecar emission failed (see above)" >&2
+            --version "$FW_VERSION" \
+            --out "$_pkg"; then
+        echo "ERROR: $profile: packing failed (see above)" >&2
         return 1
     fi
-    local _sidecar="$build_dir/ehome_collector.meta.json"
-    if [[ ! -f "$_sidecar" ]]; then
-        echo "ERROR: $profile: emitter reported success but $_sidecar is missing" >&2
+    echo "==> Verifying package (same rules as server)"
+    if ! "${IDF_PY_CMD[0]}" "$_pack" --verify "$_pkg"; then
+        rm -f "$_pkg"
+        echo "ERROR: $profile: package self-check failed; the package was removed" >&2
         return 1
     fi
-    echo "==> Sidecar: $_sidecar"
+
+    # 产线烧录用裸产物：不进包（方案 §3.7 / §7.2）。缺一个就失败 ——
+    # 少一个文件的 dist 目录会被当成「可以发版」。
+    copy_dist_file "$_bin" "$_dist_dir/ehome_collector.bin" || return 1
+    copy_dist_file "$build_dir/bootloader/bootloader.bin" \
+        "$_dist_dir/bootloader.bin" || return 1
+    copy_dist_file "$build_dir/partition_table/partition-table.bin" \
+        "$_dist_dir/partition-table.bin" || return 1
+    copy_dist_file "$build_dir/flash_args" "$_dist_dir/flash_args" || return 1
+    write_sha256sums "$FW_VERSION"
 }
 
 main() {
     local profile="${1:-}"
+
+    # --version：只解析版本、不碰 IDF（`make fw-version` 与 CI 要能单独问）。
+    if [[ "$profile" == "--version" || "$profile" == "-V" ]]; then
+        if [[ $# -gt 1 ]]; then
+            echo "ERROR: --version takes no further arguments" >&2
+            return 2
+        fi
+        resolve_fw_version || return $?
+        print_fw_version
+        return 0
+    fi
 
     # 拒绝多余参数（2026-10-06，D-26）。
     # 原先 main 只读 $1 并**静默忽略**其余参数 —— 于是
@@ -534,14 +715,19 @@ main() {
         local _idf_ver
         _idf_ver="$(idf_version_string)"
         echo "==> ESP-IDF: ${_idf_ver:-unknown}  (IDF_PATH=$IDF_PATH, build root=$BUILD_ROOT)"
+        # 版本是构建的**输入**：解析失败就别开始编（30 分钟后才发现不值得）。
+        resolve_fw_version || return $?
+        print_fw_version 1
     fi
 
     case "$profile" in
         all)
             local item
             for item in c6-n8 c6-n16 s3-n8 s3-n16 s3p-n8 s3p-n16; do
-                build_profile "$item"
+                build_profile "$item" || return $?
             done
+            # 6 档位缺一却当成全量发布 = 少发一个型号（方案 §7.6）。
+            check_dist_complete "$FW_VERSION" || return $?
             ;;
         c6-n8|c6-n16|s3-n8|s3-n16|s3p-n8|s3p-n16)
             build_profile "$profile"
