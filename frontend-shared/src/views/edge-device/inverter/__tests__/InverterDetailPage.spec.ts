@@ -62,6 +62,42 @@ vi.mock('@/composables/useDeviceData', async () => {
   }
 })
 
+/**
+ * 2026-11-19 报障链路（「BMS 在放电、INV 流向图静止」）的桩：
+ * 只替换**取数**（同节点兄弟设备列表 / 最新值快照）与实时层，
+ * 判定仍走真实的 useSiblingBattery + powerFlow，页面行为才被真正测到。
+ */
+const siblingMock = vi.hoisted(() => ({
+  getList: vi.fn(),
+  getLatestValues: vi.fn(),
+  latestData: null as any,
+  fieldAt: null as any,
+}))
+
+vi.mock('@/api/edgeDevice', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, any>>()
+  return {
+    ...actual,
+    edgeDeviceApi: {
+      ...actual.edgeDeviceApi,
+      getList: siblingMock.getList,
+      getLatestValues: siblingMock.getLatestValues,
+    },
+  }
+})
+
+vi.mock('@/composables/useRealtimeData', async () => {
+  const { ref } = await import('vue')
+  siblingMock.latestData = ref(null)
+  siblingMock.fieldAt = ref({})
+  return {
+    useRealtimeData: () => ({
+      latestData: siblingMock.latestData,
+      fieldAt: siblingMock.fieldAt,
+    }),
+  }
+})
+
 const DeviceHeaderStub = defineComponent({
   name: 'DeviceHeader',
   props: {
@@ -114,6 +150,11 @@ describe('InverterDetailPage', () => {
     hoisted.state.syncingHA.value = false
     hoisted.state.wsConnected.value = true
     hoisted.state.latestData.value = null
+    // 默认：同节点没有 BMS（其它用例的语境），只有专门用例才提供 BMS 设备
+    siblingMock.getList.mockReset()
+    siblingMock.getLatestValues.mockReset()
+    siblingMock.getList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+    siblingMock.getLatestValues.mockResolvedValue([])
   })
 
   it('renders a skeleton while loading without a device', () => {
@@ -231,6 +272,47 @@ describe('InverterDetailPage', () => {
         c.note + ' -> ' + JSON.stringify(c.data),
       ).toBe(c.direction)
     }
+  })
+
+  /**
+   * 2026-11-19 用户报障：「BMS 都在放电了，INV 流向图还显示电池静止，不对！」
+   *
+   * 现场数据（同一分钟级窗口，生产库）：逆变器 53.1V/89%、充电 0A、放电 0A；
+   * 同节点 BMS current=-1.96A。改前卡片与流向图都写「静止」。
+   * 现在逆变器两路都为 0 时回退到同节点 BMS 判向，并标注「· BMS」。
+   */
+  it('falls back to the same-node BMS current when the inverter battery current reads 0', async () => {
+    hoisted.state.device.value = {
+      id: 42, name: '逆变器', device_type: 'techfine_inverter', status: 'online', node_id: 'NODE-1',
+    }
+    hoisted.state.latestData.value = {
+      pv1_power: 193, output_active_power: 187,
+      battery_voltage: 53.1, battery_capacity: 89,
+      battery_charge_current: 0, battery_discharge_current: 0,
+      grid_voltage: 226.5, work_mode: 3,
+    }
+    siblingMock.getList.mockResolvedValue({
+      items: [{ id: 7, device_type: 'jiabaida_bms', node_id: 'NODE-1' }],
+      total: 1, page: 1, page_size: 20,
+    })
+    siblingMock.getLatestValues.mockResolvedValue([
+      { sensor_name: 'current', value: -1.96, unit: 'A', timestamp: new Date().toISOString() },
+    ])
+
+    const wrapper = mount(InverterDetailPage, { global: globalOptions })
+    await flushPromises()
+
+    expect(siblingMock.getList).toHaveBeenCalledWith(expect.objectContaining({ node_id: 'NODE-1' }))
+    expect(siblingMock.getLatestValues).toHaveBeenCalledWith(7)
+
+    const flow = wrapper.findComponent(InverterPowerFlow)
+    expect(flow.props('batteryBmsCurrent')).toBeCloseTo(-1.96, 2)
+    expect(flow.find('.pf-node.battery .pf-label').text()).toBe('放电 2.0A · BMS')
+
+    const cards = wrapper.findAllComponents(MetricStatCard)
+    expect(cards[1].props('direction'), '卡片与流向图必须同源').toBe('discharge')
+    expect(cards[1].props('subText')).toBe('89% · 放 2.0A·BMS')
+    wrapper.unmount()
   })
 
   /**

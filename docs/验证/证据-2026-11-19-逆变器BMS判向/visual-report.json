@@ -1,0 +1,29 @@
+{
+  "report": [
+    {
+      "view": "desktop",
+      "label": "放电 2.0A · BMS",
+      "marker": "url(#pf-arrow-discharge)",
+      "pathStart": "M530,200 C44",
+      "circleCls": "discharging",
+      "legend": "实测工作中 空闲实线 = 能量流；灰色虚线 = 已接入未使用 电网已接入，当前未使用 电池电流取自 BMS（逆变器电池电流寄存器读 0A）"
+    },
+    {
+      "view": "mobile",
+      "label": "放电 2.0A · BMS",
+      "arrows": [
+        "↓",
+        "↑"
+      ],
+      "arrowCls": "pfm-arrow is-discharging"
+    },
+    {
+      "view": "desktop-idle-control",
+      "label": "静止",
+      "marker": null
+    }
+  ],
+  "errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

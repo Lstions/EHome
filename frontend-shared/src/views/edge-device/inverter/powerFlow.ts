@@ -163,26 +163,73 @@ export function gridFlow(
   }
 }
 
+/**
+ * BMS 电流判向死区（A）。
+ *
+ * JBD BMS 的电流分辨率是 0.01A，静置时会在 0 附近抖动；不设死区的话箭头会随噪声
+ * 每两秒翻一次向。0.1A 在 48V 系统上约 5W，低于「逆变器自身待机 + 采样噪声」的量级。
+ */
+export const BMS_CURRENT_DEADBAND_A = 0.1
+
+/** 归一化**有符号**电流：非有限、越界 ⇒ null（null = 没有可用读数，与「正好 0A」区分开）。 */
+function normalizeSignedCurrent(value: number | null | undefined): number | null {
+  const n = Number(value)
+  if (!Number.isFinite(n) || Math.abs(n) > MAX_CURRENT_A) return null
+  return n
+}
+
+/** 电池电流的读数来源：逆变器 HBAT 两路寄存器 / 同节点 BMS / 两源互相矛盾 */
+export type BatteryFlowSource = 'inverter' | 'bms' | 'mixed'
+
 export interface BatteryFlow extends BranchFlow {
   /** 电池节点状态标签：放电 6.0A / 充电 5.5A / 静止 / 两路同时非零时不判定 */
   label: string
   /** 节点/连线配色类（'' = 静止） */
   cls: '' | 'charging' | 'discharging'
+  /** 判定所依据的电流大小（A）；静止 / 读数矛盾时为 0 */
+  amps: number
+  /** 电流读数来源（决定卡片与图上要不要标注「BMS」） */
+  source: BatteryFlowSource
 }
 
 /**
- * 电池：HBAT 的充电电流与放电电流是**两个独立寄存器**。
- *   · 只有充电 > 0  ⇒ 逆变器 → 电池（out）
- *   · 只有放电 > 0  ⇒ 电池 → 逆变器（in）
- *   · 两者都 0      ⇒ 无流动（none）
- *   · 两者同时 > 0  ⇒ 读数自相矛盾，**不猜方向**（none），标签两值并列摆出来
+ * 电池方向 —— **逆变器两路电流 + 同节点 BMS 有符号电流**三路输入。
+ *
+ * 2026-11-19 用户报障（真机截图）：
+ *   「BMS 都在放电了，INV 流向图还显示电池静止，不对！」
+ * 同一分钟级窗口（16:03–16:09）的生产数据：
+ *   · 逆变器 HBAT：battery_voltage=53.1V、battery_capacity=89%、充电 0A、放电 0A；
+ *   · 同节点 BMS：total_voltage=53.15V、rsoc=99%、current=-1.96A（负=放电）。
+ * 即：**逆变器自己没测到（或没上报）放电电流**，而电池确实在放电 2A 左右。
+ *
+ * 为什么逆变器的 0A 不能直接当作「静止」：
+ *   泰琪丰 HBAT 的充/放电电流是两个独立寄存器、整安培分辨率，实测会连续数分钟
+ *   读 0（同一时段 BMS 稳定在 -1.88 ~ -2.17A）。这台机器的 0A 首先是**能力边界**
+ *   （逆变器没有 BMS 通讯，89% 是它自己的电压估算），把「没测到」说成「静止」是
+ *   一次错误断言 —— 这正是用户看到的矛盾。
+ *
+ * 判定顺序（越靠前越权威，且**任何时候都不猜方向**）：
+ *   1. 逆变器两路都 > 0              ⇒ 自相矛盾，不判方向（原有规则）；
+ *   2. 逆变器报的方向与 BMS 相反     ⇒ 两源冲突，不判方向（新增，两个数都摆出来）；
+ *   3. 逆变器任一路 > 0              ⇒ 用逆变器自己的读数（它的直接测量）；
+ *   4. 逆变器两路都为 0、BMS 有净流动 ⇒ **用 BMS 判向**（本次修的缺陷）；
+ *   5. 都没有                        ⇒ 静止。
+ *
+ * BMS 电流约定：**正 = 充电，负 = 放电**（JBD 0x03 帧 int16/100，与 BMS 页
+ * 「放电中（电流为负）」同口径）。
  */
 export function batteryFlow(
   chargeCurrent: number | null | undefined,
   dischargeCurrent: number | null | undefined,
+  bmsCurrent?: number | null,
 ): BatteryFlow {
   const charge = normalizeCurrent(chargeCurrent)
   const discharge = normalizeCurrent(dischargeCurrent)
+  const bms = normalizeSignedCurrent(bmsCurrent)
+  // 死区内的 BMS 读数按「没有净流动」处理；它仍然算「有读数」（可与逆变器对账）
+  const bmsCharging = bms !== null && bms >= BMS_CURRENT_DEADBAND_A
+  const bmsDischarging = bms !== null && bms <= -BMS_CURRENT_DEADBAND_A
+  const bmsText = bms === null ? '' : Math.abs(bms).toFixed(1)
 
   if (charge > 0 && discharge > 0) {
     return {
@@ -190,15 +237,44 @@ export function batteryFlow(
       active: true,
       label: `充电 ${charge.toFixed(1)}A / 放电 ${discharge.toFixed(1)}A`,
       cls: '',
+      amps: 0,
+      source: 'inverter',
       text: '充电电流与放电电流同时非零，读数矛盾，不判定方向',
     }
   }
+
+  // 两源冲突：逆变器说充电、BMS 说放电（或反之）—— 不挑一个相信，两个数都摆出来。
+  if (charge > 0 && bmsDischarging) {
+    return {
+      dir: 'none',
+      active: true,
+      label: `充电 ${charge.toFixed(1)}A / BMS 放电 ${bmsText}A`,
+      cls: '',
+      amps: 0,
+      source: 'mixed',
+      text: '逆变器报充电、BMS 报放电，两个读数矛盾，不判定方向',
+    }
+  }
+  if (discharge > 0 && bmsCharging) {
+    return {
+      dir: 'none',
+      active: true,
+      label: `放电 ${discharge.toFixed(1)}A / BMS 充电 ${bmsText}A`,
+      cls: '',
+      amps: 0,
+      source: 'mixed',
+      text: '逆变器报放电、BMS 报充电，两个读数矛盾，不判定方向',
+    }
+  }
+
   if (charge > 0) {
     return {
       dir: 'out',
       active: true,
       label: `充电 ${charge.toFixed(1)}A`,
       cls: 'charging',
+      amps: charge,
+      source: 'inverter',
       text: `电池充电 ${charge.toFixed(1)}A：能量由逆变器流向电池`,
     }
   }
@@ -208,8 +284,37 @@ export function batteryFlow(
       active: true,
       label: `放电 ${discharge.toFixed(1)}A`,
       cls: 'discharging',
+      amps: discharge,
+      source: 'inverter',
       text: `电池放电 ${discharge.toFixed(1)}A：能量由电池流向逆变器`,
     }
   }
-  return { dir: 'none', active: false, label: '静止', cls: '', text: '电池无充放电' }
+
+  // 逆变器两路都为 0：只有 BMS 能说明电池到底在不在动。
+  if (bmsDischarging) {
+    return {
+      dir: 'in',
+      active: true,
+      label: `放电 ${bmsText}A`,
+      cls: 'discharging',
+      amps: Math.abs(bms as number),
+      source: 'bms',
+      text: `电池放电 ${bmsText}A：能量由电池流向逆变器（电流取自 BMS；逆变器电池电流寄存器读数为 0）`,
+    }
+  }
+  if (bmsCharging) {
+    return {
+      dir: 'out',
+      active: true,
+      label: `充电 ${bmsText}A`,
+      cls: 'charging',
+      amps: bms as number,
+      source: 'bms',
+      text: `电池充电 ${bmsText}A：能量由逆变器流向电池（电流取自 BMS；逆变器电池电流寄存器读数为 0）`,
+    }
+  }
+
+  return {
+    dir: 'none', active: false, label: '静止', cls: '', amps: 0, source: 'inverter', text: '电池无充放电',
+  }
 }

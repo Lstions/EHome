@@ -49,7 +49,7 @@
         </div>
         <div class="pfm-node" :class="batteryClass" data-branch="battery">
           <span class="pfm-icon">🔋</span>
-          <span class="pfm-label">{{ battery.label }}</span>
+          <span class="pfm-label">{{ batteryLabel }}</span>
           <span class="pfm-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</span>
         </div>
       </div>
@@ -124,7 +124,7 @@
         <circle cx="560" cy="200" r="30" :class="batteryClass" />
         <text x="560" y="206" text-anchor="middle" class="pf-icon">🔋</text>
         <text x="560" y="164" text-anchor="middle" class="pf-value">{{ fmtVolt(batteryVoltage) }} · {{ capacityPct }}%</text>
-        <text x="560" y="252" text-anchor="middle" class="pf-label">{{ battery.label }}</text>
+        <text x="560" y="252" text-anchor="middle" class="pf-label">{{ batteryLabel }}</text>
       </g>
 
       <!--
@@ -155,6 +155,13 @@
         电网已接入，当前{{ grid.status }}
       </span>
       <span v-else-if="!grid.connected" class="pf-legend-note">电网未接入（无电压）</span>
+      <!--
+        电池方向来自 BMS（逆变器自身两路电流均为 0）：把数据源写进图例。
+        不写的后果是同一页顶部电池卡仍显示逆变器自己的 0A/静止 —— 用户会以为图错了。
+      -->
+      <span v-if="battery.source === 'bms'" class="pf-legend-note">
+        电池电流取自 BMS（逆变器电池电流寄存器读 0A）
+      </span>
     </div>
   </div>
 </template>
@@ -196,6 +203,17 @@ const props = defineProps<{
   batteryChargeCurrent: number
   /** 电池放电电流（battery_discharge_current，A）——“放电”= 该字段 > 0 */
   batteryDischargeCurrent: number
+  /**
+   * 同节点 BMS 的**有符号**电流（A，正=充电 / 负=放电）；没有可用读数时传 null/undefined。
+   *
+   * 为什么需要：逆变器 HBAT 的充/放电电流是两个独立寄存器、整安培分辨率，实测会
+   * 连续数分钟读 0，而电池正在放电 2A（2026-11-19 用户报障「BMS 都在放电了，
+   * 流向图还显示静止」）。只凭逆变器自己的读数，等于把「没测到」显示成「静止」。
+   *
+   * 判定顺序见 powerFlow.ts batteryFlow：逆变器任一路 > 0 时用逆变器自己的测量，
+   * 只有两路都为 0 才回退到 BMS；两源方向相反时仍不猜方向。
+   */
+  batteryBmsCurrent?: number | null
   /** 电池剩余容量（battery_capacity，%） */
   batteryCapacity: number
   /** 市电电压（grid_voltage，V） */
@@ -236,7 +254,20 @@ const workModeLabel = computed(() => {
 const pv = computed(() => pvFlow(props.pvPower))
 const grid = computed(() => gridFlow(props.gridVoltage, props.workMode))
 const load = computed(() => loadFlow(props.loadPower))
-const battery = computed(() => batteryFlow(props.batteryChargeCurrent, props.batteryDischargeCurrent))
+const battery = computed(() => batteryFlow(
+  props.batteryChargeCurrent,
+  props.batteryDischargeCurrent,
+  props.batteryBmsCurrent,
+))
+
+/**
+ * 图上电池标签：用 BMS 判向时注明读数来源。
+ *
+ * 不注明的后果是"页面自相矛盾"：逆变器电池卡（同一页顶部）仍显示它自己的 0A/静止，
+ * 而流向图却在放电 —— 用户会以为是图错了。注明「BMS」把两个数据源的边界说清楚。
+ */
+const batteryLabel = computed(() =>
+  battery.value.source === 'bms' ? `${battery.value.label} · BMS` : battery.value.label)
 
 /**
  * 电网状态视觉类：供电（绿）/ 仅接入（灰）/ 未接入（更淡）。
@@ -330,7 +361,7 @@ function gridLinkWord(flow: GridFlow): string {
 
 const svgAriaLabel = computed(() =>
   `功率流向：光伏${dirWord(pv.value)}，电网${gridLinkWord(grid.value)}，`
-  + `负载${dirWord(load.value)}，电池${battery.value.label}（${dirWord(battery.value)}）`)
+  + `负载${dirWord(load.value)}，电池${batteryLabel.value}（${dirWord(battery.value)}）`)
 
 /**
  * 物理闸门：把不可能的读数当作"没有数据"。

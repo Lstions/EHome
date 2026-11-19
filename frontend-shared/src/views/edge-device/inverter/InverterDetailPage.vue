@@ -83,6 +83,7 @@
           :battery-voltage="num(latestData?.battery_voltage)"
           :battery-charge-current="num(latestData?.battery_charge_current)"
           :battery-discharge-current="num(latestData?.battery_discharge_current)"
+          :battery-bms-current="bmsBatteryCurrent"
           :battery-capacity="num(latestData?.battery_capacity)"
           :grid-voltage="num(latestData?.grid_voltage)"
           :work-mode="numOrNull(latestData?.work_mode)"
@@ -154,6 +155,8 @@ import InverterPowerFlow from './InverterPowerFlow.vue'
 import InverterMpptCard from './InverterMpptCard.vue'
 import InverterStatusGrid from './InverterStatusGrid.vue'
 import { RUNNING_FLAG_KEYS } from './runningFlags'
+import { batteryFlow } from './powerFlow'
+import { useSiblingBattery } from './useSiblingBattery'
 import InverterTempCard from './InverterTempCard.vue'
 import InverterEnergyCard from './InverterEnergyCard.vue'
 import MetricStatCard from '@/components/common/MetricStatCard.vue'
@@ -176,6 +179,19 @@ const {
 } = useDeviceData(deviceId, { maxItems: 100, errorPrefix: '获取逆变器详情失败' })
 
 const handleRefresh = () => composableHandleRefresh(() => historyChartRef.value?.fetchHistoryData())
+
+/**
+ * 同节点 BMS 的有符号电流（A，正=充电 / 负=放电）—— 电池支路的**兜底判向源**。
+ *
+ * 2026-11-19 用户报障现场：逆变器 HBAT 的充/放电电流连续数分钟都是 0（整安培
+ * 分辨率 + 未接 BMS 通讯），而同节点 BMS 报 -1.96A，流向图却显示「静止」。
+ * BMS 的电流是电池的直接测量，逆变器两路都为 0 时以它判向（见 ./powerFlow.ts）。
+ * 没有 BMS / BMS 离线 / 读数过期 ⇒ null，判向完全退回逆变器自身读数。
+ */
+const { current: bmsBatteryCurrent } = useSiblingBattery(
+  computed(() => device.value?.node_id ?? null),
+  deviceId,
+)
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : '逆变器')
 
@@ -315,14 +331,25 @@ function numSane(v: unknown, min: number, max: number): number | null {
 }
 
 /**
- * 电池方向。**充电与放电是两个独立寄存器**，不是同一量的正负号：
- * 泰琪丰协议里 battery_charge_current 与 battery_discharge_current 各自
- * 独立，浮充/待机时两者都可为 0。早期代码读不存在的 battery_current，
- * 恒走 idle 分支，于是语义色永远不亮。
+ * 电池方向/电流 —— 与功率流向**共用 powerFlow.batteryFlow 这一处判定**。
+ *
+ * 改前这里自己判一次（只看逆变器两路寄存器），流向图里再判一次，两处可以分别
+ * 说错话。2026-11-19 的报障正是这种分裂的变体：INV 两路都是 0 ⇒ 卡片与图都写
+ * 「静止」，而同节点 BMS 明明在放电（-1.96A）。现在 BMS 电流作为兜底输入一起进
+ * batteryFlow：逆变器有读数就用逆变器，两路都为 0 才用 BMS，两源冲突则不猜。
+ *
+ * ⚠ 泰琪丰协议里充电与放电是**两个独立寄存器**（不是同一量的正负号），浮充/待机
+ * 时两者都可能为 0 —— 不能用"小于 0 表示放电"去读逆变器的字段。
  */
+const battery = computed(() => batteryFlow(
+  num(latestData.value?.battery_charge_current),
+  num(latestData.value?.battery_discharge_current),
+  bmsBatteryCurrent.value,
+))
+
 const batteryDirection = computed<'charge' | 'discharge' | 'idle'>(() => {
-  if (num(latestData.value?.battery_charge_current) > 0) return 'charge'
-  if (num(latestData.value?.battery_discharge_current) > 0) return 'discharge'
+  if (battery.value.cls === 'charging') return 'charge'
+  if (battery.value.cls === 'discharging') return 'discharge'
   return 'idle'
 })
 
@@ -332,11 +359,14 @@ const batteryVoltageText = computed(() => {
   return v === null ? '—' : v.toFixed(1)
 })
 
+/** 卡片副文本里的电流摘要：与流向图同源（含「·BMS」来源标注）。 */
 const batteryCurrentText = computed(() => {
-  const c = num(latestData.value?.battery_charge_current)
-  const d = num(latestData.value?.battery_discharge_current)
-  if (c > 0) return `充 ${c.toFixed(1)}A`
-  if (d > 0) return `放 ${d.toFixed(1)}A`
+  const f = battery.value
+  const suffix = f.source === 'bms' ? '·BMS' : ''
+  if (f.cls === 'charging') return `充 ${f.amps.toFixed(1)}A${suffix}`
+  if (f.cls === 'discharging') return `放 ${f.amps.toFixed(1)}A${suffix}`
+  // 两源/两路读数矛盾：卡片上放不下并列的两个数，给结论 + 让用户去流向图看详情
+  if (f.label !== '静止') return '读数矛盾'
   return '静止'
 })
 

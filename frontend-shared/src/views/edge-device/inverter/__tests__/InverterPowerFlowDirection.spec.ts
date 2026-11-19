@@ -25,6 +25,8 @@ const BASE = {
   batteryVoltage: 52.3,
   batteryChargeCurrent: 0,
   batteryDischargeCurrent: 0,
+  /** 同节点 BMS 的有符号电流（A，正=充电 / 负=放电）；BASE 里默认没有 BMS */
+  batteryBmsCurrent: null as number | null,
   batteryCapacity: 81,
   gridVoltage: 231.5,
   workMode: 3 as number | null,
@@ -77,6 +79,44 @@ describe('功率流向箭头：电池支路方向必须由读数决定（用户�
     const label = wrapper.find('.pf-node.battery .pf-label').text()
     expect(label).toContain('充电 3.0A')
     expect(label).toContain('放电 2.0A')
+    wrapper.unmount()
+  })
+})
+
+/**
+ * 2026-11-19 用户报障：「BMS 都在放电了，INV 流向图还显示电池静止，不对！」
+ *
+ * 现场：逆变器 HBAT 充/放电流连续数分钟都是 0（整安培分辨率 + 没接 BMS 通讯），
+ * 同节点 BMS current=-1.96A。改前 batteryFlow(0,0) ⇒ 静止且不画箭头。
+ * 现在逆变器两路都为 0 时用 BMS 判向，并在标签/图例里注明来源。
+ */
+describe('电池支路：逆变器读 0 时由同节点 BMS 判向（2026-11-19 报障）', () => {
+  it('两路 0 + BMS -1.96A ⇒ 箭头指向逆变器，标签「放电 2.0A · BMS」+ 图例注明来源', () => {
+    const wrapper = mountFlow({ batteryBmsCurrent: -1.96 })
+    const p = batteryPath(wrapper)
+    const d = p.attributes('d') ?? ''
+    expect(d.trim().startsWith('M530'), 'BMS 报放电：连线必须从电池出发').toBe(true)
+    expect(d.trim().endsWith('358,140')).toBe(true)
+    expect(p.attributes('marker-end')).toBe('url(#pf-arrow-discharge)')
+    expect(wrapper.find('.pf-node.battery circle').classes()).toContain('discharging')
+    expect(wrapper.find('.pf-node.battery .pf-label').text()).toBe('放电 2.0A · BMS')
+    expect(wrapper.text()).toContain('电池电流取自 BMS')
+    wrapper.unmount()
+  })
+
+  it('两路 0 + BMS +1.5A ⇒ 充电方向，同样注明来源', () => {
+    const wrapper = mountFlow({ batteryBmsCurrent: 1.5 })
+    expect(batteryPath(wrapper).attributes('d')?.trim().startsWith('M358')).toBe(true)
+    expect(batteryPath(wrapper).attributes('marker-end')).toBe('url(#pf-arrow-charge)')
+    expect(wrapper.find('.pf-node.battery .pf-label').text()).toBe('充电 1.5A · BMS')
+    wrapper.unmount()
+  })
+
+  it('BMS 读数落在死区（-0.05A）⇒ 仍是静止，不画箭头也不加 BMS 标注', () => {
+    const wrapper = mountFlow({ batteryBmsCurrent: -0.05 })
+    expect(batteryPath(wrapper).attributes('marker-end')).toBeUndefined()
+    expect(wrapper.find('.pf-node.battery .pf-label').text()).toBe('静止')
+    expect(wrapper.text()).not.toContain('电池电流取自 BMS')
     wrapper.unmount()
   })
 })
@@ -194,6 +234,15 @@ describe('窄屏（≤768px）DOM 版：每个连接位独立箭头', () => {
     const wrapper = mount(InverterPowerFlow, { props: { ...BASE } })
     const bottom = wrapper.findAll('.pfm-arrow-row')[1].findAll('.pfm-arrow').map(a => a.text())
     expect(bottom[1]).toBe('·')
+    wrapper.unmount()
+  })
+
+  it('逆变器两路 0 + BMS 放电 ⇒ 下排右侧箭头朝上，节点文案带「· BMS」', () => {
+    const wrapper = mount(InverterPowerFlow, { props: { ...BASE, batteryBmsCurrent: -1.96 } })
+    const bottom = wrapper.findAll('.pfm-arrow-row')[1].findAll('.pfm-arrow')
+    expect(bottom[1].text()).toBe('↑')
+    expect(bottom[1].classes()).toContain('is-discharging')
+    expect(wrapper.find('[data-branch="battery"] .pfm-label').text()).toBe('放电 2.0A · BMS')
     wrapper.unmount()
   })
 

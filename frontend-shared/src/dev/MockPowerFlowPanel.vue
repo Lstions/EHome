@@ -1,16 +1,17 @@
 <template>
   <!--
-    离线 UI 验证工具：逆变器功率流向的**四种工况**并排渲染，无需后端/登录。
+    离线 UI 验证工具：逆变器功率流向的**各工况**并排渲染，无需后端/登录。
     仅用于开发环境 CDP 量化验收（路由由 import.meta.env.DEV 门禁，生产构建不含本 chunk）。
 
     为什么必须离线做：本组件只在设备详情页里出现，而详情页需要登录 + 真设备数据；
-    而方向判定是纯函数（powerFlow.ts），四种工况（放电 / 充电 / 静止 / 读数矛盾）
-    在一个页面里就能全部覆盖，还能同时量桌面 SVG 与窄屏 DOM 两套布局的箭头。
+    而方向判定是纯函数（powerFlow.ts），各工况（放电 / 充电 / 静止 / 读数矛盾 /
+    电网四态 / 逆变器电流读 0 交给 BMS 判向）在一个页面里就能全部覆盖，
+    还能同时量桌面 SVG 与窄屏 DOM 两套布局的箭头。
   -->
   <div class="mock-pf" style="padding: 16px; background: #f0f2f5; min-height: 100vh;">
-    <h3 style="margin: 0 0 4px;">逆变器功率流向 八工况（离线验证）</h3>
+    <h3 style="margin: 0 0 4px;">逆变器功率流向 九工况（离线验证）</h3>
     <p style="margin: 0 0 16px; color: #909399; font-size: 12px;">
-      ①-④ 电池充放电方向；⑤-⑧ 电网支路：未使用 / 供电 / 未接入 / 待机
+      ①-④ 电池充放电方向；⑤-⑧ 电网支路：未使用 / 供电 / 未接入 / 待机；⑨ 逆变器电流读 0 → 由同节点 BMS 判向
     </p>
     <el-card v-for="c in CASES" :key="c.id" :style="{ marginBottom: '16px' }" shadow="hover">
       <template #header>
@@ -26,6 +27,7 @@
           :battery-voltage="c.batteryVoltage"
           :battery-charge-current="c.batteryChargeCurrent"
           :battery-discharge-current="c.batteryDischargeCurrent"
+          :battery-bms-current="c.batteryBmsCurrent"
           :battery-capacity="c.batteryCapacity"
           :grid-voltage="c.gridVoltage"
           :work-mode="c.workMode"
@@ -99,6 +101,15 @@ const CASES = [
     pvPower: 300, loadPower: 100, batteryVoltage: 51.8,
     batteryChargeCurrent: 0, batteryDischargeCurrent: 2,
     batteryCapacity: 66, gridVoltage: 0, workMode: 3,
+  },
+  {
+    id: 'bms-fallback',
+    title: '⑨ 逆变器电流读 0，改由 BMS 判向（2026-11-19 报障）',
+    note: 'INV 53.1V/89% 充 0A 放 0A · BMS -1.96A · PV 193W · 负载 187W ⇒ 电池 → 逆变器「放电 2.0A · BMS」',
+    pvPower: 193, loadPower: 187, batteryVoltage: 53.1,
+    batteryChargeCurrent: 0, batteryDischargeCurrent: 0,
+    batteryBmsCurrent: -1.96,
+    batteryCapacity: 89, gridVoltage: 226.5, workMode: 3,
   },
   {
     id: 'grid-standby',

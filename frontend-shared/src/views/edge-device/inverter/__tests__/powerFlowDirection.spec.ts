@@ -4,6 +4,7 @@ import {
   gridFlow,
   loadFlow,
   pvFlow,
+  BMS_CURRENT_DEADBAND_A,
   MAX_CURRENT_A,
   MAX_POWER_W,
 } from '../powerFlow'
@@ -140,5 +141,76 @@ describe('功率流向：与用户截图一致的 2026-11-18 工况（电池模�
     expect(grid.status).toBe('未使用')
     expect(load.dir).toBe('out')
     expect(battery.dir, '充电 5.0A：能量由逆变器流向电池').toBe('out')
+  })
+})
+
+describe('功率流向：逆变器电流读 0 时由同节点 BMS 判向（2026-11-19 用户报障）', () => {
+  /**
+   * 现场（生产库，同一分钟级窗口 16:03–16:09）：
+   *   逆变器：53.1V / 89% / 充电 0A / 放电 0A
+   *   同节点 BMS：53.15V / 99% / current=-1.96A
+   * 改前 batteryFlow(0, 0) ⇒ 「静止」，与 BMS 页的 -1.96A 直接矛盾。
+   */
+  it('两路都是 0、BMS 报 -1.96A ⇒ 电池 → 逆变器「放电 2.0A」，且标注来源 BMS', () => {
+    const f = batteryFlow(0, 0, -1.96)
+    expect(f.dir, 'BMS 负电流 = 放电，能量由电池流向逆变器').toBe('in')
+    expect(f.active).toBe(true)
+    expect(f.cls).toBe('discharging')
+    expect(f.label).toBe('放电 2.0A')
+    expect(f.amps).toBeCloseTo(1.96, 2)
+    expect(f.source).toBe('bms')
+    expect(f.text).toContain('BMS')
+  })
+
+  it('两路都是 0、BMS 报 +1.5A ⇒ 逆变器 → 电池「充电 1.5A」', () => {
+    const f = batteryFlow(0, 0, 1.5)
+    expect(f.dir).toBe('out')
+    expect(f.cls).toBe('charging')
+    expect(f.label).toBe('充电 1.5A')
+    expect(f.source).toBe('bms')
+  })
+
+  it('BMS 读数落在死区内 ⇒ 仍算静止（不因采样噪声画箭头）', () => {
+    const f = batteryFlow(0, 0, -(BMS_CURRENT_DEADBAND_A / 2))
+    expect(f.dir).toBe('none')
+    expect(f.label).toBe('静止')
+  })
+
+  it('逆变器有读数时用逆变器自己的测量（BMS 只做兜底，不抢权威）', () => {
+    const f = batteryFlow(0, 3, -3.97)
+    expect(f.dir).toBe('in')
+    expect(f.label, '显示逆变器自己的整安培读数').toBe('放电 3.0A')
+    expect(f.source).toBe('inverter')
+  })
+
+  it('两源方向相反 ⇒ 不判方向，两个数都摆出来', () => {
+    const chargeVsBms = batteryFlow(2, 0, -1.5)
+    expect(chargeVsBms.dir, '逆变器说充电、BMS 说放电：不猜').toBe('none')
+    expect(chargeVsBms.source).toBe('mixed')
+    expect(chargeVsBms.label).toContain('充电 2.0A')
+    expect(chargeVsBms.label).toContain('BMS 放电 1.5A')
+
+    const dischargeVsBms = batteryFlow(0, 2, 1.5)
+    expect(dischargeVsBms.dir).toBe('none')
+    expect(dischargeVsBms.label).toContain('放电 2.0A')
+    expect(dischargeVsBms.label).toContain('BMS 充电 1.5A')
+  })
+
+  it('脏 BMS 读数（NaN / 越界）不得产生方向', () => {
+    for (const bad of [NaN, Infinity, MAX_CURRENT_A + 1, -MAX_CURRENT_A - 1]) {
+      const f = batteryFlow(0, 0, bad)
+      expect(f.dir, 'bad bms ' + String(bad)).toBe('none')
+      expect(f.label).toBe('静止')
+    }
+  })
+
+  it('两路都为 0 且没有 BMS 数据 ⇒ 静止（无 BMS 的安装不改变行为）', () => {
+    for (const bms of [undefined, null]) {
+      const f = batteryFlow(0, 0, bms as number | null | undefined)
+      expect(f.dir).toBe('none')
+      expect(f.active).toBe(false)
+      expect(f.label).toBe('静止')
+      expect(f.source).toBe('inverter')
+    }
   })
 })
