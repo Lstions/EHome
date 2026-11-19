@@ -26,7 +26,12 @@ $1" 2>/dev/null
 # ========================================
 API_BASE="http://localhost:8080/api/v1"
 NODE_ID=1
+# 仅用于展示/期望值：上传的版本以**镜像内 version** 为准（方案 §4.2，表单不再接收 version）。
 FIRMWARE_VERSION="2.2.5"
+# 上传必须带同名 sidecar（方案 §4.2）。镜像头能自证 chip/flash_mb/version，
+# **只有 psram 不可导出**，所以这一位只能人工给：yes|no。
+# 默认 no：本仓 C6 档位无 PSRAM，S3 的非 PSRAM 版也是 no；PSRAM 版请 EHOME_FW_PSRAM=yes。
+FIRMWARE_PSRAM="${EHOME_FW_PSRAM:-no}"
 USERNAME="${ADMIN_USERNAME:-admin}"
 PASSWORD="${ADMIN_PASSWORD:-admin123}"
 AUTH_TOKEN=""
@@ -173,6 +178,62 @@ login() {
 }
 
 # ========================================
+# sidecar 助手（M0：上传必须带同名 .meta.json）
+# ========================================
+
+# find_ehomectl 解析可用的 ehomectl 二进制。
+# 顺序：EHOMECTL_BIN（显式指定）→ 仓库内构建产物 → PATH。
+find_ehomectl() {
+    local candidates=()
+    if [[ -n "${EHOMECTL_BIN:-}" ]]; then
+        candidates+=("$EHOMECTL_BIN")
+    fi
+    candidates+=("$PROJECT_ROOT/backend/ehomectl")
+    if command -v ehomectl >/dev/null 2>&1; then
+        candidates+=("$(command -v ehomectl)")
+    fi
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ensure_firmware_sidecar 保证 <bin>.meta.json 存在。
+#
+# 已存在则不覆盖：构建脚本 build_firmware.sh 从 sdkconfig 产出的那份比这里推的更权威。
+# 缺失时才用 ehomectl firmware meta-gen 从镜像解析 chip/flash_mb/version，psram 用上面的旋钮。
+ensure_firmware_sidecar() {
+    local bin_path="$1"
+    # 与 ehomectl firmware meta-gen 同口径：去掉任意扩展名再拼 .meta.json。
+    SIDECAR_FILE="${bin_path%.*}.meta.json"
+    if [[ -f "$SIDECAR_FILE" ]]; then
+        log_info "sidecar 已存在: $SIDECAR_FILE"
+        return 0
+    fi
+
+    local ehomectl_bin
+    if ! ehomectl_bin=$(find_ehomectl); then
+        log_error "找不到 ehomectl，无法生成 sidecar（可用 EHOMECTL_BIN 指定）。先构建："
+        log_error "  cd backend && go build -o ehomectl ./cmd/ehomectl"
+        return 1
+    fi
+    log_info "生成 sidecar: $SIDECAR_FILE (psram=$FIRMWARE_PSRAM, ehomectl=$ehomectl_bin)"
+    if ! "$ehomectl_bin" firmware meta-gen --bin "$bin_path" --psram "$FIRMWARE_PSRAM" >/dev/null; then
+        log_error "ehomectl firmware meta-gen 失败；若提示 unknown 子命令，说明 $ehomectl_bin 是旧二进制，重新 go build 即可"
+        return 1
+    fi
+    if [[ ! -f "$SIDECAR_FILE" ]]; then
+        log_error "meta-gen 未产出 $SIDECAR_FILE"
+        return 1
+    fi
+    return 0
+}
+
+# ========================================
 # 上传固件获取 firmware_id
 # ========================================
 upload_firmware() {
@@ -193,7 +254,12 @@ upload_firmware() {
     local firmware_size
     firmware_size=$(wc -c < "$FIRMWARE_FILE")
     log_info "固件文件: $FIRMWARE_FILE ($firmware_size bytes)"
-    
+
+    # M0（方案 §4.2）：上传**必须**带同名 sidecar；没带就是 400 FW_META_REQUIRED。
+    if ! ensure_firmware_sidecar "$FIRMWARE_FILE"; then
+        return 1
+    fi
+
     local response
     # The Host header must match the backend's EHOME_EXTERNAL_HOST, because the
     # firmware download URL is signed against it. Do not default to a specific
@@ -210,7 +276,7 @@ upload_firmware() {
         -H "Authorization: Bearer $AUTH_TOKEN" \
         -H "Host: $ext_host" \
         -F "file=@$FIRMWARE_FILE" \
-        -F "version=$FIRMWARE_VERSION" \
+        -F "meta=@$SIDECAR_FILE" \
         "${API_BASE}/firmwares/upload" 2>/dev/null)
     
     FIRMWARE_ID=$(echo "$response" | json_val "print(d.get('id','') or (d.get('data',{}).get('id','')))")
@@ -221,7 +287,12 @@ upload_firmware() {
         return 1
     fi
     
-    log_info "固件上传成功，firmware_id: $FIRMWARE_ID"
+    # legacy 行补 sidecar 重传时接口返回 200 + completed_legacy=true（同一行、id 不变）。
+    if echo "$response" | grep -q '"completed_legacy":true'; then
+        log_info "固件上传成功（legacy 行身份已就地补齐，未新增记录），firmware_id: $FIRMWARE_ID"
+    else
+        log_info "固件上传成功，firmware_id: $FIRMWARE_ID"
+    fi
     return 0
 }
 
@@ -492,7 +563,8 @@ main() {
     echo "  API_BASE:         $API_BASE"
     echo "  NODE_ID:          $NODE_ID"
     echo "  FIRMWARE_FILE:    $FIRMWARE_FILE"
-    echo "  FIRMWARE_VERSION: $FIRMWARE_VERSION"
+    echo "  FIRMWARE_VERSION: $FIRMWARE_VERSION (仅期望值；实际上传版本取自镜像)"
+    echo "  FIRMWARE_PSRAM:   $FIRMWARE_PSRAM (sidecar 里唯一要人工给的位)"
     echo "  TEST_COUNT:       $TEST_COUNT"
     echo "  TIMEOUT_PER_OTA:  ${TIMEOUT_PER_OTA}s"
     echo ""

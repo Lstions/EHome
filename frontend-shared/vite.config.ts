@@ -3,10 +3,51 @@ import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+import { execSync } from 'node:child_process'
 import { fileURLToPath, URL } from 'node:url'
 
+/**
+ * 构建身份（契约 §4.3 / T2.4）：`build_id` 是「旧页面是否过期」的唯一判据，
+ * 必须与后端 `buildinfo.BuildID` **同源**，且**长度必须一致（7 位）** ——
+ * 后端 BuildID 取 git short SHA 前 7 位（Dockerfile 用 `GIT_COMMIT` 前 7 位推导，
+ * 与本文件规则一致）。传 12 位不会被纠正，只会让前端永远对不上
+ * `X-EHome-Build` 响应头 ⇒ 页面常驻「系统已发布新版本」横幅。
+ * **刻意不做截断/补全**：静默修正会掩盖 CI 传错，问题会以更难排查的方式出现。
+ *
+ * 取值优先级：
+ *   1. 环境变量 `VITE_BUILD_ID`（CI / Docker build-arg 注入，**生产推荐**，
+ *      与后端 buildinfo 用同一个值）；
+ *   2. 仓库 git 短 SHA（本地 `vite build` 时自动得到，同 commit 重编幂等）；
+ *   3. `dev-<时间戳36进制>`（无 git 的构建环境，保证每次构建可区分）。
+ *
+ * `build_time` 用于「部署回滚不提示」判定：服务端时间比本地更旧即视为回滚。
+ */
+function resolveBuildId(env: Record<string, string>): string {
+  const fromEnv = (env.VITE_BUILD_ID || '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    // ⚠️ **必须 7 位**：后端 buildinfo.BuildID 取短 SHA 前 7 位，这里也取 7 位。
+    //    取 12 位会让本地构建产物永远对不上 `X-EHome-Build` ⇒ 常驻「有新版本」横幅。
+    //    仍然不做截断/补全：显式传入的 VITE_BUILD_ID 原样使用，传错要在构建/部署期暴露。
+    const sha = execSync('git rev-parse --short=7 HEAD', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim()
+    if (sha) return sha
+  } catch {
+    /* 无 git（tarball / 构建沙箱）：走时间戳兜底 */
+  }
+  return `dev-${Date.now().toString(36)}`
+}
+
+function resolveBuildTime(env: Record<string, string>): string {
+  const fromEnv = (env.VITE_BUILD_TIME || '').trim()
+  return fromEnv || new Date().toISOString()
+}
+
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // 统一从 .env* 文件读取环境变量（与前端 import.meta.env 行为一致）。
   // 注意：不能用 process.env 读 VITE_* —— vite 不会把 .env 文件注入 process.env，
   // 用 process.env 会导致 vite.config 与前端 import.meta.env 读到不一致的值。
@@ -26,7 +67,20 @@ export default defineConfig(({ mode }) => {
   // 去掉首尾斜杠，用于 proxy key 拼接（如 /ehome-dev/api）
   const basePrefix = basePath === '/' ? '' : basePath.replace(/\/+$/, '')
 
+  const buildId = resolveBuildId(env)
+  const buildTime = resolveBuildTime(env)
+
   return {
+  // 构建身份只注入**生产构建**：`vite dev` 下前端热更新、后端不是同一份产物，
+  // 两者的 build_id 天然不同源 ⇒ 注入一个「本地 id」会让开发时永远挂着
+  // 「系统已发布新版本」横幅。开发态留空 = 更新检测静默（store 视为「无法比对」）。
+  // 需要在本机验证横幅时，显式 `VITE_BUILD_ID=xxx pnpm build && pnpm preview`。
+  define: command === 'build'
+    ? {
+        'import.meta.env.VITE_BUILD_ID': JSON.stringify(buildId),
+        'import.meta.env.VITE_BUILD_TIME': JSON.stringify(buildTime),
+      }
+    : {},
   plugins: [
     vue(),
     // Element Plus 按需自动引入

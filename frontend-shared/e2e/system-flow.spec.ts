@@ -1,14 +1,11 @@
 import { test, expect, type Page } from '@playwright/test';
+import { loginAsAdmin } from './helpers/login';
 
 // ── Login Helper ──────────────────────────────────────────────────
 
 async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.waitForSelector('.el-input, form, .el-form', { timeout: 10000 });
-  await page.locator('input').first().fill('admin');
-  await page.locator('input[type="password"]').fill('admin123');
-  await page.locator('button.el-button--primary, button[type="submit"], button:has-text("登录")').first().click();
-  await page.waitForURL(/\/(dashboard|node|edge-device)/, { timeout: 15000 });
+  // 公共 helper：按可访问名点「登 录」（旧选择器 type=submit / has-text 都不命中）
+  await loginAsAdmin(page, { waitForUrl: /\/(dashboard|node|edge-device)/, timeoutMs: 15000 });
 }
 
 // ── System Feature Flow E2E Tests ─────────────────────────────────

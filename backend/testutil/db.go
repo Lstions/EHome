@@ -142,6 +142,13 @@ func openSQLite(t *testing.T) *gorm.DB {
 	if err := dbschema.EnsureSourceGroupSchema(db); err != nil {
 		t.Fatalf("sqlite source_group schema: %v", err)
 	}
+	// 固件身份 schema（方案 §5.6 / 附录 B）：与生产启动**同一组函数**。
+	// 缺这一处，uq_firmwares_elf 只在生产库存在 ⇒ AC-7/IT-MIG-* 在 SQLite 上假绿。
+	// 测试进程 cwd 通常不是仓库根，firmwareDir 指向不存在的目录即是预期：
+	// 回填解析失败 ⇒ 行保持 legacy，不影响其它用例。
+	if _, err := dbschema.MigrateFirmwareIdentity(db, dbschema.FirmwareDir); err != nil {
+		t.Fatalf("sqlite firmware identity schema: %v", err)
+	}
 	return db
 }
 
@@ -702,6 +709,11 @@ func openPostgres(t *testing.T) *gorm.DB {
 
 	if err := db.AutoMigrate(allModels...); err != nil {
 		t.Fatalf("postgres automigrate: %v", err)
+	}
+	// 固件身份 schema：与 SQLite 分支、生产启动**同一组函数**（方案 §5.6）。
+	// 两库都建出 uq_firmwares_elf，AC-7 才有证据。
+	if _, err := dbschema.MigrateFirmwareIdentity(db, dbschema.FirmwareDir); err != nil {
+		t.Fatalf("postgres firmware identity schema: %v", err)
 	}
 
 	// Cleanup: drop the test schema when test finishes

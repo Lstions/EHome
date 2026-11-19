@@ -47,10 +47,19 @@
         </el-sub-menu>
       </el-menu>
 
-      <!-- 侧边栏底部 -->
+      <!-- 侧边栏底部：版本号即「关于」入口（契约 §6.4 更新内容弹窗，T2.12）。
+           notes 为空时退回纯文本 —— 不渲染任何可点入口（AC-18：不许出现空弹窗）。 -->
       <div class="sidebar-footer">
         <div class="version-info" v-if="!uiStore.sidebarCollapsed">
-          <span>v{{ appVersion }}</span>
+          <button
+            v-if="appUpdateStore.hasReleaseNotes"
+            type="button"
+            class="version-info-link"
+            data-testid="about-entry-sidebar"
+            :aria-label="`关于：版本 ${appUpdateStore.displayVersion}，查看更新内容`"
+            @click="appUpdateStore.openReleaseNotes()"
+          >v{{ appUpdateStore.displayVersion }}</button>
+          <span v-else>v{{ appUpdateStore.displayVersion }}</span>
         </div>
       </div>
     </el-aside>
@@ -107,9 +116,17 @@
           </el-sub-menu>
         </el-menu>
 
-        <!-- 版本信息 -->
+        <!-- 版本信息：与桌面侧栏同一个「关于」弹窗（App 层单实例） -->
         <div class="mobile-sidebar-footer">
-          <span class="mobile-version-info">v{{ appVersion }}</span>
+          <button
+            v-if="appUpdateStore.hasReleaseNotes"
+            type="button"
+            class="mobile-version-info mobile-version-info--link"
+            data-testid="about-entry-mobile"
+            :aria-label="`关于：版本 ${appUpdateStore.displayVersion}，查看更新内容`"
+            @click="handleMobileAbout"
+          >v{{ appUpdateStore.displayVersion }}</button>
+          <span v-else class="mobile-version-info">v{{ appUpdateStore.displayVersion }}</span>
         </div>
       </div>
     </el-drawer>
@@ -267,6 +284,7 @@ import { useBreadcrumbStore } from '@/stores/breadcrumb'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useNodeStore } from '@/stores/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
+import { useAppUpdateStore } from '@/stores/appUpdate'
 // NotificationHandle 是 ElNotification() 的返回类型：m-2 需要保存实例以便显式关闭
 // （duration: 0 的提示没有自动关闭路径，路由跳转也不会清掉挂在 body 上的浮层）。
 import { ElNotification, type NotificationHandle } from 'element-plus'
@@ -375,7 +393,17 @@ const warmPrimaryListData = () => Promise.allSettled([
   edgeDeviceStore.fetchList({ page: 1, page_size: 24 }),
 ])
 
-const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
+/**
+ * 版本号真源：后端 `GET /api/v1/system/version`（store 在 App 层 init 时拉取）。
+ * 缺失时显示「未知」，**不再回退**到 2.2.0 这类写死常量（T2.4）。
+ */
+const appUpdateStore = useAppUpdateStore()
+
+// 移动端「关于」：先关抽屉再开弹窗，避免抽屉的模态焦点陷阱把弹窗盖住 / 抢焦点。
+const handleMobileAbout = () => {
+  mobileDrawerVisible.value = false
+  appUpdateStore.openReleaseNotes()
+}
 
 // 移动端 logo 点击：关闭抽屉并导航
 const handleMobileLogoClick = () => {
@@ -894,6 +922,32 @@ onUnmounted(() => {
   color: var(--sidebar-text, rgba(255, 255, 255, 0.65));
 }
 
+/* 版本号在「有更新内容」时是按钮（「关于」入口）。外观与纯文本一致，
+   只在 hover/focus-visible 时给出可点提示 —— 平时不能看起来像个普通链接，
+   那会让侧栏底部显得杂乱。热区补到 24px 高（12px 字号的可点目标下限）。 */
+.sidebar .version-info-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.sidebar .version-info-link:hover,
+.sidebar .version-info-link:focus-visible {
+  background: var(--el-fill-color-light);
+  color: var(--el-color-primary);
+  outline: none;
+}
+.sidebar .version-info-link:focus-visible {
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+
 /* ========== 右侧容器 ========== */
 .main-container {
   background: var(--el-fill-color-light);
@@ -1263,6 +1317,23 @@ onUnmounted(() => {
   text-align: center;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+/* 移动端「关于」入口：整行可点（热区 ≥44px），视觉仍像一行版本文字。 */
+:global(.mobile-sidebar-drawer .mobile-version-info--link) {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 12px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+:global(.mobile-sidebar-drawer .mobile-version-info--link:active) {
+  background: var(--el-fill-color-light);
 }
 
 /* ========== 响应式 ========== */

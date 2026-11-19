@@ -3,10 +3,12 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
+	"ehome/backend/internal/buildinfo"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
@@ -37,6 +39,35 @@ var apiBuildCommit = "unknown"
 func SetBuildCommit(c string) {
 	if c != "" {
 		apiBuildCommit = c
+	}
+}
+
+// BuildHeaderName 是所有 /api/* 响应携带当前 build id 的响应头名（方案 §4.3）。
+//
+// 前端 apiClient 的响应拦截器在读 response.data **之前**拿它与
+// import.meta.env.VITE_BUILD_ID 比对：不同就把页面置为 stale —— 这是"正在操作的
+// 标签页在下一次 API 响应（通常秒级）就能感知发布"的那条通道（§6.4 通道 1）。
+// 放进响应头而不是每个响应体：不用改任何既有响应契约，错误响应也天然带着它。
+//
+// main.go 的跨源 CORS 配置引用了这个名字来填 Access-Control-Expose-Headers
+// （跨源部署时浏览器默认不给 JS 读自定义响应头）。改名字必须同时改那里。
+const BuildHeaderName = "X-EHome-Build"
+
+// buildHeaderMiddleware 给**所有 /api/* 响应（含错误）**加 X-EHome-Build。
+//
+// 覆盖范围刻意是 /api/ 前缀而不是全站：
+//   - 静态资源由 gin 的 Static/NoRoute 直接给文件，浏览器按 immutable 缓存，
+//     加头没有意义（前端也不经过 axios）；
+//   - /health、/readyz、/metrics 是探针/抓取通道，不参与"旧页面提示"。
+//
+// 时序：头在 c.Next() **之前**写入，所以 JWT 401、参数 400、业务 409、NoRoute 404
+// 这些"处理器提前返回"的响应也带着它（gin 在写状态行时序列化当前 header map）。
+func buildHeaderMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if path := c.Request.URL.Path; path == "/api" || strings.HasPrefix(path, "/api/") {
+			c.Header(BuildHeaderName, buildinfo.BuildID())
+		}
+		c.Next()
 	}
 }
 
@@ -97,6 +128,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		}
 	}
 	controlPolicy = resolveControlPolicy(controlPolicy)
+	// 构建 id 响应头（§6.4 通道 1）：必须挂在所有路由之前 —— 挂在业务组里会让
+	// v1 组之外的 /api/*（含 JWT 401）拿不到头。
+	r.Use(buildHeaderMiddleware())
 	// Global HTTP metrics middleware
 	r.Use(func(c *gin.Context) {
 		path := c.FullPath()
@@ -117,6 +151,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "commit": apiBuildCommit})
 	})
+
+	// 版本端点（方案 §4.3 / T2.2）：公开、根路由，与 /health 同级，**不进** v1 JWT 组。
+	// 未登录可读（AC-12）；维护窗口内由维护引擎注册同一个 handler（见 maintenance.go）。
+	r.GET("/api/v1/system/version", systemVersionHandler)
 
 	// Login limiter (in-process sliding window; Redis retired in 方案 v3.4 §4 任务B).
 	// 2026-11-15：in-session reauthentication 已删除（危险动作不再要求输密码），

@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/buildinfo"
+
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -122,7 +124,8 @@ func maintenancePhase(s MaintenanceSnapshot) string {
 // NewMaintenanceEngine 构造维护期 gin 引擎。
 //
 // 契约 §3.3 的免鉴权白名单全部在这里放行：/health、/readyz、
-// /api/v1/system/maintenance、/ping、/assets/*、/favicon.svg、/metrics。
+// /api/v1/system/maintenance、/api/v1/system/version、/ping、/assets/*、
+// /favicon.svg、/metrics。
 // 其余一切请求（含所有 /api/* 业务路由）返回 503 + Retry-After。
 //
 // staticDir 为空（未设置 EHOME_STATIC_DIR）时跳过静态与 SPA 回退 —— 与
@@ -166,10 +169,18 @@ func NewMaintenanceEngine(src MaintenanceSource, staticDir string) *gin.Engine {
 		Success(c, snapshotOf(src))
 	})
 
+	// /api/v1/system/version: 公开版本端点（AC-12：启动/维护窗口内仍返回 200）。
+	// 与全量引擎注册的是**同一个 handler**（同 envelope、同 no-store、同 notes 形状），
+	// 因此维护页与「关于」页读到的版本不会因为"现在是哪条引擎在服务"而分叉。
+	// 注意：本端点**不**加入 isStartupStatusPath —— 切换后由全量引擎服务，才能
+	// 顺带拿到 X-EHome-Build 响应头（维护引擎没有全量引擎的中间件链）。
+	r.GET("/api/v1/system/version", systemVersionHandler)
+
 	// /ping 与 /metrics 保持维护期可用（白名单，契约 §3.3）。
 	// /ping 在维护期没有 driver registry，只回最小字段，不假装全量信息。
+	// version 必须来自 buildinfo（此前硬编码 "2.0.0"，与镜像实际版本早已脱节）。
 	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": "2.0.0"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": buildinfo.Version()})
 	})
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
@@ -188,7 +199,7 @@ func NewMaintenanceEngine(src MaintenanceSource, staticDir string) *gin.Engine {
 		// NoRoute 是**已匹配失败**的兜底，不是路由器内置路由 —— gin 不会给它
 		// 追加尾部斜杠或重定向，所以这里的分支就是最终结果。
 		if staticDir != "" && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) &&
-			!isAPIPath(c.Request.URL.Path) {
+			!IsAPIPath(c.Request.URL.Path) {
 			c.Header("Cache-Control", maintenanceNoCache)
 			c.File(filepath.Join(staticDir, "index.html"))
 			return
@@ -204,23 +215,8 @@ func NewMaintenanceEngine(src MaintenanceSource, staticDir string) *gin.Engine {
 	return r
 }
 
-// isAPIPath 判断路径是否属于 API/非页面命名空间（这些路径绝不回退到 index.html）。
-//
-// 为什么必须显式判：SPA 回退只应作用于「前端路由」，把 /api/* 也回退成
-// index.html 会让调用方拿到 200 + HTML，比 503 更难排查。
-func isAPIPath(path string) bool {
-	return hasPathPrefix(path, "/api/") ||
-		path == "/api" ||
-		hasPathPrefix(path, "/metrics") ||
-		path == "/health" ||
-		path == "/readyz" ||
-		path == "/ping"
-}
-
-// hasPathPrefix 是 prefix 匹配但不误伤同前缀的其他词（/api/ 不会匹配 /apix）。
-func hasPathPrefix(path, prefix string) bool {
-	return len(path) >= len(prefix) && path[:len(prefix)] == prefix
-}
+// 路径命名空间判定（IsAPIPath）与全量引擎的 404/SPA 兜底共用同一实现，
+// 见 no_route.go —— 两引擎的"是不是 API"规则必须只有一份。
 
 // RootHandler 是全量引擎与维护引擎之间的原子开关（契约 §2）。
 //

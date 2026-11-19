@@ -229,6 +229,15 @@ func AutoMigrate() error {
 	if _, err = MigrateNodeIDFromJTAGMAC(DB); err != nil {
 		return err
 	}
+	// 固件身份 schema（方案《固件与平台更新机制》§5.6 / 附录 B）：
+	// 回填身份 → 以镜像 version 为准 → 按 elf_sha256 去重 → DROP stable/target_model
+	// → 建唯一部分索引 uq_firmwares_elf → 回填 nodes 硬件 → 输出 legacy/duplicate 清单。
+	// 必须排在**现有迁移之后**（不是 AutoMigrate 末尾），且整体单事务：
+	// 任一步失败返回错误 ⇒ 启动失败（与 abortStartup 口径一致），不留半态。
+	// 测试库同源调用点：testutil/db.go（缺一处会让唯一索引只在生产存在，验收假绿）。
+	if _, err = dbschema.MigrateFirmwareIdentity(DB, dbschema.FirmwareDir); err != nil {
+		return err
+	}
 	return err
 }
 

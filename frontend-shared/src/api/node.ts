@@ -110,6 +110,12 @@ export interface OTARecord {
   started_at?: string
   created_at: string
   completed_at?: string
+  /** 是否绕过闸门（契约 §5.4）；历史记录里展示「强制」标记 */
+  forced?: boolean
+  /** 强制原因（写入安全审计） */
+  force_reason?: string
+  /** `user`（人工）/ `system`（系统回滚） */
+  source?: string
 }
 
 /** Persisted ESP32 log record returned by the node history API. */
@@ -346,10 +352,33 @@ export const nodeApi = {
     await client.post(`/api/v1/nodes/${id}/config/sync`)
   },
 
-  async startOTA(id: number | string, firmwareId: number, force: boolean = false): Promise<{ota_record_id?: number, id?: number, status: string}> {
-    const response = await client.post<unknown, ApiResponse<{ota_record_id?: number, id?: number, status: string}>>(
+  /**
+   * 建 OTA 任务（契约 §4.3：新增 `force` / `force_reason`；闸门不通过 → 409 + data.reasons）。
+   *
+   * 第三参兼容两种写法：
+   * · `startOTA(id, fwId, true)` —— 既有调用方/用例沿用的布尔形态；
+   * · `startOTA(id, fwId, { force: true, force_reason: '...' })` —— M1b 的强制入口，
+   *   `force_reason` 会被后端写入安全审计（AC-8），因此**只在非空时发送**。
+   */
+  async startOTA(
+    id: number | string,
+    firmwareId: number,
+    forceOrOptions: boolean | { force?: boolean; force_reason?: string } = false,
+  ): Promise<{ ota_record_id?: number, id?: number, status: string }> {
+    const options = typeof forceOrOptions === 'boolean'
+      ? { force: forceOrOptions, force_reason: '' }
+      : { force: forceOrOptions.force === true, force_reason: (forceOrOptions.force_reason || '').trim() }
+    const payload: Record<string, unknown> = {
+      node_id: id,
+      firmware_id: firmwareId,
+      force: options.force,
+    }
+    if (options.force && options.force_reason) {
+      payload.force_reason = options.force_reason
+    }
+    const response = await client.post<unknown, ApiResponse<{ ota_record_id?: number, id?: number, status: string }>>(
       `/api/v1/ota/tasks`,
-      { node_id: id, firmware_id: firmwareId, force }
+      payload
     )
     return response.data
   },

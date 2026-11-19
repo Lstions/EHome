@@ -1130,9 +1130,11 @@ describe('firmwareApi', () => {
 
   it('getList returns list', async () => {
     mockClient.get.mockResolvedValue({ data: [{ id: 1, version: '1.0' }] })
-    const res = await firmwareApi.getList({ model: 'esp32' })
+    // M0 契约：model/status 参数已删除，改为 chip/flash_mb/channel/q/node_id
+    const res = await firmwareApi.getList({ chip: 'esp32s3' })
     expect(res.list).toHaveLength(1)
     expect(res.total).toBe(1)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/firmwares', { params: { chip: 'esp32s3' } })
   })
 
   it('getList with null data returns empty', async () => {
@@ -1160,8 +1162,15 @@ describe('firmwareApi', () => {
 
   it('update calls put', async () => {
     mockClient.put.mockResolvedValue(undefined)
-    await firmwareApi.update(1, { version: '2.0' })
-    expect(mockClient.put).toHaveBeenCalledWith('/api/v1/firmwares/1', { version: '2.0' })
+    // PUT 只允许 changelog/channel/min_from_version（version 由镜像决定）
+    await firmwareApi.update(1, { changelog: '修复若干问题' })
+    expect(mockClient.put).toHaveBeenCalledWith('/api/v1/firmwares/1', { changelog: '修复若干问题' })
+  })
+
+  it('withdraw posts to the withdraw endpoint', async () => {
+    mockClient.post.mockResolvedValue(undefined)
+    await firmwareApi.withdraw(7)
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/firmwares/7/withdraw')
   })
 
   it('delete calls delete', async () => {
@@ -1170,17 +1179,17 @@ describe('firmwareApi', () => {
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/firmwares/1')
   })
 
-  it('getDownloadUrl includes token', () => {
-    localStorage.setItem('token', 'jwt-123')
-    const url = firmwareApi.getDownloadUrl('fw.bin')
-    expect(url).toContain('fw.bin')
-    expect(url).toContain('token=jwt-123')
-  })
-
-  it('getDownloadUrl without token', () => {
-    const url = firmwareApi.getDownloadUrl('fw.bin')
-    expect(url).toContain('fw.bin')
-    expect(url).toContain('token=')
+  it('createDownloadTicket posts to the ticket endpoint and returns the signed url', async () => {
+    mockClient.post.mockResolvedValue({
+      data: {
+        url: 'http://h/api/v1/firmwares/abc.bin/download?expires=1&signature=s',
+        expires_at: '2026-11-19T12:00:00Z',
+      },
+    })
+    const ticket = await firmwareApi.createDownloadTicket(7)
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/firmwares/7/download-ticket')
+    expect(ticket.url).toContain('signature=s')
+    expect(ticket.expires_at).toBe('2026-11-19T12:00:00Z')
   })
 })
 

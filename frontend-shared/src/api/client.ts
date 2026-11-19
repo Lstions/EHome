@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type AxiosError, type AxiosResponse } from 'axios'
 import { clearSessionCaches } from '@/utils/sessionCache'
 import { loginPath } from '@/utils/basePath'
+import { notifyServerBuild } from '@/stores/appUpdate'
 
 interface ErrorEnvelope {
   code?: number | string
@@ -62,9 +63,37 @@ apiClient.interceptors.request.use(
   }
 )
 
+/**
+ * 读取响应头 `X-EHome-Build`（契约 §4.3「版本探测响应头」）。
+ *
+ * 必须在**取 response.data 之前**比对：这是活跃用户的秒级通道 —— 用户下一次
+ * 操作产生的任意 /api/* 响应都会带上新 build，比较即知页面是否已过期。
+ *
+ * 兼容三种形态（axios 版本/适配器不同）：
+ * · AxiosHeaders 实例 ⇒ 用 `.get()`；
+ * · 普通对象 ⇒ 小写键取值；
+ * · 头缺失 / 值非字符串 ⇒ 返回空串（部署窗口内可能 502/503 且无头，属正常）。
+ */
+function readBuildHeader(headers: unknown): string {
+  if (!headers) return ''
+  const bag = headers as { get?: (name: string) => unknown } & Record<string, unknown>
+  let raw: unknown
+  if (typeof bag.get === 'function') {
+    raw = bag.get('x-ehome-build')
+  }
+  if (raw === undefined || raw === null) {
+    raw = bag['x-ehome-build'] ?? bag['X-EHome-Build']
+  }
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
 // 响应拦截器 - 统一错误处理
 apiClient.interceptors.response.use(
   (response) => {
+    // 通道 1：版本探测响应头（在解包 envelope 之前，且不阻塞返回值）。
+    // 无头（部署窗口内 502/503、第三方响应）时什么都不做。
+    const serverBuildId = readBuildHeader(response.headers)
+    if (serverBuildId) notifyServerBuild(serverBuildId)
     const data = response.data as ErrorEnvelope & { data?: unknown }
     // 检查业务状态码：2xx 放行，4xx/5xx 拦截为业务错误
     if (typeof data.code === 'number' && data.code >= 400) {

@@ -25,7 +25,16 @@
               <tbody>
                 <tr v-for="record in otaHistory" :key="record.id">
                   <td class="mono">{{ record.from_version ? record.from_version + ' → ' + record.to_version : record.to_version }}</td>
-                  <td><span class="bus-tag" :class="otaTagClass(record.status)">{{ otaStatusText(record.status) }}</span></td>
+                  <td>
+                    <span class="bus-tag" :class="otaTagClass(record.status)">{{ otaStatusText(record.status) }}</span>
+                    <!-- 闸门被 force 放行的任务（契约 §5.4 forced / force_reason）必须留下可见痕迹：
+                         事后排障时「这条为什么装了不匹配的版本」要能一眼回答 -->
+                    <span
+                      v-if="record.forced"
+                      class="bus-tag bus-tag-orange ota-forced-tag"
+                      :title="record.force_reason || '强制升级（未填写理由）'"
+                    >强制</span>
+                  </td>
                   <td>
                     <div class="ota-progress"><span class="ota-progress-bar" :style="{ width: otaProgressWidth(record) }"></span></div>
                     <span class="ota-progress-num">{{ otaProgressText(record) }}</span>
@@ -129,6 +138,7 @@ function cancelRecord(record: OTARecord) { emit('cancel', record) }
 .ota-progress-bar { display: block; height: 100%; border-radius: 3px; background: var(--no-primary); }
 .ota-progress-num { font-size: 12px; color: var(--no-text-secondary); font-variant-numeric: tabular-nums; }
 .ota-na { color: var(--no-text-faint); }
+.ota-forced-tag { margin-left: 4px; }
 .link-btn-danger { color: var(--no-danger); }
 .link-btn-danger:hover:not(:disabled) { color: var(--no-danger); opacity: .8; }
 </style>

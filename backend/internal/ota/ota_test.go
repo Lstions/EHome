@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/firmwareid"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
@@ -24,8 +25,50 @@ func setupOTATestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Node{})
+	// SecurityAuditEvent 只有 force 审计路径用到；建在这里让所有用例共用一套表。
+	db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Node{}, &models.SecurityAuditEvent{})
 	return db
+}
+
+// mustGateNode 建一个与 mustGateFirmware 完全匹配的硬件档案（c6 / 8MB / 无 PSRAM）。
+//
+// 闸门在 CreateTaskWithOptions 里对所有建任务生效（设计如此），所以这些关注
+// 进度/取消/Hello 的用例也必须先用「真实可升级」的数据建任务，而不是绕闸门。
+func mustGateNode(t *testing.T, db *gorm.DB, nodeID string) *models.Node {
+	t.Helper()
+	node := &models.Node{
+		NodeID:          nodeID,
+		Model:           "esp32c6",
+		Platform:        firmwareid.ChipC6,
+		FirmwareVersion: "0.9.0",
+		HwFlashMB:       8,
+		HwPsram:         firmwareid.PSRAMNo,
+		Status:          "online",
+	}
+	if err := db.Create(node).Error; err != nil {
+		t.Fatalf("create gate node %s: %v", nodeID, err)
+	}
+	return node
+}
+
+// mustGateFirmware 建一条身份已验证、与 mustGateNode 档位匹配的固件行。
+func mustGateFirmware(t *testing.T, db *gorm.DB, version string) *models.Firmware {
+	t.Helper()
+	fw := &models.Firmware{
+		Version:       version,
+		Checksum:      "checksum",
+		URL:           "http://example/fw.bin",
+		SizeBytes:     1024,
+		Chip:          firmwareid.ChipC6,
+		FlashMB:       8,
+		Psram:         firmwareid.PSRAMNo,
+		ModelKey:      "esp32c6-n8",
+		IdentityState: firmwareid.IdentityVerified,
+	}
+	if err := db.Create(fw).Error; err != nil {
+		t.Fatalf("create gate firmware %s: %v", version, err)
+	}
+	return fw
 }
 
 func TestNewManager(t *testing.T) {
@@ -39,7 +82,7 @@ func TestCreateTaskNoFirmware(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	_, err := mgr.CreateTask("1", 999)
+	_, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "1", FirmwareID: 999})
 	if err == nil {
 		t.Error("expected error for non-existent firmware")
 	}
@@ -49,15 +92,10 @@ func TestCreateTaskWithFirmware(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	fw := models.Firmware{
-		Version:   "1.0.0",
-		URL:       "http://example.com/fw.bin",
-		SizeBytes: 1024,
-		Checksum:  "abc123",
-	}
-	db.Create(&fw)
+	node := mustGateNode(t, db, "1")
+	fw := mustGateFirmware(t, db, "1.0.0")
 
-	task, err := mgr.CreateTask("1", fw.ID)
+	task, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: node.NodeID, FirmwareID: fw.ID})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,13 +120,12 @@ func TestCreateTaskSupersedesPrior(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	fw1 := models.Firmware{Version: "1.0.0", URL: "u1", SizeBytes: 1, Checksum: "a"}
-	fw2 := models.Firmware{Version: "2.0.0", URL: "u2", SizeBytes: 2, Checksum: "b"}
-	db.Create(&fw1)
-	db.Create(&fw2)
+	node := mustGateNode(t, db, "1")
+	fw1 := mustGateFirmware(t, db, "1.0.0")
+	fw2 := mustGateFirmware(t, db, "2.0.0")
 
 	// First task should be in pending
-	t1, err := mgr.CreateTask("1", fw1.ID)
+	t1, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: node.NodeID, FirmwareID: fw1.ID})
 	if err != nil {
 		t.Fatalf("first task: %v", err)
 	}
@@ -103,7 +140,7 @@ func TestCreateTaskSupersedesPrior(t *testing.T) {
 	db.Save(t1)
 
 	// Second task should supersede the first
-	t2, err := mgr.CreateTask("1", fw2.ID)
+	t2, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: node.NodeID, FirmwareID: fw2.ID})
 	if err != nil {
 		t.Fatalf("second task: %v", err)
 	}
@@ -134,9 +171,9 @@ func TestHandleOtaProgressStateMapping(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	fw := models.Firmware{Version: "1.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
-	db.Create(&fw)
-	task, _ := mgr.CreateTask("1", fw.ID)
+	fw := mustGateFirmware(t, db, "1.0.0")
+	mustGateNode(t, db, "1")
+	task, _ := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "1", FirmwareID: fw.ID})
 	if task == nil {
 		t.Fatal("task is nil")
 	}
@@ -167,7 +204,7 @@ func TestHandleOtaProgressStateMapping(t *testing.T) {
 	for _, c := range cases {
 		// Reset task to a fresh state for each case
 		db.Exec("DELETE FROM ota_tasks")
-		task, _ := mgr.CreateTask("1", fw.ID)
+		task, _ := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "1", FirmwareID: fw.ID})
 		otaID = task.OtaID
 
 		payload := encodeProgress(otaID, c.wireStatus, 50)
@@ -190,9 +227,9 @@ func TestHandleHelloOTACompletionSuccess(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	fw := models.Firmware{Version: "2.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
-	db.Create(&fw)
-	task, _ := mgr.CreateTask("1", fw.ID)
+	fw := mustGateFirmware(t, db, "2.0.0")
+	mustGateNode(t, db, "1")
+	task, _ := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "1", FirmwareID: fw.ID})
 	// Push to mid-flight
 	now := time.Now()
 	task.Status = StatusInstalling
@@ -216,9 +253,9 @@ func TestHandleHelloOTACompletionTimeout(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	fw := models.Firmware{Version: "2.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
-	db.Create(&fw)
-	task, _ := mgr.CreateTask("1", fw.ID)
+	fw := mustGateFirmware(t, db, "2.0.0")
+	mustGateNode(t, db, "1")
+	task, _ := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "1", FirmwareID: fw.ID})
 	// Started 20 min ago, still in flight
 	oldStart := time.Now().Add(-20 * time.Minute)
 	task.Status = StatusDownloading
@@ -258,24 +295,11 @@ func TestCancelTask(t *testing.T) {
 	db := setupOTATestDB(t)
 
 	// Create collector and firmware
-	col := models.Node{
-		NodeID:          "2001",
-		Model:           "ESP32S3",
-		FirmwareVersion: "1.0.0",
-		Status:          "online",
-	}
-	db.Create(&col)
-
-	fw := models.Firmware{
-		Version:   "1.1.0",
-		URL:       "u1",
-		SizeBytes: 1024,
-		Checksum:  "abc",
-	}
-	db.Create(&fw)
+	col := mustGateNode(t, db, "2001")
+	fw := mustGateFirmware(t, db, "1.1.0")
 
 	mgr := NewManager(db, nil, nil)
-	task, err := mgr.CreateTask(col.NodeID, fw.ID)
+	task, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: col.NodeID, FirmwareID: fw.ID})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -305,13 +329,11 @@ func TestCancelTask(t *testing.T) {
 // Test CancelTask: terminal state task → error
 func TestCancelTask_AlreadyTerminal(t *testing.T) {
 	db := setupOTATestDB(t)
-	col := models.Node{NodeID: "2002", Status: "online"}
-	db.Create(&col)
-	fw := models.Firmware{Version: "1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
-	db.Create(&fw)
+	col := mustGateNode(t, db, "2002")
+	fw := mustGateFirmware(t, db, "1.0.0")
 
 	mgr := NewManager(db, nil, nil)
-	task, _ := mgr.CreateTask(col.NodeID, fw.ID)
+	task, _ := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: col.NodeID, FirmwareID: fw.ID})
 
 	// Manually mark as success
 	task.Status = StatusSuccess
@@ -340,11 +362,10 @@ func TestCancelTask_NotFound(t *testing.T) {
 func newCancelTestTask(t *testing.T, nodeID string) (*gorm.DB, *Manager, *models.OTATask) {
 	t.Helper()
 	db := setupOTATestDB(t)
-	db.Create(&models.Node{NodeID: nodeID, Model: "ESP32S3", FirmwareVersion: "1.0.0", Status: "online"})
-	fw := models.Firmware{Version: "1.1.0", URL: "u1", SizeBytes: 1024, Checksum: "abc"}
-	db.Create(&fw)
+	mustGateNode(t, db, nodeID)
+	fw := mustGateFirmware(t, db, "1.1.0")
 	mgr := NewManager(db, nil, nil)
-	task, err := mgr.CreateTask(nodeID, fw.ID)
+	task, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: nodeID, FirmwareID: fw.ID})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -467,11 +488,10 @@ func TestCancelTask_ConditionalUpdateRejectsStaleState(t *testing.T) {
 	if err := db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Node{}); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
-	db.Create(&models.Node{NodeID: "3004", Status: "online"})
-	fw := models.Firmware{Version: "1.1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
-	db.Create(&fw)
+	mustGateNode(t, db, "3004")
+	fw := mustGateFirmware(t, db, "1.1.0")
 	mgr := NewManager(db, nil, nil)
-	task, err := mgr.CreateTask("3004", fw.ID)
+	task, err := mgr.CreateTaskWithOptions(CreateTaskOptions{NodeID: "3004", FirmwareID: fw.ID})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

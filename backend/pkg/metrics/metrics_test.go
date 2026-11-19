@@ -151,6 +151,41 @@ func TestPrometheusMetricsRegistered(t *testing.T) {
 	})
 }
 
+// TestGateRejectionCounters 守两条「拒绝观测」指标的增量语义。
+//
+// 用 Before/After 差值而不是绝对值：计数器是进程全局的，同包其它用例
+// （以及将来新增的用例）会自增同名序列，绝对值断言必然 flaky。
+func TestGateRejectionCounters(t *testing.T) {
+	t.Run("OTAGateRejected_Inc", func(t *testing.T) {
+		labels := map[string]string{"reason": "OTA_GATE_HARDWARE_UNKNOWN"}
+		before, _ := promCounterValue(t, "ehome_ota_gate_rejected_total", labels)
+		OTAGateRejected.WithLabelValues("OTA_GATE_HARDWARE_UNKNOWN").Inc()
+		assertCounterIncrement(t, "ehome_ota_gate_rejected_total", labels, before, 1)
+	})
+
+	t.Run("OTAGateRejected_ReasonsAreSeparateSeries", func(t *testing.T) {
+		// reason 是维度而不是同一个计数：两条分支各自累计（这是按 reason 建看板的前提）。
+		labels := map[string]string{"reason": "OTA_GATE_MODEL_MISMATCH"}
+		before, _ := promCounterValue(t, "ehome_ota_gate_rejected_total", labels)
+		OTAGateRejected.WithLabelValues("OTA_GATE_MODEL_MISMATCH").Inc()
+		assertCounterIncrement(t, "ehome_ota_gate_rejected_total", labels, before, 1)
+	})
+
+	t.Run("FirmwareUploadRejected_Inc", func(t *testing.T) {
+		labels := map[string]string{"reason": "FW_META_REQUIRED"}
+		before, _ := promCounterValue(t, "ehome_firmware_upload_rejected_total", labels)
+		FirmwareUploadRejected.WithLabelValues("FW_META_REQUIRED").Inc()
+		assertCounterIncrement(t, "ehome_firmware_upload_rejected_total", labels, before, 1)
+	})
+
+	t.Run("FirmwareUploadRejected_ReasonsAreSeparateSeries", func(t *testing.T) {
+		labels := map[string]string{"reason": "FW_DUPLICATE"}
+		before, _ := promCounterValue(t, "ehome_firmware_upload_rejected_total", labels)
+		FirmwareUploadRejected.WithLabelValues("FW_DUPLICATE").Inc()
+		assertCounterIncrement(t, "ehome_firmware_upload_rejected_total", labels, before, 1)
+	})
+}
+
 // TestNewGaugeDoesNotPanic verifies that creating a new Gauge via promauto
 // does not panic (double-registration would panic).
 func TestNewGaugeDoesNotPanic(t *testing.T) {

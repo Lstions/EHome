@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test'
+import { clickLoginButton, fillLoginCredentials } from './helpers/login'
 
 /**
  * task-10 / G3 —— **真实浏览器**验证：列表页创建向导的「选择已有通道」分支
@@ -26,9 +27,9 @@ const PASS = process.env.EHOME_E2E_PASS || '12345678'
 async function login(page: Page): Promise<void> {
   await page.goto(BASE + '/login')
   await page.waitForSelector('input[type="password"]', { timeout: 20000 })
-  await page.locator('input').first().fill(USER)
-  await page.locator('input[type="password"]').fill(PASS)
-  await page.locator('button:has-text("登录"), button[type="submit"], button.el-button--primary').first().click()
+  // 公共 helper：字段选择器与「登 录」按钮（含空格）都按可访问名/语义兜底
+  await fillLoginCredentials(page, USER, PASS)
+  await clickLoginButton(page)
   await page.waitForURL(/\/(dashboard|node|edge-device)/, { timeout: 25000 })
 }
 

@@ -17,6 +17,7 @@ import (
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/bootstrap"
+	"ehome/backend/internal/buildinfo"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
@@ -37,6 +38,7 @@ import (
 	"ehome/backend/internal/transport"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 	"encoding/json"
 
@@ -56,6 +58,13 @@ import (
 // "部署的到底是哪份代码"变成可查询事实，而不是靠 strings 事后推断。
 var buildCommit = "unknown"
 
+// buildTime 由构建期注入（Dockerfile 的 -ldflags -X main.buildTime=<RFC3339>）。
+//
+// 与 buildCommit 同一条注入链的理由：-X 指向不存在的符号时链接器**静默忽略**，
+// 分散到各包会让"注入失败"变成线上一个永远为空的字段；集中在 main 上至少只有
+// 两个符号，且启动日志会打印实际取值（见下方 "build identity" 行）。
+var buildTime = ""
+
 func main() {
 	cfg := config.Load()
 
@@ -67,8 +76,23 @@ func main() {
 	logger.Infof("EHomeSystem Server v2.0 starting...")
 
 	// Validate JWT secret is not default in production
-	// 构建来源转发给 api 层，供 /health 回显（2026-10-21 事故教训：镜像必须能自证来源）。
-	api.SetBuildCommit(buildCommit)
+	// 构建身份统一收口到 internal/buildinfo（版本端点 / 响应头 / 指标都读它）：
+	// ldflags 的 main.buildCommit 是**构建环境**的事实，优先级高于 release.json；
+	// api 层只承接一个快照，供 /health 回显（2026-10-21 事故教训：镜像必须能自证来源）。
+	buildinfo.SetCommit(buildCommit)
+	buildinfo.SetBuildTime(buildTime)
+	api.SetBuildCommit(buildinfo.Commit())
+	// ehome_build_info{version,commit}=1（方案 §9.5）：线上实际运行的版本无需登机器查。
+	metrics.SetBuildInfo(buildinfo.Version(), buildinfo.Commit())
+	// 启动即把构建身份打进日志：注入链断掉（-X 符号名写错会被链接器静默忽略）时，
+	// 这里会显示空 build_time，比等发布后从「关于」页发现问题早得多。
+	logger.Infof("build identity: version=%s build_id=%s commit=%s build_time=%s",
+		buildinfo.Version(), buildinfo.BuildID(), buildinfo.Commit(), buildinfo.BuildTime())
+	if buildinfo.BuildTime() == "" && buildinfo.Commit() != buildinfo.UnknownCommit {
+		// 有 commit 却没有构建时间 ⇒ 前端无法区分"发布"与"回滚"（不可解析时间按
+		// 非回滚处理），回滚时可能误报"有新版本"。CI 必须传 BUILD_TIME build-arg。
+		logger.Warnf("build_time is empty: update banner cannot distinguish rollback from new release; pass --build-arg BUILD_TIME=<RFC3339>")
+	}
 	api.ValidateJWTSecret()
 	logger.Infof("Config: DB=%s:%d/%s, API=%s, device_listener=%v",
 		cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr(), cfg.Device.Enabled)
@@ -89,7 +113,9 @@ func main() {
 	//   3) 用「维护引擎 + RootHandler」起 http.Server，早于数据库连接。
 	// ════════════════════════════════════════════════════════════════════════
 	startupTracker := bootstrap.NewTracker(bootstrap.DefaultSteps())
-	startupTracker.SetBuildCommit(buildCommit)
+	startupTracker.SetBuildCommit(buildinfo.Commit())
+	// 维护页显示的版本号同样是构建身份，不再留 "unknown"（此前从未注入）。
+	startupTracker.SetVersion(buildinfo.Version())
 	progressAdapter := &startupProgressAdapter{tracker: startupTracker, touched: map[string]bool{}}
 	datalifecycle.SetMigrationProgress(progressAdapter)
 
@@ -520,7 +546,9 @@ func main() {
 	})
 	go outboxProcessor.Run(outboxContext, time.Second)
 
-	otaMgr := ota.NewManager(db, publisher, wsHub)
+	// M-1（方案 T-1.2）：固件下载票据在 OtaCmd 发送时刻现签 —— 上传时写死的票
+	// 只有 30 分钟寿命，比任务寿命短，隔天再升级必然 401（DEF-2）。
+	otaMgr := ota.NewManager(db, publisher, wsHub, ota.WithFirmwareURLIssuer(api.NewOtaFirmwareURLIssuer()))
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
 	nodeMgr := nodemgr.NewManager(db, publisher, wsHub, offlineDetector, otaMgr, driverRegistry)
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调接线 (api 包函数, 避免包依赖环)。
@@ -986,12 +1014,14 @@ func main() {
 	// 支持通配符 "*"（放开任意来源）：gin-contrib/cors 在 AllowOrigins 含 "*"
 	// 且 AllowCredentials=true 时会自动回显请求 Origin 而非字面 "*"，因此
 	// 既允许任何来源的浏览器访问，也保留凭据（Cookie/Authorization）传递。
+	// 跨源部署时浏览器默认**不把自定义响应头暴露给 JS**：ExposeHeaders 不列
+	// X-EHome-Build，前端 axios 就永远读不到它，秒级更新通道只在同源部署下有效（§6.4）。
 	if len(allowedOrigins) > 0 {
 		r.Use(cors.New(cors.Config{
 			AllowOrigins:     allowedOrigins,
 			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 			AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
-			ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+			ExposeHeaders:    []string{"Content-Length", "Content-Type", api.BuildHeaderName},
 			AllowCredentials: true,
 			MaxAge:           12 * time.Hour,
 		}))
@@ -1023,7 +1053,7 @@ func main() {
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "ok",
-			"version": "2.0.0",
+			"version": buildinfo.Version(),
 			"drivers": driverRegistry.List(),
 		})
 	})

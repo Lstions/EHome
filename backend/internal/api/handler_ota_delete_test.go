@@ -1,13 +1,12 @@
 package api
 
 import (
-	"bytes"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"ehome/backend/internal/models"
@@ -22,25 +21,19 @@ import (
 // removed. Both the upload path (StoragePath) and the delete path are pinned here.
 
 // firmwareUploadRequest builds an authenticated multipart POST /api/v1/firmwares/upload.
+//
+// 2026-11-18（M0）：上传契约改成「合法 ESP 镜像 + 同名 sidecar 必填、版本取自镜像」，
+// 表单不再接收 version。本用例只关心「上传落盘 → 删除清盘」，因此这里不再使用
+// 调用方给的任意字节（那会被解析器拒成 FW_NOT_IMAGE），而是造一份最小合法镜像；
+// payload 参数保留只为不改调用点的语义（上传内容大小）。
 func firmwareUploadRequest(t *testing.T, version, filename string, payload []byte) *http.Request {
 	t.Helper()
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	if err := mw.WriteField("version", version); err != nil {
-		t.Fatalf("write version field: %v", err)
-	}
-	part, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		t.Fatalf("create file part: %v", err)
-	}
-	if _, err := part.Write(payload); err != nil {
-		t.Fatalf("write file part: %v", err)
-	}
-	if err := mw.Close(); err != nil {
-		t.Fatalf("close multipart writer: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/firmwares/upload", &body)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	_ = payload
+	image := firmwareTestImage(0x000D, 3, version, "firmware-delete-test")
+	sidecar := firmwareTestSidecar(t, image, "esp32c6", 8, false, version, "c6-n8")
+	body, contentType := firmwareUploadMultipart(t, filename, image, sidecar)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/firmwares/upload", body)
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", authHeader(t))
 	return req
 }
@@ -79,8 +72,13 @@ func TestFirmwareDelete_RemovesUploadedBinaryFromDisk(t *testing.T) {
 	if err := db.First(&fw, "filename = ?", "delete-me.bin").Error; err != nil {
 		t.Fatalf("uploaded firmware row not found: %v", err)
 	}
-	if want := filepath.Join("firmwares", "delete-me.bin"); fw.StoragePath != want {
-		t.Fatalf("StoragePath = %q, want %q", fw.StoragePath, want)
+	// 落盘名带 elf 前缀（M0：同名重传不得覆盖旧二进制），但仍是 firmwares/ 下的真实文件。
+	stored := filepath.Base(fw.StoragePath)
+	if !strings.HasPrefix(stored, "elf") || !strings.HasSuffix(stored, "_delete-me.bin") {
+		t.Fatalf("StoragePath basename = %q, want an elf-prefixed unique name ending in _delete-me.bin", stored)
+	}
+	if dir := filepath.Dir(fw.StoragePath); dir != "firmwares" {
+		t.Fatalf("StoragePath dir = %q, want firmwares", dir)
 	}
 	if fw.Filename != "delete-me.bin" {
 		t.Fatalf("Filename = %q, want %q (existing semantics must not change)", fw.Filename, "delete-me.bin")
@@ -94,7 +92,7 @@ func TestFirmwareDelete_RemovesUploadedBinaryFromDisk(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	mustStatMissing(t, filepath.Join("firmwares", "delete-me.bin"))
+	mustStatMissing(t, fw.StoragePath)
 	if err := db.First(&models.Firmware{}, fw.ID).Error; err == nil {
 		t.Fatalf("firmware row %d still present after delete", fw.ID)
 	}

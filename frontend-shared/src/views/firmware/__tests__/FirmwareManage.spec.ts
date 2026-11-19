@@ -15,7 +15,7 @@ vi.mock('@/api/firmware', () => ({
     delete: vi.fn(() => Promise.resolve()),
     update: vi.fn(() => Promise.resolve()),
     upload: vi.fn(() => Promise.resolve()),
-    getDownloadUrl: vi.fn(() => 'http://test/fw.bin'),
+    createDownloadTicket: vi.fn(() => Promise.resolve({ url: 'http://test/fw.bin', expires_at: '2026-11-19T12:00:00Z' })),
   },
 }))
 

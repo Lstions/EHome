@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { firmwareApi, type Firmware, type FirmwareListParams } from '@/api/firmware'
+import { firmwareApi, type Firmware, type FirmwareListParams, type FirmwareUpdatePayload } from '@/api/firmware'
 import { registerSessionCacheClearer } from '@/utils/sessionCache'
 
 const LIST_CACHE_TTL = 60_000 // 60s — firmware list rarely changes
@@ -50,7 +50,11 @@ export const useFirmwareStore = defineStore('firmware', () => {
     return fw
   }
 
-  async function update(id: number, data: { version?: string; changelog?: string; target_model?: string; stable?: boolean }) {
+  /**
+   * 编辑（契约：只允许 changelog / channel / min_from_version）。
+   * version 由镜像决定、target_model/stable 列已删 —— 传了后端也不会接受。
+   */
+  async function update(id: number, data: FirmwareUpdatePayload) {
     const generation = sessionGeneration
     await firmwareApi.update(id, data)
     if (generation !== sessionGeneration) throw new Error('会话已变更')
@@ -59,6 +63,19 @@ export const useFirmwareStore = defineStore('firmware', () => {
     if (idx >= 0) {
       Object.assign(list.value[idx], data)
     }
+  }
+
+  /**
+   * 撤回（有在途任务 → 409 FIRMWARE_IN_USE，由调用方展示原因）。
+   *
+   * 不做乐观更新：撤回是可恢复态（withdrawn_at），失败时回滚成本高于直接重取；
+   * 成功后把缓存标记为过期，由页面重新拉列表拿到服务端权威状态。
+   */
+  async function withdraw(id: number) {
+    const generation = sessionGeneration
+    await firmwareApi.withdraw(id)
+    if (generation !== sessionGeneration) throw new Error('会话已变更')
+    fetchedAt = 0
   }
 
   function deleteFirmware(id: number): Promise<void> {
@@ -116,6 +133,7 @@ export const useFirmwareStore = defineStore('firmware', () => {
     fetchList,
     upload,
     update,
+    withdraw,
     deleteFirmware,
     clearCache,
     isFresh,

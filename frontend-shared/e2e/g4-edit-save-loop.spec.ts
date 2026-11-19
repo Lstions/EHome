@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test'
+import { clickLoginButton, fillLoginCredentials } from './helpers/login'
 
 /**
  * task-10 / G4 -- real browser + real HTTP verification of the edit-save loop.
@@ -24,9 +25,9 @@ const DEVICE_NAME = process.env.EHOME_E2E_DEVICE || '\u5149\u5b66\u96e8\u91cf\u8
 async function login(page: Page): Promise<void> {
   await page.goto(BASE + '/login')
   await page.waitForSelector('input[type="password"]', { timeout: 20000 })
-  await page.locator('input').first().fill(USER)
-  await page.locator('input[type="password"]').fill(PASS)
-  await page.locator('button:has-text("\u767b\u5f55"), button[type="submit"], button.el-button--primary').first().click()
+  // 公共 helper：字段选择器与「登 录」按钮（含空格）都按可访问名/语义兜底
+  await fillLoginCredentials(page, USER, PASS)
+  await clickLoginButton(page)
   await page.waitForURL(/\/(dashboard|node|edge-device)/, { timeout: 25000 })
 }
 

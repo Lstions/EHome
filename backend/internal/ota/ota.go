@@ -10,12 +10,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/audit"
 	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/events"
+	"ehome/backend/internal/firmwareid"
+	"ehome/backend/internal/firmwareticket"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -80,6 +84,68 @@ var cancellableStates = []string{StatusPending, StatusDownloading}
 // 读取后被并发改写。API 层用 errors.Is 判定并映射为 HTTP 409。
 var ErrTaskNotCancellable = errors.New("task is no longer cancellable")
 
+// ErrForceReasonRequired：force 必须给理由（REQ-8 / AC-8）。
+// API 层用 errors.Is 判定并映射为 HTTP 400 —— force 本身合法，缺的是理由。
+var ErrForceReasonRequired = errors.New("force requires a non-empty force_reason")
+
+// DeliveryError 是「任务已落库、但下发失败」的 typed error（D2）。
+//
+// 语义（HTTP 层可照此映射 503 + data.task_id）：
+//   - 任务行与 force 审计**保留**：它们是这次尝试的证据，不因下发失败回滚/删除；
+//   - 任务被有条件推进到 failed（MarkDeliveryFailed），客户端能按 task_id 定位；
+//   - 重试是一次全新的任务：旧任务已是终态，不参与抢占，不会被新任务覆盖。
+type DeliveryError struct {
+	TaskID uint
+	OtaID  string
+	// Status 是任务**实际**持久化状态（通常 failed；并发改写时按回读值如实上报）。
+	Status string
+	Err    error
+}
+
+func (e *DeliveryError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("ota task %d delivery failed: %v", e.TaskID, e.Err)
+}
+
+// Unwrap 让调用方仍能 errors.Is/As 到原始下发错误。
+func (e *DeliveryError) Unwrap() error { return e.Err }
+
+// MarkDeliveryFailed 把「下发失败」的任务有条件推进到 failed（D2），返回实际持久化状态。
+//
+// 为什么由 Manager 做而不是 handler 直接 db.Save：
+//   - AutoRollback 也走「建任务 + 下发」，埋在 handler 会让回滚留下幽灵 pending；
+//   - Save 是整行覆盖且错误被忽略；这里用 WHERE status=pending 的条件更新，
+//     RowsAffected!=1 时回读真实状态，绝不覆盖并发推进，也不谎报状态。
+func (m *Manager) MarkDeliveryFailed(task *models.OTATask, sendErr error) string {
+	if task == nil {
+		return StatusPending
+	}
+	msg := fmt.Sprintf("send failed: %v", sendErr)
+	now := time.Now()
+	result := m.db.Model(&models.OTATask{}).
+		Where("id = ? AND status = ?", task.ID, StatusPending).
+		Updates(map[string]interface{}{
+			"status":       StatusFailed,
+			"error_msg":    msg,
+			"completed_at": &now,
+		})
+	if result.Error == nil && result.RowsAffected == 1 {
+		task.Status = StatusFailed
+		task.ErrorMsg = msg
+		task.CompletedAt = &now
+		return StatusFailed
+	}
+	logger.Errorf("[OTA] delivery failed but task %d could not be marked failed: err=%v rows=%d",
+		task.ID, result.Error, result.RowsAffected)
+	var persisted models.OTATask
+	if err := m.db.First(&persisted, task.ID).Error; err == nil && persisted.Status != "" {
+		return persisted.Status
+	}
+	return StatusPending
+}
+
 // cancelErrorMsg 用户取消的 error_msg。取消不引入 cancelled 终态, 复用 failed +
 // 本常量区分 (与设备侧上报的失败 reason 天然可区分)。
 const cancelErrorMsg = "cancelled by user (during download)"
@@ -107,28 +173,6 @@ const (
 	timeoutThreshold = 30 * time.Minute
 	timeoutScanTick  = 60 * time.Second
 )
-
-// compareVersion compares two semver-like version strings (Major.Minor.Patch).
-// Returns -1 if a < b, 0 if a == b, 1 if a > b.
-func compareVersion(a, b string) int {
-	aParts := strings.Split(a, ".")
-	bParts := strings.Split(b, ".")
-	for i := 0; i < 3; i++ {
-		av, bv := 0, 0
-		if i < len(aParts) {
-			av, _ = strconv.Atoi(aParts[i])
-		}
-		if i < len(bParts) {
-			bv, _ = strconv.Atoi(bParts[i])
-		}
-		if av < bv {
-			return -1
-		} else if av > bv {
-			return 1
-		}
-	}
-	return 0
-}
 
 // ack retry parameters
 const (
@@ -168,22 +212,47 @@ func getBridge() *bridge {
 	return _bridge
 }
 
+// FirmwareURLIssuer 在**发送时刻**签一张新的固件下载票据（方案 T-1.2）。
+//
+// 为什么是接口而不是直接 import 签名实现：签名密钥与外部主机名都在 api 层
+// （jwtSecret / EHOME_EXTERNAL_HOST），而 api 已经 import ota，本包不能反向依赖它。
+type FirmwareURLIssuer interface {
+	// IssueDownloadURL 返回 filename 的新签名下载地址；无法签发时返回 ""。
+	IssueDownloadURL(filename string) string
+}
+
+// Option 是可选的 Manager 依赖（保持既有三参构造调用点不变）。
+type Option func(*Manager)
+
+// WithFirmwareURLIssuer 注入发送时签票的签发器（cmd/server/main.go 注入）。
+func WithFirmwareURLIssuer(issuer FirmwareURLIssuer) Option {
+	return func(m *Manager) {
+		m.firmwareURLIssuer = issuer
+	}
+}
+
 type Manager struct {
-	db        *gorm.DB
-	downlink  downlink.Publisher
-	wsHub     *websocket.Hub
-	wg        sync.WaitGroup // for timeoutScanner graceful shutdown
-	started   sync.Once      // ensures Start() is re-entrant safe
-	closeOnce sync.Once      // ensures Close() does not double-close stopCh
+	db       *gorm.DB
+	downlink downlink.Publisher
+	wsHub    *websocket.Hub
+	// firmwareURLIssuer 为 nil 时退回 firmware.URL（单测/场景仿真）；
+	// 生产由 main.go 注入，保证 OtaCmd 里的票从发送时刻起算 30 分钟。
+	firmwareURLIssuer FirmwareURLIssuer
+	wg                sync.WaitGroup // for timeoutScanner graceful shutdown
+	started           sync.Once      // ensures Start() is re-entrant safe
+	closeOnce         sync.Once      // ensures Close() does not double-close stopCh
 }
 
 // NewManager creates a new OTA manager
-func NewManager(db *gorm.DB, downlinkPublisher downlink.Publisher, wsHub *websocket.Hub) *Manager {
+func NewManager(db *gorm.DB, downlinkPublisher downlink.Publisher, wsHub *websocket.Hub, opts ...Option) *Manager {
 	getBridge() // ensure bridge singleton is initialized (idempotent)
 	mgr := &Manager{
 		db:       db,
 		downlink: downlinkPublisher,
 		wsHub:    wsHub,
+	}
+	for _, opt := range opts {
+		opt(mgr)
 	}
 	return mgr
 }
@@ -261,18 +330,22 @@ func (m *Manager) scanTimeouts() {
 	}
 }
 
+// errorMsgDeviceRolledBack 是设备自动回滚的记账标记（方案 §6.6）。
+//
+// 它必须同时出现在两处：
+//   - HandleHelloOTACompletion 置 failed 时写它（可诊断）；
+//   - countRecentFailures 把它排除出失败计数，否则「回滚的回执」会凑满 3 次，
+//     再触发一次 AutoRollback（回滚的回滚，RK-12）。
+const errorMsgDeviceRolledBack = "device rolled back"
+
 // maybeAutoRollback checks if the same node has had >=3 OTA failures in 24h,
 // and if so, automatically rolls back to the last known stable firmware.
 func (m *Manager) maybeAutoRollback(nodeID string) {
-	since := time.Now().Add(-rollbackWindow)
-	var failCount int64
-	m.db.Model(&models.OTATask{}).
-		Where("node_id = ? AND status IN ? AND completed_at >= ?",
-			nodeID,
-			[]string{StatusFailed, StatusTimeout, StatusNeedsRetry},
-			since,
-		).
-		Count(&failCount)
+	failCount, err := m.countRecentFailures(nodeID)
+	if err != nil {
+		logger.Errorf("[OTA] count recent failures for node %s: %v", nodeID, err)
+		return
+	}
 
 	if failCount < int64(rollbackFailMax) {
 		return
@@ -283,6 +356,24 @@ func (m *Manager) maybeAutoRollback(nodeID string) {
 	if err := m.AutoRollback(nodeID); err != nil {
 		logger.Errorf("[OTA] auto-rollback failed for node %s: %v", nodeID, err)
 	}
+}
+
+// countRecentFailures 统计 AutoRollback 窗口内的**真失败**（方案 §6.6 / RK-12）。
+//
+// 「device rolled back」是设备自动回滚的回执，不是升级失败：把它算进失败计数，
+// 下一次 maybeAutoRollback 就会「为回滚再回滚」一次，形成循环。
+func (m *Manager) countRecentFailures(nodeID string) (int64, error) {
+	since := time.Now().Add(-rollbackWindow)
+	var failCount int64
+	err := m.db.Model(&models.OTATask{}).
+		Where("node_id = ? AND status IN ? AND completed_at >= ?",
+			nodeID,
+			[]string{StatusFailed, StatusTimeout, StatusNeedsRetry},
+			since,
+		).
+		Where("NOT (status = ? AND error_msg = ?)", StatusFailed, errorMsgDeviceRolledBack).
+		Count(&failCount).Error
+	return failCount, err
 }
 
 // AutoRollback finds the last known stable firmware for a node and creates a rollback OTA task.
@@ -314,15 +405,28 @@ func (m *Manager) AutoRollback(nodeID string) error {
 		return fmt.Errorf("node %s already on stable version %s, no rollback needed", nodeID, stableFW.Version)
 	}
 
-	// Create rollback task
-	task, err := m.CreateTask(nodeID, stableFW.ID)
+	// Create rollback task.
+	// source=system：回滚目标是更旧版本，必须跳过闸门第 9/10 条版本方向判定，
+	// 否则 AutoRollback 每天都会被 OTA_GATE_NOT_AN_UPGRADE 拒掉（AC-9）。
+	// 硬件类判定照常生效（方案 §6.3「系统回滚只校硬件、不校方向」）。
+	task, err := m.CreateTaskWithOptions(CreateTaskOptions{
+		NodeID:     nodeID,
+		FirmwareID: stableFW.ID,
+		Source:     firmwareid.SourceSystem,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create rollback task: %w", err)
 	}
 
-	// Send the OTA command
+	// Send the OTA command. 下发失败同样不能留幽灵 pending（D2）：任务置 failed，
+	// 返回带 task_id 的 typed error（HTTP 层统一映射 503 OTA_DELIVERY_FAILED）。
 	if err := m.SendOtaCommand(task); err != nil {
-		return fmt.Errorf("failed to send rollback OTA command: %w", err)
+		return &DeliveryError{
+			TaskID: task.ID,
+			OtaID:  task.OtaID,
+			Status: m.MarkDeliveryFailed(task, err),
+			Err:    fmt.Errorf("send failed: %w", err),
+		}
 	}
 
 	logger.Infof("[OTA] auto-rollback: node %s → firmware %s (task %s)", nodeID, stableFW.Version, task.OtaID)
@@ -367,45 +471,246 @@ func (m *Manager) GetNodeOTAStatus(nodeID string) (map[string]interface{}, error
 	return result, nil
 }
 
-// CreateTask creates a new OTA task per docs §6.4.1:
-//  1. Mark all in-flight OTA records for the same node as failed ("Superseded by new attempt")
-//  2. Create new record in pending state with the target firmware version
-//  3. (Caller is expected to publish the OtaCommand afterwards)
-func (m *Manager) CreateTask(collectorID string, firmwareID uint) (*models.OTATask, error) {
-	var firmware models.Firmware
-	if err := m.db.First(&firmware, firmwareID).Error; err != nil {
-		return nil, fmt.Errorf("firmware not found: %w", err)
+// AuditActor 是 force 落审计的主体（方案评审 P0-6 的 opts{Force,Reason,Actor,Source}）。
+//
+// HTTP 层从登录态填（subject_id → UserID）；为空时按 "user" + 空快照记录，
+// 绝不因为「拿不到 actor」就跳过审计（REQ-8：危险操作必须留痕）。
+type AuditActor struct {
+	Type      string // "user" / "admin" / "system"
+	UserID    *uint
+	Snapshot  string
+	RequestID string
+	SourceIP  string
+}
+
+// CreateTaskOptions 是建任务参数（方案 §5.4 / §6.3）。
+//
+// 为什么把 NodeID/FirmwareID 也放进 opts：闸门需要 Force/ForceReason/Source/Actor
+// 四个额外维度；继续用位置参数会变成 CreateTask(id, fw, false, "", "user", actor)，
+// 调用点读不出语义，也最容易把 force 与 source 传反。
+type CreateTaskOptions struct {
+	NodeID      string
+	FirmwareID  uint
+	Force       bool
+	ForceReason string
+	Source      string
+	Actor       AuditActor
+}
+
+// CreateTaskWithOptions 建 OTA 任务 —— 闸门的唯一入口（方案 §6.3 / AC-8）。
+//
+// 顺序：
+//  1. 读固件与节点硬件档案（节点不存在 = 硬件档案未知，交给闸门第 3 条，不报 500）；
+//  2. firmwareid.CheckCompat 十分支判定；不兼容**先返回 typed GateError，不写库**；
+//  3. force 只对版本方向两条（9/10）生效；放行时必须带理由并落审计；
+//  4. 抢占旧任务（沿用既有「失败只告警」语义）→ 落库 +（强制时）审计同一事务。
+func (m *Manager) CreateTaskWithOptions(opts CreateTaskOptions) (*models.OTATask, error) {
+	if strings.TrimSpace(opts.NodeID) == "" {
+		return nil, fmt.Errorf("create task: node_id is required")
+	}
+	firmware, err := m.loadFirmware(opts.FirmwareID)
+	if err != nil {
+		return nil, err
+	}
+	node, err := m.loadNodeForGate(opts.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("create task: load node %s: %w", opts.NodeID, err)
 	}
 
-	// §6.4.1: Supersede any prior in-flight OTA for this node
+	compatReq := NewCompatRequest(&node, firmware, opts.Source)
+	// 节点行不存在时 loadNodeForGate 返回零值：NodeID 仍要填，第 3 条的
+	// data.fix 命令才拼得出来；fix 是运维唯一出口。
+	compatReq.Node.NodeID = opts.NodeID
+	gate := firmwareid.CheckCompat(compatReq)
+
+	var gateErr *firmwareid.GateError
+	forced := false
+	if !gate.Compatible {
+		gateErr = gate.GateError()
+		if !opts.Force || !gate.Forceable {
+			// 硬件类不匹配一律拒绝（方案 §2.4 R5）：force 只买「版本方向」这一种例外。
+			//
+			// 指标埋在这里而不是 HTTP 层：AutoRollback/手动回滚也走本函数，
+			// 埋在 handler 会漏掉系统回滚通道的拒绝（§9.5 按 reason 观测闸门）。
+			metrics.OTAGateRejected.WithLabelValues(gateErr.Code).Inc()
+			return nil, gateErr
+		}
+		if strings.TrimSpace(opts.ForceReason) == "" {
+			return nil, ErrForceReasonRequired
+		}
+		forced = true
+	}
+	return m.createTaskRecord(opts, firmware, forced, gateErr)
+}
+
+// NewCompatRequest 把库里的节点/固件行映射成闸门输入。
+//
+// 只做字段搬运：chip 别名与 psram 大小写的规范化、以及 10 条分支判定全在
+// firmwareid.CheckCompat 内。因此 ehomectl ota gate-check 的只读预检与
+// CreateTaskWithOptions 的判定**同源**（v1.4 删除 gateMode 的前提）。
+func NewCompatRequest(node *models.Node, firmware *models.Firmware, source string) firmwareid.CompatRequest {
+	req := firmwareid.CompatRequest{
+		Firmware: firmwareid.FirmwareFacts{
+			ID:             firmware.ID,
+			ModelKey:       firmware.ModelKey,
+			Chip:           firmware.Chip,
+			FlashMB:        firmware.FlashMB,
+			Psram:          firmware.Psram,
+			Version:        firmware.Version,
+			SizeBytes:      firmware.SizeBytes,
+			MinFromVersion: firmware.MinFromVersion,
+			IdentityState:  firmware.IdentityState,
+			Withdrawn:      firmware.WithdrawnAt != nil,
+		},
+		Source: normalizeSource(source),
+	}
+	if node != nil {
+		req.Node = firmwareid.NodeHardware{
+			NodeID:   node.NodeID,
+			Platform: node.Platform,
+			FlashMB:  node.HwFlashMB,
+			Psram:    node.HwPsram,
+		}
+		req.CurrentVersion = node.FirmwareVersion
+	}
+	return req
+}
+
+// createTaskRecord 只做「抢占旧任务 + 落库 + 强制时审计」，不含闸门判定。
+//
+// §6.4.1 的抢占语义保持不变：同节点所有非终态记录先标 failed("Superseded by new attempt")。
+// 事务只包住「新任务 + force 审计」：这两者必须同生共死；抢占失败按既有语义只告警。
+func (m *Manager) createTaskRecord(opts CreateTaskOptions, firmware *models.Firmware, forced bool, gateErr *firmwareid.GateError) (*models.OTATask, error) {
 	now := time.Now()
+	task := &models.OTATask{
+		OtaID:       fmt.Sprintf("ota-%d", now.UnixNano()),
+		NodeID:      opts.NodeID,
+		FirmwareID:  opts.FirmwareID,
+		ToVersion:   firmware.Version,
+		Status:      StatusPending,
+		Progress:    0,
+		Forced:      forced,
+		ForceReason: "",
+		Source:      normalizeSource(opts.Source),
+	}
+	if forced {
+		task.ForceReason = strings.TrimSpace(opts.ForceReason)
+	}
+
+	// §6.4.1 的抢占保持既有语义：失败只告警，不阻断新任务（一次脏锁不该让升级永久不可发）。
+	// 因此它刻意留在事务外 —— 放进事务后，PG 里失败的语句会污染整个事务，
+	// 「告警后继续」就变成了假语义。
 	res := m.db.Model(&models.OTATask{}).
-		Where("node_id = ? AND status IN ?", collectorID, activeStates).
+		Where("node_id = ? AND status IN ?", opts.NodeID, activeStates).
 		Updates(map[string]interface{}{
 			"status":       StatusFailed,
 			"error_msg":    "Superseded by new attempt",
 			"completed_at": &now,
 		})
 	if res.Error != nil {
-		logger.Warnf("[OTA] Failed to supersede prior tasks for collector %s: %v", collectorID, res.Error)
+		logger.Warnf("[OTA] Failed to supersede prior tasks for collector %s: %v", opts.NodeID, res.Error)
 	} else if res.RowsAffected > 0 {
-		logger.Infof("[OTA] Superseded %d in-flight OTA record(s) for collector %s", res.RowsAffected, collectorID)
+		logger.Infof("[OTA] Superseded %d in-flight OTA record(s) for collector %s", res.RowsAffected, opts.NodeID)
 	}
 
-	task := &models.OTATask{
-		OtaID:      fmt.Sprintf("ota-%d", now.UnixNano()),
-		NodeID:     collectorID,
-		FirmwareID: firmwareID,
-		ToVersion:  firmware.Version,
-		Status:     StatusPending,
-		Progress:   0,
+	// 任务行与 force 审计同事务：审计是危险操作的凭据，不允许「任务在、审计丢」。
+	err := m.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(task).Error; err != nil {
+			return fmt.Errorf("failed to create task: %w", err)
+		}
+		if !forced {
+			return nil
+		}
+		return writeForceAudit(tx, opts, firmware, gateErr)
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	if err := m.db.Create(task).Error; err != nil {
-		return nil, fmt.Errorf("failed to create task: %w", err)
-	}
-
 	return task, nil
+}
+
+// forceAuditEventName 是「强制放行建任务」的审计事件名（security_audit_events.event_name）。
+const forceAuditEventName = "ota.task.force_created"
+
+// writeForceAudit 落一条 force 审计（与任务行同事务，AC-8 的审计判据）。
+//
+// metadata 里必须同时有 target（firmware）、reason 与命中的闸门码：事后追责时要能
+// 回答「对哪台节点、放行了哪条判定、为什么」。actor 由 Event 的 Actor* 字段承担。
+func writeForceAudit(tx *gorm.DB, opts CreateTaskOptions, firmware *models.Firmware, gateErr *firmwareid.GateError) error {
+	actorType := strings.TrimSpace(opts.Actor.Type)
+	if actorType == "" {
+		actorType = "user"
+	}
+	metadata := map[string]interface{}{
+		"node_id":     opts.NodeID,
+		"firmware_id": opts.FirmwareID,
+		"to_version":  firmware.Version,
+		"reason":      strings.TrimSpace(opts.ForceReason),
+	}
+	if gateErr != nil {
+		metadata["gate_code"] = gateErr.Code
+		metadata["gate_reasons"] = gateErr.Reasons
+	}
+	if err := audit.NewWriter(tx).Write(audit.Event{
+		ActorType:     actorType,
+		ActorUserID:   opts.Actor.UserID,
+		ActorSnapshot: opts.Actor.Snapshot,
+		EventName:     forceAuditEventName,
+		EventVersion:  1,
+		Result:        "success",
+		RequestID:     opts.Actor.RequestID,
+		SourceIP:      opts.Actor.SourceIP,
+		TargetType:    "firmware",
+		TargetID:      strconv.FormatUint(uint64(opts.FirmwareID), 10),
+		Metadata:      metadata,
+	}); err != nil {
+		return fmt.Errorf("write force audit: %w", err)
+	}
+	return nil
+}
+
+// loadFirmware 读固件行；错误文案保持既有口径（调用方与测试按 firmware not found 识别）。
+func (m *Manager) loadFirmware(firmwareID uint) (*models.Firmware, error) {
+	var firmware models.Firmware
+	if err := m.db.First(&firmware, firmwareID).Error; err != nil {
+		return nil, fmt.Errorf("firmware not found: %w", err)
+	}
+	return &firmware, nil
+}
+
+// loadNodeForGate 读节点硬件档案。节点不存在返回零值而不是错误：
+// 交给闸门第 3 条（OTA_GATE_HARDWARE_UNKNOWN）拒绝 —— 前端拿到的是可解释的 409
+// （含 data.fix），而不是一句 500 record not found。
+func (m *Manager) loadNodeForGate(nodeID string) (models.Node, error) {
+	var node models.Node
+	err := m.db.Where("node_id = ?", nodeID).First(&node).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.Node{}, err
+	}
+	return node, nil
+}
+
+// normalizeSource 把来源收敛到 user/system 两个值（方案 §5.4）。
+//
+// 未知值一律按 user：只有 source=system 能跳过版本方向判定，默认必须落在严格一侧。
+func normalizeSource(source string) string {
+	if strings.ToLower(strings.TrimSpace(source)) == firmwareid.SourceSystem {
+		return firmwareid.SourceSystem
+	}
+	return firmwareid.SourceUser
+}
+
+// InFlightTaskCount 返回引用该固件的在途任务数（pending/downloading/verifying/installing）。
+//
+// 撤回/删除固件前的保护判据（方案 §4.3 / DEF-10 → 409 FIRMWARE_IN_USE）：
+// 固件被在途任务引用时撤回或删除，设备会拿到一份「已不可选/已删」的下载地址，
+// 造成账实不符。判据与抢占/AutoRollback 共用 activeStates，不另写一份状态表。
+func InFlightTaskCount(db *gorm.DB, firmwareID uint) (int64, error) {
+	var count int64
+	err := db.Model(&models.OTATask{}).
+		Where("firmware_id = ? AND status IN ?", firmwareID, activeStates).
+		Count(&count).Error
+	return count, err
 }
 
 // SendOtaCommand sends OtaCommand to a device and waits for acknowledgement.
@@ -523,15 +828,42 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 }
 
 // buildOtaCmdPayload constructs the binary payload for an OtaCmd frame.
+//
+// M-1（方案 T-1.2 / DEF-2）：URL **在发送时刻现签**，不复用上传时写进
+// firmware.URL 的那张票 —— 那张票的 30 分钟有效期从上传时刻算起，
+// 隔天再下发必然 401（AC-11）。重试复用同一个 payload，票在 30 分钟内足够。
 func (m *Manager) buildOtaCmdPayload(task *models.OTATask, firmware *models.Firmware, seq uint32) []byte {
 	enc := frame.NewEncoder(frame.MsgOtaCmd)
 	enc.EncodeString(1, task.OtaID)
-	enc.EncodeString(2, firmware.URL)
+	enc.EncodeString(2, m.firmwareDownloadURL(firmware))
 	enc.EncodeString(3, firmware.Checksum)
 	enc.EncodeVarint(4, firmware.SizeBytes)
 	enc.EncodeString(5, firmware.Version)
 	enc.EncodeVarint(frame.OtaCmdFieldSequence, uint64(seq))
 	return enc.Bytes()
+}
+
+// firmwareDownloadURL 现签下载地址；签发器缺失（单测/仿真）时退回库里的 URL。
+//
+// filename 取落盘名（StoragePath 的 basename）：上传会按 elf_sha256 重命名，
+// URL 必须指向磁盘上真实存在的那个文件。
+func (m *Manager) firmwareDownloadURL(firmware *models.Firmware) string {
+	if m.firmwareURLIssuer == nil {
+		return firmware.URL
+	}
+	filename := firmwareticket.SanitizeName(firmware.StoragePath)
+	if filename == "" {
+		filename = firmwareticket.SanitizeName(firmware.Filename)
+	}
+	if filename == "" {
+		return firmware.URL
+	}
+	fresh := m.firmwareURLIssuer.IssueDownloadURL(filename)
+	if fresh == "" {
+		logger.Warnf("[OTA] firmware URL issuer returned nothing for %q; falling back to stored URL", filename)
+		return firmware.URL
+	}
+	return fresh
 }
 
 // HandleOtaProgress processes OtaProgress messages from devices per docs §6.4.2:
@@ -673,14 +1005,30 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	}
 }
 
+// helloCompletionErrorMsg 是「Hello 补完成」写入的 error_msg（方案 §6.2 的字面值）。
+const helloCompletionErrorMsg = "auto-completed via Hello"
+
+// rollbackDetectableStates 是允许判定「设备已回滚」的任务状态（方案 §6.6）。
+//
+// 为什么不判全部 active 状态：设备在 downloading 阶段也会周期性发同步 Hello
+// （sync_manager 周期 600s），那时它当然还跑着旧版本。若对 pending/downloading
+// 也按「当前版本 == 上一个成功版本」判回滚，每次正常升级都会被自己的周期 Hello
+// 误杀。只有镜像已经进入写入阶段（verifying/installing）后 Hello 仍报旧版本，
+// 才是「写完、重启、退回旧分区」的证据；检测不到的回滚仍由 30 分钟超时扫描兜底
+// （§6.6 自己写明的兜底路径）。
+var rollbackDetectableStates = []string{StatusVerifying, StatusInstalling}
+
 // HandleHelloOTACompletion reconciles in-flight OTA tasks when a device Hello reports
-// a new firmware version, per docs §6.4.3.
+// its running firmware version (docs §6.2 / §6.4.3 / §6.6).
 //
-// If the device is now running the target firmware (to_version), any in-flight task for
-// that node is marked success. This covers the case where the ESP32 reboots into
-// the new firmware and the trailing success OtaProgress frame is lost.
+// 三条出口：
+//  1. 版本相等且任务**已离开 pending** → 条件更新为 success（补完成，AC-10）；
+//  2. 版本相等但仍是 pending → 只记日志，不判成功（从未开始的任务不能凭版本相等成功）；
+//  3. 版本不相等 → 设备回滚识别：已进入写入阶段 + 当前版本 == 上一个成功版本
+//     → 条件更新为 failed(device rolled back)，且不触发 AutoRollback（§6.6）。
 //
-// Enhanced: version mismatch detection with needs_retry status.
+// 用条件更新（WHERE id + node_id + status）而不是整行 Save：读与写之间设备可能
+// 又推进了状态，RowsAffected != 1 时绝不覆盖（AC-10 的并发判据）。
 func (m *Manager) HandleHelloOTACompletion(collectorID string, deviceID, firmwareVersion string) {
 	if collectorID == "" {
 		return
@@ -695,35 +1043,121 @@ func (m *Manager) HandleHelloOTACompletion(collectorID string, deviceID, firmwar
 		return // No in-flight OTA or DB error
 	}
 
-	// Only action: device reports the target version → mark success.
-	// This covers the case where the ESP32 reboots into the new firmware
-	// and the trailing success OtaProgress frame is lost.
-	//
-	// Timeout/failure detection is handled by timeoutScanner (60s tick, 30min threshold)
-	// and SendOtaCommand's ack retry goroutine (30s×3 retries).
-	// We intentionally do NOT mark tasks as failed/mismatch here — the device may
-	// still be downloading while periodically sending Hello with the old version.
-	if task.ToVersion != "" && task.ToVersion == firmwareVersion {
-		now := time.Now()
-		task.Status = StatusSuccess
-		task.Progress = 100
-		task.CompletedAt = &now
-		task.ErrorMsg = "Auto-completed via Hello (device reported target firmware)"
-		if task.StartedAt == nil {
-			task.StartedAt = &now
-		}
-		if err := m.db.Save(&task).Error; err == nil && m.wsHub != nil {
-			m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
-				"ota_id":    task.OtaID,
-				"status":    task.Status,
-				"progress":  100,
-				"device_id": deviceID,
-				"reason":    "hello_completion",
-			})
-		}
-		logger.Infof("[%s] OTA %s auto-completed via Hello (firmware_version=%s)",
-			deviceID, task.OtaID, firmwareVersion)
+	if task.ToVersion == "" || task.ToVersion != firmwareVersion {
+		m.handleDeviceRollback(&task, deviceID, firmwareVersion)
+		return
 	}
+
+	// 从未开始的任务不能凭「版本相等」判成功：pending 说明 OtaCmd 还没被设备确认，
+	// 版本相等只说明它本来就在这个版本上（同版本重刷场景）。
+	if task.Status == StatusPending {
+		logger.Warnf("[%s] OTA %s not completed via Hello: task never left pending (reason=hello_without_progress)",
+			deviceID, task.OtaID)
+		return
+	}
+
+	now := time.Now()
+	result := m.db.Model(&models.OTATask{}).
+		Where("id = ? AND node_id = ? AND status = ?", task.ID, collectorID, task.Status).
+		Updates(map[string]interface{}{
+			"status":       StatusSuccess,
+			"progress":     100,
+			"completed_at": &now,
+			"error_msg":    helloCompletionErrorMsg,
+		})
+	if result.Error != nil {
+		logger.Errorf("[%s] OTA %s Hello completion failed: %v", deviceID, task.OtaID, result.Error)
+		return
+	}
+	if result.RowsAffected != 1 {
+		logger.Warnf("[%s] OTA %s Hello completion skipped: concurrent change (read_status=%s rows=%d)",
+			deviceID, task.OtaID, task.Status, result.RowsAffected)
+		return
+	}
+
+	if m.wsHub != nil {
+		m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
+			"ota_id":    task.OtaID,
+			"status":    StatusSuccess,
+			"progress":  100,
+			"device_id": deviceID,
+			"reason":    "hello_completion",
+		})
+	}
+	logger.Infof("[%s] OTA %s auto-completed via Hello (firmware_version=%s)",
+		deviceID, task.OtaID, firmwareVersion)
+}
+
+// handleDeviceRollback 识别「设备自动回滚」（方案 §6.6）。
+//
+// 判据（两条都必须成立）：
+//   - 任务已进入写入阶段（rollbackDetectableStates）—— 下载中的 Hello 不算证据；
+//   - 设备当前版本 == 该节点在该任务之前**最后一次成功**的版本 —— 即它退回了旧分区。
+//
+// 判据不成立时什么都不做：可能只是设备还在下载（Hello 报旧版本是正常的），
+// 也可能回滚到了没有成功记录的更老版本 —— 后者仍由 30 分钟超时扫描兜底。
+//
+// 命中后写 error_msg="device rolled back"，并**刻意不调用 maybeAutoRollback**：
+// 回滚不是升级失败，不能再触发一次「回滚的回滚」（§6.6 / RK-12）。
+func (m *Manager) handleDeviceRollback(task *models.OTATask, deviceID, firmwareVersion string) {
+	if firmwareVersion == "" || task.ToVersion == "" || firmwareVersion == task.ToVersion {
+		return
+	}
+	if !slices.Contains(rollbackDetectableStates, task.Status) {
+		return
+	}
+	previous := m.previousSuccessVersion(task)
+	if previous == "" || previous != firmwareVersion {
+		return
+	}
+
+	now := time.Now()
+	result := m.db.Model(&models.OTATask{}).
+		Where("id = ? AND node_id = ? AND status = ?", task.ID, task.NodeID, task.Status).
+		Updates(map[string]interface{}{
+			"status":       StatusFailed,
+			"error_msg":    errorMsgDeviceRolledBack,
+			"completed_at": &now,
+		})
+	if result.Error != nil {
+		logger.Errorf("[%s] OTA %s rollback accounting failed: %v", deviceID, task.OtaID, result.Error)
+		return
+	}
+	if result.RowsAffected != 1 {
+		logger.Warnf("[%s] OTA %s rollback accounting skipped: concurrent change (read_status=%s rows=%d)",
+			deviceID, task.OtaID, task.Status, result.RowsAffected)
+		return
+	}
+
+	if m.wsHub != nil {
+		m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
+			"ota_id":    task.OtaID,
+			"status":    StatusFailed,
+			"progress":  task.Progress,
+			"device_id": deviceID,
+			"reason":    "device_rolled_back",
+		})
+	}
+	logger.Warnf("[%s] OTA %s failed: device rolled back from %s to %s",
+		deviceID, task.OtaID, task.ToVersion, firmwareVersion)
+}
+
+// previousSuccessVersion 返回该节点在本任务之前最后一次成功升级到的版本。
+//
+// 用 id < task.ID 而不是 completed_at 比较：id 单调递增，不受时钟回拨影响；
+// completed_at 允许为空（历史行）。
+func (m *Manager) previousSuccessVersion(task *models.OTATask) string {
+	var previous models.OTATask
+	err := m.db.Where("node_id = ? AND status = ? AND id < ?", task.NodeID, StatusSuccess, task.ID).
+		Order("id DESC").
+		First(&previous).Error
+	if err != nil {
+		return ""
+	}
+	if previous.ToVersion == "" || previous.ToVersion == task.ToVersion {
+		return ""
+	}
+	return previous.ToVersion
 }
 
 // CancelTask marks an in-flight OTA task as cancelled (failed with reason).

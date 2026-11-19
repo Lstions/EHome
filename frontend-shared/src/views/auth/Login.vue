@@ -88,6 +88,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { useAppUpdateStore } from '@/stores/appUpdate'
 import { authApi, type AuthState, type InitializeRequest } from '@/api/auth'
 import { getRemainingLockSeconds } from '@/utils/loginLockout'
 import LoginForm from '@/components/forms/LoginForm.vue'
@@ -109,7 +110,13 @@ const authState = ref<AuthState | null>(null)
 const lockSeconds = ref(0)
 let lockTimer: ReturnType<typeof setInterval> | null = null
 
-const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.0.0')
+/**
+ * 登录前也要显示真实版本（T2.4）：`/system/version` 是**公开**端点，App 层已在
+ * 挂载时拉取一次，故这里直接读 store —— 与侧栏版本同源，缺失时显示「未知」。
+ * 不再回退到写死的 2.0.0（那是与镜像无关的常量，属于「永远正确又永远无用」）。
+ */
+const appUpdateStore = useAppUpdateStore()
+const appVersion = computed(() => appUpdateStore.displayVersion)
 
 const refreshLock = () => {
   lockSeconds.value = getRemainingLockSeconds()

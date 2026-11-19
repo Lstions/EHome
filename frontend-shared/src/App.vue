@@ -21,24 +21,34 @@
          （ErrorBoundary > NetworkBanner > RouteProgressBar > router-view），
          既有测试与样式依赖都不得改变。 -->
     <ErrorBoundary v-else>
-      <NetworkBanner />
+      <NetworkBanner @visible-change="networkBannerVisible = $event" />
       <!-- 全局路由进度条：懒加载 chunk 下载期间保持可见反馈。ErrorBoundary 之前，确保路由级错误也能被覆盖 -->
       <RouteProgressBar />
       <router-view />
     </ErrorBoundary>
+    <!-- 旧页面更新提示（契约 §6.4）。两条位置约束都不是随意的：
+         ① **放在 ErrorBoundary 之外**：ErrorBoundary 命中时会把整个 slot 换成错误页，
+            若把更新模态放进去，恰恰在「页面已崩」时看不到唯一有效的出路（立即刷新）。
+         ② **放在 router-view 之后**：AppStartupGate.spec 断言 ready 后子树顺序
+            （NetworkBanner > RouteProgressBar > router-view），插在中间会让该门禁假红；
+            它自身是 fixed 定位，DOM 顺序不影响视觉。
+         断线时通过 defer 整块延后 —— 两个 fixed top 不重叠、断线优先。 -->
+    <UpdateBanner :defer="networkBannerVisible" />
   </el-config-provider>
 </template>
 
 <script setup lang="ts">
-import { watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loading } from '@element-plus/icons-vue'
 import { useThemeStore } from '@/stores/theme'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
 import NetworkBanner from '@/components/common/NetworkBanner.vue'
 import RouteProgressBar from '@/components/common/RouteProgressBar.vue'
+import UpdateBanner from '@/components/common/UpdateBanner.vue'
 import Maintenance from '@/views/maintenance/Maintenance.vue'
 import { useStartupGate } from '@/views/maintenance/useStartupGate'
+import { useAppUpdateStore } from '@/stores/appUpdate'
 
 const themeStore = useThemeStore()
 
@@ -50,6 +60,19 @@ const locale = zhCn
  * 完整语义（含「后端不认识该接口则 fail-open」等边界）见 useStartupGate.ts 的文件头。
  */
 const { phase, snapshot, connectionFailed } = useStartupGate()
+
+/**
+ * 旧页面更新提示（契约 §6.4 / T2.5）。
+ *
+ * 在这里 init 而不是 main.ts：store 需要 Pinia 已安装（app.use(createPinia()) 之后），
+ * 而 App 的 setup 是**唯一**保证「已安装且一定执行一次」的位置。
+ * 首屏检查、visibilitychange、30 分钟轮询、WS 重连、模块加载失败五条监听都由 init 安装。
+ */
+const appUpdateStore = useAppUpdateStore()
+const networkBannerVisible = ref(false)
+
+onMounted(() => appUpdateStore.init())
+onBeforeUnmount(() => appUpdateStore.dispose())
 
 // 监听主题变化，更新 document 类名
 watch(() => themeStore.mode, (mode) => {

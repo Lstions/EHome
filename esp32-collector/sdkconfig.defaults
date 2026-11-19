@@ -216,8 +216,30 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
 # ⚠ OUT 保持 IDF 默认 4096（asymmetric）：设备**发送**方向不需要 16 KB，
 #   而 OUT 也是一笔连续内部 RAM。IN/OUT 分开设正是因为两者需求差 4 倍。
 
-# Bootloader rollback protection
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
+# ============================================================================
+# Bootloader rollback protection（M3a/T3a.1，2026-11-18：由 n 改为 y）
+# ============================================================================
+#
+# ⚠ 这个开关编进 **bootloader.bin**，不在应用分区里。OTA 只写应用分区 ⇒
+#   本行的值只能靠**整片烧录 / 现场重烧**进入设备，之后任何 OTA 都改不了它。
+#   因此：重烧过 bootloader 的设备获得自动回滚；只 OTA 到本版本、bootloader
+#   仍是旧固件（n）的设备**没有**自动回滚（方案 D-1，覆盖范围由 M3b 作业决定）。
+#
+# 打开后引导器语义（bootloader_support/src/bootloader_utility.c:396-400/445-447）：
+#   · 新 OTA 镜像首次启动 ⇒ otadata 状态 NEW→PENDING_VERIFY；
+#   · 应用把它标成 VALID ⇒ 正常启动，不再回滚；
+#   · **只要没标 VALID 就复位** ⇒ 下次启动置 ABORTED 并自动退回旧分区。
+# ⇒ 应用侧的“确认”判据必须**本地可达成**（uptime >= 30s 且非安全模式且关键
+#   初始化完成；见 ota.h 的 ota_confirm_due / main.c 的 ota_boot_validation_poll）。
+#   挂在联网 / Hello / StatusReport 上会让“应用正常但网络不通”的设备被误滚
+#   —— 那正是 DEF-4 的原始形态（方案 §3.4 判断 2、§6.6）。
+# ⇒ 整片烧录后的首次启动**不会**停在 PENDING_VERIFY：otadata 为空时引导器写入
+#   的初始状态是 VALID（同文件 set_actual_ota_seq），故不确认也不会误滚。
+#
+# 回退剧本：本逻辑若在现场出现异常，把本行改回 n 并重编重刷（方案 §9.3）。
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# 防降级（anti-rollback，依赖 eFuse secure_version）**保持关闭**：它需要烧写
+# eFuse 才真正生效且不可逆，语义上与本卡的“回退到旧版本”相反。
 CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
 
 # NVS

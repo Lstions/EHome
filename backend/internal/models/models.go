@@ -22,8 +22,10 @@ type Node struct {
 	Name            string     `gorm:"size:64;not null" json:"name"`
 	Model           string     `gorm:"size:20" json:"model"`
 	FirmwareVersion string     `gorm:"size:32" json:"firmware_version"`
-	ProtocolVersion string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
-	Platform        string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
+	ProtocolVersion string     `gorm:"size:16;default:2.2" json:"protocol_version"`       // v2.2
+	Platform        string     `gorm:"size:16" json:"platform"`                           // ESP32 / ESP32S3 / ESP32C6
+	HwFlashMB       uint16     `gorm:"column:hw_flash_mb;default:0" json:"hw_flash_mb"`   // 硬件容量档；0=未识别（方案 §5.3：未知即拒绝，不可 force）
+	HwPsram         string     `gorm:"column:hw_psram;size:8;default:''" json:"hw_psram"` // yes/no/""；"" 只由 OTA_GATE_HARDWARE_UNKNOWN 拒绝
 	Status          string     `gorm:"size:20;default:offline" json:"status"`
 	ConfigVersion   string     `gorm:"size:64" json:"config_version"`
 	ConfigStatus    string     `gorm:"size:20;default:pending" json:"config_status"`
@@ -407,6 +409,9 @@ type OTATask struct {
 	Progress    uint8      `gorm:"default:0" json:"progress"`
 	ErrorMsg    string     `gorm:"size:256" json:"error_msg"`
 	ToVersion   string     `gorm:"size:32" json:"to_version"`
+	Forced      bool       `gorm:"column:forced;default:false" json:"forced"`                   // 是否绕过闸门（方案 §5.4：只有版本方向两条可 force）
+	ForceReason string     `gorm:"column:force_reason;size:256;default:''" json:"force_reason"` // 强制原因（落审计）
+	Source      string     `gorm:"column:source;size:16;default:user" json:"source"`            // user/system；system 时闸门跳过版本方向判定（否则回滚天天被拒）
 	StartedAt   *time.Time `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at"`
 	CreatedAt   time.Time  `json:"created_at"`
@@ -415,20 +420,52 @@ type OTATask struct {
 
 // =====================================================================
 
-// Firmware 固件版本 (保留)
+// 固件渠道（方案 §5.2）：只有三个值，withdrawn 由 withdrawn_at 表达，不占渠道取值。
+const (
+	FirmwareChannelStable   = "stable"
+	FirmwareChannelBeta     = "beta"
+	FirmwareChannelInternal = "internal"
+)
+
+// Firmware 固件版本
+//
+// 身份列是方案《固件与平台更新机制》§5.2 的落地：chip / flash_mb / version /
+// elf_sha256 来自**镜像自证**，psram 来自**构建期 sidecar**，两处都不接受人手填写
+// （§3.4 判断 5）。identity_state 把「不知道」放进数据状态而不是请求路径：
+// 只有 verified 的行才可选。
+//
+// stable / target_model 两列已在本方案的启动迁移里 DROP（v1.4 §2.4 R1：不留双真源）；
+// 渠道真源是 channel，展示真源是 model_key + build_profile。
 type Firmware struct {
-	ID             uint      `gorm:"primaryKey" json:"id"`
-	Version        string    `gorm:"size:32;not null" json:"version"`
-	Checksum       string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
-	SizeBytes      uint64    `json:"size_bytes"`
-	URL            string    `gorm:"size:256;not null" json:"url"`
-	Filename       string    `gorm:"size:256" json:"filename,omitempty"`
-	StoragePath    string    `gorm:"size:512" json:"storage_path,omitempty"`
-	Changelog      string    `gorm:"type:text" json:"changelog,omitempty"`
-	TargetModel    string    `gorm:"size:64" json:"target_model,omitempty"`
-	MinFromVersion string    `gorm:"size:32" json:"min_from_version,omitempty"` // 最低可升级版本(跳级检测)
-	Stable         bool      `gorm:"default:false" json:"stable"`               // 是否标记为稳定版本
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uint   `gorm:"primaryKey" json:"id"`
+	Version        string `gorm:"size:32;not null" json:"version"`
+	Checksum       string `gorm:"size:64;not null" json:"checksum"` // 上传内容的 SHA256 hex
+	SizeBytes      uint64 `json:"size_bytes"`
+	URL            string `gorm:"size:256;not null" json:"url"`
+	Filename       string `gorm:"size:256" json:"filename,omitempty"`
+	StoragePath    string `gorm:"size:512" json:"storage_path,omitempty"`
+	Changelog      string `gorm:"type:text" json:"changelog,omitempty"`
+	MinFromVersion string `gorm:"size:32" json:"min_from_version,omitempty"` // 最低可升级版本(跳级检测)
+
+	// ── 镜像自证的身份 ──
+	// 列名全部显式声明：迁移里的部分唯一索引/回填 SQL 直接写列名，
+	// 依赖 GORM 的缩略词拆分规则（IDFVer / ElfSHA256 会拆错）太脆。
+	Chip       string `gorm:"column:chip;size:16;default:''" json:"chip"`
+	FlashMB    uint16 `gorm:"column:flash_mb;default:0" json:"flash_mb"`
+	ModelKey   string `gorm:"column:model_key;size:32;default:''" json:"model_key"`
+	ElfSHA256  string `gorm:"column:elf_sha256;size:64;default:''" json:"elf_sha256"` // 唯一键（部分索引，见 dbschema）
+	BuiltAtRaw string `gorm:"column:built_at_raw;size:32;default:''" json:"built_at_raw"`
+	IDFVer     string `gorm:"column:idf_ver;size:32;default:''" json:"idf_ver"`
+
+	// ── 构建期 sidecar ──
+	Psram        string `gorm:"column:psram;size:8;default:''" json:"psram"` // 只有 yes / no；"" 只出现在 legacy 行
+	BuildProfile string `gorm:"column:build_profile;size:32;default:''" json:"build_profile"`
+
+	Channel       string         `gorm:"column:channel;size:16;default:stable" json:"channel"` // stable / beta / internal
+	WithdrawnAt   *time.Time     `gorm:"column:withdrawn_at" json:"withdrawn_at"`              // 撤回状态由该列表达
+	IdentityState string         `gorm:"column:identity_state;size:16;default:legacy" json:"identity_state"`
+	CreatedAt     time.Time      `json:"created_at"`
+	DeletedAt     gorm.DeletedAt `json:"-"`
 }
 
 // =====================================================================

@@ -368,7 +368,11 @@ esp_err_t ota_confirm_valid(void)
     esp_err_t state_err = running ? esp_ota_get_state_partition(running, &state) : ESP_ERR_INVALID_STATE;
     if (state_err == ESP_OK && state == ESP_OTA_IMG_VALID) {
         /* The bootloader transition already succeeded on an earlier attempt;
-         * only durable recovery-state cleanup still needs retrying. */
+         * only durable recovery-state cleanup still needs retrying.
+         * ⇒ 重复调用是**安全**的（方案 §6.6 实施要点 4）：IDF 的
+         *   esp_ota_mark_app_valid_cancel_rollback() 在 state==VALID 时也不会
+         *   重写 otadata，所以这条早退纯粹是为了省一次 NVS 读改写。 */
+        ESP_LOGD(TAG, "Image already VALID; nothing to cancel");
         return ota_nvs_set_state(OTA_STATE_NONE);
     }
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
@@ -388,15 +392,32 @@ void ota_mark_invalid_rollback(ota_rollback_trigger_t trigger)
         ? "boot validation failed" 
         : "manual rollback";
     
-    ESP_LOGW(TAG, "Marking app invalid and triggering rollback + reboot (reason: %s)", reason);
+    ESP_LOGW(TAG, "marking running image INVALID and rebooting (reason: %s)", reason);
     
     /* Clear NVS state before rollback */
     ota_nvs_set_state(OTA_STATE_NONE);
     
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "mark_app_invalid_rollback_and_reboot failed: %s", esp_err_to_name(err));
+
+    /* 走到这里说明**没有复位**：IDF 只在 esp_ota_mark_app_invalid_rollback()
+     * 成功时才 esp_restart()（app_update/esp_ota_ops.c）。
+     *
+     * 因此下面必须是“不退化成静默继续跑”：调用点的语义是“这块固件不能继续
+     * 用”，所以记日志后主动复位，把决定权交回引导器（方案 §6.6 实施要点 5）。 */
+    if (err == ESP_ERR_OTA_ROLLBACK_FAILED) {
+        /* 另一分区没有可用镜像（esp_ota_check_rollback_is_possible()==false）
+         * ⇒ 主动 invalid 没有可退回的目标，也没有任何东西被改坏。
+         * 退化为「不确认 + 复位」：镜像仍未确认（若本次是 PENDING_VERIFY，
+         * 引导器下次启动会把它置 ABORTED）；若镜像早已是 VALID，则本路径
+         * 等价于一次普通复位 —— 已确认的镜像本来就没有“回滚”可言。 */
+        ESP_LOGE(TAG, "rollback impossible (no valid passive app partition): %s; "
+                      "falling back to \"do not confirm + reboot\" and letting the bootloader decide",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGE(TAG, "mark_app_invalid_rollback_and_reboot failed: %s; "
+                      "falling back to \"do not confirm + reboot\"", esp_err_to_name(err));
     }
+    esp_restart();
 }
 
 /**
@@ -468,7 +489,7 @@ static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg,
     if (!is_https) {
         /* Plain HTTP path */
 #if CONFIG_COLLECTOR_OTA_ALLOW_HTTP
-        ESP_LOGW(TAG, "OTA: using plain HTTP (development mode - INSECURE)");
+        ESP_LOGW(TAG, "using plain HTTP (development mode - INSECURE)");
         return ESP_OK;
 #else
         ESP_LOGE(TAG, "HTTP not allowed (CONFIG_COLLECTOR_OTA_ALLOW_HTTP=n)");
@@ -501,7 +522,7 @@ static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg,
         ESP_LOGW(TAG, "OTA HTTPS: certificate verification DISABLED - not for production");
     #endif
 #else
-    ESP_LOGW(TAG, "OTA: HTTPS URL but CONFIG_COLLECTOR_OTA_USE_HTTPS not set");
+    ESP_LOGW(TAG, "HTTPS URL but CONFIG_COLLECTOR_OTA_USE_HTTPS not set");
 #endif
     return ESP_OK;
 }

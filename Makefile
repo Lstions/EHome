@@ -30,6 +30,8 @@
 #   make clean          - 停止本机前后端并清理日志（不删统一基础设施/数据卷）
 #   make docs-audit     - 文档「声称-实现」对账：分类器自校准 + 候选数（非门禁，理由见脚本头部）
 #   make verify-image   - 验证 GHCR 已发布镜像（需 docker pull + 起栈；不进 CI）
+#   make release-notes-check - 校验 deploy/release.json 的 notes schema（构建期门禁，不联网）
+#   make verify-release - 对账运行中服务的 commit 与发布清单（BASE_URL 可覆盖）
 #   make blackbox       - 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
 #
 # 说明：
@@ -57,6 +59,9 @@ POSTGRES_DB     ?= ehome
 # 404 方言、WebSocket 永远握手失败，界面表现是「一直显示离线」——
 # 且因为端口确实有服务在监听，故障是**静默**的。故默认改为 8080。
 API_PORT        ?= 8080
+
+# 发布对账目标（make verify-release）：默认对账本机 API 端口。
+RELEASE_BASE_URL ?= http://127.0.0.1:$(API_PORT)
 
 # 仅当确实需要跑「本机 Go 后端」（例如调试后端改动）时才用到。
 # 刻意避开 API_PORT：8080 归容器所有，本地再绑会抢端口。
@@ -122,7 +127,7 @@ FRONTEND_COVERAGE_THRESHOLD ?= 25
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
         status logs backup restore clean help \
-        docs-audit verify-image blackbox
+        docs-audit verify-image blackbox release-notes-check verify-release
 
 # ---- 一键启动统一环境 ----
 dev: up ## 启动统一环境（历史兼容别名）
@@ -411,6 +416,15 @@ docs-audit: ## 文档「声称-实现」对账：分类器自校准（门禁级�
 verify-image: ## 验证 GHCR 已发布镜像（需 docker pull + 起栈；不进 CI）
 	@echo "==> Verifying published image (ghcr.io/lstions/ehome; project ehome-ghcr, port 18090)..."
 	@bash $(ROOT)/deploy/ghcr/verify-published-image.sh
+
+# ---- 发布身份（方案 M2 T2.9 / §6.5）---------------------------------------
+# 两者都只是**薄封装**：判定逻辑唯一实现在 scripts/verify-release.sh，
+# Makefile 在这里多写一条规则就会变成第二份真源。
+release-notes-check: ## 校验 deploy/release.json 的 notes schema（构建期门禁，不联网）
+	@bash $(ROOT)/scripts/verify-release.sh --notes-only
+
+verify-release: ## 对账运行中服务的 commit 与发布清单（BASE_URL=... 可覆盖）
+	@bash $(ROOT)/scripts/verify-release.sh --base-url "$(RELEASE_BASE_URL)"
 
 blackbox: ## 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
 	@echo "==> Running deployment blackbox (exclusive project ehome-bb, port 18080)..."

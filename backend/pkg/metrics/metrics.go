@@ -76,6 +76,30 @@ var (
 		Help: "Total OTA update attempts by status",
 	}, []string{"status"})
 
+	// OTAGateRejected counts OTA gate rejections by machine code.
+	//
+	// 埋在**闸门判定处**（ota.CreateTaskWithOptions 返回 *firmwareid.GateError 时），
+	// 不是 HTTP handler：同一道闸门有「建任务」与「AutoRollback/手动回滚」两条入口，
+	// 埋在 HTTP 会让回滚通道的拒绝漏统计。
+	//
+	// reason 只接受 OTA_GATE_* 机器码（附录 A 唯一真源），不传短名/文案/HTTP 状态码：
+	// 看板与告警按机器码聚合，文案改动不应断线。§9.5「闸门拒绝按 reason 计数」。
+	OTAGateRejected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_ota_gate_rejected_total",
+		Help: "Total OTA gate rejections by machine code (OTA_GATE_*)",
+	}, []string{"reason"})
+
+	// FirmwareUploadRejected counts firmware upload rejections by machine code.
+	//
+	// 埋在 handler 的统一拒绝出口 rejectFirmwareUpload：FW_META_REQUIRED /
+	// FW_META_CONFLICT / FW_DUPLICATE / FW_TOO_LARGE / FW_NOT_IMAGE … 全部经此，
+	// 不会因为新增校验分支而漏埋。reason 是机器码而不是 HTTP 状态码 —— 400/409/413
+	// 的语义差异远小于机器码（§9.5 的「上传拦截原因」维度）。
+	FirmwareUploadRejected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_firmware_upload_rejected_total",
+		Help: "Total firmware upload rejections by machine code (FW_*)",
+	}, []string{"reason"})
+
 	// HTTPRequests counts API requests by path and method
 	HTTPRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_http_requests_total",
@@ -491,4 +515,27 @@ var (
 		Name: "ehome_automation_events_total",
 		Help: "Automation events persisted, by bounded result code",
 	}, []string{"result"})
+
+	// BuildInfo 暴露**正在运行**的构建身份（方案 §9.5 / T2.1）。
+	//
+	// info 型指标惯例：值恒为 1，信息全在 label 上。这样发布对账可以直接
+	//   ehome_build_info{version="2.9.0",commit="a1b2c3d..."} 1
+	// 读到线上真实版本，不必登机器 strings 二进制。写入点是 cmd/server/main.go 的
+	// 构建身份注入处（每次部署一个值，运行期不改）。
+	BuildInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ehome_build_info",
+		Help: "Running server build identity (always 1); version/commit are labels",
+	}, []string{"version", "commit"})
 )
+
+// SetBuildInfo 把构建身份写进 BuildInfo。
+//
+// 先 Reset 再 Set：一个进程只应暴露一个 build 身份。不 Reset 的话，测试里连续
+// 注入两次会留下两条序列，线上表现为"同一个实例两个版本"——比没有指标更糟。
+func SetBuildInfo(version, commit string) {
+	if BuildInfo == nil {
+		return
+	}
+	BuildInfo.Reset()
+	BuildInfo.WithLabelValues(version, commit).Set(1)
+}

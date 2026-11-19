@@ -11,6 +11,15 @@
 #   我们的镜像（USB-JTAG 控制台）⇒ 只到 ROM 的 "entry 0x..." 便再无输出
 # ⇒ 那个"静默"是**控制台通道**问题，不是固件问题。
 #
+# ## 真机台架也一样（2026-11-19 实机验证补充）
+# 同样的现象在**真机**上会出现：板子的 USB 口只接了 1a86/CH34x 之类的
+# USB-UART 桥到芯片 UART0（ESP32-C6 开发板常见），而产品控制台是芯片
+# **原生 USB Serial/JTAG** ⇒ app 日志走芯片 USB 引脚，台架上**一个字节都看不到**，
+# 只有 ROM/bootloader 的 UART0 输出可见，看起来同样像"到了 entry 就静默"。
+# 实测：ESP32-C6 + /dev/ttyACM0 = "1a86 USB_Single_Serial"（接 UART0），
+#       烧产品配置固件时 app 日志为空；加本文件重建后完整可见。
+# ⇒ 真机验证也照此办理：带本文件重建，用 UART 桥那个口（115200）看日志。
+#
 # ## 用法（不改产品配置，只在命令行追加）
 #   EXTRA_SDKCONFIG_DEFAULTS=tools/qemu-console-uart.defaults \
 #       BUILD_ROOT=/tmp/qemu ./build_firmware.sh s3-n16

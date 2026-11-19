@@ -216,7 +216,10 @@ describe('F8 移动端宽表横滚合同 — 口径基线与豁免白名单', ()
       'src/views/automation/components/EventHistorySection.vue',
       'src/views/source-group/SourceGroupList.vue',
       'src/views/dashboard/Dashboard.vue',
-      'src/views/firmware/FirmwareManage.vue',
+      // 2026-11-18 M1b 拆分（纯搬移）：表格（连同 .mobile-table-wrapper 与 .mobile-table-hint）
+      // 随固件页改造搬到 FirmwareTable.vue（页面本身按方案要求 ≤300 行/文件）。
+      // 读取路径机械改指向新文件；断言（每张表都必须包裹、hint 必须是 wrapper 直接子节点）一字未改。
+      'src/views/firmware/components/FirmwareTable.vue',
       'src/views/data-source/OverviewTab.vue',
       'src/components/node/LogHistoryPanel.vue',
       'src/views/alert/AlertRules.vue',

@@ -14,11 +14,15 @@ package catalog
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,14 +60,19 @@ func init() {
 
 // otaFirmwareEnvelope 只取断言需要的字段（models.Firmware 的 JSON 形状）。
 type otaFirmwareEnvelope struct {
-	ID        uint   `json:"id"`
-	Version   string `json:"version"`
-	Filename  string `json:"filename"`
-	Checksum  string `json:"checksum"`
-	SizeBytes uint64 `json:"size_bytes"`
-	URL       string `json:"url"`
-	Changelog string `json:"changelog"`
-	Stable    bool   `json:"stable"`
+	ID            uint   `json:"id"`
+	Version       string `json:"version"`
+	Filename      string `json:"filename"`
+	StoragePath   string `json:"storage_path"`
+	Checksum      string `json:"checksum"`
+	SizeBytes     uint64 `json:"size_bytes"`
+	URL           string `json:"url"`
+	Changelog     string `json:"changelog"`
+	Chip          string `json:"chip"`
+	FlashMB       uint16 `json:"flash_mb"`
+	Psram         string `json:"psram"`
+	ModelKey      string `json:"model_key"`
+	IdentityState string `json:"identity_state"`
 }
 
 func otaRun001(e *harness.Env) {
@@ -73,9 +82,11 @@ func otaRun001(e *harness.Env) {
 	// 场景内的清理与遗留排查都依赖这个名字可辨识（§7 红线 4 之外的运维要求）。
 	filename := e.NS("SIM-OTA-001", "fw") + ".bin"
 	version := "9.9.1"
-	body := otaFirmwareBytes(2048)
+	// M0：上传必须是合法镜像（服务端解析镜像头）+ 同名 sidecar，版本取自镜像。
+	body := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-001", "elf"), 2048)
+	sidecar := otaSidecar(t, body, "esp32c6", 8, false, version, "c6-n8")
 
-	created := otaUploadFirmware(e, filename, map[string]string{"version": version}, body).
+	created := otaUploadFirmware(e, filename, body, sidecar).
 		Expect(http.StatusCreated)
 	var fw otaFirmwareEnvelope
 	created.Decode(&fw)
@@ -126,17 +137,14 @@ func otaRun001(e *harness.Env) {
 
 	// 不变式 3：版本登记信息可修改（PUT /api/v1/firmwares/:id），并真实持久化。
 	changelog := e.NS("SIM-OTA-001", "changelog")
+	// M0：stable / target_model 两列已随迁移 DROP，PUT 只接受 changelog/channel/min_from_version。
 	updated := e.Admin.Put("/api/v1/firmwares/"+strconv.FormatUint(uint64(fw.ID), 10), map[string]any{
 		"changelog": changelog,
-		"stable":    true,
 	}).Expect(http.StatusOK)
 	var afterUpdate otaFirmwareEnvelope
 	updated.Decode(&afterUpdate)
 	if afterUpdate.Changelog != changelog {
 		t.Fatalf("更新返回的 changelog = %q，期望 %q", afterUpdate.Changelog, changelog)
-	}
-	if !afterUpdate.Stable {
-		t.Fatalf("更新后 stable 仍为 false（body=%s）", string(updated.Raw))
 	}
 	reloaded := false
 	for _, item := range otaListFirmwares(t, e) {
@@ -144,7 +152,7 @@ func otaRun001(e *harness.Env) {
 			continue
 		}
 		reloaded = true
-		if item.Changelog != changelog || !item.Stable {
+		if item.Changelog != changelog {
 			t.Fatalf("重新查询到的固件 %d 未持久化更新: %+v", fw.ID, item)
 		}
 	}
@@ -175,11 +183,13 @@ func otaRun002(e *harness.Env) {
 
 	version := "9.9.2"
 	filename := e.NS("SIM-OTA-002", "fw") + ".bin"
-	body := otaFirmwareBytes(1024)
+	// M0：上传必须是合法镜像 + sidecar；OtaCmd 的 version 来自镜像。
+	body := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-002", "elf"), 1024)
+	sidecar := otaSidecar(t, body, "esp32c6", 8, false, version, "c6-n8")
 	sum := sha256.Sum256(body)
 	wantChecksum := hex.EncodeToString(sum[:])
 
-	created := otaUploadFirmware(e, filename, map[string]string{"version": version}, body).
+	created := otaUploadFirmware(e, filename, body, sidecar).
 		Expect(http.StatusCreated)
 	var fw otaFirmwareEnvelope
 	created.Decode(&fw)
@@ -245,8 +255,8 @@ func otaRun002(e *harness.Env) {
 	}
 	if got := otaFieldString(fields, 2); got == "" {
 		t.Fatalf("OtaCmd.url 为空 —— 设备拿到指令也无法下载固件")
-	} else if !bytes.Contains([]byte(got), []byte("/api/v1/firmwares/"+filename+"/download")) {
-		t.Fatalf("OtaCmd.url = %q，未指向固件 %s 的下载路径", got, filename)
+	} else if storedName := filepath.Base(fw.StoragePath); !bytes.Contains([]byte(got), []byte("/api/v1/firmwares/"+storedName+"/download")) {
+		t.Fatalf("OtaCmd.url = %q，未指向固件 %s 的下载路径", got, storedName)
 	}
 	if got := otaFieldString(fields, 3); got != wantChecksum {
 		t.Fatalf("OtaCmd.checksum = %q，期望 %q", got, wantChecksum)
@@ -296,11 +306,14 @@ func otaRun003(e *harness.Env) {
 	version := "9.9.3"
 	filenameA := e.NS("SIM-OTA-003", "fw-a") + ".bin"
 	filenameB := e.NS("SIM-OTA-003", "fw-b") + ".bin"
-	bodyA := otaFirmwareBytes(512)
-	bodyB := otaFirmwareBytes(768)
+	// M0：两份内容不同、elf_sha256 不同的合法镜像（唯一键是 elf，不是文件名）。
+	bodyA := otaFirmwareImage(version, 0x000D, 3, e.NS("SIM-OTA-003", "elf-a"), 512)
+	bodyB := otaFirmwareImage(version+"-b", 0x000D, 3, e.NS("SIM-OTA-003", "elf-b"), 768)
+	sidecarA := otaSidecar(t, bodyA, "esp32c6", 8, false, version, "c6-n8")
+	sidecarB := otaSidecar(t, bodyB, "esp32c6", 8, false, version+"-b", "c6-n8")
 
-	fwA := otaUploadFirmware(e, filenameA, map[string]string{"version": version}, bodyA).Expect(http.StatusCreated)
-	fwB := otaUploadFirmware(e, filenameB, map[string]string{"version": version + "-b"}, bodyB).Expect(http.StatusCreated)
+	fwA := otaUploadFirmware(e, filenameA, bodyA, sidecarA).Expect(http.StatusCreated)
+	fwB := otaUploadFirmware(e, filenameB, bodyB, sidecarB).Expect(http.StatusCreated)
 	var fwAEnvelope, fwBEnvelope otaFirmwareEnvelope
 	fwA.Decode(&fwAEnvelope)
 	fwB.Decode(&fwBEnvelope)
@@ -381,13 +394,49 @@ func otaFlipLastChar(s string) string {
 	return s[:len(s)-1] + "A"
 }
 
-// otaFirmwareBytes 生成确定性的固件包内容（字节可复现，校验和断言才有意义）。
-func otaFirmwareBytes(n int) []byte {
+// otaFirmwareImage 生成一份**服务端可解析**的最小 ESP 镜像（M0 起上传会解析镜像头）。
+//
+// 偏移表与 internal/firmwareid 必须一致；镜像头之外填充确定性字节，
+// 这样「下载内容 == 上传内容」的断言才有意义。
+func otaFirmwareImage(version string, chipID uint16, spiSize uint8, elfSeed string, n int) []byte {
+	if n < 0x200 {
+		n = 0x200
+	}
 	out := make([]byte, n)
 	for i := range out {
 		out[i] = byte(i % 251)
 	}
+	out[0x00] = 0xE9
+	out[0x03] = spiSize << 4
+	binary.LittleEndian.PutUint16(out[0x0C:], chipID)
+	binary.LittleEndian.PutUint32(out[0x20:], 0xABCD5432)
+	copy(out[0x30:0x50], version)
+	copy(out[0x50:0x70], "ehome_collector")
+	copy(out[0x70:0x80], "07:37:54")
+	copy(out[0x80:0x90], "Oct  5 2026")
+	copy(out[0x90:0xB0], "v6.1")
+	sum := sha256.Sum256([]byte(elfSeed))
+	copy(out[0xB0:0xD0], sum[:])
 	return out
+}
+
+// otaSidecar 生成与镜像自洽的 <bin>.meta.json（psram 是镜像头里唯一没有的位）。
+func otaSidecar(t *testing.T, image []byte, chip string, flashMB uint16, psram bool, version, profile string) []byte {
+	t.Helper()
+	sum := sha256.Sum256(image)
+	raw, err := json.Marshal(map[string]any{
+		"profile":  profile,
+		"chip":     chip,
+		"flash_mb": flashMB,
+		"psram":    psram,
+		"version":  version,
+		"idf_ver":  "v6.1",
+		"sha256":   hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("编码 sidecar 失败: %v", err)
+	}
+	return raw
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +463,11 @@ func otaFieldUint(fields map[uint8]frame.Field, num uint8) uint64 {
 //
 // 设计 §5.2 的 Session.Post 只覆盖 JSON body，而固件上传是 multipart/form-data，
 // 文件字段名固定为 "file"（生产端 c.FormFile("file")）。
-func otaUploadFirmware(e *harness.Env, filename string, fields map[string]string, content []byte) *harness.Response {
-	return e.Admin.UploadMultipart("/api/v1/firmwares/upload", fields,
-		[]harness.UploadFile{{Field: "file", Filename: filename, Content: content}})
+func otaUploadFirmware(e *harness.Env, filename string, image, sidecar []byte) *harness.Response {
+	// M0（方案 §4.2）：sidecar 必填，字段名 "meta"，文件名与 .bin 同名（fw.bin → fw.meta.json）。
+	metaName := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".meta.json"
+	return e.Admin.UploadMultipart("/api/v1/firmwares/upload", nil, []harness.UploadFile{
+		{Field: "file", Filename: filename, Content: image},
+		{Field: "meta", Filename: metaName, Content: sidecar},
+	})
 }

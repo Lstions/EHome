@@ -12,10 +12,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { CircleCloseFilled, WarningFilled, Link } from '@element-plus/icons-vue'
 import { useWebSocketStore } from '@/stores/websocket'
 import { loginPath } from '@/utils/basePath'
+
+/**
+ * 可见性外发给父级：更新横幅（UpdateBanner）与断线横幅**共用顶部栈**，
+ * 断线优先。父级据此把更新提示延后，避免两个 `position: fixed; top: 0` 重叠。
+ */
+const emit = defineEmits<{
+  (e: 'visible-change', value: boolean): void
+}>()
 
 const wsStore = useWebSocketStore()
 const visible = ref(false)
@@ -39,6 +47,8 @@ const title = computed(() => {
   if (wsStore.isAuthenticated && !wsStore.connected) return '与服务器的连接已断开'
   return ''
 })
+
+watch(visible, (value) => emit('visible-change', value), { immediate: true })
 
 let timer: ReturnType<typeof setTimeout> | null = null
 const show = (msg: string, retry = true) => {

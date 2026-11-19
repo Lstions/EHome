@@ -150,3 +150,97 @@ function isHttpStatus(error: unknown, status: number): boolean {
  * axios 实例就多一份「拦截器会不会被后来人偷偷挂上」的隐患 ——
  * api/__tests__/system.spec.ts 断言「模块加载时 axios.create 恰好被调用 1 次」，
  * 这条断言正是为了防这个。 */
+
+/* ════════════════════════════════════════════════════════════════════════
+ * 平台版本与更新内容（契约 §4.3 / §6.4）
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * `GET /api/v1/system/version` 的 data 形状（契约 §4.3）。
+ *
+ * - 该端点**公开**（与 /health 同级，不进 v1 JWT 组），故走 {@link maintenanceClient}：
+ *   无拦截器 ⇒ 不会被 401 硬跳登录；5s 超时 ⇒ 不会拖住首屏。
+ *   更关键的是：**绝不能**走 `api/client.ts` 的实例 —— 那个实例的响应拦截器会读
+ *   `x-ehome-build` 并触发一次更新检查，而本端点正是检查本身 ⇒ 自我递归。
+ * - `notes` 契约：恒为数组，空时 `[]`（不省略、不 null）；上限 10 条 / 每条 120 字
+ *   由构建期脚本校验，运行期**不截断** ⇒ 前端不得自行 slice，否则「界面上被截断」
+ *   正是方案要消灭的形态。
+ */
+export interface SystemVersionInfo {
+  version: string
+  build_id: string
+  commit: string
+  build_time: string
+  notes: string[]
+}
+
+/** 后端不认识该端点（旧版本 / 纯静态托管）—— 与「暂时连不上」是不同事实。 */
+export class SystemVersionUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SystemVersionUnsupportedError'
+  }
+}
+
+const SYSTEM_VERSION_PATH = '/api/v1/system/version'
+
+/**
+ * 把服务端 data 归一成前端可安全消费的形状。
+ *
+ * 判据与维护态同口径（fail-closed 只针对「形状认不出」，不针对「字段缺省」）：
+ * · 认不出是版本快照（非对象 / 既无 version 也无 build_id）⇒ 返回 null，
+ *   由调用方抛 {@link SystemVersionUnsupportedError}，UI 保持旧行为（不提示更新）；
+ * · `notes` 缺失 / null / 非数组 ⇒ 归一成 `[]`（§6.4：空与 undefined 同等处理，
+ *   都不渲染「查看更新内容」入口）；非字符串 / 空串条目剔除（后端保证不出现，
+ *   但前端不能把一个会让 `v-for` 渲染空白行的值当合法数据）。
+ */
+export function normalizeVersionInfo(raw: unknown): SystemVersionInfo | null {
+  if (!raw || typeof raw !== 'object') return null
+  const candidate = raw as Record<string, unknown>
+  const version = typeof candidate.version === 'string' ? candidate.version : ''
+  const buildId = typeof candidate.build_id === 'string' ? candidate.build_id : ''
+  if (!version && !buildId) return null
+  const notes = Array.isArray(candidate.notes)
+    ? candidate.notes.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  return {
+    version,
+    build_id: buildId,
+    commit: typeof candidate.commit === 'string' ? candidate.commit : '',
+    build_time: typeof candidate.build_time === 'string' ? candidate.build_time : '',
+    notes,
+  }
+}
+
+/**
+ * 读取平台版本快照（公开端点）。
+ *
+ * 抛错语义与 {@link getMaintenanceStatus} 一致：
+ * · 404 / 非 envelope / data 形状认不出 ⇒ {@link SystemVersionUnsupportedError}；
+ * · 其余（网络错误、超时、5xx）原样抛出，由更新 store 收敛为「本次检查失败，
+ *   维持现状」—— 检查失败不得被当成「已是最新」（那会让真正的过期页面静默）。
+ */
+export async function getSystemVersion(): Promise<SystemVersionInfo> {
+  let response
+  try {
+    response = await maintenanceClient.get<MaintenanceEnvelope>(SYSTEM_VERSION_PATH)
+  } catch (error) {
+    if (isHttpStatus(error, 404)) {
+      throw new SystemVersionUnsupportedError('后端不支持版本端点')
+    }
+    throw error
+  }
+
+  const envelope = response.data
+  if (!envelope || typeof envelope !== 'object' || typeof envelope.code !== 'number') {
+    throw new SystemVersionUnsupportedError('版本端点响应不是统一 envelope（疑为旧后端或静态托管）')
+  }
+  if (envelope.code >= 400) {
+    throw new Error(envelope.message || '版本查询失败')
+  }
+  const info = normalizeVersionInfo(envelope.data)
+  if (!info) {
+    throw new SystemVersionUnsupportedError('版本端点返回的 data 不是合法版本快照')
+  }
+  return info
+}

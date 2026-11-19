@@ -16,15 +16,18 @@
           style="width: 100%;"
           :loading="firmwaresLoading"
         >
+          <!-- 置灰来源只有一个：后端逐行给的 `compatible`（带 node_id 查询时，T1b.1）。
+               单一模式 —— 命中即置灰，不给「先选了再被 409 拒绝」的机会；但仍展示原因。 -->
           <el-option
             v-for="fw in firmwares"
             :key="fw.id"
-            :label="`${fw.version} - ${fw.filename}`"
+            :label="optionLabel(fw)"
             :value="fw.id"
+            :disabled="!isFirmwareSelectable(fw)"
           >
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>{{ fw.version }} - {{ fw.filename }}</span>
-              <span style="color: var(--el-text-color-secondary); font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
+            <div class="firmware-option">
+              <span class="firmware-option-main">{{ optionLabel(fw) }}</span>
+              <span v-if="optionReasonText(fw)" class="firmware-option-reason">{{ optionReasonText(fw) }}</span>
             </div>
           </el-option>
         </el-select>
@@ -58,6 +61,43 @@
             </div>
           </el-descriptions-item>
         </el-descriptions>
+      </el-form-item>
+
+      <!-- 闸门拒绝（409）：展示机器码对应的人话原因 + data.fix（节点硬件更正命令）。
+           只有 forceable（版本方向两条）才出现强制入口，且必须填理由（AC-8 UI 侧）。 -->
+      <el-form-item v-if="gateIssue" label="兼容性" data-testid="ota-gate-issue">
+        <div class="gate-issue">
+          <el-alert type="error" :closable="false" show-icon title="该固件不能直接升级到该节点" class="gate-alert">
+            <template #default>
+              <ul class="gate-reasons">
+                <li v-for="(reason, index) in gateIssue.reasonTexts" :key="index">{{ reason }}</li>
+              </ul>
+              <div v-if="gateIssue.fix" class="gate-fix">
+                <span>按提示更正节点硬件档案后重试：</span>
+                <code class="gate-fix-cmd">{{ gateIssue.fix }}</code>
+              </div>
+            </template>
+          </el-alert>
+
+          <template v-if="gateIssue.forceable">
+            <el-checkbox v-model="form.force" data-testid="ota-force-toggle">
+              强制升级（仅版本方向可绕过，会写入审计）
+            </el-checkbox>
+            <el-input
+              v-if="form.force"
+              v-model="form.force_reason"
+              type="textarea"
+              :rows="2"
+              maxlength="256"
+              show-word-limit
+              placeholder="必填：说明为什么必须强制（例如系统回滚、线下已确认）"
+              data-testid="ota-force-reason"
+            />
+          </template>
+          <p v-else class="gate-hard-hint">
+            硬件类不匹配不支持强制升级，请按上面的命令更正数据后重试。
+          </p>
+        </div>
       </el-form-item>
 
       <el-divider v-if="upgradeStatus !== 'idle'" content-position="left">
@@ -101,10 +141,11 @@
       <el-button
         type="primary"
         :loading="upgradeStatus === 'uploading' || upgradeStatus === 'upgrading'"
-        :disabled="!form.firmware_id || upgradeStatus === 'completed'"
+        :disabled="!form.firmware_id || upgradeStatus === 'completed' || !forceReady"
+        data-testid="ota-start"
         @click="handleStart"
       >
-        {{ upgradeStatus === 'completed' ? '已完成' : '开始升级' }}
+        {{ upgradeStatus === 'completed' ? '已完成' : startButtonText }}
       </el-button>
     </template>
   </el-dialog>
@@ -115,7 +156,13 @@ import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
-import { type Firmware } from '@/api/firmware'
+import {
+  OTA_FORCEABLE_REASONS,
+  describeGateReasons,
+  firmwareProfileText,
+  isFirmwareSelectable,
+  type Firmware,
+} from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
 import { UNKNOWN, formatFileSize } from '@/utils/format'
 
@@ -188,6 +235,9 @@ const dialogVisible = computed({
       otaGeneration++
       // 重置状态
       form.firmware_id = null
+      form.force = false
+      form.force_reason = ''
+      gateIssue.value = null
       progress.value = 0
       upgradeStatus.value = 'idle'
       upgradeLogs.value = []
@@ -197,8 +247,30 @@ const dialogVisible = computed({
 })
 
 const form = reactive({
-  firmware_id: null as number | null
+  firmware_id: null as number | null,
+  /** 强制升级开关：只有 `data.forceable === true`（版本方向）时才渲染入口 */
+  force: false,
+  /** 强制理由：必填，后端写审计；空串时不允许提交 */
+  force_reason: '',
 })
+
+/**
+ * 闸门拒绝（HTTP 409 / envelope code 409）的结构化结果。
+ *
+ * 形状取自契约 §4.3：
+ * `{ reasons, node_hw, firmware, forceable, fix }`。
+ * `forceable` 由后端给出，前端再用 `OTA_FORCEABLE_REASONS` 复核一遍 ——
+ * 硬件类绝不允许出现强制入口（§6.3「硬件类不可 force」），
+ * 即使后端某天误报 forceable 也不该把误刷通道重新打开。
+ */
+interface GateIssue {
+  reasons: string[]
+  reasonTexts: string[]
+  fix: string
+  forceable: boolean
+}
+
+const gateIssue = ref<GateIssue | null>(null)
 
 const firmwares = ref<Firmware[]>([])
 const firmwaresLoading = ref(false)
@@ -217,21 +289,71 @@ const progressStatus = computed(() => {
   return ''
 })
 
-// 设备型号映射
-const MODEL_NAMES: Record<string, string> = {
-  'ESP32-S3': 'ESP32-S3',
-  'ESP32-S2': 'ESP32-S2',
-  'ESP32-C3': 'ESP32-C3'
-}
-
 const rules = {
   firmware_id: [{ required: true, message: '请选择固件版本', trigger: 'change' }]
 }
 
-// 获取型号名称（Firmware.target_model 可选，缺省时原样返回空）
-const getModelName = (model?: string): string => {
-  if (!model) return ''
-  return MODEL_NAMES[model] || model
+/**
+ * 下拉项主文案：版本 + 档位（model_key / build_profile）。
+ * 改前展示 `target_model`，该列已随 M0 删除 —— 继续读它只会得到空型号。
+ */
+const optionLabel = (fw: Firmware): string => {
+  const profile = firmwareProfileText(fw)
+  return profile ? `${fw.version} - ${profile}` : `${fw.version} - ${fw.filename}`
+}
+
+/** 置灰原因（最多展示两条，避免下拉项被撑成段落）。 */
+const optionReasonText = (fw: Firmware): string => {
+  if (isFirmwareSelectable(fw)) return ''
+  const texts = describeGateReasons(fw.reasons)
+  if (texts.length) return texts.slice(0, 2).join('；')
+  if (fw.withdrawn_at) return '已撤回'
+  if (fw.identity_state && fw.identity_state !== 'verified') return '身份未验证，需重传'
+  return ''
+}
+
+/**
+ * 能否提交：
+ * - 没有闸门拦截 ⇒ 可提交；
+ * - 有拦截且 `forceable` ⇒ 必须勾选强制**并**填写理由（理由非空才算数）；
+ * - 有拦截但不可 force ⇒ 永不可提交（硬件类）。
+ */
+const forceReady = computed(() => {
+  if (!gateIssue.value) return true
+  if (!gateIssue.value.forceable) return false
+  return form.force && form.force_reason.trim().length > 0
+})
+
+const startButtonText = computed(() => (form.force && gateIssue.value ? '强制升级' : '开始升级'))
+
+/**
+ * 从 409 响应里提取结构化闸门信息。
+ *
+ * 返回 null 表示「不是闸门拒绝」（网络错误、500、401 等），调用方按普通错误处理。
+ * 兼容两种错误入口：HTTP 4xx（axios reject）与 2xx 内嵌 code>=400（拦截器 reject）——
+ * 两者的 ApiError.response 都带着原始 envelope。
+ */
+function readGateIssue(error: unknown): GateIssue | null {
+  const response = (error as { response?: { data?: unknown } } | null)?.response
+  const envelope = response?.data as { data?: unknown } | undefined
+  const payload = envelope?.data as
+    | { reasons?: unknown; forceable?: unknown; fix?: unknown }
+    | undefined
+  if (!payload || typeof payload !== 'object') return null
+  const reasons = Array.isArray(payload.reasons)
+    ? payload.reasons.filter((item): item is string => typeof item === 'string' && item !== '')
+    : []
+  if (reasons.length === 0) return null
+  const versionOnly = reasons.every((reason) =>
+    (OTA_FORCEABLE_REASONS as readonly string[]).includes(reason)
+  )
+  return {
+    reasons,
+    reasonTexts: describeGateReasons(reasons),
+    fix: typeof payload.fix === 'string' ? payload.fix : '',
+    // 双重判定：后端说 forceable **且** 命中原因全是版本方向
+    forceable: payload.forceable === true && versionOnly,
+  }
 }
 
 // 获取固件列表
@@ -239,9 +361,13 @@ const firmwareStore = useFirmwareStore()
 const fetchFirmwares = async () => {
   firmwaresLoading.value = true
   try {
-    await firmwareStore.fetchList({ status: 'active' })
+    // 带 node_id 查询 ⇒ 后端逐行返回 compatible / reasons（T1b.1）；
+    // 极端情况下没有节点 ID（对话框以空 collectorId 打开）时退回全量列表，
+    // 此时只能靠建任务时的 409 兜底，不能再假装「都能装」。
+    const nodeId = props.collectorId
+    await firmwareStore.fetchList(nodeId ? { node_id: nodeId } : undefined)
     firmwares.value = firmwareStore.list
-    
+
     if (firmwares.value.length === 0) {
       ElMessage.warning('暂无可用固件，请先上传固件')
     }
@@ -252,8 +378,12 @@ const fetchFirmwares = async () => {
   }
 }
 
-// 监听选中的固件
+// 监听选中的固件：换固件即清空上一轮的闸门结论与强制理由
+// （否则用户换一个固件后，上一份 reasons/fix 会挂在界面上误导判断）
 watch(() => form.firmware_id, (newVal) => {
+  gateIssue.value = null
+  form.force = false
+  form.force_reason = ''
   if (newVal) {
     const fw = firmwares.value.find(f => f.id === newVal)
     if (fw) {
@@ -278,17 +408,31 @@ const handleStart = async () => {
     return
   }
 
+  if (!forceReady.value) {
+    ElMessage.warning('强制升级必须填写理由')
+    return
+  }
+
   const collectorId = props.collectorId
   const generation = ++otaGeneration
+  const forceRequested = Boolean(gateIssue.value && form.force && form.force_reason.trim())
   try {
     upgradeStatus.value = 'uploading'
-    statusText.value = '正在创建OTA任务...'
-    addLog('开始 OTA 升级')
+    statusText.value = forceRequested ? '正在创建强制 OTA 任务...' : '正在创建OTA任务...'
+    addLog(forceRequested ? '开始强制 OTA 升级' : '开始 OTA 升级')
 
-    const otaRecord = await nodeApi.startOTA(collectorId, form.firmware_id)
+    const otaRecord = await nodeApi.startOTA(
+      collectorId,
+      form.firmware_id,
+      forceRequested
+        ? { force: true, force_reason: form.force_reason.trim() }
+        : false
+    )
     if (generation !== otaGeneration || props.collectorId !== collectorId) return
 
     upgradeStatus.value = 'upgrading'
+    // 任务已创建：闸门提示完成使命，清掉以免与「正在升级中」并列显示（看起来像又失败了）
+    gateIssue.value = null
     statusText.value = '正在升级中...'
     addLog(`OTA 任务已创建，ID: ${otaRecord.ota_record_id ?? otaRecord.id}`)
 
@@ -301,6 +445,19 @@ const handleStart = async () => {
 
   } catch (error: any) {
     if (generation !== otaGeneration || props.collectorId !== collectorId) return
+
+    // 闸门拒绝（409）：**不是任务失败** —— 任务根本没有被创建。
+    // 展示 reasons + data.fix，并把 force 入口交给用户（仅版本方向）。
+    const issue = readGateIssue(error)
+    if (issue) {
+      gateIssue.value = issue
+      upgradeStatus.value = 'idle'
+      statusText.value = ''
+      addLog('闸门拒绝: ' + (issue.reasonTexts.join('；') || issue.reasons.join(', ')))
+      feedback.warning('该固件与节点不兼容，已阻止升级')
+      return
+    }
+
     feedback.handleError(error, '启动升级失败')
     upgradeStatus.value = 'failed'
     statusText.value = '升级失败'
@@ -421,6 +578,64 @@ onUnmounted(() => {
   /* changelog 是多行文本（含 \n），默认 white-space: normal 会把换行**折叠**成空格，
      多行日志因此挤成一行（实测 lineBoxes=1）。pre-wrap 保留换行、同时仍允许长行折行。 */
   white-space: pre-wrap;
+}
+
+/* ── 闸门拒绝区（409 的 reasons / data.fix / force 入口）───────────────── */
+.gate-issue {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.gate-alert :deep(.el-alert__content) {
+  width: 100%;
+}
+.gate-reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.gate-fix {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.gate-fix-cmd {
+  /* 更正命令是要被整条复制到终端执行的：等宽 + 任意断点 + 可整串选中 */
+  font-family: var(--el-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  word-break: break-all;
+  user-select: all;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+.gate-hard-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-color-warning);
+}
+.firmware-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.firmware-option-main {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.firmware-option-reason {
+  flex: 0 1 auto;
+  max-width: 55%;
+  font-size: 12px;
+  color: var(--el-color-warning);
+  text-align: right;
 }
 
 .upgrade-progress {

@@ -49,6 +49,16 @@ func main() {
 		runRetireUnifiedDataCLI()
 	case "command-intervals":
 		runCommandIntervalsCleanupCLI()
+	case "firmware":
+		// 固件身份（方案 M0/T0.2）：meta-gen 给存量 .bin 补 sidecar；
+		// migrate-report 复现启动迁移的 legacy/duplicate 清单（只读）。
+		runFirmwareCLI()
+	case "node":
+		// 节点硬件档案（方案 §6.3 data.fix）：hw set 更正单台，hw backfill 批量。
+		runNodeCLI()
+	case "ota":
+		// 闸门只读预检（方案 T1a.6）；M1a 落地前以退出码 2 明确「未实现」。
+		runOTACLI()
 	default:
 		usage()
 	}
@@ -58,6 +68,11 @@ func usage() {
 	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
 		"       ehomectl retire-logical-device\n" +
 		retireUsageLine() +
+		"       ehomectl firmware meta-gen --bin <path> --psram yes|no\n" +
+		"       ehomectl firmware migrate-report\n" +
+		"       ehomectl node hw set --id <node_id> --flash-mb 8|16 --psram yes|no\n" +
+		"       ehomectl node hw backfill\n" +
+		"       ehomectl ota gate-check --all | --node <node_id>\n" +
 		"       ehomectl command-intervals cleanup")
 }
 

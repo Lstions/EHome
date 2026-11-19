@@ -342,6 +342,18 @@ build_profile() {
         CONFIG_COLLECTOR_PSRAM
         CONFIG_SPIRAM
         CONFIG_SPIRAM_MODE_OCT
+        # 自动回滚开关（M3a/T3a.1，2026-11-18）。它编进 **bootloader.bin**，
+        # 而 OTA 只写应用分区 ⇒ 派生 sdkconfig 一旦把它钉在 n，这份固件烧下去
+        # **根本没有回滚能力**：坏镜像启动即崩也不会退回旧分区，而构建日志、
+        # 门禁、内存数字全都正常 —— "以为有回滚，其实没有"。
+        # 实测（2026-11-18）：把 sdkconfig.defaults 改成 y 之后，既有的
+        # build61/c6-n16/sdkconfig 仍然是 n，**连 `idf.py reconfigure` 都翻不
+        # 过来**（kconfgen/kconfiglib 把"与已加载 defaults 不同的现值"当作
+        # user value，sdkconfig 胜出）；而 tools/check_sdkconfig_symbols.py
+        # 只验"符号在 Kconfig 树里存在"、不验取值，所以那次构建它照样打 PASS。
+        # ⇒ 只能靠这条守卫把"静默漂移"变成构建失败（与上面 PSRAM 那组同一个
+        #   道理：都属于"看起来配了、其实没生效"）。
+        CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
     )
     if [[ -f "$sdkconfig" ]]; then
         local _drift=0 _sym _want _have _want_all=""
@@ -468,6 +480,37 @@ build_profile() {
             return 1
         fi
     fi
+
+    # ---- 构建期 sidecar：<bin> 同名 .meta.json（方案 §4.2 / WBS T0.2）----
+    #
+    # 后端上传**必须**带 sidecar（缺 -> 400 FW_META_REQUIRED），而"这块产物是
+    # 不是 PSRAM 型号"镜像头里没有（方案判断 1：spi_size/chip_id 在头里，SPIRAM 不在）
+    # ⇒ 只能由构建现场记录。此前只有 `ehomectl firmware meta-gen` 能补，等于每个
+    # 版本手工补一次；忘了的表现是"上传被 400 拒绝"，不是"固件坏了"，很容易漏。
+    #
+    # 为什么放在**所有门禁之后**：被 IRAM/内存/落地核查拒掉的产物不该留下 sidecar
+    # —— 否则它在目录里看起来就是"一份可上传的固件"。
+    # 失败必须让构建失败：半份 sidecar 比没有更糟（上传时才 400，且更难查）。
+    local _emit="$PROJECT_DIR/scripts/emit_meta.py"
+    if [[ ! -f "$_emit" ]]; then
+        echo "ERROR: $profile: sidecar emitter not found: $_emit" >&2
+        return 1
+    fi
+    echo "==> Emitting firmware sidecar ($profile)"
+    if ! "${IDF_PY_CMD[0]}" "$_emit" \
+            --bin "$build_dir/ehome_collector.bin" \
+            --sdkconfig "$sdkconfig" \
+            --profile "$profile" \
+            --project-cmakelists "$PROJECT_DIR/CMakeLists.txt"; then
+        echo "ERROR: $profile: sidecar emission failed (see above)" >&2
+        return 1
+    fi
+    local _sidecar="$build_dir/ehome_collector.meta.json"
+    if [[ ! -f "$_sidecar" ]]; then
+        echo "ERROR: $profile: emitter reported success but $_sidecar is missing" >&2
+        return 1
+    fi
+    echo "==> Sidecar: $_sidecar"
 }
 
 main() {

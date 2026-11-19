@@ -1,14 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
+import { clickLoginButton, fillLoginCredentials, loginAsAdmin, loginButton } from './helpers/login';
 
 // ── Login Helper ──────────────────────────────────────────────────
 
 async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.waitForSelector('.el-input, form, .el-form', { timeout: 10000 });
-  await page.locator('input').first().fill('admin');
-  await page.locator('input[type="password"]').fill('admin123');
-  await page.locator('button.el-button--primary, button[type="submit"], button:has-text("登录")').first().click();
-  await page.waitForURL(/\/(dashboard|node|edge-device)/, { timeout: 15000 });
+  // 统一走公共 helper：登录按钮是 el-button（type=button）+ 字面量「登 录」，
+  // 旧的 type=submit / has-text("登录") 都不命中（见 e2e/helpers/login.ts 文件头）。
+  await loginAsAdmin(page, { waitForUrl: /\/(dashboard|node|edge-device)/, timeoutMs: 15000 });
 }
 
 // ── Auth Flow E2E Tests ───────────────────────────────────────────
@@ -29,18 +27,13 @@ test.describe('认证流程', () => {
     // 密码输入框可见
     await expect(page.locator('input[type="password"]')).toBeVisible({ timeout: 5000 });
 
-    // 登录按钮可见
-    const loginBtn = page.locator('button.el-button--primary, button[type="submit"], button:has-text("登录")').first();
+    // 登录按钮可见（按可访问名「登 录」匹配，正中带空格的文案）
+    const loginBtn = loginButton(page);
     await expect(loginBtn).toBeVisible({ timeout: 5000 });
   });
 
   test('正确凭证登录 → 跳转 dashboard', async ({ page }) => {
-    await page.goto('/login');
-    await page.waitForSelector('.el-input, form, .el-form', { timeout: 10000 });
-
-    await page.locator('input').first().fill('admin');
-    await page.locator('input[type="password"]').fill('admin123');
-    await page.locator('button.el-button--primary, button[type="submit"], button:has-text("登录")').first().click();
+    await loginAsAdmin(page, { waitForUrl: /\/(dashboard|node|edge-device)/, timeoutMs: 15000 });
 
     // 登录成功后应跳转到 dashboard 或其他已认证页面
     await page.waitForURL(/\/(dashboard|node|edge-device)/, { timeout: 15000 });
@@ -51,9 +44,9 @@ test.describe('认证流程', () => {
     await page.goto('/login');
     await page.waitForSelector('.el-input, form, .el-form', { timeout: 10000 });
 
-    await page.locator('input').first().fill('wrong_user');
-    await page.locator('input[type="password"]').fill('wrong_password_123');
-    await page.locator('button.el-button--primary, button[type="submit"], button:has-text("登录")').first().click();
+    // 失败路径不能走 loginAsAdmin（它等待跳转）：只复用「填字段 + 点提交」两个动作
+    await fillLoginCredentials(page, 'wrong_user', 'wrong_password_123');
+    await clickLoginButton(page);
 
     // 登录失败后应显示错误提示 (el-alert type=error)
     await page.waitForSelector('.el-alert--error, .el-message--error', { timeout: 10000 });

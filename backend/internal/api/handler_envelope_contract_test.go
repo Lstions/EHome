@@ -5,16 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"ehome/backend/internal/firmwareid"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
@@ -247,11 +246,20 @@ func TestEnvelopeContract_NodeCreateReturnsObjectData(t *testing.T) {
 func TestEnvelopeContract_OTACreateTaskReturnsObjectData(t *testing.T) {
 	r, db := setupEnvelopeContractOTARouter(t)
 
-	fw := models.Firmware{Version: "1.0.0", Checksum: "x", URL: "http://example/fw.bin", SizeBytes: 10}
+	// M1a 闸门：固件身份必须 verified 且档位完整、节点必须带硬件档案，
+	// 否则建任务会被 409 拒绝（本用例锁的是 201 的信封形状）。
+	fw := models.Firmware{
+		Version: "1.0.0", Checksum: "x", URL: "http://example/fw.bin", SizeBytes: 10,
+		Chip: firmwareid.ChipC6, FlashMB: 8, Psram: firmwareid.PSRAMNo,
+		ModelKey: "esp32c6-n8", IdentityState: firmwareid.IdentityVerified,
+	}
 	if err := db.Create(&fw).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Node{NodeID: "CONTRACT-OTA", Name: "ota", Status: "online"}).Error; err != nil {
+	if err := db.Create(&models.Node{
+		NodeID: "CONTRACT-OTA", Name: "ota", Status: "online",
+		Platform: firmwareid.ChipC6, HwFlashMB: 8, HwPsram: firmwareid.PSRAMNo,
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,23 +284,16 @@ func TestEnvelopeContract_FirmwareUploadReturnsObjectData(t *testing.T) {
 	r, _ := setupEnvelopeContractRouter(t)
 	t.Setenv("EHOME_EXTERNAL_HOST", "127.0.0.1:8080")
 
+	// 2026-11-18（M0）：上传要求「合法 ESP 镜像 + 同名 sidecar」，版本取自镜像；
+	// 本用例只锁信封形状，所以用夹具造一份最小合法镜像。
 	const fwName = "contract-upload.bin"
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	_ = mw.WriteField("version", "9.9.9")
-	part, err := mw.CreateFormFile("file", fwName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := part.Write([]byte("firmware-bytes")); err != nil {
-		t.Fatal(err)
-	}
-	_ = mw.Close()
+	image := firmwareTestImage(0x000D, 3, "9.9.9", "envelope-contract")
+	sidecar := firmwareTestSidecar(t, image, "esp32c6", 8, false, "9.9.9", "c6-n8")
+	body, contentType := firmwareUploadMultipart(t, fwName, image, sidecar)
 
-	w := authenticated(t, r, http.MethodPost, "/api/v1/firmwares/upload", buf.Bytes(), mw.FormDataContentType())
+	w := authenticated(t, r, http.MethodPost, "/api/v1/firmwares/upload", body.Bytes(), contentType)
 	t.Cleanup(func() {
-		_ = os.Remove(filepath.Join("firmwares", fwName))
-		_ = os.Remove("firmwares")
+		_ = os.RemoveAll("firmwares")
 	})
 	data := requireEnvelopeOK(t, w, http.StatusCreated)
 

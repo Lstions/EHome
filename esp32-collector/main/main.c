@@ -144,6 +144,9 @@ static void log_boot_heap(const char *stage) { (void)stage; }
  * 连接被判定致命而断开。且 MQTT 未来要启用 TLS（上下文 16~40KB），
  * 现有余量完全不够 —— 只能先把无谓预留压下去。 */
 #define STATUS_TASK_STACK 5120
+/* 回滚确认任务（见 ota_confirm_task）：只做日志 + 一次 mark_valid，
+ * 3072 足够（不像 status 要编码上报帧）。 */
+#define OTA_CONFIRM_TASK_STACK 3072
 
 /* StatusReport 上报周期 (毫秒)。1s 是节点离线可见时延预算的一部分：
  * 最坏 = 1s(本周期) + 3s(服务端 NodeOfflineThreshold) + 1s(服务端检测 ticker) = 5s。
@@ -154,6 +157,141 @@ static void log_boot_heap(const char *stage) { (void)stage; }
 #define STATUS_REPORT_PERIOD_MS 1000
 
 static bool s_ota_pending_verify = false;
+
+/* ============================================================================
+ * OTA 回滚确认（boot validation）—— 判据**全部本地可达成**，绝不依赖网络
+ * ============================================================================
+ *
+ * 引导器语义（ESP-IDF bootloader_support/src/bootloader_utility.c:396-400 /
+ * 445-447）：镜像处于 PENDING_VERIFY 时，**只要应用没把它标成 VALID 就复位**，
+ * 下一次启动引导器把它置 ABORTED 并自动退回旧分区。⇒ “确认”这一步直接决定
+ * 设备会不会回滚，所以它的判据**不能**包含任何外部条件。
+ *
+ * ⚠ 本文件此前把确认挂在“首条 StatusReport 发送成功”之后（旧 331-332 行）。
+ *   那会让“应用完全正常，只是网线/路由/服务端不可用”的设备永远停在
+ *   PENDING_VERIFY ⇒ 任何一次意外复位（掉电、看门狗、手动重启）都会把它误滚
+ *   回旧固件。方案 §3.4 判断 2 / §6.6 判据对照 / AC-15 要求改为本地自检。
+ *
+ * 现判据 = uptime >= OTA_CONFIRM_DELAY_S && !安全模式 && 关键初始化完成
+ *（见 ota.h 的 ota_confirm_due()，三个条件都是本地事实，秒级可达成）。
+ * ============================================================================ */
+
+/* 本地关键子系统就绪：**不含网络**的那一串初始化已经跑完。
+ *
+ * 判据口径（2026-11-19 实机验证后收紧）：
+ *   · 关键初始化（NVS、配置/消息骨架、Hello 监督器、外设控制、OTA、
+ *     调度器、传输、LED/恢复出厂）在 app_main 里顺序执行，失败路径直接
+ *     esp_restart()；能走到本标志的置位点 ⇒ 这一串确实全部成功；
+ *   · 唯一“不致命但确实不可用”的形态（handler_periph_init 失败）已由
+ *     主动 invalid 覆盖（见 app_main），不混进本判据；
+ *   · **WiFi 连接不在其中**：把它算进来等于让确认时刻依赖网络耗时。
+ *     2026-11-19 实机实测：无 AP 时 wifi_mgr_start() 同步等满连接超时
+ *     30.86s ⇒ 确认被从 30s 拖到 31.94s（联网时 31.45s）。若超时调大，
+ *     未确认窗口会到分钟级，任何意外复位都会滚掉一个本来正常的镜像 ——
+ *     这正是 §6.6 要避免的形态。
+ *
+ * ⇒ 置位点放在 wifi_mgr_start() **之前**，确认由独立的 ota_confirm 任务
+ *   驱动（见 ota_confirm_task）。代价是 app_main 剩余部分（总线任务启动等）
+ *   不在本判据内；那部分失败仍会被看门狗/panic 捕获，而“能不能用”由 30s
+ *   存活本身验证。
+ *
+ * 它并非恒真：app_main 若**卡在**网络之前那段关键序列中途（死锁/长时间
+ * 等待），本标志永远为 false ⇒ 永不确认 ⇒ 下次复位由引导器退回旧镜像。
+ *
+ * volatile：由 main 任务写、ota_confirm 任务读（与 s_mem_low_event 同形态）。 */
+static volatile bool s_core_ready = false;
+
+static inline bool critical_ready(void) { return s_core_ready; }
+
+/* 由 ota_confirm 任务按 200ms 周期调用。只做两件事：到点确认 / 记录
+ * “为什么暂不确认”。不阻塞、不分配、不碰网络 —— 这条路径必须在断网设备上
+ * 照样走到（2026-11-19 实机：无 AP 时仍在 30.5s 内确认）。
+ *
+ * uptime_sec 由调用方按真实单调时钟给出，**不**读 s->uptime_sec：后者由
+ * status_task 维护，而 status_task 可能晚于确认时刻才创建（无 AP 时要等
+ * wifi 连接超时）—— 确认路径不能依赖它。 */
+static void ota_boot_validation_poll(app_state_t *s, uint32_t uptime_sec)
+{
+    if (!s->ota_need_confirm) return;
+
+    const bool safe_mode = boot_guard_in_safe_mode();
+    const bool core_ready = critical_ready();
+
+    if (ota_confirm_due(s->ota_need_confirm, uptime_sec, safe_mode, core_ready)) {
+        const esp_err_t err = ota_confirm_valid();
+        if (err == ESP_OK) {
+            s->ota_need_confirm = false;
+            ESP_LOGI(TAG, "OTA: boot validation PASSED - image marked valid at uptime=%us "
+                          "(local criteria only; network not required)",
+                     (unsigned)uptime_sec);
+        } else {
+            /* 不清标志、不放宽判据：下一轮（1s 后）再试（mark_valid 幂等）。
+             * 失败也要留痕，但 1s 周期不能每轮一行 ⇒ 首行 + 每 60 行。 */
+            static uint32_t s_tries = 0;
+            if ((s_tries % 60u) == 0) {
+                ESP_LOGE(TAG, "OTA: image confirm failed (%s); retrying (attempt %u, uptime=%us)",
+                         esp_err_to_name(err), (unsigned)(s_tries + 1u),
+                         (unsigned)uptime_sec);
+            }
+            s_tries++;
+        }
+        return;
+    }
+
+    /* 未达判据：只在**首次**因该原因跳过时打一行（1s 周期，逐轮打会把现场
+     * 日志冲成噪声；但完全不打就等于“设备为什么没确认”无法回答）。 */
+    if (safe_mode) {
+        static bool s_logged_safe = false;
+        if (!s_logged_safe) {
+            s_logged_safe = true;
+            ESP_LOGW(TAG, "OTA: boot validation deferred - boot_guard safe mode (%s); "
+                          "NOT confirming (a degraded-but-alive image must not be pinned VALID); "
+                          "if this persists the bootloader will roll back",
+                     boot_guard_safe_mode_reason());
+        }
+    } else if (!core_ready) {
+        static bool s_logged_core = false;
+        if (!s_logged_core) {
+            s_logged_core = true;
+            ESP_LOGW(TAG, "OTA: boot validation deferred - critical init sequence not finished "
+                          "(uptime=%us)", (unsigned)uptime_sec);
+        }
+    }
+    /* 剩下的原因只有“还没到 OTA_CONFIRM_DELAY_S 秒”：正常倒计时，不打日志。 */
+}
+
+/* ============================================================================
+ * 独立确认执行体 —— 必须有，且必须早于任何可能阻塞的网络初始化启动
+ * ============================================================================
+ *
+ * 2026-11-19 实机实测（这就是本任务存在的理由）：
+ *   · 修复前确认挂在 status_task 上，而 status_task 在 wifi_mgr_start() **之后**
+ *     才创建；无 AP 时 wifi_mgr_start() 同步等满连接超时 30.86s
+ *     ⇒ 确认时刻 = max(30s, app_main 走到 status_task 创建) = 31.94s（联网 31.45s）。
+ *     判据本身全是本地事实，但**观察点**被网络耗时绑架。
+ *   · 一旦连接超时调大（或改成同步重试循环），未确认窗口会到分钟级，任何一次
+ *     意外复位都会滚掉一个本来正常的镜像 —— 正是 §6.6 要避免的形态。
+ *
+ * 本任务在 wifi_mgr_start() 之前创建，周期 200ms（要求“到点后 ~1s 内确认”，
+ * 留 5 倍余量）；确认完成后转 1s 低频空转，开销可忽略。
+ *
+ * 为什么用独立任务而不是 esp_timer：确认动作里要打日志、要调 IDF 的
+ * esp_ota_mark_app_valid_cancel_rollback()（内部有 flash 写），放定时器回调
+ * 里不合适；独立任务还能在 MemReport 里被观测到（见 status_task 的名单）。
+ */
+static void ota_confirm_task(void *pv)
+{
+    app_state_t *s = (app_state_t *)pv;
+    for (;;) {
+        if (!s->ota_need_confirm) {
+            /* 已确认 / 本来就不需要：不再需要 200ms 精度，转 1s 空转。 */
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        ota_boot_validation_poll(s, app_state_uptime_sec_now());
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
 
 /* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x21) ==== */
 
@@ -201,6 +339,9 @@ static void status_task(void *pv)
          * 所以可以放在这个周期任务里随手调用。不要放进 NVS —— 每 1s 写一次会磨损 flash。
          * 见 main/boot_guard.h 的说明。 */
         boot_guard_tick();
+        /* OTA 回滚确认**不在本任务里**：它由独立的 ota_confirm 任务驱动
+         * （在 wifi_mgr_start() 之前创建）。此处若再调用，会把确认重新绑回
+         * “status_task 已创建”这条依赖上 —— 无 AP 时要先等满 30s 连接超时。 */
         /* WiFi 主动链路探针（2026-10-05）。
          *
          * 为什么不能只靠 WIFI_EVENT_STA_DISCONNECTED：实测出现过"驱动以为还连着、
@@ -236,7 +377,8 @@ static void status_task(void *pv)
         }
         if (mem_periodic) {
             static const char *names[] = {
-                "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
+                "status", "ota_confirm", "sync", "rx_task",
+                "cmd_u0", "cmd_u1", "cmd_u2",
                 "cmd_spi", "cmd_i2c", "report_tx",
                 "hello_super", "periph_worker", "periph_rsp", "rgb_led",
                 "factory_reset",
@@ -324,14 +466,16 @@ static void status_task(void *pv)
         const bool uplink_ready = transport_any_connected();
         (void)wifi_mgr_check_liveness(uplink_ready);
         if (uplink_ready) {
-            esp_err_t status_err = msg_handler_send_status(
+            /* ⚠ 旧确认点（mark_valid 挂在“首条 StatusReport 成功”之后）已删除：
+             * 那等于让确认依赖网络 ⇒ 断网设备永不确认 ⇒ 下次复位被引导器误滚回
+             * 旧固件（方案 §6.6 实施要点 1）。确认改由独立任务 ota_confirm 按
+             * **本地**判据完成（见 ota_confirm_task）；这里只负责上报，返回值不再
+             * 参与任何决策（故显式丢弃，避免 unused 告警）。 */
+            (void)msg_handler_send_status(
                 s->uptime_sec, "online",
                 (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
                 scheduler_get_state());
-			if (s->ota_need_confirm && status_err == ESP_OK) {
-				if (ota_confirm_valid() == ESP_OK) s->ota_need_confirm = false;
-			}
-		}
+        }
         vTaskDelay(pdMS_TO_TICKS(STATUS_REPORT_PERIOD_MS));
     }
 }
@@ -545,20 +689,24 @@ void app_main(void)
     ESP_ERROR_CHECK(r);
 
     /* ---- OTA: boot validation ---- */
-    /* Check if running partition is pending verification (OTA rollback protection).
-     * If so, run self-checks before confirming the new firmware as valid.
-     * Self-checks: WiFi connected + MQTT connected + first StatusReport sent.
-     * If any check fails 3 times → mark invalid → rollback to previous partition. */
+    /* 只**读**运行分区状态，不在这里确认（方案 §6.6）。
+     * PENDING_VERIFY = 本次启动的镜像来自一次 OTA 且尚未被标 VALID ⇒ 置标志，
+     * 交给独立的 ota_confirm 任务（ota_boot_validation_poll，200ms 周期）：
+     *   uptime >= OTA_CONFIRM_DELAY_S && !boot_guard_in_safe_mode() && critical_ready()
+     * ⚠ 绝不要把确认挂到 WiFi / Hello / 首条 StatusReport 上，也不要在这里直接
+     *   mark_valid —— “没确认就复位 ⇒ 引导器回退旧分区”，确认条件必须本地可达成。 */
     {
         esp_ota_img_states_t ota_state;
         const esp_partition_t *running = esp_ota_get_running_partition();
         if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
             if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
                 ESP_LOGW(TAG, "OTA: running partition is PENDING_VERIFY — boot validation active");
-                /* Validation happens in app_callbacks only after WiFi, MQTT,
-                 * and the first StatusReport have all succeeded. Do not cancel
-                 * rollback here. */
-				s_ota_pending_verify = true;
+                /* Confirmation is NOT done here and NOT in app_callbacks:
+                 * it happens in the dedicated ota_confirm task
+                 * (ota_boot_validation_poll) once the local criteria hold;
+                 * that task is created before wifi_mgr_start(). Do not cancel
+                 * rollback at boot. */
+                s_ota_pending_verify = true;
             }
         }
         /* A non-zero download NVS state is recovery metadata, not proof that
@@ -622,8 +770,18 @@ void app_main(void)
     hello_handshake_start(s);
     log_stream_set_publish_callback(msg_handler_publish);
     if (handler_periph_init() != ESP_OK) {
+        /* ⭐「能跑但确定不可用」是**唯一**允许主动 invalid 的形态（方案 §6.6）：
+         * 应用起得来，但采集/控制这条核心能力没就绪 ⇒ 即使把它标 VALID 也没有
+         * 价值。仅在镜像**尚未确认**（本次 OTA 的新镜像）时这么做：已稳定运行过
+         * 并被标 VALID 的镜像遇到同样的初始化失败，更可能是硬件/配置问题，主动
+         * invalid 只会让设备在两个分区之间反复乒乓（每次启动换一个分区），既磨损
+         * otadata 又让日志里的版本号乱跳 ⇒ 保留原有的“复位 + boot_guard 熔断”。 */
         ESP_LOGE(TAG, "Peripheral handler initialization failed; restarting");
         crash_diag_mark_reboot_reason("periph_init_failed");
+        if (s->ota_need_confirm) {
+            /* 不返回：能回退就直接退回旧分区；不可回退时函数内部记日志并复位。 */
+            ota_mark_invalid_rollback(OTA_ROLLBACK_ON_BOOT_FAIL);
+        }
         esp_restart();
     }   /* v3.0: GPIO/PWM peripheral control queues + tasks */
     log_boot_heap("after periph");
@@ -650,6 +808,25 @@ void app_main(void)
     rgb_led_init(BOARD_LED_GPIO);
     rgb_led_start();
     factory_reset_init();
+
+    /* ---- OTA 回滚确认：独立执行体，必须早于 wifi_mgr_start() ----
+     *
+     * s_core_ready 的置位点与确认任务的创建点都在这里：此时本地关键初始化
+     * 已完成（NVS/配置/消息/Hello/外设/OTA/调度/传输/LED/恢复出厂），而
+     * wifi_mgr_init() 是本地操作、wifi_mgr_start() 可能阻塞满连接超时。
+     * ⇒ 无论 WiFi 是否连通、是否正在超时等待，确认都在 uptime≈30s 发生。
+     * 详见 s_core_ready 与 ota_confirm_task 的注释。 */
+    s_core_ready = true;
+    if (xTaskCreate(ota_confirm_task, "ota_confirm", OTA_CONFIRM_TASK_STACK,
+                    (void *)s, 3, NULL) != pdPASS) {
+        /* 建任务失败 ⇒ 设备会永远停在 PENDING_VERIFY，下次复位被引导器回滚。
+         * 这与 handler_periph_init 失败同级：当前镜像不可能被确认，直接处理。 */
+        ESP_LOGE(TAG, "failed to create ota_confirm task; boot validation cannot run");
+        if (s->ota_need_confirm) {
+            ota_mark_invalid_rollback(OTA_ROLLBACK_ON_BOOT_FAIL);
+        }
+        esp_restart();
+    }
 
     log_boot_heap("before wifi");
     wifi_mgr_init();
@@ -791,4 +968,8 @@ void app_main(void)
 #endif
 
     ESP_LOGI(TAG, "Init done, node=%s", s->node_id);
+
+    /* ⚠ s_core_ready **不**在这里置位（2026-11-19 起）：它已前移到
+     * wifi_mgr_start() 之前（见那里的注释）。本行以下若再增加关键初始化，
+     * 需要重新评估“确认判据不含网络”这条约束，而不是把标志挪回最后。 */
 }

@@ -4,6 +4,7 @@ import { useWebSocketStore } from '@/stores/websocket'
 
 import { loadEdgeDeviceList, loadNodeList } from './routeLoaders'
 import { useRouteProgress } from '@/stores/routeProgress'
+import { isModuleLoadFailure, useAppUpdateStore } from '@/stores/appUpdate'
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -236,10 +237,28 @@ router.afterEach(() => {
   useRouteProgress().done()
 })
 
-// 导航错误（如懒加载 chunk 加载失败）：同样收敛，避免进度条卡死。
-// 失败路径的视觉收敛与成功一致，由组件层（登录过渡层）负责补充错误提示。
-router.onError(() => {
+// 导航错误（如懒加载 chunk 加载失败）：收敛进度条 + 推进更新状态机（§6.4 通道 4）。
+//
+// 判据分两层，且都**不改变既有视觉收敛**（进度条照旧 fail）：
+//  ① 命中模块加载特征串 ⇒ blocked（旧 hash 已不存在，页面已无法正常导航）；
+//  ② 处于 stale 期间发生导航失败 ⇒ 同样 blocked（§6.4 状态机 blocked 行的后半句）——
+//     此时页面引用的资源本就可能已被替换，刷新是唯一出路；仍要用户点击，不自动刷新。
+// 其余导航错误（守卫抛错、组件 setup 抛错等）只收敛进度条，不弹「必须刷新」——
+// 那是误导，用户刷新后同样会失败。
+router.onError((error) => {
   useRouteProgress().fail()
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  if (isModuleLoadFailure(error)) {
+    useAppUpdateStore().handleModuleLoadFailure(detail)
+    return
+  }
+  // store 可能拿不到（pinia 未安装的极端场景 / 直接 import router 的单测）：静默跳过
+  try {
+    const appUpdate = useAppUpdateStore()
+    if (appUpdate.state === 'stale') appUpdate.markBlocked('navigation failed: ' + detail)
+  } catch {
+    /* noop */
+  }
 })
 
 export default router

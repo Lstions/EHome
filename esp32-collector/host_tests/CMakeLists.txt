@@ -73,6 +73,17 @@ target_include_directories(legacy_write_guard_tests PRIVATE
 target_compile_options(legacy_write_guard_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME legacy_write_guard_tests COMMAND legacy_write_guard_tests)
 
+# OTA 回滚确认判据（ota_confirm_due）——纯头文件判据，不需要链接 ota.c
+# （那会拖进 esp_ota_ops/nvs 依赖）。真值表在 ota_confirm_due_tests.c 里穷举，
+# 任何往判据里新添的条件都会让这条用例变红。为什么要守：该判据决定“镜像会不会
+# 被引导器回退”，把它挂到网络条件上就是 DEF-4 的原始形态（方案 §6.6 / AC-15）。
+add_executable(ota_confirm_due_tests ota_confirm_due_tests.c)
+target_include_directories(ota_confirm_due_tests PRIVATE
+    stubs
+    ../components/ota)
+target_compile_options(ota_confirm_due_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME ota_confirm_due_tests COMMAND ota_confirm_due_tests)
+
 add_executable(bus_queue_policy_tests bus_queue_policy_tests.c)
 target_include_directories(bus_queue_policy_tests PRIVATE
     ../components/bus_worker/include

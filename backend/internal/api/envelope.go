@@ -96,3 +96,17 @@ func AbortError(c *gin.Context, statusCode int, msg string) {
 		Message: msg,
 	})
 }
+
+// ErrorWithCodeData is ErrorWithCode plus a machine-readable payload.
+//
+// 建任务的闸门（M1a）要把「为什么不能升」讲清楚：reasons / node_hw / firmware /
+// forceable / fix 都在 data 里，前端据此置灰并给出更正命令。只有 message 字符串
+// 无法做到这一点，而自定义顶层字段又违反统一 envelope。
+func ErrorWithCodeData(c *gin.Context, statusCode int, errorCode, msg string, data interface{}) {
+	c.JSON(statusCode, envelope{
+		Code:      statusCode,
+		Data:      data,
+		Message:   msg,
+		ErrorCode: errorCode,
+	})
+}

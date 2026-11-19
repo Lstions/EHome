@@ -1,8 +1,11 @@
 # 固件OTA
 
 > **状态**: 已实现（v2.2 交付 99.9% 可靠性闭环：HTTPS + SHA256 + A/B 分区 + mark-valid 自动回滚 + Hello 自动完成；36 故障点全闭环）
-> **版本**: v3.6
-> **日期**: 2026-09-19
+> **版本**: v3.7
+> **日期**: 2026-11-18
+> **回滚能力边界（v3.7）**: 应用侧“确认”逻辑已就位，且判据**全部本地可达成**；自动回滚本身由
+> `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` 编进 **bootloader.bin**，只有整片烧录 / 现场重烧过的
+> 设备才具备。**未重烧设备没有自动回滚**（见 §8）。
 > **关联**: [总体设计.md](总体设计.md) | [节点.md](节点.md) | [../协议/二进制帧协议.md](../协议/二进制帧协议.md)
 
 ## 1. 功能概述
@@ -11,7 +14,11 @@
 
 关键可靠性设计（v2.2 实测收敛至 100/100 成功）：
 
-- **A/B 分区 + 30s mark-valid**：新镜像启动后 30 秒内验证（保活周期），失败自动回滚旧分区。
+- **A/B 分区 + 30s 本地自检 mark-valid**：新镜像首次启动处于 `PENDING_VERIFY`；应用在
+  `uptime ≥ 30s` 且**不在安全模式**且**本地关键初始化**完成（不含网络）后才标 `VALID`（判据**全部本地可达成**，
+  不含联网 / Hello / StatusReport）。确认由独立任务 `ota_confirm_task` 驱动、在 `wifi_mgr_start()` 之前创建，
+  **确认时刻不得被网络阻塞**（2026-11-19 实机修复：原实现被同步 WiFi 连接超时推迟到 31.9s）。
+  未确认就复位 ⇒ 引导器下次启动置 `ABORTED` 并退回旧分区（需 bootloader 已开启回滚，见 §8）。
 - **Hello 自动完成**：OTA 相关帧（progress/result）丢失时，节点重启后 Hello 上报 firmware_version，中心端比对自动标记 OTA success——掉线不丢任务结局。
 - **并发 supersede**：同一节点新 OTA 任务创建时，旧任务自动置 failed（`error_msg="Superseded by new attempt"`，ota.go:364-377；可查询遗留任务结果后由新任务接管）。
 - **生产 TLS 不可降级**：HTTPS 下载强制；TLS 校验用 Mozilla CRT bundle（公网）/自签 cert（内网，Kconfig 显式声明）。
@@ -126,6 +133,7 @@ Kconfig 三组合：生产 HTTPS + CRT bundle / 内网自签 cert / 开发降级
 ## 7. 验收标准
 
 - [x] 上传 → 建任务 → 下载进度 → 校验 → 重启 → Hello 自动完成（实机 E2E）
+- [x] 确认 → otadata `VALID` → 复位不回退（2026-11-19 真机全链路：2.8.0 → 2.9.0，证据见 [沙箱验证报告](../验证/固件与平台更新机制-沙箱验证-2026-11-18.md) §16）
 - [x] 失败注入：checksum 错 → 失败 + 不切换分区
 - [x] 并发 OTA → supersede 语义
 - [x] 帧丢失恢复：progress 丢帧不影响终态
@@ -133,6 +141,8 @@ Kconfig 三组合：生产 HTTPS + CRT bundle / 内网自签 cert / 开发降级
 - [x] 100/100 压力验证（v2.2 发布记录）
 - [x] 取消语义闭环（2026-09-19 收尾复核）：仅 `pending`/`downloading` 可取消；`verifying`/`installing` 返回 409；终态返回 400；并发竞态由条件更新拒绝；取消时清理 ack 等待通道。证据：实现 ota.go:724-778、handler_ota.go:104-120；测试 `TestCancelTask_RejectedDuringInstalling/Verifying`、`_ConditionalUpdateRejectsStaleState`、`_ClearsPendingAckChannel`（ota_test.go:365/394/460/525）与 `TestOTA_CancelTask_InstallingReturns409/VerifyingReturns409`（handler_ota_vendor_user_test.go:144/177）；`go test -race ./internal/ota/... ./internal/api/...` 两包均 ok
 - [ ] 设备侧取消/中止（**未实现**）：无取消下行帧，设备不能中止进行中的下载（见 §3.1）
+- [x] 回滚语义**实机**验证（2026-11-19，ESP32-C6 8MB / c6-n8）：FW-RB-01 坏镜像崩溃后引导器置 ABORTED 并回退；02 清 NVS 无 AP 仍确认（30.541s，早于 WiFi 连接超时 0.326s）；03 安全模式不确认、复位后回退；04 主动 invalid 立即回退。证据见 [沙箱验证报告](../验证/固件与平台更新机制-沙箱验证-2026-11-18.md) §13。
+  未覆盖：`ESP_ERR_OTA_ROLLBACK_FAILED` 降级分支（需另一分区无可用镜像）。
 
 ## 8. 已知限制
 
@@ -140,3 +150,8 @@ Kconfig 三组合：生产 HTTPS + CRT bundle / 内网自签 cert / 开发降级
 - 节点容量：A/B 双分区占用 flash 一半（S3/C6 各 4M/8M/16M 分区表可选）。
 - **取消不通知设备**（已知缺口，见 §3.1，**task-1 落地后依然成立**）：服务端取消只结束服务端跟踪，不下发任何下行帧；设备侧无取消帧（frame_codec.h:38-71）、全仓无 `esp_ota_abort()`（实测仅归档文档提及），`s_upgrading` 期间新命令被 `ota_classify_cmd`(ota.c:203-224) 判 BUSY 后由 handler_data.c:84-88 静默丢弃 ⇒ 设备仍会完成当前下载。
 - `needs_retry` 状态字面量已定义但当前无写入点（见 §2），前端映射已前向兼容。
+- **自动回滚依赖 bootloader 版本（M3b 未完成）**：`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`
+  编进 `bootloader.bin`，而 OTA 只写应用分区 ⇒ 只通过 OTA 升级到本版本（应用侧判据已就位）、
+  bootloader 仍是旧固件的设备**不具备**自动回滚，须现场重烧（方案 D-1 / M3b）。
+- **回滚触发条件对已确认镜像是“无回滚”**：镜像已被标 `VALID` 后，后续复位不会再退回旧分区；
+  此时“能跑但确定不可用”只能靠主动 invalid（且要求另一分区有可用镜像，否则退化为普通复位）。

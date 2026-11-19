@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
@@ -30,6 +31,15 @@ func init() {
 
 func setupOTATest(t *testing.T) (*gin.Engine, *gorm.DB, *ota.Manager) {
 	t.Helper()
+	return setupOTATestWithDownlink(t, nil)
+}
+
+// setupOTATestWithDownlink 同 setupOTATest，但注入可记录的 Publisher。
+//
+// 建任务成功后 handler 会 SendOtaCommand → Publisher.Publish；nil 接口会 panic。
+// 需要走通 201 / 闸门放行路径的用例必须用它。
+func setupOTATestWithDownlink(t *testing.T, publisher downlink.Publisher) (*gin.Engine, *gorm.DB, *ota.Manager) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -43,12 +53,14 @@ func setupOTATest(t *testing.T) (*gin.Engine, *gorm.DB, *ota.Manager) {
 		&models.DeviceModel{}, &models.NodeEvent{},
 		&models.CalibrationCache{},
 		&models.PendingWriteRecord{},
+		// 撤回/删除/force 的审计写这张表（T1b.2 / REQ-8）。
+		&models.SecurityAuditEvent{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil)
-	otaMgr := ota.NewManager(db, nil, nil)
+	mgr := nodemgr.NewManager(db, publisher, nil, nil, nil)
+	otaMgr := ota.NewManager(db, publisher, nil)
 	registerOTARoutes(v1, db, otaMgr, mgr)
 	return r, db, otaMgr
 }
