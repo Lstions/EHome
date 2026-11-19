@@ -29,6 +29,17 @@ export const WS_EVENT = {
   // 数据
   DATA_UPDATE: 'data_update',
 
+  /**
+   * 边缘设备 **1Hz 状态快照**（不是事件流）。
+   *
+   * 与 DATA_UPDATE 的分工（长期约定）：
+   *   · DATA_UPDATE / EDGE_DEVICE_STATUS —— 详情页、图表、终端：要「刚收到了什么」；
+   *   · EDGE_DEVICES_LIVE                 —— 列表、看板：要「现在是什么状态」。
+   * 快照每拍带全体设备的 {id,status,last_data_at,data}，客户端按「整体替换」消费；
+   * 服务端在没有 WS 客户端时不发（internal/livedevices 的 ClientCount 门控）。
+   */
+  EDGE_DEVICES_LIVE: 'edge_devices_live',
+
   // OTA
   OTA_PROGRESS: 'ota_progress',
   OTA_COMPLETED: 'ota_completed',

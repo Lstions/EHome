@@ -23,13 +23,23 @@ export class ApiError extends Error {
   readonly response?: AxiosResponse
   readonly status?: number
   readonly errorCode?: string
+  /**
+   * 传输层错误码（axios 的 `AxiosError.code`）：
+   *   ECONNABORTED / ETIMEDOUT → 请求超时；ERR_NETWORK → 网络不可达；ERR_CANCELED → 主动取消。
+   *
+   * 为什么必须保留：服务端业务码走 `errorCode`（envelope.error_code），传输层码走这里 ——
+   * 两者语义不同。此前构造 ApiError 时把 code 丢了，于是「超时」只能靠英文 message
+   * 文本判据、`ERR_NETWORK` 分支形同虚设（Login.vue 等处的分派永远走不到）。
+   */
+  readonly code?: string
 
-  constructor(message: string, response?: AxiosResponse, errorCode?: string) {
+  constructor(message: string, response?: AxiosResponse, errorCode?: string, code?: string) {
     super(message)
     this.name = 'ApiError'
     this.response = response
     this.status = response?.status
     this.errorCode = errorCode
+    this.code = code
   }
 }
 
@@ -127,7 +137,14 @@ apiClient.interceptors.response.use(
       }
     }
     const errorData = error.response?.data as ErrorEnvelope | undefined
-    return Promise.reject(new ApiError(errorData?.message || error.message, error.response, errorData?.error_code))
+    return Promise.reject(new ApiError(
+      errorData?.message || error.message,
+      error.response,
+      errorData?.error_code,
+      // 传输层码要带下去：超时（ECONNABORTED）与断网（ERR_NETWORK）都没有响应体，
+      // 只有它能让上层把英文 "timeout of 10000ms exceeded" 换成可读文案。
+      error.code
+    ))
   }
 )
 

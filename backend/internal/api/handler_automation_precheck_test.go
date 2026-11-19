@@ -95,16 +95,16 @@ func precheckRiskBody(actionID string) map[string]interface{} {
 
 func precheckSensorBody(sensorName string) map[string]interface{} {
 	return map[string]interface{}{
-		"name":                    "预检 selector",
-		"trigger_type":            models.AutomationTriggerSensorThreshold,
-		"trigger_edge_device_id":  1,
-		"trigger_sensor_name":     sensorName,
-		"trigger_comparator":      "gt",
-		"trigger_threshold":       50.0,
-		"action_type":             models.AutomationActionNotification,
-		"action_level":            models.AlertLevelWarning,
-		"cooldown_sec":            300,
-		"max_daily_exec":          0,
+		"name":                   "预检 selector",
+		"trigger_type":           models.AutomationTriggerSensorThreshold,
+		"trigger_edge_device_id": 1,
+		"trigger_sensor_name":    sensorName,
+		"trigger_comparator":     "gt",
+		"trigger_threshold":      50.0,
+		"action_type":            models.AutomationActionNotification,
+		"action_level":           models.AlertLevelWarning,
+		"cooldown_sec":           300,
+		"max_daily_exec":         0,
 	}
 }
 

@@ -2,6 +2,11 @@
 # 验证前后端 WS 事件名一致 (union match)
 set -e
 
+# comm(1) 要求输入按**字节序**排序；而 en_US.UTF-8 之类的排序规则会忽略下划线，
+# 于是 "edge_device_status" 与 "edge_devices_live" 的先后在 sort 与 comm 眼里不同，
+# 报 "file 1 is not in sorted order" 并让门禁假红。事件名全是 ASCII，固定 C 即可。
+export LC_ALL=C
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 

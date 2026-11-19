@@ -31,3 +31,5 @@ export const edgeDeviceApi = {
 
 export * from './edgeDevice/types'
 export { compactEdgeDeviceList } from './edgeDevice/normalize'
+// 状态词汇表：HTTP 归一化与实时层（stores/edgeDeviceLive.ts）共用同一份映射。
+export { mapStatus, STATUS_MAP } from './edgeDevice/status'

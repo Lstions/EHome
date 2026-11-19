@@ -127,9 +127,12 @@ var changePrefilterDecodeHookForTest *int64
 //
 // 返回 (points, true, nil)  成功 —— points 是**最终**图表点（已做 change 归约）；
 // 返回 (nil, false, nil)    预筛不可用（rollup 覆盖未验证 / 读取失败 / 整窗在实时段）——
-//                           调用方必须回落纯帧分段解码（≤8 天内可服务），>8 天则报诚实错误；
+//
+//	调用方必须回落纯帧分段解码（≤8 天内可服务），>8 天则报诚实错误；
+//
 // 返回 (nil, false, err)    真错误（帧解码失败 / 超长链 / 超过 change 点上限）——
-//                           直接上抛（前端显示「加载失败」，绝不谎报「暂无数据」）。
+//
+//	直接上抛（前端显示「加载失败」，绝不谎报「暂无数据」）。
 func (s frameSource) changeLongWindowPoints(ctx context.Context, q historyPointQuery) ([]HistoryPoint, bool, error) {
 	window := q.End.Sub(q.Start)
 	if window <= frameDecodeMaxWindow {

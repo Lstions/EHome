@@ -95,6 +95,19 @@ describe('apiClient 拦截器', () => {
     expect(isApiErrorCode(caught, 'confirmation_expired')).toBe(true)
   })
 
+  it('保留传输层错误码：超时/断网的可读文案依赖它', async () => {
+    const handler = mockResponseRejected.getMockImplementation() as any
+    let caught: unknown
+    try {
+      await handler({ config: { url: '/api/v1/edge-devices' }, message: 'timeout of 10000ms exceeded', code: 'ECONNABORTED' })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).code).toBe('ECONNABORTED')
+    expect((caught as ApiError).status).toBeUndefined()
+  })
+
   it('业务 code 200 时 resolve data', () => {
     const handler = mockResponseFulfilled.getMockImplementation() as any
     const data = { code: 200, message: 'ok', data: { foo: 1 } }

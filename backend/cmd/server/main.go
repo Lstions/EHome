@@ -27,6 +27,7 @@ import (
 	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
+	"ehome/backend/internal/livedevices"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/notify"
@@ -539,6 +540,17 @@ func main() {
 		return err == nil && state.State == models.AuthStateInitialized && user.SessionVersion == version
 	})
 	go wsHub.Run()
+
+	// 边缘设备 1Hz 状态快照通道（internal/livedevices）：
+	//   · 列表/看板类视图的实时来源，与 data_update（逐帧事件流）**并存**：
+	//     详情页/图表要"刚收到了什么"，列表要"现在是什么状态"；
+	//   · 无 WS 客户端时不查库、不广播（ClientCount 门控），空闲系统零成本；
+	//   · 数据源是内存里的最新值缓存（api.LatestValues），不写库、不阻塞数据面。
+	// 文档：docs/设计/边缘设备列表-1Hz实时刷新-2026-11-19.md §6
+	liveSnapshotCtx, stopLiveSnapshot := context.WithCancel(context.Background())
+	defer stopLiveSnapshot()
+	go livedevices.New(db, wsHub.BroadcastEvent, api.LatestValues, wsHub.ClientCount).Run(liveSnapshotCtx)
+
 	outboxContext, stopOutbox := context.WithCancel(context.Background())
 	defer stopOutbox()
 	outboxProcessor := authservice.NewOutboxProcessor(db, func(subjectID uint, _ int64, _ string) {

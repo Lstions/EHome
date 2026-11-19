@@ -9,6 +9,12 @@ export interface WebSocketMessage {
   topic?: string
   payload?: {
     edge_device_id?: number
+    /**
+     * 同一 ID 的历史别名。后端 edge_device_status 事件同时发两个键
+     * （consumers_heavy.go 的 BroadcastEvent），消费方历史上两种写法都有。
+     * 这里补进类型只是为了让它可被类型化读取，不改变任何运行时行为。
+     */
+    device_id?: number
     edge_device_name?: string
     node_id?: number | string
     node_name?: string
@@ -28,6 +34,19 @@ export interface WebSocketMessage {
     model?: string
     firmware?: string
     reason?: string
+
+    /**
+     * edge_devices_live 快照载荷（1Hz 状态快照，见 internal/livedevices）：
+     * at = 快照生成时刻（RFC3339，UTC）；items = 逐设备 {id,status,last_data_at,data}。
+     * 与逐帧事件不同，一次消息就表达"全体设备的当前状态"。
+     */
+    at?: string
+    items?: Array<{
+      id?: number
+      status?: string
+      last_data_at?: string | null
+      data?: Record<string, number>
+    }>
   }
   // Flat-format fields
   data?: any

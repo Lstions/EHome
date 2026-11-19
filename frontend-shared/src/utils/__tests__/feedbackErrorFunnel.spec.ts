@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ElMessage } from 'element-plus'
-import { feedback, extractErrorMessage } from '@/utils/feedback'
+import {
+  feedback,
+  extractErrorMessage,
+  RESPONSE_TIMEOUT_MESSAGE,
+  NETWORK_ERROR_MESSAGE,
+} from '@/utils/feedback'
+import { ApiError } from '@/api/client'
 
 /**
  * I-1「ElMessage.error 收敛」的出口契约测试。
@@ -179,5 +185,65 @@ describe('feedback.error / feedback.handleError — 统一出口契约', () => {
     expect(extractErrorMessage({ name: [{ nope: 1 }] }, '创建失败')).toBe('创建失败')
     expect(extractErrorMessage({ name: [{ message: '' }] }, '创建失败')).toBe('创建失败')
     expect(extractErrorMessage({}, '创建失败')).toBe('创建失败')
+  })
+})
+
+/**
+ * 传输层失败（超时 / 断网）——**没有**服务端原因可透传。
+ *
+ * 现场（2026-11-19 09:15:02 生产，用户截图）：部署窗口内一次 10 s 超时，页面弹出
+ * `timeout of 10000ms exceeded` —— axios 的英文原文被原样弹给了用户。
+ * 本仓出口契约是「服务端原因优先」，但超时/断网没有服务端原因；此时再"原样透传"，
+ * 用户既看不懂，也不知道该做什么。故这一类必须换成中文 + 动作建议。
+ */
+describe('extractErrorMessage — 传输层失败（超时/断网）', () => {
+  it('axios 超时（ECONNABORTED）→ 中文可读文案，不透出英文原文', () => {
+    const err = Object.assign(new Error('timeout of 10000ms exceeded'), { code: 'ECONNABORTED' })
+
+    expect(extractErrorMessage(err)).toBe(RESPONSE_TIMEOUT_MESSAGE)
+    expect(extractErrorMessage(err)).not.toContain('timeout of')
+  })
+
+  it('拦截器包装成 ApiError 后仍能识别超时（code 保留 + message 特征双保险）', () => {
+    // 双保险的意义：已部署的旧页面里 ApiError 不保留 code，只能靠 message 特征；
+    // 修复后 code 保留，判据不再依赖英文文案措辞。
+    expect(
+      extractErrorMessage(new ApiError('timeout of 10000ms exceeded', undefined, undefined, 'ECONNABORTED')),
+    ).toBe(RESPONSE_TIMEOUT_MESSAGE)
+    expect(extractErrorMessage(new ApiError('timeout of 10000ms exceeded'))).toBe(RESPONSE_TIMEOUT_MESSAGE)
+  })
+
+  it('断网（ERR_NETWORK / Network Error）→ 中文可读文案', () => {
+    expect(
+      extractErrorMessage(Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' })),
+    ).toBe(NETWORK_ERROR_MESSAGE)
+    // 旧页面没有 code：仅凭 message 也要能认出来
+    expect(extractErrorMessage(new Error('Network Error'))).toBe(NETWORK_ERROR_MESSAGE)
+  })
+
+  it('有服务端 message 时永远以服务端为准（传输层映射不得覆盖它）', () => {
+    const err = new ApiError(
+      'timeout of 10000ms exceeded',
+      { data: { message: '设备忙，请稍后重试' } } as never,
+      undefined,
+      'ECONNABORTED',
+    )
+
+    expect(extractErrorMessage(err)).toBe('设备忙，请稍后重试')
+  })
+
+  it('业务自己 throw 的中文原因仍原样透传（不误伤）', () => {
+    expect(extractErrorMessage(new Error('驱动指令加载失败'))).toBe('驱动指令加载失败')
+    // 纯 'timeout' 不是 axios 超时文案，保持既有契约（见上方 handleError 用例）
+    expect(extractErrorMessage(new Error('timeout'))).toBe('timeout')
+  })
+
+  it('handleErrorWithContext 的上下文 + 中文超时文案可同时呈现（首屏列表失败的最终形态）', () => {
+    feedback.handleErrorWithContext(
+      Object.assign(new Error('timeout of 10000ms exceeded'), { code: 'ECONNABORTED' }),
+      '获取边缘设备列表失败',
+    )
+
+    expect(lastMessageText()).toBe('获取边缘设备列表失败: ' + RESPONSE_TIMEOUT_MESSAGE)
   })
 })

@@ -121,6 +121,19 @@ func (h *Hub) SetSessionValidator(validator func(subjectID uint, sessionVersion 
 	h.onMsgMu.Unlock()
 }
 
+// ClientCount 返回当前已注册的客户端数量（只含握手成功、尚未注销的连接）。
+//
+// 用途：1Hz 状态快照广播（internal/livedevices）用它做门控 —— 没有订阅者时
+// 连库都不查，避免"没人看的页面让服务端每秒查一次库"。
+//
+// 读的是 Run() 维护的同一个 clients 映射，必须持读锁；返回值是**瞬时快照**，
+// 调用方不要缓存它（下一毫秒就可能变化）。
+func (h *Hub) ClientCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
+}
+
 func (h *Hub) DisconnectSubject(subjectID uint) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()

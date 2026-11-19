@@ -340,7 +340,10 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).not.toContain("result = result.filter(d => d.device_type === typeFilter.value)")
     expect(source).not.toContain("result = result.filter(d => d.status === statusFilter.value)")
     expect(source).not.toContain("result = result.filter(d => d.hardware_type === hardwareFilter.value)")
-    expect(source).toContain('const filteredDevices = computed(() => devices.value)')
+    // 2026-11-19：展示层改为「HTTP 快照 + 实时层补丁」的 displayDevices，
+    // filteredDevices 仍然是**直通**（不在这里做任何 filter/slice）——
+    // 断言跟着改成同一条直通链路的下一跳，判据（禁止本地筛选）不变。
+    expect(source).toContain('const filteredDevices = computed(() => displayDevices.value)')
   })
 
   it('defers wizard dependencies until the create dialog is opened', () => {

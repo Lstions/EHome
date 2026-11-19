@@ -82,14 +82,29 @@ export const copyText = async (text: string) => {
   }
 }
 
-export const formatRelativeTime = (time: string | null | undefined) => {
+/**
+ * 「多久以前」的可读文本。
+ *
+ * **必须到秒**（2026-11-19）：本页卡片已按 1Hz 实时刷新，而旧实现 <1 分钟恒返回
+ * 「刚刚」—— 于是读数每秒都在变、时间戳文字却一动不动，用户照样会以为"没刷新"。
+ * 秒级文案才让「数据是活的」可被看见。
+ *
+ * nowMs 由调用方传入实时层的 1Hz 时基（stores/edgeDeviceLive.ts 的 now）：
+ *   · 同一帧内多次格式化用**同一个**基准，不会出现「2秒前 / 3秒前」抖动；
+ *   · 不传时退回 Date.now()，一次性场景（CSV 导出等）行为不变。
+ */
+export const formatRelativeTime = (time: string | null | undefined, nowMs?: number) => {
   if (!time) return UNKNOWN
-  const now = new Date()
-  const date = new Date(time)
-  const diff = now.getTime() - date.getTime()
-  
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return '刚刚'
+  const at = new Date(time).getTime()
+  if (!Number.isFinite(at)) return UNKNOWN
+
+  // 负值 = 浏览器与服务端时钟偏差。按「刚刚」处理，绝不渲染出「-3秒前」。
+  const diff = Math.max(0, (nowMs ?? Date.now()) - at)
+  const seconds = Math.floor(diff / 1000)
+  if (seconds <= 2) return '刚刚'
+  if (seconds < 60) return `${seconds}秒前`
+
+  const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}分钟前`
   if (minutes < 1440) return `${Math.floor(minutes / 60)}小时前`
   return `${Math.floor(minutes / 1440)}天前`

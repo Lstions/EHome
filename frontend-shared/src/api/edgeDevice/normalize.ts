@@ -10,7 +10,9 @@
  *   · 总线名只走 channel_hardware_id（展示层唯一入口）。
  */
 import type { OperationDef } from '../deviceConfig'
-import type { BatchItemResult, DeviceStatus, EdgeDevice, EdgeDeviceDataSummaryItem } from './types'
+import type { BatchItemResult, EdgeDevice, EdgeDeviceDataSummaryItem } from './types'
+// 状态映射单列在 ./status（HTTP 归一化与实时层共用同一份词汇表，见该文件头注释）。
+import { mapStatus } from './status'
 
 // ============================================================
 // Normalize backend fields → frontend EdgeDevice interface
@@ -66,25 +68,6 @@ function isRawEdgeDevice(value: unknown): value is RawEdgeDevice {
 export function compactEdgeDeviceList(items: unknown): EdgeDevice[] {
   if (!Array.isArray(items)) return []
   return items.filter(isRawEdgeDevice) as EdgeDevice[]
-}
-
-// M9 fix: Explicit status mapping from backend values to frontend display values
-// Preserves health status values (active, warning, error, disabled) instead of collapsing to online/offline
-const STATUS_MAP: Record<string, DeviceStatus> = {
-  active: 'active',
-  online: 'online',
-  offline: 'offline',
-  warning: 'warning',
-  error: 'error',
-  disabled: 'disabled',
-  pending: 'pending',
-  initializing: 'initializing',
-  unknown: 'unknown',
-}
-
-function mapStatus(rawStatus?: string): DeviceStatus {
-  if (!rawStatus) return 'offline'
-  return STATUS_MAP[rawStatus] ?? 'unknown' // unmapped statuses become 'unknown' instead of unsafe cast
 }
 
 export const normalize = (d: RawEdgeDevice): EdgeDevice => ({

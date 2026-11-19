@@ -237,6 +237,7 @@ func validateChannelCrossChannelPins(tx *gorm.DB, ch models.Channel) error {
 //	且 UI 上只看到"配置失败"，看不到是 DMA —— 与 §211 的 2818 次 config failed 同族。
 //
 // 判据与 nodemgr 保持**同源**（复用 validateUARTDMASlots），不重写一套，
+//
 //	避免两处口径漂移。这里只负责把「同节点其它通道」一起喂进去。
 //
 // candidate.ID == 0 表示新建（此时它还没进 DB，不会出现在查询结果里）。

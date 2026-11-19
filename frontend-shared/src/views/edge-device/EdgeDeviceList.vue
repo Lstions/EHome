@@ -22,12 +22,12 @@
       <div v-if="deviceScope === 'active'" class="stats-row">
         <StatCard label="本页边缘设备" :mobile-label="`边缘设备（${SCOPE_PAGE}）`" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
           <template #icon><el-icon><Cpu /></el-icon></template>
-          <template #value><CountUp :value="stats.total" class="stat-value" /></template>
+          <template #value><CountUp :value="pageStats.total" class="stat-value" /></template>
         </StatCard>
 
         <StatCard label="本页在线" :mobile-label="`在线（${SCOPE_PAGE}）`" icon-color="var(--el-color-success)">
           <template #icon><el-icon><CircleCheck /></el-icon></template>
-          <template #value><CountUp :value="stats.online" class="stat-value" /></template>
+          <template #value><CountUp :value="pageStats.online" class="stat-value" /></template>
         </StatCard>
 
         <!-- 第三张卡承载「非在线」的全部设备：离线/异常 + 等待数据。
@@ -40,12 +40,12 @@
         <StatCard label="本页离线/异常" :mobile-label="`离线/异常（${SCOPE_PAGE}）`" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
           <template #icon><el-icon><CircleClose /></el-icon></template>
           <template #value>
-            <CountUp :value="stats.offline + stats.pending" class="stat-value" />
+            <CountUp :value="pageStats.offline + pageStats.pending" class="stat-value" />
           </template>
           <!-- StatCard 只有 icon/value/suffix 三个插槽（见 components/common/StatCard.vue），
                没有 footer。用 suffix 承载"其中等待数据 N"的说明。 -->
           <template #suffix>
-            <span v-if="stats.pending > 0" class="stat-sub">等待数据 {{ stats.pending }}</span>
+            <span v-if="pageStats.pending > 0" class="stat-sub">等待数据 {{ pageStats.pending }}</span>
           </template>
         </StatCard>
 
@@ -315,7 +315,7 @@
         </el-table-column>
         <el-table-column prop="last_data_time" label="最后采集" width="140">
           <template #default="{ row }">
-            {{ formatRelativeTime(row.last_data_time) }}
+            {{ formatRelativeTime(row.last_data_time, liveNow) }}
           </template>
         </el-table-column>
         <!-- 操作列仅图标（原 160px 占 390px 视口的 41%）；2026-10-23 新增
@@ -434,7 +434,7 @@
           <el-icon :size="15"><Warning /></el-icon>
           <span>等待首条采集数据</span>
         </div>
-        <p v-if="device.last_data" class="card-updated">更新于 {{ formatRelativeTime(device.last_data_time) }}</p>
+        <p v-if="device.last_data" class="card-updated">更新于 {{ formatRelativeTime(device.last_data_time, liveNow) }}</p>
 
         <div class="card-actions">
           <el-button size="small" type="primary" class="card-action card-action--primary" :icon="View" :style="isMobile ? { minHeight: '44px' } : undefined" @click="goToDetail(device.id)">详情</el-button>
@@ -587,7 +587,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { feedback } from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 
@@ -619,6 +619,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
+import { useEdgeDeviceLive } from '@/stores/edgeDeviceLive'
 import {
   compactEdgeDeviceList,
   type DeletedEdgeDevice,
@@ -800,7 +801,7 @@ const {
   onSuccess: (deletedIds, _deleteData) => {
     devices.value = devices.value.filter(d => !deletedIds.includes(d.id))
     total.value = Math.max(0, total.value - deletedIds.length)
-    updateStats()
+    // 统计由 pageStats 自动跟随 devices，不再手动重算。
     fetchDevices(true).catch(() => {
       ElMessage.warning('删除结果已保存，但列表刷新失败，请稍后刷新')
     })
@@ -1004,18 +1005,78 @@ watch(batchMode, (on) => {
   if (!on) clearAllSelection()
 })
 
-// 统计数据
-const stats = reactive({
-  total: 0,
-  online: 0,
-  // pending：已创建但尚未收到任何数据（后端 EdgeDeviceStatusPending）。
-  // 单列一项，使 total = online + pending + offline 可被用户自行核对。
-  pending: 0,
-  offline: 0,
-  // null = 后端未提供该字段（或请求失败），显示 UNKNOWN；0 是「今天是 0 条」的合法值，
-  // 两者必须可区分 —— 用 0 兜底会把「拿不到数据」显示成「没有数据」。
-  todayData: null as number | null
+// ═══════════════════════════════════════════════════════════════════════
+// 实时层（1Hz）：卡片读数 / 状态自动刷新
+//
+// 数据分工（长期维护的规则，改这里之前先读）：
+//   · HTTP 列表快照  = 成员 / 配置 / 分页 / 排序（低频，由筛选变化与对账驱动）
+//   · 实时层 store   = status / lastData / lastDataAt（1Hz，由 WebSocket 驱动）
+// 两者只在**视图层**合成，谁都不写回对方 —— 否则「谁覆盖谁」会变成每个页面
+// 各自猜一次的隐式契约。
+// ═══════════════════════════════════════════════════════════════════════
+const liveStore = useEdgeDeviceLive()
+
+/**
+ * 实时 1Hz 时基。历史视图下**不读取**它：computed 没有依赖就不会让页面
+ * 被实时节拍驱动重渲（历史面板有自己的加载节奏）。
+ */
+const liveNow = computed(() => (deviceScope.value === 'active' ? liveStore.now : undefined))
+
+/**
+ * 页面展示用的设备列表 = HTTP 快照 + 实时补丁。
+ *
+ * last_data 用**整体替换**而不是合并：两边的读数同源（后端最新值缓存），
+ * 但实时层更新。只有在实时层还没有任何读数时才保留快照值
+ * （刚进页面、WS 尚未推帧，或该设备确实没数据）。
+ */
+const displayDevices = computed<EdgeDevice[]>(() => {
+  const live = liveStore.live
+  if (devices.value.length === 0) return devices.value
+  return devices.value.map((device) => {
+    const patch = live[device.id]
+    if (!patch) return device
+    const hasReadings = patch.lastData !== null && Object.keys(patch.lastData).length > 0
+    return {
+      ...device,
+      status: patch.status ?? device.status,
+      last_data: hasReadings ? patch.lastData : device.last_data,
+      last_data_time: patch.lastDataAt ?? device.last_data_time,
+    }
+  })
 })
+
+// 统计数据
+//
+// 前三张卡由**当前页展示数据**（快照 + 实时层）算出，所以必须是 computed，而不是
+// 在 fetch 回调里赋值：实时层的状态补丁（设备上线/离线）不经过 fetch，赋值式的
+// stats 会一直停在上次请求时的数字 —— 正是「必须整页刷新才更新」的同一种病。
+const pageStats = computed(() => {
+  const allVisible = compactEdgeDeviceList(displayDevices.value)
+  return {
+    total: allVisible.length,
+    // 只有 active/online 才是「在线」；pending（已创建未采到数据）不算，
+    // 否则刚建的空设备会被计入在线，正是缺陷 5 的统计口径版本。
+    online: allVisible.filter(d => d.status === 'active' || d.status === 'online').length,
+    // pending 也不计入「离线/异常」：它在等第一帧数据，offlinedetector 尚未
+    // 判定（超时后才转 offline）。算进离线会让新建设备一出现就显示故障。
+    //
+    // 但**必须单列**：此前 pending 只进 total，两个分项都不含它，于是三张卡并排
+    // 却「在线 + 离线/异常 < 总数」，用户本就抱怨数字对不上 —— 修一个显示错误
+    // 不该引入一个新的对不上。单列后 total = online + pending + offline 可自校验。
+    pending: allVisible.filter(d => d.status === 'pending' || d.status === 'initializing').length,
+    offline: allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length,
+  }
+})
+
+// 今日采样帧（全局口径）—— 唯一**不**由当前页算出的统计，来自 /api/v1/overview。
+// null = 后端未提供该字段（或请求失败），显示 UNKNOWN；0 是「今天是 0 条」的合法值，
+// 两者必须可区分 —— 用 0 兜底会把「拿不到数据」显示成「没有数据」。
+const todayData = ref<number | null>(null)
+
+// /overview 在服务端本身有 30s 缓存（handler_overview.go），实时刷新若每拍都打它，
+// 只是把同一个数字重新背一遍。这里同频节流到 30s：自动刷新不再放大全局聚合查询。
+const TODAY_REFRESH_MS = 30_000
+let lastTodayFetchAt = 0
 
 // 获取今日采样帧统计
 //
@@ -1025,13 +1086,15 @@ const stats = reactive({
 //   ② 缺字段不得伪装成 0：字段不存在时显示「—」（UNKNOWN），而不是 `|| 0`。
 //      旧写法把「后端没这个字段」和「今天确实 0 条」渲染成同一个 '0'，
 //      缺陷因此藏了很久 —— 这正是本次要钉住的行为。
-const fetchTodayDataCount = async () => {
+const fetchTodayDataCount = async (force = false) => {
+  if (!force && Date.now() - lastTodayFetchAt < TODAY_REFRESH_MS) return
+  lastTodayFetchAt = Date.now()
   try {
     const response = await client.get<unknown, any>('/api/v1/overview')
     const raw = response.data?.data_count_today
-    stats.todayData = typeof raw === 'number' ? raw : null
+    todayData.value = typeof raw === 'number' ? raw : null
   } catch {
-    stats.todayData = null
+    todayData.value = null
   }
 }
 
@@ -1039,7 +1102,7 @@ const fetchTodayDataCount = async () => {
 // ⚠ 单位是「帧」不是「条/行」：口径见上方 SCOPE_GLOBAL 注释块（D2）。
 // 取不到值时走 UNKNOWN 占位符（不进 CountUp —— 它是数字组件，喂不了字符串）。
 const todayDataDisplay = computed(() => {
-  const count = stats.todayData
+  const count = todayData.value
   if (count === null) return { value: UNKNOWN, decimals: 0, suffix: '', unknown: true }
   return count >= 1000
     ? { value: count / 1000, decimals: 1, suffix: 'k', unknown: false }
@@ -1052,13 +1115,22 @@ const deviceTypes = deviceTypeOptions
 // 表格/卡片直接渲染接口返回的当前页, **不再做本地切片/过滤** (真分页)。
 // 改前这里对 devices.value (当时是全量数组) 做本地 filter, 于是"筛选"只在当前页
 // 生效、"翻页"只是本地切片 —— 两者都伪装成了全局行为。筛选已下沉服务端。
-const filteredDevices = computed(() => devices.value)
+const filteredDevices = computed(() => displayDevices.value)
 
-// 获取边缘设备列表
+// 获取边缘设备列表（成员 / 配置 / 分页的真源；读数与状态由实时层叠加）
 let listRequestSequence = 0
+/**
+ * 最近一次列表请求的发起时刻：自动同步节拍据此判断「距上次请求多久」（见 onTick）。
+ *
+ * 初值是「现在」而不是 0：实时层 start() 会立刻补一拍 flush（让切回页面立即重绘），
+ * 若初值为 0 那第一拍就会判定"早已过期"再发一次请求 —— 挂载时页面的 fetchDevices
+ * 刚发过，重复请求只是白白绕过缓存。
+ */
+let lastListFetchAt = Date.now()
 const fetchDevices = async (force = false, throwOnError = false) => {
   const sequence = ++listRequestSequence
   const params = getListParams()
+  lastListFetchAt = Date.now()
   const showInitialSkeleton = !edgeDeviceStore.hasCachedList(params)
   if (showInitialSkeleton) loading.value = true
   try {
@@ -1067,32 +1139,16 @@ const fetchDevices = async (force = false, throwOnError = false) => {
     const cached = edgeDeviceStore.getCachedList(params)
     devices.value = compactEdgeDeviceList(cached?.items)
     total.value = cached?.total || 0
-    updateStats()
+    // 统计由 pageStats 的 computed 自动跟随，这里只需按节流补一次**全局**计数。
+    void fetchTodayDataCount()
   } catch (error) {
-    if (sequence === listRequestSequence && !throwOnError) feedback.handleError(error, '获取边缘设备列表失败')
+    // 带操作上下文：超时/断网时 extractErrorMessage 只会给出「请求超时…」，
+    // 不带上下文用户不知道是哪一步失败（首屏就有驱动树/通道/列表多路并发）。
+    if (sequence === listRequestSequence && !throwOnError) feedback.handleErrorWithContext(error, '获取边缘设备列表失败')
     if (throwOnError) throw error
   } finally {
     if (showInitialSkeleton && sequence === listRequestSequence) loading.value = false
   }
-}
-
-// 更新统计
-const updateStats = () => {
-  const allVisible = compactEdgeDeviceList(devices.value)
-  stats.total = allVisible.length
-  // 只有 active/online 才是「在线」；pending（已创建未采到数据）不算，
-  // 否则刚建的空设备会被计入在线，正是缺陷 5 的统计口径版本。
-  stats.online = allVisible.filter(d => d.status === 'active' || d.status === 'online').length
-  // pending 也不计入「离线/异常」：它在等第一帧数据，offlinedetector 尚未
-  // 判定（超时后才转 offline）。算进离线会让新建设备一出现就显示故障。
-  //
-  // 但**必须单列一张卡**（2026-10-03 审查发现）：此前 pending 只进 total，
-  // 两个分项都不含它，于是三张卡并排却「在线 + 离线/异常 < 总数」，
-  // 用户本来就在抱怨数字对不上 —— 修一个显示错误不该引入一个新的对不上。
-  // 单列后 total = online + pending + offline，三卡可自校验。
-  stats.pending = allVisible.filter(d => d.status === 'pending' || d.status === 'initializing').length
-  stats.offline = allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length
-  fetchTodayDataCount()
 }
 
 // 设备图标 / 语义色调 / 类型标签、状态标签与标签色、时间与原始数据的可读化，
@@ -1200,7 +1256,6 @@ const confirmDelete = async (deleteData: boolean) => {
   if (result.success && result.id) {
     devices.value = devices.value.filter(item => item?.id !== result.id)
     total.value = Math.max(0, total.value - 1)
-    updateStats()
     try {
       await fetchDevices(true, true)
     } catch {
@@ -1217,7 +1272,6 @@ const confirmBatchDelete = async (deleteData: boolean) => {
     const succeededIds = new Set(result.succeededIds)
     devices.value = devices.value.filter(device => device && !succeededIds.has(device.id))
     total.value = Math.max(0, total.value - result.succeeded)
-    updateStats()
     try {
       await fetchDevices(true, true)
     } catch {
@@ -1293,6 +1347,44 @@ const clearFilters = () => {
   statusFilter.value = ''
   hardwareFilter.value = ''
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 自动同步节拍（挂在实时层的 1Hz 时基上，页面不再自己开定时器）
+//
+// 分工：
+//   · 读数 / 状态 —— 实时层（WebSocket）已经负责，页面拿到的就是最新的；
+//   · 成员 / 配置 / 排序 —— 只有 HTTP 能改，靠这里的「对账」兜底。
+//
+// 为什么还要降级轮询：WS 可能被反向代理挡住（握手失败）而 HTTP 正常。
+// 那种部署下实时层永远收不到消息、卡片会静止 —— 断开就退回 3s 轮询让页面
+// 仍然动起来，重连后（connected 变 true）自动回到 30s 对账。
+// ═══════════════════════════════════════════════════════════════════════
+const LIVE_POLL_MS = 3000
+const LIVE_RECONCILE_MS = 30_000
+let autoSyncInFlight = false
+
+const stopLiveTick = liveStore.onTick(() => {
+  // 历史视图有自己的加载/分页时机，与本节拍无关。
+  if (deviceScope.value !== 'active') return
+  // 上一拍还没回来就跳过这一拍：绝不叠请求（慢网下 1s 一个请求会堆成一片）。
+  if (autoSyncInFlight) return
+
+  const interval = liveStore.connected ? LIVE_RECONCILE_MS : LIVE_POLL_MS
+  if (Date.now() - lastListFetchAt < interval) return
+
+  autoSyncInFlight = true
+  // throwOnError=true：自动同步失败不该每 3 秒弹一次 toast，静默等下一拍；
+  // 用户仍可用「刷新列表」拿到明确错误反馈。
+  void fetchDevices(true, true)
+    .catch(() => { /* 静默：下一拍重试 */ })
+    .finally(() => { autoSyncInFlight = false })
+})
+
+onUnmounted(() => {
+  // 实时层自身的订阅/定时器由 useEdgeDeviceLive 的 onUnmounted 负责；
+  // 这里只交还本页注册的节拍回调。
+  stopLiveTick()
+})
 
 onMounted(() => {
   // 驱动树用于卡片「从机地址」的能力判定（requires_target_address）——

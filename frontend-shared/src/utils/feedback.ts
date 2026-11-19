@@ -9,6 +9,24 @@
  */
 import { ElMessage, ElMessageBox, type MessageOptions } from 'element-plus'
 
+/**
+ * 传输层错误（无服务端原因）的**可读文案**。
+ *
+ * 为什么必须映射：本出口的契约是「服务端原因为准」—— 但超时/断网**没有**服务端原因，
+ * 直接透传 axios 的英文原文（`timeout of 10000ms exceeded` / `Network Error`）
+ * 等于把调试信息弹给用户：看不懂，也不知道下一步该做什么。
+ * （生产实测 2026-11-19 09:15：部署窗口内一次 10 s 超时，弹窗原样显示英文。）
+ * 口径与 useHistoryData.reasonOf（`请求超时（N 秒），请稍后重试`）保持一致：中文 + 动作建议。
+ */
+export const RESPONSE_TIMEOUT_MESSAGE = '请求超时，请检查网络后重试'
+export const NETWORK_ERROR_MESSAGE = '网络连接失败，请检查网络后重试'
+
+/** axios 超时的两种形态：适配器给的 code，以及兜底的英文 message 特征。 */
+function isTransportTimeout(err: { code?: unknown; message?: unknown }): boolean {
+  if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') return true
+  return typeof err.message === 'string' && /timeout of \d+ms exceeded/i.test(err.message)
+}
+
 const DEFAULT_SUCCESS_OPTS: MessageOptions = { type: 'success', duration: 3000, showClose: true }
 const DEFAULT_ERROR_OPTS: MessageOptions = { type: 'error', duration: 5000, showClose: true, dangerouslyUseHTMLString: false }
 const DEFAULT_WARNING_OPTS: MessageOptions = { type: 'warning', duration: 4000, showClose: true }
@@ -21,12 +39,14 @@ export function extractErrorMessage(error: unknown, fallback = '操作失败'): 
   if (error instanceof Error) {
     // axios 风格
     const anyErr = error as any
-    return (
-      anyErr.response?.data?.message ||
-      anyErr.response?.data?.msg ||
-      anyErr.message ||
-      fallback
-    )
+    const serverMessage = anyErr.response?.data?.message || anyErr.response?.data?.msg
+    // 1) 服务端原因永远优先（有响应体就说明请求确实到了后端）
+    if (typeof serverMessage === 'string' && serverMessage) return serverMessage
+    // 2) 没有响应体的传输层失败：换成可读文案，不透出 axios 英文原文
+    if (isTransportTimeout(anyErr)) return RESPONSE_TIMEOUT_MESSAGE
+    if (anyErr.code === 'ERR_NETWORK' || anyErr.message === 'Network Error') return NETWORK_ERROR_MESSAGE
+    // 3) 其余本地异常（业务代码自己 throw 的中文原因）原样透传
+    return anyErr.message || fallback
   }
 
   // Element Plus 表单校验的拒绝值**不是 Error**，而是 invalidFields 普通对象：
