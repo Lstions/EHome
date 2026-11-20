@@ -833,6 +833,12 @@ func TestJiabaidaMOSPolicyPlanCompilerGoldenVector(t *testing.T) {
 	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
 		t.Fatalf("step kinds = %q/%q", plan.Steps[0].Kind, plan.Steps[1].Kind)
 	}
+	// 2026-11-20 生产取证（真机 UART 原始帧）：这台 BMS 收到 E1 软件关断后约 1s
+	// 自行把 fet_status 恢复成 0x03。写入后 100ms 回读会拿到"已关断"的假象，
+	// 于是命令被判成功、用户却看到 MOS 仍导通。稳定窗必须 ≥ 1s。
+	if plan.Steps[0].PostTXDelayMS < 1000 {
+		t.Fatalf("write step settle window = %dms, want >= 1000 (BMS reverts fet_status about 1s after E1)", plan.Steps[0].PostTXDelayMS)
+	}
 }
 
 func TestJiabaidaBMSRestartPlanCompilerGoldenVector(t *testing.T) {

@@ -1725,6 +1725,81 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
   })
 
 
+  // ── F-11（2026-11-20 生产缺陷）：命令终态失败必须可见 ──────────────────────
+  //
+  // 缺陷形态（用户投诉）：规则「关闭BMS充电」的命令实际 FAILED（ChannelCmdV2 final
+  // verification failed），触发历史却显示"已执行"，且没有任何提示。后端修复后新增结果码
+  // `failed_execution`（命令到达终态 FAILED/UNKNOWN/CANCELLED 时回填）。
+  //
+  // 本门禁钉住"三处映射齐全 + 推送有提示"：
+  //   ① 筛选下拉能按它过滤（否则用户永远筛不到失败记录）；
+  //   ② 事件表渲染成中文「执行失败」+ danger 标签（未映射时是英文原码，用户看不懂）；
+  //   ③ 收到 automation_execution_failed 推送即弹错误提示并重拉事件表（无需刷新）。
+  describe('F-11 执行失败（failed_execution）必须可见', () => {
+    it('结果筛选下拉含「执行失败」，且不出现英文原码', async () => {
+      const wrapper = await mountPage()
+      const labels = wrapper.find('[data-test="filter-result"]').findAll('option').map(o => o.text())
+      expect(labels).toContain('执行失败')
+      expect(labels.join('|')).not.toContain('failed_execution')
+    })
+
+    it('事件表把 failed_execution 渲染为「执行失败」danger 标签，详情列带 final_reason', async () => {
+      const detail = '设备未确认执行成功（命令终态 FAILED）: 设备上报最终执行失败，或最终回传未通过服务端校验; final_reason=final_failed'
+      mockedAutomationApi.listEvents.mockResolvedValue(eventPage([
+        { ...eventFixture, id: 500, result: 'failed_execution', detail },
+      ]))
+      const wrapper = await mountWithSlotTable()
+      const row = wrapper.find('[data-test="events-table"] tbody tr')
+      expect(row.exists()).toBe(true)
+      const cells = row.findAll('td')
+      // 列序：时间 / 规则 / 结果 / 触发值 / 事件时刻 / 来源 / 命令 ID / 详情 / 操作
+      expect(cells[2].text()).toContain('执行失败')
+      expect(cells[2].text()).not.toContain('failed_execution')
+      expect(cells[7].text()).toContain('final_reason=final_failed')
+      const tag = cells[2].find('.el-tag')
+      expect(tag.exists(), '结果列缺少 el-tag：断言会假绿').toBe(true)
+      // danger：命令已经下发到设备，失败可能有真实副作用（UNKNOWN 时设备甚至可能已动作）
+      expect(tag.attributes('data-type')).toBe('danger')
+    })
+
+    it('订阅 automation_execution_failed：收到推送即弹错误提示并重拉事件表', async () => {
+      const { useWebSocketStore } = await import('@/stores/websocket')
+      const pinia = createPinia()
+      const store = useWebSocketStore(pinia)
+      const captured = new Map<string, (m: unknown) => void>()
+      vi.spyOn(store, 'subscribe').mockImplementation(((type: string, handler: (m: never) => void) => {
+        captured.set(type, handler as (m: unknown) => void)
+        return () => { captured.delete(type) }
+      }) as typeof store.subscribe)
+      mount(AutomationRules, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      expect([...captured.keys()]).toContain('automation_execution_failed')
+      const before = mockedAutomationApi.listEvents.mock.calls.length
+
+      const { feedback } = await import('@/utils/feedback')
+      const errMock = vi.spyOn(feedback, 'error').mockImplementation(() => ({ close: () => {} }) as ReturnType<typeof feedback.error>)
+      captured.get('automation_execution_failed')!({
+        type: 'automation_execution_failed',
+        payload: {
+          title: '策略执行失败: 关闭BMS充电',
+          detail: {
+            rule_name: '关闭BMS充电',
+            reason: '设备未确认执行成功（命令终态 FAILED）: ...; final_reason=final_failed',
+          },
+        },
+      })
+      await flushPromises()
+      expect(errMock).toHaveBeenCalled()
+      const last = JSON.stringify(errMock.mock.calls[errMock.mock.calls.length - 1])
+      expect(last).toContain('关闭BMS充电')
+      expect(last).toContain('final_failed')
+      // 无需用户手动刷新：推送到达即重拉事件表
+      expect(mockedAutomationApi.listEvents.mock.calls.length).toBeGreaterThan(before)
+      vi.restoreAllMocks()
+    })
+  })
+
   describe('F-10 窄屏 ≤480px 断点', () => {
     it('样式含 480px 断点，且动作卡操作区与弹窗 footer 在该断点下换行/撑满', async () => {
       // 2026-11-12 表单区拆分（纯搬移）：同一断点下的声明现在分布在页面与子组件的

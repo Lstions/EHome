@@ -87,7 +87,7 @@ export function useNotificationCenter() {
 
   // ── 实时通知：订阅 WS 推送（负债 D-3）──
   // 后端 events.Notification 的载荷是通知实体本身（与 REST 列表项同形），收到即插入。
-  // 订阅 automation 的 3 个自定义事件：它们同样携带通知实体（顶层）与自动化领域详情
+  // 订阅 automation 的 4 个自定义事件：它们同样携带通知实体（顶层）与自动化领域详情
   // （detail），前端按语义给出差异化用户反馈。
   const handleNotificationPush = (message: { payload?: any; data?: any }) => {
     // 兼容两种 WS 消息形状：{type, payload} 与扁平 {type, ...fields}
@@ -110,6 +110,23 @@ export function useNotificationCenter() {
     feedback.error('自动化执行已禁用：系统主体用户不可用，请检查初始化状态')
   }
 
+  // 2026-11-20：自动化动作**执行失败**（命令终态回填 failed_execution）。
+  // 以前这条链路没有任何 WS 生产者 —— 规则失败了，通知中心一直是安静的，用户只能
+  // 自己翻「触发历史」（而历史当时还把"已提交"显示成"已执行"）。现在后端在终态
+  // 事务提交后既落通知（走 notification_channels 外发）也推这个事件。
+  const handleAutomationExecutionFailed = (message: { payload?: any; data?: any }) => {
+    handleNotificationPush(message)
+    const body = (message?.payload ?? message?.data) as any
+    const ruleName = body?.detail?.rule_name ?? body?.title ?? ''
+    ElNotification({
+      type: 'error',
+      duration: 8000,
+      title: '策略执行失败',
+      message: `策略「${ruleName}」的设备动作未执行成功，点击前往触发历史核查`,
+      onClick: () => { router.push('/automation') },
+    })
+  }
+
   const handleAutomationPendingConfirm = (message: { payload?: any; data?: any }) => {
     handleNotificationPush(message)
     const body = (message?.payload ?? message?.data) as any
@@ -129,6 +146,7 @@ export function useNotificationCenter() {
   let unsubscribeDailyLimit: (() => void) | null = null
   let unsubscribeSystemActor: (() => void) | null = null
   let unsubscribePendingConfirm: (() => void) | null = null
+  let unsubscribeExecutionFailed: (() => void) | null = null
   // removeConnectionRefresh 解绑 wsStore.onConnected 注册的"重连成功后刷新"处理器。
   let removeConnectionRefresh: (() => void) | null = null
 
@@ -145,6 +163,7 @@ export function useNotificationCenter() {
     unsubscribeDailyLimit = wsStore.subscribe('automation_daily_limit', handleAutomationDailyLimit)
     unsubscribeSystemActor = wsStore.subscribe('automation_system_actor_unavailable', handleAutomationSystemActorUnavailable)
     unsubscribePendingConfirm = wsStore.subscribe('automation_pending_confirm', handleAutomationPendingConfirm)
+    unsubscribeExecutionFailed = wsStore.subscribe('automation_execution_failed', handleAutomationExecutionFailed)
     // WS 重连成功 → 重新拉取，补齐断线期间错过的推送（不依赖轮询）。
     removeConnectionRefresh = wsStore.onConnected(() => { void fetchNotifications() })
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -155,6 +174,7 @@ export function useNotificationCenter() {
     unsubscribeDailyLimit?.(); unsubscribeDailyLimit = null
     unsubscribeSystemActor?.(); unsubscribeSystemActor = null
     unsubscribePendingConfirm?.(); unsubscribePendingConfirm = null
+    unsubscribeExecutionFailed?.(); unsubscribeExecutionFailed = null
     removeConnectionRefresh?.(); removeConnectionRefresh = null
     document.removeEventListener('visibilitychange', handleVisibilityChange)
   }

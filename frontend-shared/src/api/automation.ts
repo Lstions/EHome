@@ -43,7 +43,7 @@ export type AutomationActionLevel = 'info' | 'warning' | 'critical'
  * 注意: 是 result 不是 state —— 前端旧版误用 state/armed/confirmed_pending/failed 等字段名。
  */
 export type AutomationEventResult =
-  | 'executed'                // 已提交 commandexec 执行
+  | 'executed'                // 已提交 commandexec 执行，且（终态回填后）设备已确认成功；detail 写明终态
   | 'pending_confirm'         // 高风险动作, 等待人工确认 (confirmEvent 闭环)
   | 'suppressed_cooldown'     // 冷却期内抑制
   | 'suppressed_daily_limit'  // 达到每日熔断上限
@@ -54,6 +54,13 @@ export type AutomationEventResult =
   | 'expired'                 // pending_confirm 超时未确认 (24h 清扫置位)
   | 'confirmation_required'   // 自动路径被确认门拦住: 规则缺少规则级风险授权。**不应出现** —— 保存入口 V7 校验保证"能保存成功 = 已授权"(2026-11-18 用户裁定); 唯一来源是存量数据/风险等级升级/绕过 API, 处置=编辑规则重新授权
   | 'partial_failure'         // 多动作执行到第 k 个失败、剩余已中止 (危险状态: 设备已被改了一半, 需人工介入)
+  // 2026-11-20 生产缺陷修复（用户投诉「自动规则失败了应该有提示」）：后端在命令到达终态
+  // FAILED/UNKNOWN/CANCELLED 时，把原本的 'executed'（只代表"已提交"）回填成本码，
+  // detail 带 command_executions.final_reason 原文 + 人话原因。SUCCEEDED 不回填结果码，
+  // 只把 detail 补成"设备已确认执行成功"。
+  // 与 failed_dispatch 的区别：后者是"Create 就失败、命令没进设备"；本码是"命令已经下发、
+  // 设备没确认成功"（UNKNOWN 时设备甚至可能已被改动），处置方向是查设备与现场。
+  | 'failed_execution'        // 命令已下发但设备未执行成功 (终态 FAILED/UNKNOWN/CANCELLED，异步回填)
   | 'suppressed_no_solar_event' // 极昼/极夜: 本日无日出/日落事件, 规则本日不触发 (显式审计, 不静默)
   | 'missed_solar_event'       // 日出/日落事件存在但未执行: 进程停机/重启跨过且超出启动补发窗口 (设备本次没动过)
   // ── 来源组结果码（方案《规则数据来源与复合来源》N-18；与后端

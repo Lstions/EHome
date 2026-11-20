@@ -74,7 +74,32 @@ const (
 	// 会让前端把它显示成"完全失败", 用户误以为设备没被动过。事件行的 action_seq
 	// 记录失败发生在第几个动作, 供前端精确展示。
 	AutomationResultPartialFailure = "partial_failure" // 第 k 个动作失败且 k<N (已中止剩余动作)
-	AutomationResultNotification   = "notification"    // 纯通知动作已发出
+	// AutomationResultFailedExecution 是"命令已下发, 但设备最终没有执行成功"的专属
+	// 结果码（2026-11-20 生产缺陷：自动化动作实际失败，触发历史却显示「已执行」）。
+	//
+	// 语义与写入时机：事件创建时这里仍是 AutomationResultExecuted（= 已提交
+	// commandexec，仅代表"下发成功"）；当 command_executions 里对应 command_id 走到
+	// 终态 FAILED / UNKNOWN / CANCELLED 时，由 commandexec 在**同一事务**内回填成本码
+	// （见 internal/commandexec/automation_backfill.go）。SUCCEEDED 不回填结果码，
+	// 只把 detail 补写为"设备已确认执行成功"的终态说明。
+	//
+	// 为什么必须是新码而不是复用 failed_dispatch：failed_dispatch 的口径是
+	// "Create 就失败了，命令根本没进设备"，处置方向是 availability gate / 参数 / 主体；
+	// 本码的口径是"命令已经在链路上跑过一轮，设备没有确认成功"，UNKNOWN 时设备甚至
+	// 可能已被部分改动，处置方向是查设备与现场。混码会让运维归因被带偏 —— 与
+	// AutomationResultPartialFailure 当初从 failed_dispatch 拆出来的理由同源。
+	// 与 partial_failure 的区别：后者是**多动作**规则里"第 k 个动作失败"（动作维度，
+	// 触发时即时落库），本码是**单条命令**的终态（命令维度，异步回填）。
+	//
+	// 保留期：刻意不加入 datalifecycle.automationEventRetentionClasses 的任何白名单。
+	// 该清理器是白名单制（"白名单之外一律保留"），未列出即永久保留 —— 方向安全
+	// （宁可多留，不可把设备动作归因当噪声删掉）；若将来要清理，需在那里显式裁决。
+	//
+	// 三向同步（后端常量 ↔ 仿真白名单 ↔ 前端 union）由
+	// TestAutomationResultWhitelistMatchesModelConstants /
+	// TestAutomationResultCodesThreeWayConsistency 钉住，漏一处即红。
+	AutomationResultFailedExecution = "failed_execution" // 命令到达终态但设备未执行成功
+	AutomationResultNotification    = "notification"     // 纯通知动作已发出
 	AutomationResultExpired        = "expired"         // pending_confirm 超时未确认 (24h 清扫置位)
 	// AutomationResultSuppressedNoSolarEvent 是"极昼/极夜导致本日无日出/日落事件,
 	// 规则本日不触发"的专属结果码 (用户裁决 O-6; 选型文档 §6.1; 方案 §3.1.4)。

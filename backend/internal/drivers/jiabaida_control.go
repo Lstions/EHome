@@ -483,7 +483,13 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				// 写入后必须等满一个"稳定窗"再回读（2026-11-20 生产实测）：
+				// 该 BMS（软件版本 0x81）把 E1 软件关断当成瞬时动作 —— 写入后
+				// ~1s 内 fet_status 会自行恢复成 0x03，而 100ms 时就回读会拿到
+				// "已关断"的假象，于是命令被判 SUCCEEDED，用户却在页面上看到
+				// MOS 仍然导通（"手动触发显示执行成功但实际没有效果"）。
+				// 稳定窗取 1200ms：> 实测恢复时刻（约 960ms）+ 一帧 0x0F 周期。
+				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 1200},
 				{ID: "readback_fet", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
@@ -808,11 +814,16 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 			wantDischargeOpen = 1
 		}
 		var fet *uint8
+		var protection uint16
+		hasProtection := false
 		for i := range readback {
-			if readback[i].Name == "fet_status" {
+			switch readback[i].Name {
+			case "fet_status":
 				v := uint8(readback[i].Value)
 				fet = &v
-				break
+			case "protection_status":
+				protection = uint16(readback[i].Value)
+				hasProtection = true
 			}
 		}
 		if fet == nil {
@@ -821,7 +832,18 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 		gotCharge := *fet & 0x01
 		gotDischarge := (*fet >> 1) & 0x01
 		if gotCharge != wantChargeOpen || gotDischarge != wantDischargeOpen {
-			return nil, fmt.Errorf("jiabaida set_mos_policy readback mismatch: fet_status=0x%02X charge bit=%d want %d discharge bit=%d want %d; 检查 protection_status 是否有硬件保护覆盖", *fet, gotCharge, wantChargeOpen, gotDischarge, wantDischargeOpen)
+			// 2026-11-20 生产取证：这台 BMS（软件版本 0x81）收到 E1 软件关断后
+			// ~1s 内自行把 fet_status 恢复成 0x03，同时置 protection_status bit12
+			// (0x1000)。稳定窗读回因此必然看到"回退"而不是"保护覆盖"，告警文案
+			// 必须把两者讲清楚，否则运维会去查根本不存在的硬件保护。
+			reason := "设备在稳定窗内回退了软件策略（BMS 把 E1 软件关断当作瞬时动作，约 1s 后自动恢复）"
+			if hasProtection && protection != 0x1000 {
+				reason = fmt.Sprintf("设备回退且 protection_status=0x%04X 可能有硬件/保护覆盖", protection)
+			} else if hasProtection && protection == 0x1000 {
+				reason = "设备回退（protection_status bit12=0x1000 为软件锁定/软件关断标志位，随关断请求置位后保留，不代表硬件保护）"
+			}
+			return nil, fmt.Errorf("jiabaida set_mos_policy settle readback mismatch: fet_status=0x%02X charge=%d(want %d) discharge=%d(want %d) protection_status=0x%04X; %s",
+				*fet, gotCharge, wantChargeOpen, gotDischarge, wantDischargeOpen, protection, reason)
 		}
 		return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, readback...), nil
 	}

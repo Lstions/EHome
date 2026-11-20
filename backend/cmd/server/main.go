@@ -844,6 +844,12 @@ func main() {
 	// 自动化策略通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 日熔断 / 待人工确认 /
 	// 纯通知动作 / 系统主体不可用四类通知随之可外发 —— 无人值守下"待确认"必须能推送到手机。
 	automationPlanner.SetNotifier(notifyDispatcher)
+	// 2026-11-20 生产缺陷修复：命令到达终态（FAILED/UNKNOWN/CANCELLED）时把
+	// automation_events.result 从 'executed' 回填成 'failed_execution'，并即时广播 +
+	// 发通知（缺陷形态：命令实际失败，触发历史却显示"已执行"，用户以为策略生效）。
+	// 二阶段注入的理由同 SetNotifier：commandexec 不 import automation（会成环），
+	// 由这里把"回填后的收尾"接到 Planner 上；未注入时回填照常写库，只是不推送。
+	commandService.SetAutomationEventObserver(automationPlanner.OnCommandTerminal)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)

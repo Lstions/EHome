@@ -1235,12 +1235,17 @@ onMounted(async () => {
 // B4 新增事件名的订阅（方案 §4.3）：
 //   · `automation_partial_failure` —— 多动作执行到第 k 个失败、剩余已中止。这是
 //     危险状态（设备已被改了一半），必须显式提示"需要人工介入"，不能等用户翻事件表。
+// 2026-11-20 新增（生产缺陷：规则失败却显示"已执行"，用户投诉"失败了应该有提示"）：
+//   · `automation_execution_failed` —— 命令已下发但设备未执行成功（终态
+//     FAILED/UNKNOWN/CANCELLED，后端回填 failed_execution）。以前这类终态**没有任何
+//     推送**，页面停在触发历史时永远是旧数据；现在既弹提示也自动重拉事件表。
 const wsStore = useWebSocketStore()
 const AUTOMATION_PUSH_EVENTS = [
   'automation_pending_confirm',
   'automation_daily_limit',
   'automation_system_actor_unavailable',
   'automation_partial_failure',
+  'automation_execution_failed',
 ] as const
 let unsubscribeAutomationPushes: Array<() => void> = []
 
@@ -1253,7 +1258,16 @@ function pushDetail(message: { payload?: { detail?: Record<string, unknown> } } 
 
 function onAutomationPush(name: string, message: unknown) {
   const detail = pushDetail(message as { payload?: { detail?: Record<string, unknown> } })
-  if (name === 'automation_partial_failure') {
+  if (name === 'automation_execution_failed') {
+    const rule = detail.rule_name ?? detail.rule_id ?? ''
+    const reason = typeof detail.reason === 'string' && detail.reason.trim() !== '' ? detail.reason : ''
+    // 本次修复的**可见面**：命令终态失败必须当场告知，而不是等用户翻事件表才发现
+    // "已执行"是假的。必须走 feedback（I-1 收敛门禁：禁止裸 ElMessage.error），
+    // 并带规则名与后端给出的原因（含 final_reason 原文）。
+    feedback.error(
+      `规则「${rule}」执行失败：${reason || '设备未确认执行成功'}。请在触发历史中核查该次执行。`,
+    )
+  } else if (name === 'automation_partial_failure') {
     const rule = detail.rule_name ?? detail.rule_id ?? ''
     const seq = detail.failed_seq ?? ''
     const failed = detail.failed_action_id ?? ''

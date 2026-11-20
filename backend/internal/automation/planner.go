@@ -1143,6 +1143,116 @@ func (p *Planner) broadcastAutomationEvent(rule models.AutomationRule, ev models
 	}
 }
 
+// OnCommandTerminal 是命令终态回填之后的**自动化侧收尾**（2026-11-20 生产缺陷修复）。
+//
+// 由 commandexec.Service.SetAutomationEventObserver 注入（cmd/server/main.go 接线），
+// 调用时机固定在 commandexec 的终态事务**提交之后**：此时 automation_events.result
+// 已经是终态值（executed 或 failed_execution），detail 也写好了。
+//
+// 为什么需要它而不是只靠页面刷新：用户投诉的正是"规则失败了应该有提示"。只把 DB 改对
+// 不构成提示 —— 页面停在触发历史时不会自己重拉。这条路径负责两件事：
+//  ① 广播 automation_event，让任何订阅方无需刷新即可重拉事件表（与创建路径同形）；
+//  ② 失败时落一条通知（复用既有 notify.Dispatcher → notification_channels 投递）并
+//     广播 automation_execution_failed，前端据此即时弹提示 + 通知中心加一条。
+//
+// fail-open 纪律：本函数里的任何失败都只影响"提示"，绝不影响已经提交的命令终态 ——
+// 因此每个分支都只记日志，不返回错误（签名也没有 error）。
+func (p *Planner) OnCommandTerminal(update commandexec.AutomationEventUpdate) {
+	if !update.Applied() {
+		return
+	}
+	// 规则可能已被删除（事件行保留历史归因）：降级成 #id，不阻断提示。
+	ruleName := fmt.Sprintf("#%d", update.RuleID)
+	var rule models.AutomationRule
+	if err := p.db.Select("id", "name").First(&rule, update.RuleID).Error; err != nil {
+		logger.Warn("automation: command terminal, rule lookup failed",
+			"rule_id", update.RuleID, "event_id", update.EventID, "error", err)
+	} else if rule.Name != "" {
+		ruleName = rule.Name
+	}
+
+	// ① 通用刷新信号。载荷比创建路径多 detail / command_status 两个键：
+	//    这是"终态更新"而不是"新事件"，订阅方需要能区分（缺 value 是刻意的，
+	//    更新路径没有触发值语义，补 0 会让前端把真实触发值覆盖成 0）。
+	if p.broadcast != nil {
+		p.broadcast("automation_event", gin.H{
+			"rule_id":        update.RuleID,
+			"rule_name":      ruleName,
+			"event_id":       update.EventID,
+			"result":         update.Result,
+			"command_id":     update.CommandID,
+			"command_status": update.Status,
+			"detail":         update.Detail,
+		})
+	}
+	if update.Result != models.AutomationResultFailedExecution {
+		return
+	}
+	logger.Warnf("automation: command terminal failure rule_id=%d event_id=%d command_id=%s status=%s detail=%q",
+		update.RuleID, update.EventID, update.CommandID, update.Status, update.Detail)
+
+	n, created := p.notifyExecutionFailed(ruleName, update)
+	if !created || p.broadcast == nil {
+		return
+	}
+	// ② 失败专用事件名（与 automation_partial_failure / automation_pending_confirm
+	//    同族）：顶层是通知实体本身，自动化领域详情进嵌套 detail —— 前端
+	//    useNotificationCenter 可直接插列表，AutomationRules 页据 detail 弹提示。
+	p.broadcast("automation_execution_failed", notificationBroadcastPayload(n, gin.H{
+		"rule_id":        update.RuleID,
+		"rule_name":      ruleName,
+		"event_id":       update.EventID,
+		"command_id":     update.CommandID,
+		"command_status": update.Status,
+		"reason":         update.Detail,
+	}))
+}
+
+// notifyExecutionFailed 为"自动化动作执行失败"落一条通知（幂等：一事件一条）。
+//
+// 为什么复用 createNotification 而不是直接 db.Create：那一个入口在生产接的是
+// notify.Dispatcher，负责"落库 + 按 notification_channels 配置投递"（短信/webhook/…）。
+// 无人值守时页面没人看，只有外发通道能真正提醒到人 —— 这正是用户投诉的场景。
+//
+// 级别取 critical（Notification.Type = error）：这不是"策略主动的取舍"（抑制/冷却），
+// 而是"策略动了，设备没照做"，可能需要立即人工核查（UNKNOWN 时设备甚至可能已被改动）。
+//
+// 返回 (通知行, 是否可广播)。created=false 表示已有同事件的失败通知（重复投递）
+// 或落库失败 —— 两种情况下都不该再广播一条前端插不进去的通知。
+func (p *Planner) notifyExecutionFailed(ruleName string, update commandexec.AutomationEventUpdate) (models.Notification, bool) {
+	// 幂等闸：source=automation_event + source_id=事件 ID（一个事件只对应一条失败通知）。
+	sourceID := fmt.Sprintf("%d", update.EventID)
+	var cnt int64
+	if err := p.db.Model(&models.Notification{}).
+		Where("source = ? AND source_id = ?", automationExecutionFailedSource, sourceID).
+		Count(&cnt).Error; err == nil && cnt > 0 {
+		return models.Notification{}, false
+	}
+	title := "策略执行失败: " + ruleName
+	desc := fmt.Sprintf("策略「%s」的设备动作已下发，但设备未确认执行成功。%s（command_id=%s）",
+		ruleName, update.Detail, update.CommandID)
+	n := models.Notification{
+		Type:        models.NotificationType(models.AlertLevelCritical),
+		Title:       title,
+		Message:     desc,
+		Description: desc,
+		Source:      automationExecutionFailedSource,
+		SourceID:    sourceID,
+		Read:        false,
+		CreatedAt:   p.nowFn(),
+	}
+	if !p.createNotification(context.Background(), &n, "execution_failed") {
+		return models.Notification{}, false
+	}
+	return n, true
+}
+
+// automationExecutionFailedSource 是"自动化动作执行失败"通知的 source 值。
+//
+// 与 automation_rule（规则维度）/ automation_system（系统主体维度）并列的**事件维度**
+// 来源：一条通知对应一次命令终态失败，source_id 存 automation_events.id。
+const automationExecutionFailedSource = "automation_event"
+
 // notificationBroadcastPayload 构造自动化通知的 WS 广播载荷 (负债 D-3 契约):
 // 顶层 = 通知实体本身, 与前端 api/notification.ts 的 Notification 接口、
 // GET /notifications 列表项同形 (id/type/title/description/message/source/

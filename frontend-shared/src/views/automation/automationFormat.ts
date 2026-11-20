@@ -76,6 +76,10 @@ export const resultOptions: Array<{ value: AutomationEventResult; label: string 
   // 编辑规则重新勾选风险确认。故标签按真实语义命名, 不再写"需确认（未授权）"。
   { value: 'confirmation_required', label: '规则未授权' },
   { value: 'partial_failure', label: '部分失败' },
+  // 2026-11-20：命令已下发但设备没执行成功（后端终态回填的结果码）。
+  // 不标"下发失败"—— failed_dispatch 才是"没发出去"；这条是"发出去了、设备没照做"，
+  // 两者处置方向不同，标签必须能让用户一眼分开。
+  { value: 'failed_execution', label: '执行失败' },
   { value: 'suppressed_no_solar_event', label: '无日出日落事件' },
   { value: 'missed_solar_event', label: '错过日出日落' },
   { value: 'unresolved_selector', label: '选择器解析不到' },
@@ -150,6 +154,9 @@ export function resultText(r: AutomationEventResult): string {
     // 见 resultOptions 同名项注释: 这是"数据异常"而非"等待用户确认"。
     confirmation_required: '规则未授权',
     partial_failure: '部分失败',
+    // 命令已下发但设备未执行成功（终态回填）。与 partial_failure 的区别是维度：
+    // 那条是"多动作第 k 个失败"，这条是"单条命令最终没成功"。
+    failed_execution: '执行失败',
     suppressed_no_solar_event: '无日出日落事件',
     missed_solar_event: '错过日出日落',
     // 字段解析层：配置错（解析不到）与运维开关（解析未启用）分列，处置方式不同
@@ -179,6 +186,8 @@ export function resultTagType(r: AutomationEventResult): 'success' | 'warning' |
   if (r === 'missed_solar_event') return 'warning'
   // partial_failure 是**危险状态**（设备已被改了一半，需人工介入），必须比 failed_* 更显眼，
   // 故与 expired/failed_* 同为 danger。
+  // failed_execution（2026-11-20 终态回填）由下面的 failed_ 前缀分支覆盖：命令已经
+  // 下发到设备，失败可能有真实副作用（UNKNOWN 时设备甚至可能已动作），必须 danger。
   if (r.startsWith('failed_') || r === 'expired' || r === 'partial_failure') return 'danger'
   return 'info'
 }

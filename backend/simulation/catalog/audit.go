@@ -327,7 +327,7 @@ func auditRun001(e *harness.Env) {
 //	executed / pending_confirm / suppressed_cooldown / suppressed_daily_limit /
 //	condition_changed / failed_gate / failed_dispatch / confirmation_required /
 //	partial_failure / suppressed_no_solar_event / missed_solar_event / notification / expired /
-//	unresolved_selector / field_resolver_disabled
+//	unresolved_selector / field_resolver_disabled / failed_execution
 //
 // confirmation_required 由 B1 新增（方案 §3.2.5 第 1 步）；partial_failure 由 B2
 // 新增（多动作第 k 个失败，方案 §3.2.4 / §6.3）；suppressed_no_solar_event 由 B3
@@ -348,7 +348,11 @@ func auditIsDefinedResult(result string) bool {
 		"unresolved_selector", "field_resolver_disabled",
 		// 来源组结果码（方案 N-18；与 models.AutomationResultSource* 逐项一致，
 		// 由 TestAutomationResultWhitelistMatchesModelConstants 双向钉住）
-		"source_member_changed", "source_stale", "source_degraded":
+		"source_member_changed", "source_stale", "source_degraded",
+		// 命令终态回填（2026-11-20：命令已下发但设备未执行成功，由 commandexec 在
+		// 终态事务内把 executed 回填成该码 —— 与 models.AutomationResultFailedExecution
+		// 逐字一致；漏列会让仿真把合法结果码判成"未定义"而误红）
+		"failed_execution":
 		return true
 	default:
 		return false

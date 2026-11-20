@@ -48,6 +48,9 @@ func (s *Service) recordInbox(ctx context.Context, event InboxEvent, finalizer I
 	}
 	var execution models.CommandExecution
 	applied := false
+	// automationUpdate 是本事务里回填出的自动化事件投影，事务提交后才交给观察者
+	// （WS 广播 / 通知）。零值 = 这条命令不是自动化下发，或已回填过。
+	var automationUpdate AutomationEventUpdate
 	var acceptDuration time.Duration
 	acceptDurationObserved := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -129,6 +132,23 @@ func (s *Service) recordInbox(ctx context.Context, event InboxEvent, finalizer I
 				return err
 			}
 		}
+		if IsTerminal(to) {
+			// 自动化审计行的终态回填（2026-11-20 生产缺陷修复）。
+			//
+			// 必须在**同一事务**内：命令终态与自动化审计终态是同一个事实的两面，
+			// 分开提交会留下"设备已失败、页面仍显示已执行"的窗口（本缺陷的形态）。
+			// 回填失败照常 return err 回滚 —— inbox 事件按 event_id 幂等，设备重传
+			// 会重新走完整条路径，不会丢事实。
+			update, err := backfillAutomationEventTx(tx, AutomationTerminalEvent{
+				CommandID:   execution.CommandID,
+				Status:      to,
+				FinalReason: event.EventType,
+			})
+			if err != nil {
+				return err
+			}
+			automationUpdate = update
+		}
 		execution.Status = to
 		if IsTerminal(to) {
 			execution.CompletedAt = &now
@@ -148,6 +168,8 @@ func (s *Service) recordInbox(ctx context.Context, event InboxEvent, finalizer I
 		if execution.Status == StatusDeviceAccepted && acceptDurationObserved && acceptDuration >= 0 {
 			metrics.DeviceActionAcceptDuration.Observe(acceptDuration.Seconds())
 		}
+		// 提交之后才广播/通知：观察者写 WS + 通知，不能处在未提交的事务里。
+		s.publishAutomationTerminal(automationUpdate)
 	}
 	return &execution, applied, err
 }
@@ -228,6 +250,10 @@ func composeDeadlineReason(attemptCause, executionCause string) string {
 func (s *Service) RecoverExpired(ctx context.Context) ([]models.CommandExecution, error) {
 	now := s.now()
 	var expired []models.CommandExecution
+	// 超时收尾同样要让自动化审计跟着动：一条 QUEUED 命令因下发被拒/超期而落 FAILED、
+	// 或一条已下发的命令因没有最终证据落 UNKNOWN，对用户都是"策略动作没做成"。
+	// 收集到事务外再广播（观察者要写 WS + 通知，不得处在未提交事务里）。
+	var automationUpdates []AutomationEventUpdate
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.CommandOutbox{}).Where("state = ? AND lease_expires_at < ?", "LEASED", now).Updates(map[string]interface{}{"state": "PENDING", "lease_owner": "", "lease_expires_at": nil}).Error; err != nil {
 			return err
@@ -281,6 +307,17 @@ func (s *Service) RecoverExpired(ctx context.Context) ([]models.CommandExecution
 					return err
 				}
 				queued[i].FinalReason = reason
+				update, err := backfillAutomationEventTx(tx, AutomationTerminalEvent{
+					CommandID:   queued[i].CommandID,
+					Status:      StatusFailed,
+					FinalReason: reason,
+				})
+				if err != nil {
+					return err
+				}
+				if update.Applied() {
+					automationUpdates = append(automationUpdates, update)
+				}
 			}
 			if err := tx.Model(&models.CommandOutbox{}).Where("command_id IN ? AND state IN ?", commandIDs, []string{"PENDING", "LEASED"}).Updates(map[string]interface{}{"state": "CANCELLED", "processed_at": now, "lease_expires_at": nil}).Error; err != nil {
 				return err
@@ -321,6 +358,17 @@ func (s *Service) RecoverExpired(ctx context.Context) ([]models.CommandExecution
 			dispatched[i].Status = StatusUnknown
 			dispatched[i].CompletedAt = &now
 			dispatched[i].FinalReason = withoutEvidenceReason
+			update, err := backfillAutomationEventTx(tx, AutomationTerminalEvent{
+				CommandID:   dispatched[i].CommandID,
+				Status:      StatusUnknown,
+				FinalReason: withoutEvidenceReason,
+			})
+			if err != nil {
+				return err
+			}
+			if update.Applied() {
+				automationUpdates = append(automationUpdates, update)
+			}
 		}
 		expired = append(expired, dispatched...)
 		return nil
@@ -331,6 +379,9 @@ func (s *Service) RecoverExpired(ctx context.Context) ([]models.CommandExecution
 			if !execution.CreatedAt.IsZero() {
 				metrics.DeviceActionDuration.Observe(now.Sub(execution.CreatedAt).Seconds())
 			}
+		}
+		for _, update := range automationUpdates {
+			s.publishAutomationTerminal(update)
 		}
 	}
 	return expired, err

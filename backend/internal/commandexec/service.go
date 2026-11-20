@@ -65,6 +65,11 @@ type Service struct {
 	actions         *deviceaction.Registry
 	now             func() time.Time
 	dispatchEnabled bool
+
+	// automationObserver 是"自动化事件终态回填之后"的可选观察者（WS 广播 + 通知）。
+	// nil = 未接线（单测/仿真默认）：回填照常写库，只是不推送。
+	// 见 SetAutomationEventObserver / automation_backfill.go 的包级说明。
+	automationObserver func(AutomationEventUpdate)
 }
 
 func NewService(db *gorm.DB, actions *deviceaction.Registry) *Service {
@@ -755,6 +760,10 @@ func (s *Service) ResolveUnknown(ctx context.Context, in ResolveUnknownInput) (*
 
 func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*models.CommandExecution, error) {
 	var execution models.CommandExecution
+	// 自动化规则下发的命令被取消 ⇒ 自动化审计行也必须离开"已执行"（2026-11-20）。
+	// QUEUED 才可取消（即命令从未下发到设备），因此回填结果码后用户看到的是
+	// "执行失败 —— 命令已被取消（未下发到设备）"，与事实一致。
+	var automationUpdate AutomationEventUpdate
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "command_id = ?", commandID).Error; err != nil {
 			return err
@@ -774,8 +783,20 @@ func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*mo
 			return err
 		}
 		execution.Status, execution.CompletedAt, execution.FinalReason = StatusCancelled, &now, "cancelled by actor"
+		update, err := backfillAutomationEventTx(tx, AutomationTerminalEvent{
+			CommandID:   commandID,
+			Status:      StatusCancelled,
+			FinalReason: "cancelled by actor",
+		})
+		if err != nil {
+			return err
+		}
+		automationUpdate = update
 		return audit.NewWriter(tx).Write(audit.Event{ActorType: "user", ActorUserID: &actor, EventName: "device_action.cancelled", Result: "cancelled", RequestID: commandID, TargetType: "edge_device", TargetID: fmt.Sprint(execution.EdgeDeviceID), Metadata: map[string]interface{}{"action_id": execution.ActionID}})
 	})
+	if err == nil {
+		s.publishAutomationTerminal(automationUpdate)
+	}
 	return &execution, err
 }
 
