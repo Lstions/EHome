@@ -849,6 +849,10 @@ func cmdRun006(e *harness.Env) {
 //	(a) 窗口内 ⇒ 动作被接受、指令真的出网（SIM-CMD-007 前半）；
 //	(b) 超窗   ⇒ fail-closed 拒绝，且原因可诊断（SIM-CMD-007 后半 + SIM-CMD-008）。
 //
+// 2026-11-20 修订（手动路径能力快照自愈）：超窗后 commandexec 会先探活一次
+// （QueryResources 0x1A），节点回了 ResourceReport 就用新鲜快照重试一次，节点不回
+// 则仍按原语义拒绝。所以 (b) 的判据从"零帧"收窄成"零**指令帧**"：探活帧不是下发。
+//
 // 为什么用"做旧"而不是真实 sleep：MaxCapabilityAge 当前是 15 分钟，真实等待会让
 // 单条场景耗时 15 分钟以上（全量套件本就接近超时预算）。做旧把"距离上次
 // ResourceReport 已经过了多久"这一**同一状态**直接摆出来，与"真实心跳停了
@@ -938,10 +942,11 @@ func cmdRun007(e *harness.Env) {
 		t.Fatalf("窗口内下发未返回执行记录 ID：%s", accepted.BodyString())
 	}
 	// 不变量：接受必须是"真的发出去了"，而不是"接受了但没有下文"。
-	frame := cmdAwaitChannelCmd(e, fx, before, 20*time.Second)
+	// （局部变量不能叫 frame：本文件后面还要用 frame.MsgQueryResources 这个包名。）
+	acceptedFrame := cmdAwaitChannelCmd(e, fx, before, 20*time.Second)
 	e.Evidence("SIM-CMD-007.accepted_in_window", map[string]any{
 		"snapshot_age_ms": age.Milliseconds(), "command_id": commandID,
-		"reason_code": fresh.ReasonCode, "frame_boot_id": frame.BootID,
+		"reason_code": fresh.ReasonCode, "frame_boot_id": acceptedFrame.BootID,
 	})
 
 	// ── 方向 (b)：能力快照超窗 ⇒ fail-closed 且可诊断 ─────────────────
@@ -989,7 +994,14 @@ func cmdRun007(e *harness.Env) {
 	e.Evidence("SIM-CMD-007.catalog_expired", expired)
 
 	// 不变量 2：下发必须被拒（409），拒绝语义仍是产品契约的 action unavailable。
+	//
+	// 2026-11-20（能力快照自愈，D5）：超窗后 commandexec 会先下发一次
+	// QueryResources(0x1A) 探测，节点若回 ResourceReport 就用**新鲜**快照重试一次；
+	// 本场景的仿真节点不回应 0x1A（能力上报由场景显式驱动），于是探测超时后仍
+	// fail-closed 拒绝。因此计数基准同时记「指令帧」与「探测帧」两类。
 	beforeReject := fx.Device.FrameSeq()
+	beforeRejectCmdFrames := cmdChannelCmdCount(fx)
+	beforeProbeFrames := len(fx.Device.FramesOf(frame.MsgQueryResources))
 	rejected := cmdDispatch(cmdOpsSession(e), fx.EdgeDeviceID, cmdActionReadRainfall,
 		e.NS("SIM-CMD-007", "idem-aged"), nil, "", "").Expect(http.StatusConflict)
 	if !strings.Contains(rejected.Message, "action unavailable") {
@@ -1008,8 +1020,18 @@ func cmdRun007(e *harness.Env) {
 	// 把场景自身的断言缺陷误报成产品缺陷。这里改为对照被拒前后的记录数：
 	// 不变量是"拒绝不得留下痕迹"，而不是"设备上不曾有过任何记录"。
 	beforeCount := cmdExecutionCount(e, fx)
-	if extra := fx.Device.FrameSeq() - beforeReject; extra != 0 {
-		t.Fatalf("超窗被拒的下发之后新增了 %d 帧（应为 0，fail-closed 被破坏）", extra)
+	// （帧数对照见下一条 —— 2026-11-20 起"零帧"不再成立：探测帧是允许的，
+	//   fail-closed 防的是"照发指令"，不是"探活"。）
+	if extra := fx.Device.FrameSeq() - beforeReject; extra < 0 {
+		t.Fatalf("超窗被拒的下发之后帧序号倒退（%d）—— 观测口径被破坏", extra)
+	}
+	// 不变量 3a：探测必须发生且**只发生一次**（stale 是可自愈失败，不许空转重试）。
+	if probed := len(fx.Device.FramesOf(frame.MsgQueryResources)) - beforeProbeFrames; probed != 1 {
+		t.Fatalf("超窗下发后的能力探测帧 = %d，期望 1（stale 应触发一次 QueryResources 探测）", probed)
+	}
+	// 不变量 3b：**不得有任何指令帧出网** —— 这才是 fail-closed 的实质。
+	if sent := cmdChannelCmdCount(fx) - beforeRejectCmdFrames; sent != 0 {
+		t.Fatalf("超窗被拒的下发之后新增了 %d 条指令帧（应为 0，fail-closed 被破坏）", sent)
 	}
 	afterCount := cmdExecutionCount(e, fx)
 	if afterCount != beforeCount {
