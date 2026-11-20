@@ -206,7 +206,9 @@ const composedReasonColumnChars = 256
 //
 // 为什么不是"随便给个 400 字"（2026-09-21 CI 实测缺陷）：
 // 把超过列宽的值直接 UPDATE 进 varchar(256) 在 PostgreSQL 上是
-//   ERROR: value too long for type character varying(256) (SQLSTATE 22001)
+//
+//	ERROR: value too long for type character varying(256) (SQLSTATE 22001)
+//
 // 测试在**种数据**这一步就炸了，根本走不到它想验证的组装逻辑。
 // 而 SQLite 不强制 VARCHAR 宽度，于是同一个用例在本地（EHOME_TEST_DB 默认 sqlite）
 // 全绿、只在 CI 的 PG 集成 job 变红：这是**方言盲区**，也是本仓"测试全绿但存储

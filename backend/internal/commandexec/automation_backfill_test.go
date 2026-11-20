@@ -114,7 +114,7 @@ func TestRecordInboxFailedBackfillsAutomationEventAsFailed(t *testing.T) {
 
 	got := reloadAutomationEvent(t, s.Database(), ev.ID)
 	if got.Result != models.AutomationResultFailedExecution {
-		t.Fatalf("automation result=%q want %q: 命令失败后事件必须变成可区分的失败结果" +
+		t.Fatalf("automation result=%q want %q: 命令失败后事件必须变成可区分的失败结果"+
 			"（生产缺陷正是这里停在 executed，页面显示「已执行」）",
 			got.Result, models.AutomationResultFailedExecution)
 	}

@@ -34,13 +34,13 @@ var (
 	// 消费者现状（如实记录，避免注释比代码活得久）：自动化走的是**执行前主动刷新**
 	// （planner.ensureNodeCapabilityFresh），**不读**这个哨兵；它当前只用于可诊断
 	// 分类（事件 detail 里能看出"这是刷新一下就好"的那一类失败）。
-	ErrCapabilityStale = errors.New("node command capability is absent or stale")
-	ErrInvalidParams        = errors.New("action parameters are invalid")
-	ErrNotCancellable       = errors.New("execution is no longer cancellable")
-	ErrInvalidResolution    = errors.New("manual resolution is invalid")
-	ErrNotResolvable        = errors.New("execution is not unknown")
-	ErrAlreadyResolved      = errors.New("execution already has a different manual resolution")
-	ErrInvalidRequest       = errors.New("invalid command request")
+	ErrCapabilityStale   = errors.New("node command capability is absent or stale")
+	ErrInvalidParams     = errors.New("action parameters are invalid")
+	ErrNotCancellable    = errors.New("execution is no longer cancellable")
+	ErrInvalidResolution = errors.New("manual resolution is invalid")
+	ErrNotResolvable     = errors.New("execution is not unknown")
+	ErrAlreadyResolved   = errors.New("execution already has a different manual resolution")
+	ErrInvalidRequest    = errors.New("invalid command request")
 )
 
 // commandDeadline 是新建命令执行的 Deadline（生产恒 2 分钟）。
@@ -70,10 +70,21 @@ type Service struct {
 	// nil = 未接线（单测/仿真默认）：回填照常写库，只是不推送。
 	// 见 SetAutomationEventObserver / automation_backfill.go 的包级说明。
 	automationObserver func(AutomationEventUpdate)
+
+	// capabilityRefresher 让 capability_stale 这个**可自愈**失败能自动刷一次
+	// 资源快照（见 capability_refresh.go）。nil = 未接线（单测/仿真默认）：
+	// 失败原样返回，行为与接线前完全一致。
+	capabilityRefresher      CapabilityRefresher
+	capabilityRefreshTimeout time.Duration
+	capabilityRefreshPoll    time.Duration
 }
 
 func NewService(db *gorm.DB, actions *deviceaction.Registry) *Service {
-	return &Service{db: db, actions: actions, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{
+		db: db, actions: actions, now: func() time.Time { return time.Now().UTC() },
+		capabilityRefreshTimeout: defaultCapabilityRefreshTimeout,
+		capabilityRefreshPoll:    defaultCapabilityRefreshPoll,
+	}
 }
 
 func (s *Service) SetDispatchEnabled(enabled bool) { s.dispatchEnabled = enabled }
@@ -199,6 +210,7 @@ type gateResult struct {
 //     the shared node-state gates plus gatePeriphConfig. GPIO/PWM have no
 //     channel, manifest or capability facts, so the four channel-domain gates
 //     are never evaluated for them (no fabricated channel data).
+//
 // actionUnavailableError 把**失败的那一道门禁**带进错误链。
 //
 // errors.Is(err, ErrActionUnavailable) 仍然成立（错误链首段就是它），因此既有
@@ -555,97 +567,103 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 	}
 	var result models.CommandExecution
 	replayed := false
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		edge, err := resolveActionTarget(tx, in)
-		if err != nil {
-			return err
-		}
-		// Resolve the action and canonical request before checking mutable runtime
-		// gates.  A retry with an existing idempotency key must return the durable
-		// execution even when the node has since gone offline or its capability
-		// report has become stale; it must never emit a second physical command.
-		def, ok := s.actions.Get(edge.Type, in.ActionID)
-		if !ok {
-			return ErrActionUnavailable
-		}
-		params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
-		}
-		digest := sha256.Sum256(params)
-		hash := hex.EncodeToString(digest[:])
-		scope := fmt.Sprintf("user:%d:edge:%d:action:%s:v:%d", in.ActorUserID, edge.ID, def.ID, def.Version)
-		var existing models.CommandExecution
-		err = tx.Preload("ManualResolution").Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
-		if err == nil {
-			if existing.RequestHash != hash {
-				return ErrIdempotencyCollision
-			}
-			result, replayed = existing, true
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-
-		// Availability gates. The first failing gate rejects the request.
-		// This folds the exact shared predicate set from evaluateActionGates
-		// (F4): the same single source of truth drives Catalog annotations.
-		// The gate order deliberately mirrors the original Create checks so a
-		// new gate failure still yields ErrActionUnavailable.
-		//
-		// 2026-11-18: 拒绝原因不再被丢弃。旧实现只 return 哨兵, 12 道门禁的
-		// 差异在事件表里塌缩成同一句 "action is unavailable for this device" ——
-		// 生产上真机问题 (capability_stale) 因此无法从 UI 诊断。
-		for _, gate := range evaluateActionGates(s, tx, edge, def, params) {
-			if !gate.passed {
-				return actionUnavailableError(gate)
-			}
-		}
-		// 确认制门禁: 判定源收敛为**唯一**的 RiskLevel.RequiresConfirmation()
-		// (方案 §3.3.3 落点 1 / §6.4)。此处不得再内联任何 risk 字面量比较 ——
-		// 那正是 R3/A-9 防漂移门禁要抓的第二份判定。
-		//
-		// 2026-11-18 简化: 风险等级只决定"界面要不要弹窗提示", 不再承担授权语义。
-		// - user 路径 (设备页/手动触发/确认执行): 风险动作必须持一次性令牌;
-		// - system 路径 (自动化自动执行): 直接执行 —— 规则是用户保存时确认过的,
-		//   无人值守时不可能再有人点一次弹窗。要不要"先问我"由规则上的
-		//   require_confirmed 决定 (true 在 planner 侧分流为 pending_confirm)。
-		needsConfirmation := def.RiskLevel.RequiresConfirmation() && in.ActorKind != ActorKindSystem
-		if needsConfirmation {
-			// 2026-10-15 用户裁定：确认弹窗只保留确认/取消，理由不再是必填
-			// （可选审计备注）。确认的**实质**仍是 consumeConfirmation 对
-			// 一次性 token 的消费 —— 留空理由不会绕过确认门。
-			if utf8.RuneCountInString(in.Reason) > 512 {
-				return ErrConfirmationRequired
-			}
-			if err := s.consumeConfirmation(tx, in.ConfirmationToken, in.ActorUserID, edge.ID, def, hash); err != nil {
+	// 2026-11-20（D5）：能力快照过期（后端重启后 Hello 作废快照）属于可自愈失败，
+	// 这里刷一次快照再重试一次，避免手动操作得到一句无从下手的 action unavailable。
+	err := s.runWithCapabilityRefresh(ctx, in.EdgeDeviceID, func() error {
+		result = models.CommandExecution{}
+		replayed = false
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			edge, err := resolveActionTarget(tx, in)
+			if err != nil {
 				return err
 			}
-		}
-		now := s.now()
-		commandID, err := newCommandID()
-		if err != nil {
-			return err
-		}
-		result = models.CommandExecution{
-			CommandID: commandID, EdgeDeviceID: edge.ID, NodeID: edge.NodeID,
-			DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: edge.Node.ConfigVersion,
-			ActionID: def.ID, ActionVersion: def.Version, CommandEngineRevision: edge.Node.CommandEngineRevision, ActorUserID: in.ActorUserID,
-			IdempotencyScope: scope, IdempotencyKey: in.IdempotencyKey, RequestHash: hash,
-			ParamsJSON: string(params), Status: StatusQueued, DeadlineAt: now.Add(CommandDeadline()), CreatedAt: now,
-		}
-		if err := tx.Create(&result).Error; err != nil {
-			return err
-		}
-		outbox := models.CommandOutbox{CommandID: commandID, EventType: "command.dispatch", PayloadJSON: string(params), State: "PENDING", CreatedAt: now}
-		if err := tx.Create(&outbox).Error; err != nil {
-			return err
-		}
-		return audit.NewWriter(tx).Write(audit.Event{
-			ActorType: actorTypeForAudit(in.ActorKind), ActorUserID: &in.ActorUserID, EventName: "device_action.created", Result: "queued",
-			RequestID: commandID, SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(edge.ID),
-			Metadata: map[string]interface{}{"action_id": def.ID, "action_version": def.Version, "request_hash": hash, "risk_level": string(def.RiskLevel)},
+			// Resolve the action and canonical request before checking mutable runtime
+			// gates.  A retry with an existing idempotency key must return the durable
+			// execution even when the node has since gone offline or its capability
+			// report has become stale; it must never emit a second physical command.
+			def, ok := s.actions.Get(edge.Type, in.ActionID)
+			if !ok {
+				return ErrActionUnavailable
+			}
+			params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidParams, err)
+			}
+			digest := sha256.Sum256(params)
+			hash := hex.EncodeToString(digest[:])
+			scope := fmt.Sprintf("user:%d:edge:%d:action:%s:v:%d", in.ActorUserID, edge.ID, def.ID, def.Version)
+			var existing models.CommandExecution
+			err = tx.Preload("ManualResolution").Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
+			if err == nil {
+				if existing.RequestHash != hash {
+					return ErrIdempotencyCollision
+				}
+				result, replayed = existing, true
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+
+			// Availability gates. The first failing gate rejects the request.
+			// This folds the exact shared predicate set from evaluateActionGates
+			// (F4): the same single source of truth drives Catalog annotations.
+			// The gate order deliberately mirrors the original Create checks so a
+			// new gate failure still yields ErrActionUnavailable.
+			//
+			// 2026-11-18: 拒绝原因不再被丢弃。旧实现只 return 哨兵, 12 道门禁的
+			// 差异在事件表里塌缩成同一句 "action is unavailable for this device" ——
+			// 生产上真机问题 (capability_stale) 因此无法从 UI 诊断。
+			for _, gate := range evaluateActionGates(s, tx, edge, def, params) {
+				if !gate.passed {
+					return actionUnavailableError(gate)
+				}
+			}
+			// 确认制门禁: 判定源收敛为**唯一**的 RiskLevel.RequiresConfirmation()
+			// (方案 §3.3.3 落点 1 / §6.4)。此处不得再内联任何 risk 字面量比较 ——
+			// 那正是 R3/A-9 防漂移门禁要抓的第二份判定。
+			//
+			// 2026-11-18 简化: 风险等级只决定"界面要不要弹窗提示", 不再承担授权语义。
+			// - user 路径 (设备页/手动触发/确认执行): 风险动作必须持一次性令牌;
+			// - system 路径 (自动化自动执行): 直接执行 —— 规则是用户保存时确认过的,
+			//   无人值守时不可能再有人点一次弹窗。要不要"先问我"由规则上的
+			//   require_confirmed 决定 (true 在 planner 侧分流为 pending_confirm)。
+			needsConfirmation := def.RiskLevel.RequiresConfirmation() && in.ActorKind != ActorKindSystem
+			if needsConfirmation {
+				// 2026-10-15 用户裁定：确认弹窗只保留确认/取消，理由不再是必填
+				// （可选审计备注）。确认的**实质**仍是 consumeConfirmation 对
+				// 一次性 token 的消费 —— 留空理由不会绕过确认门。
+				if utf8.RuneCountInString(in.Reason) > 512 {
+					return ErrConfirmationRequired
+				}
+				if err := s.consumeConfirmation(tx, in.ConfirmationToken, in.ActorUserID, edge.ID, def, hash); err != nil {
+					return err
+				}
+			}
+			now := s.now()
+			commandID, err := newCommandID()
+			if err != nil {
+				return err
+			}
+			result = models.CommandExecution{
+				CommandID: commandID, EdgeDeviceID: edge.ID, NodeID: edge.NodeID,
+				DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: edge.Node.ConfigVersion,
+				ActionID: def.ID, ActionVersion: def.Version, CommandEngineRevision: edge.Node.CommandEngineRevision, ActorUserID: in.ActorUserID,
+				IdempotencyScope: scope, IdempotencyKey: in.IdempotencyKey, RequestHash: hash,
+				ParamsJSON: string(params), Status: StatusQueued, DeadlineAt: now.Add(CommandDeadline()), CreatedAt: now,
+			}
+			if err := tx.Create(&result).Error; err != nil {
+				return err
+			}
+			outbox := models.CommandOutbox{CommandID: commandID, EventType: "command.dispatch", PayloadJSON: string(params), State: "PENDING", CreatedAt: now}
+			if err := tx.Create(&outbox).Error; err != nil {
+				return err
+			}
+			return audit.NewWriter(tx).Write(audit.Event{
+				ActorType: actorTypeForAudit(in.ActorKind), ActorUserID: &in.ActorUserID, EventName: "device_action.created", Result: "queued",
+				RequestID: commandID, SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(edge.ID),
+				Metadata: map[string]interface{}{"action_id": def.ID, "action_version": def.Version, "request_hash": hash, "risk_level": string(def.RiskLevel)},
+			})
 		})
 	})
 	if err == nil {

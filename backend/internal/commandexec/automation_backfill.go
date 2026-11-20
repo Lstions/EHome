@@ -109,9 +109,10 @@ func (s *Service) publishAutomationTerminal(update AutomationEventUpdate) {
 // backfillAutomationEventTx 在调用方事务内把"命令终态"回填到 automation_events。
 //
 // 只改 result = 'executed' 的行，两个作用：
-//   · 幂等 —— 同一终态重复投递（设备重传 / 清扫重跑）不会再改写一次；
-//   · 不越界 —— 绝不覆盖其它结果码（pending_confirm 的待办、failed_gate 的审计、
-//     人工确认后的 partial_failure 等）与已回填过的行。
+//
+//	· 幂等 —— 同一终态重复投递（设备重传 / 清扫重跑）不会再改写一次；
+//	· 不越界 —— 绝不覆盖其它结果码（pending_confirm 的待办、failed_gate 的审计、
+//	  人工确认后的 partial_failure 等）与已回填过的行。
 //
 // 匹配不到任何行是**正常**的（人工下发、告警下发、或该系统里没有任何规则共用这条
 // 命令），返回零值 + nil error。

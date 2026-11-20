@@ -850,6 +850,10 @@ func main() {
 	// 二阶段注入的理由同 SetNotifier：commandexec 不 import automation（会成环），
 	// 由这里把"回填后的收尾"接到 Planner 上；未注入时回填照常写库，只是不推送。
 	commandService.SetAutomationEventObserver(automationPlanner.OnCommandTerminal)
+	// 2026-11-20（D5）：手动路径同样要能从 capability_stale 自愈 —— 后端重启时
+	// Hello 会作废节点能力快照，只有 ResourceReport 回来才恢复；没有这条接线时
+	// 用户在设备页点任何 bounded 动作都只会得到 action unavailable。
+	commandService.SetCapabilityRefresher(nodeMgr)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)

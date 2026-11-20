@@ -34,6 +34,7 @@ var (
 //   - 它是 ErrRecentAuthRequired 的唯一来源，删掉后确认弹窗不会再变成密码框；
 //   - 保留的仍是**授权**判定（Enabled + 系统管理员主体），那是"谁能确认"，
 //     与"刚刚是否输过密码"是两件事，混在一起会让非管理员永远卡在密码框上。
+//
 // 单次令牌、参数摘要绑定、5 分钟 TTL、限流、审计等安全不变量不变。
 const confirmationLifetime = 5 * time.Minute
 const confirmationRateWindow = time.Minute
@@ -65,22 +66,63 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 		return nil, ErrConfirmationRequired
 	}
 	var grant ConfirmationGrant
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if !s.dispatchEnabled {
-			return ErrActionUnavailable
-		}
-		// periph_cmd 分流: GPIO/PWM 动作无 channel/manifest/capability 事实,
-		// 目标解析与 gate 与 Create 同源 (resolveActionTarget)。
-		if deviceaction.IsPeriphAction(in.ActionID) {
-			edge, err := resolveActionTarget(tx, CreateInput{EdgeDeviceID: in.EdgeDeviceID, ActionID: in.ActionID})
-			if err != nil {
+	// 2026-11-20（D5）：能力快照过期（后端重启后 Hello 作废快照）属于可自愈失败，
+	// 刷一次资源快照再重试一次，避免手动操作得到一句无从下手的 action unavailable。
+	err := s.runWithCapabilityRefresh(ctx, in.EdgeDeviceID, func() error {
+		grant = ConfirmationGrant{}
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if !s.dispatchEnabled {
+				return ErrActionUnavailable
+			}
+			// periph_cmd 分流: GPIO/PWM 动作无 channel/manifest/capability 事实,
+			// 目标解析与 gate 与 Create 同源 (resolveActionTarget)。
+			if deviceaction.IsPeriphAction(in.ActionID) {
+				edge, err := resolveActionTarget(tx, CreateInput{EdgeDeviceID: in.EdgeDeviceID, ActionID: in.ActionID})
+				if err != nil {
+					return err
+				}
+				if edge.Node.Status != "online" {
+					return ErrActionUnavailable
+				}
+				definition, ok := s.actions.Get(edge.Type, in.ActionID)
+				if !ok || !definition.Enabled || !deviceaction.CurrentEngineAllows(definition) {
+					return ErrActionUnavailable
+				}
+				if !definition.RiskLevel.RequiresConfirmation() {
+					return ErrConfirmationNotNeeded
+				}
+				params, err := deviceaction.CanonicalizeParams(definition.InputSchema, in.Params)
+				if err != nil {
+					return fmt.Errorf("%w: %v", ErrInvalidParams, err)
+				}
+				if err := requirePeriphConfig(tx, edge.NodeID, definition.ID, params); err != nil {
+					return ErrActionUnavailable
+				}
+				return s.issueConfirmation(tx, &grant, in.ActorUserID, edge.ID, definition, params, in.Reason, in.SourceIP)
+			}
+			var edge models.EdgeDevice
+			if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
 				return err
 			}
-			if edge.Node.Status != "online" {
+			if !edge.Enabled || edge.Status == "inactive" || edge.Node.Status != "online" {
+				return ErrActionUnavailable
+			}
+			if _, err := loadActionChannel(tx, edge); err != nil {
+				return ErrActionUnavailable
+			}
+			if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
+				return ErrActionUnavailable
+			}
+			if _, _, capsErr := currentCapabilities(edge.Node, s.now); capsErr != nil {
+				// 只有"快照缺失/过期"可自愈，必须把哨兵带出去让外层刷新重试；
+				// "节点不支持 ChannelCmdV2"/"能力解码失败"仍按不可用处理。
+				if errors.Is(capsErr, ErrCapabilityStale) {
+					return errCapabilityStaleUnavailable()
+				}
 				return ErrActionUnavailable
 			}
 			definition, ok := s.actions.Get(edge.Type, in.ActionID)
-			if !ok || !definition.Enabled || !deviceaction.CurrentEngineAllows(definition) {
+			if !ok || !definition.Enabled {
 				return ErrActionUnavailable
 			}
 			if !definition.RiskLevel.RequiresConfirmation() {
@@ -90,39 +132,8 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalidParams, err)
 			}
-			if err := requirePeriphConfig(tx, edge.NodeID, definition.ID, params); err != nil {
-				return ErrActionUnavailable
-			}
 			return s.issueConfirmation(tx, &grant, in.ActorUserID, edge.ID, definition, params, in.Reason, in.SourceIP)
-		}
-		var edge models.EdgeDevice
-		if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
-			return err
-		}
-		if !edge.Enabled || edge.Status == "inactive" || edge.Node.Status != "online" {
-			return ErrActionUnavailable
-		}
-		if _, err := loadActionChannel(tx, edge); err != nil {
-			return ErrActionUnavailable
-		}
-		if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
-			return ErrActionUnavailable
-		}
-		if _, _, err := currentCapabilities(edge.Node, s.now); err != nil {
-			return ErrActionUnavailable
-		}
-		definition, ok := s.actions.Get(edge.Type, in.ActionID)
-		if !ok || !definition.Enabled {
-			return ErrActionUnavailable
-		}
-		if !definition.RiskLevel.RequiresConfirmation() {
-			return ErrConfirmationNotNeeded
-		}
-		params, err := deviceaction.CanonicalizeParams(definition.InputSchema, in.Params)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
-		}
-		return s.issueConfirmation(tx, &grant, in.ActorUserID, edge.ID, definition, params, in.Reason, in.SourceIP)
+		})
 	})
 	if err != nil {
 		return nil, err

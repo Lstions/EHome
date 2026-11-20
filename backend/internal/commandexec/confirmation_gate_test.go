@@ -240,4 +240,3 @@ func TestAuditRecordsRiskLevelSnapshot(t *testing.T) {
 		t.Fatalf("审计 Metadata 未含 risk_level 快照: %s", row.Metadata)
 	}
 }
-
