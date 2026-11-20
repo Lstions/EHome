@@ -2,12 +2,14 @@
 
 #include <limits.h>
 #include <string.h>
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 #define CONFIG_BUS_UART 1
 #define CONFIG_BUS_I2C  2
 #define CONFIG_BUS_SPI  3
+#define CONFIG_BUS_ADC  5
 
 typedef struct {
     uint8_t owner;
@@ -23,7 +25,14 @@ esp_err_t periph_owner_transaction_begin(void)
 {
     if (!s_transaction_mutex) s_transaction_mutex = xSemaphoreCreateMutex();
     if (!s_transaction_mutex) return ESP_ERR_NO_MEM;
-    return xSemaphoreTake(s_transaction_mutex, portMAX_DELAY) ? ESP_OK : ESP_FAIL;
+    /* Bounded, not portMAX_DELAY: a stuck holder must fail the config
+     * transaction visibly instead of freezing the control plane forever.
+     * Five seconds is longer than any legitimate PWM/GPIO critical section. */
+    if (xSemaphoreTake(s_transaction_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE("PERIPH_OWNER", "transaction gate timeout (holder did not release in 5s)");
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
 }
 
 void periph_owner_transaction_end(void)
@@ -44,6 +53,11 @@ static bool channel_uses_pin(const config_channel_t *channel, int pin)
     case CONFIG_BUS_SPI:
         if (len >= 6 && cfg[0] == pin) return true;
         return len >= 9 && (cfg[6] == pin || cfg[7] == pin || cfg[8] == pin);
+    case CONFIG_BUS_ADC:
+        /* ADC layout: [unit, channel, pin, attenuation, bit_width]. Analog
+         * pins are not GPIO-routable resources, but GPIO/PWM must still not
+         * claim them while an ADC channel is configured. */
+        return len >= 5 && cfg[2] == pin;
     default:
         return false;
     }

@@ -285,3 +285,9 @@ frontend-shared/*.png
 #     · 数据夹具路径   => 就该指向仓外的 .tmp-telemetry/realdata/（那里放 114M 生产 CSV，
 #                        本来就不该进 git；测试找不到时 skip 并打印加载方法）
 /.tmp-*/
+
+# 本机 Docker 部署运行产物
+deploy/local/.docker-config/
+deploy/local/build.log
+deploy/local/up.log
+deploy/local/*.log

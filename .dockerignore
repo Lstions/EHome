@@ -15,3 +15,9 @@ simulation
 **/dist
 **/bin
 *.tar.gz
+
+# 本机部署凭据 / PKI / env 不进构建上下文
+.secrets
+deploy/local
+.env
+.env.*

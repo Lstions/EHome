@@ -6,6 +6,7 @@ import type { Channel } from '@/api/channel'
 import { useDmaStore } from '@/stores/dma'
 import { isDmaRebindable } from '@/utils/dmaState'
 import { nodeApi } from '@/api/node'
+import { adcApi } from '@/api/periph'
 import { getSessionGeneration, assertSessionGeneration } from '@/utils/sessionCache'
 import feedback from '@/utils/feedback'
 import {
@@ -49,6 +50,9 @@ export function useBusConfig(options: BusConfigOptions) {
   const busPageSize = 10
   const i2cScanning = ref(false)
   const scanResult = ref<string[] | null>(null)
+  const adcReadingId = ref<number | null>(null)
+  const adcResult = ref<{ channelId: number; hardwareId: string; raw: number; maxRaw: number; bitWidth: number; percent: number; at: number } | null>(null)
+  const adcError = ref('')
 
   const activeBusResources = computed<BusResource[]>(() => resourcesOf(options.capabilities.value, activeBusType.value))
   const selectedResource = computed(() => activeBusResources.value.find(resource => resource.id === selectedResourceId.value) || null)
@@ -75,6 +79,8 @@ export function useBusConfig(options: BusConfigOptions) {
     activeBusType.value = type
     busPage.value = 1
     scanResult.value = null
+    adcResult.value = null
+    adcError.value = ''
     selectedResourceId.value = activeBusResources.value[0]?.id || ''
   }
 
@@ -82,7 +88,7 @@ export function useBusConfig(options: BusConfigOptions) {
   // 右侧「资源详情」由 selectedResource 统一派生（资源名称/引脚/关键参数/已挂载通道/DMA 绑定）。
   // 清掉只属于上一行的瞬态（I2C 地址扫描结果）放在这里做一次，避免三个入口各写一份、
   // 漏掉任意一个就会把上一行的扫描结果挂到新资源上（张冠李戴）。
-  watch(selectedResourceId, () => { scanResult.value = null })
+  watch(selectedResourceId, () => { scanResult.value = null; adcResult.value = null; adcError.value = '' })
 
   /** B1：选择器选中后绑定/解绑。复用 dmaStore.toggle（含并发守卫与"必须指定 bindTo"防御）。 */
   async function changeResourceDma(resource: BusResource, value: string) {
@@ -156,10 +162,51 @@ export function useBusConfig(options: BusConfigOptions) {
     }
   }
 
-  /** 路由切换：选中资源与扫描结果属于「上一节点的上下文」，必须清空。 */
+  /**
+   * 读取一次 ADC 原始样本。
+   *
+   * 与 I2C 扫描一样，这是**设备往返**而不是读缓存：后端会下发 PeriphCmd
+   * (periph_type=ADC, action=read) 并等待同一 request_id 的 PeriphRsp。
+   */
+  async function readAdc(channel: Channel) {
+    if (options.nodeOffline.value || activeBusType.value !== 'adc') return
+    const id = route.params.id as string
+    const serial = options.nodeSerial.value
+    const operation = options.opGeneration.value
+    const sessionGeneration = getSessionGeneration()
+    adcReadingId.value = channel.id ?? null
+    adcError.value = ''
+    adcResult.value = null
+    try {
+      const result = await adcApi.read(serial, channel.hardware_id)
+      assertSessionGeneration(sessionGeneration)
+      if (operation !== options.opGeneration.value || route.params.id !== id) return
+      adcResult.value = {
+        channelId: result.channel_id,
+        hardwareId: result.hardware_id || channel.hardware_id,
+        raw: result.raw,
+        maxRaw: result.max_raw,
+        bitWidth: result.bit_width,
+        percent: result.percent,
+        at: Date.now(),
+      }
+      ElMessage.success(`ADC ${result.raw}（${result.percent.toFixed(2)}%）`)
+    } catch (err: any) {
+      if (operation !== options.opGeneration.value || route.params.id !== id) return
+      adcError.value = `读取 ${channel.hardware_id} 失败`
+      feedback.handleError(err, 'ADC 读取失败')
+    } finally {
+      if (operation === options.opGeneration.value && route.params.id === id) adcReadingId.value = null
+    }
+  }
+
+  /** 路由切换：选中资源与扫描/读数结果属于「上一节点的上下文」，必须清空。 */
   function resetForRouteChange() {
     selectedResourceId.value = ''
     scanResult.value = null
+    adcResult.value = null
+    adcError.value = ''
+    adcReadingId.value = null
   }
 
   return {
@@ -169,6 +216,10 @@ export function useBusConfig(options: BusConfigOptions) {
     busPageSize,
     i2cScanning,
     scanResult,
+    adcReadingId,
+    adcResult,
+    adcError,
+    readAdc,
     activeBusResources,
     selectedResource,
     busTotalPages,

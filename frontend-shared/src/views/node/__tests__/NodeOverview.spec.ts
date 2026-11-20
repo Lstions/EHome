@@ -18,7 +18,6 @@ import type { Node } from '@/api/node'
 const NODE_OVERVIEW_SOURCE_FILES = [
   'src/views/node/NodeOverview.vue',
   'src/views/node/components/BusConfigPanel.vue',
-  'src/views/node/components/BusCreatedChannelsCard.vue',
   'src/views/node/components/DmaChannelsCard.vue',
   'src/views/node/components/NodeDevicesCard.vue',
   'src/views/node/components/NodeOtaHistoryCard.vue',
@@ -28,7 +27,6 @@ const NODE_OVERVIEW_SOURCE_FILES = [
   'src/views/node/composables/useNodeOverviewData.ts',
   'src/views/node/composables/useBusResources.ts',
   'src/views/node/composables/useBusConfig.ts',
-  'src/views/node/composables/useBaudReconfigure.ts',
   'src/views/node/composables/useNodeTabs.ts',
   'src/views/node/composables/useNodeHeaderActions.ts',
   'src/views/node/composables/useNodeDeviceOps.ts',
@@ -405,15 +403,15 @@ describe('NodeOverview (生产页)', () => {
     } as any)
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+    await wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))?.trigger('click')
     await flushPromises()
-    await wrapper.findAll('.bus-subtab').find(b => b.text().includes('UART'))?.trigger('click')
+    await wrapper.findAll('.bus-seg-btn').find(b => b.text().includes('UART'))?.trigger('click')
     await flushPromises()
 
-    const rows = wrapper.findAll('.bus-table tbody tr')
+    const rows = wrapper.findAll('.bus-res-card')
     expect(rows).toHaveLength(2)
     const detailText = () => wrapper.find('[data-bus-detail]').text()
-    const viewBtn = (i: number) => rows[i].findAll('button').find(b => b.text().includes('查看'))!
+    const viewBtn = (i: number) => rows[i]
 
     await viewBtn(0).trigger('click')
     await flushPromises()
@@ -522,12 +520,12 @@ describe('NodeOverview (生产页)', () => {
   it('切换总线配置后读取真实 capabilities，渲染资源表和右侧详情', async () => {
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))
     await tab?.trigger('click')
     await flushPromises()
 
     expect(mockGetCapabilities).toHaveBeenCalledWith('F0F5BDFFFE02')
-    expect(wrapper.find('.bus-main-cols').exists()).toBe(true)
+    expect(wrapper.find('.bus-workbench').exists()).toBe(true)
     expect(wrapper.text()).toContain('I2C0')
     expect(wrapper.text()).toContain('SDA21 / SCL22')
     expect(wrapper.text()).toContain('100kHz')
@@ -537,39 +535,32 @@ describe('NodeOverview (生产页)', () => {
   it('总线工作台仅展示真实通道能力，并按设计稿保留工具分组与连续右栏', async () => {
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))
     await tab?.trigger('click')
     await flushPromises()
 
     expect(wrapper.find('.bus-workbench').exists()).toBe(true)
-    // 2026-10-02：工具分组按当前总线 TAB 收窄。默认落在 I2C TAB，因此只有
-    // 「I2C 总线工具」一组；「快速操作（改波特率）」是 UART 专属，不得出现在这里
-    // —— 它曾在生产 I2C 页面上渲染，误导用户以为 I2C 也能改波特率。
-    expect(wrapper.findAll('.bus-tool-group')).toHaveLength(1)
-    expect(wrapper.find('.bus-tool-group').text()).toContain('I2C 总线工具')
-    expect(wrapper.find('.bus-tool-group').text()).not.toContain('修改波特率')
-
-    const editor = wrapper.find('.bus-create-card')
-    expect(editor.exists()).toBe(true)
-    expect(editor.text()).toContain('创建表单支持的字段')
-    expect(editor.text()).toContain('从机地址')
-    expect(editor.text()).toContain('时钟频率')
-    expect(editor.text()).toContain('通道名称')
-    expect(editor.text()).toContain('启用状态')
-    expect(editor.text()).toContain('新建通道')
-
-    // 设计稿中的 mock 表单分区没有对应生产契约，不能伪造到生产工作台。
-    expect(editor.text()).not.toContain('运行参数')
-    expect(editor.text()).not.toContain('权限提示')
+    // 总线类型只保留进通道体系的四类；GPIO/PWM 已移出本页，统一到「外设」。
+    const segments = wrapper.findAll('.bus-seg-btn').map(item => item.text())
+    expect(segments).toHaveLength(4)
+    expect(segments.join(' ')).toContain('UART')
+    expect(segments.join(' ')).not.toContain('GPIO')
+    expect(segments.join(' ')).not.toContain('PWM')
+    // 主操作固定：工具栏只保留一个主按钮；空态另给局部入口。
+    expect(wrapper.findAll('.bus-toolbar-right .btn-primary')).toHaveLength(1)
+    // I2C0 无通道时给出空态与下一步，而不是一张「字段说明卡」。
+    expect(wrapper.find('[data-created-channels]').exists()).toBe(true)
+    expect(wrapper.find('.bus-create-card').exists()).toBe(false)
+    // 批量改波特率已按裁决移除。
+    expect(wrapper.text()).not.toContain('批量改波特率')
+    expect(wrapper.text()).not.toContain('创建表单支持的字段')
   })
 
   it('总线工作台为窄桌面与移动端定义堆叠断点，移动端表格保留可滚动宽度', () => {
-    expect(source).toContain('@media (max-width: 1440px)')
-    expect(source).toContain('.bus-main-cols { flex-direction: column; }')
-    expect(source).toContain('.bus-col-right { width: 100%; flex: 0 0 auto; }')
-    expect(source).toContain('@media (max-width: 768px)')
-    expect(source).toContain('.bus-create-field-grid { grid-template-columns: 1fr; }')
-    expect(source).toMatch(/\.bus-table\s*\{[^}]*min-width:\s*680px/)
+    expect(source).toContain('@media (max-width: 980px)')
+    expect(source).toContain('.bus-body { grid-template-columns: 1fr; }')
+    expect(source).toContain('flex-direction: row; overflow-x: auto;')
+    expect(source).toContain('.bus-channel-table table { min-width: 640px; }')
   })
 
   it('移动端将页头操作收纳为两列，并让外层 TAB 横向滚动而非挤压裁切', () => {
@@ -637,21 +628,21 @@ describe('NodeOverview (生产页)', () => {
     } as any)
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))
     await tab?.trigger('click')
     await flushPromises()
     expect(wrapper.find('.bus-alert-offline').exists()).toBe(true)
-    expect(wrapper.find('.bus-tool-card .btn-primary').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.bus-toolbar-right .btn-primary').attributes('disabled')).toBeDefined()
   })
 
   // ── 新 TAB：DMA 通道 / 关联设备 / OTA 历史 / 系统日志 / 通道终端 ──
 
-  it('DMA 通道 TAB：进入时拉取 store 数据并渲染卡片（名称/状态/绑定），空数据时空态', async () => {
+  it('DMA 分配 TAB：进入时拉取 store 数据并渲染分配表（名称/状态/绑定），空数据时空态', async () => {
     // 先验证空数组 → 空态 + 触发 fetch
     mockDmaChannelsRef.value = []
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('DMA 分配'))
     await tab?.trigger('click')
     await flushPromises()
     expect(mockDmaFetch).toHaveBeenCalledWith('F0F5BDFFFE02')
@@ -659,8 +650,8 @@ describe('NodeOverview (生产页)', () => {
     // "设备没上报这个能力"读成"这台设备确实没有 DMA"）：
     //   · 能力上报里没有 dma 项 ⇒ 未上报（本用例的 fixture 正是这种：buses 无 dma）
     //   · 上报了但一条不可用 ⇒ 已上报 N 条
-    const emptyText = wrapper.find('.dma-card .card-empty').text()
-    expect(emptyText).toContain('未上报 DMA 资源')
+    const emptyText = wrapper.find('.dma-card .dma-empty').text()
+    expect(emptyText).toContain('未上报 DMA 能力')
     expect(emptyText).not.toContain('暂无 DMA 通道')
 
     // 反例（分类器自检）：能力上报里**有** dma 项 ⇒ 不得再说"未上报"
@@ -669,11 +660,11 @@ describe('NodeOverview (生产页)', () => {
     } as any)
     const wrapperReported = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tabReported = wrapperReported.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    const tabReported = wrapperReported.findAll('.tab-item').find(item => item.text().includes('DMA 分配'))
     await tabReported?.trigger('click')
     await flushPromises()
-    const reportedText = wrapperReported.find('.dma-card .card-empty').text()
-    expect(reportedText).not.toContain('未上报 DMA 资源')
+    const reportedText = wrapperReported.find('.dma-card .dma-empty').text()
+    expect(reportedText).not.toContain('未上报 DMA 能力')
     expect(reportedText).toContain('1 条 DMA 资源')
 
     // 再验证有数据 → 渲染卡片（重新 mount）
@@ -683,18 +674,18 @@ describe('NodeOverview (生产页)', () => {
     ] as any[]
     const wrapper2 = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab2 = wrapper2.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    const tab2 = wrapper2.findAll('.tab-item').find(item => item.text().includes('DMA 分配'))
     await tab2?.trigger('click')
     await flushPromises()
     const card = wrapper2.find('.dma-card')
-    const items = card.findAll('.dma-item')
+    const items = card.findAll('.dma-table tbody tr')
     expect(items).toHaveLength(2)
-    expect(items[0].text()).toContain('GDMA')
+    expect(items[0].text()).toContain('DMA0')
     // 2026-10-02 文案统一：能力位由 'TX, RX'（缩写+英文单词混排）改为全中文「发送 · 接收 · 突发」，
     // 与同卡片内的「最大突发长度」保持同一语言与粒度。
     // fixture capabilities=3 = TX(1)|RX(2)，无突发位(4) ⇒ 支持能力值只有「发送 · 接收」。
     // 注意不能断言整卡不含"突发"：「最大突发长度」是另一个字段，本来就该出现。
-    expect(items[0].text()).toContain('支持能力发送 · 接收')
+    expect(items[0].text()).toContain('发送 · 接收')
     expect(items[0].text()).toContain('UART · I2C') // 可服务总线 3 = UART(1) + I2C(2)
     expect(items[0].text()).toContain('128')
     expect(items[0].text()).toContain('未绑定')
@@ -798,7 +789,7 @@ describe('NodeOverview (生产页)', () => {
     mockGetOTAHistory.mockResolvedValueOnce([])
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('固件升级'))
     await tab?.trigger('click')
     await flushPromises()
     const card = wrapper.find('.ota-card')
@@ -833,7 +824,7 @@ describe('NodeOverview (生产页)', () => {
     ] as any[])
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('固件升级'))
     await tab?.trigger('click')
     await flushPromises()
     const cancelBtn = wrapper.find('.ota-card tbody tr button')
@@ -854,7 +845,7 @@ describe('NodeOverview (生产页)', () => {
     ] as any[])
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('固件升级'))
     await tab?.trigger('click')
     await flushPromises()
     const card = wrapper.find('.ota-card')
@@ -887,7 +878,7 @@ describe('NodeOverview (生产页)', () => {
     ] as any[])
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('固件升级'))
     await tab?.trigger('click')
     await flushPromises()
     const rows = wrapper.findAll('.ota-card .bus-table tbody tr')
@@ -902,7 +893,7 @@ describe('NodeOverview (生产页)', () => {
   it('系统日志 TAB：渲染 LogPanel 并传递 collector-id / node-device-id', async () => {
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('系统日志'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('日志'))
     await tab?.trigger('click')
     await flushPromises()
     const panel = wrapper.find('.log-panel-stub')
@@ -914,7 +905,7 @@ describe('NodeOverview (生产页)', () => {
   it('通道终端 TAB：渲染 ChannelTerminal 并传递 channels 全量', async () => {
     const wrapper = mount(NodeOverview, { global: { stubs } })
     await flushPromises()
-    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('通道终端'))
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('终端'))
     await tab?.trigger('click')
     await flushPromises()
     const terminal = wrapper.find('.channel-terminal-stub')
@@ -1027,20 +1018,14 @@ describe('NodeOverview (生产页)', () => {
     })
 
     it('总线工作台文本层级与响应式关键规则由 scoped CSS 明确约束', () => {
-      expect(source).toContain('.bus-subtab.active { border-bottom-color: var(--no-primary); font-weight: 600; }')
-      expect(source).toContain('.bus-desc { margin: 12px 0 16px; color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }')
-      expect(source).toContain('.bus-stat-label { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; white-space: nowrap; }')
-      expect(source).toContain('.bus-stat-value { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 22px; }')
-      expect(source).toContain('.bus-table th { height: 42px; padding: 0 6px; color: var(--no-text-secondary); text-align: left; font-size: 12px; font-weight: 500; line-height: 18px;')
-      expect(source).toContain('.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px;')
-      // 2026-10-02：行分隔线原先用 --no-border-light(#F0F2F5)，在白底卡片上几乎不可见，
-      // 整张表读起来是"一片白"。改用 --no-border，并给表头加浅底色带恢复三层层级。
-      expect(source).toContain('.bus-resource-card .bus-table thead th { background: var(--no-bg-subtle, #FAFBFC); }')
-      expect(source).toContain('.bus-tool-group-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }')
-      expect(source).toContain('.bus-create-field span { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }')
-      expect(source).toContain('.bus-create-field b { color: var(--no-text); font-size: 13px; font-weight: 500; line-height: 20px; }')
-      expect(source).toContain('.tab-bar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;')
-      expect(source).toContain('.bus-table { min-width: 680px; table-layout: auto; }')
+      expect(source).toContain('.bus-seg-btn.active { background: var(--card-bg, #fff); color: var(--no-text); box-shadow:')
+      expect(source).toContain('.bus-res-name { font-size: 14px; font-weight: 600; color: var(--no-text); }')
+      expect(source).toContain('.bus-channel-table th { height: 36px; padding: 0 10px; text-align: left; font-size: 12px; font-weight: 500;')
+      expect(source).toContain('.bus-channel-table td { padding: 9px 10px; border-bottom: 1px solid var(--no-border-light); vertical-align: middle; }')
+      expect(source).toContain('.bus-detail-title b { font-size: 16px; font-weight: 600; color: var(--no-text); }')
+      expect(source).toContain('.tab-bar { display: flex; align-items: center; height: 48px; padding: 0 20px; gap: 4px;')
+      expect(source).toContain('overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;')
+      expect(source).toContain('.bus-channel-table table { min-width: 640px; }')
     })
 
     it('防竞态：序列号守卫 + 会话代际断言', () => {
@@ -1102,7 +1087,7 @@ describe('NodeOverview (生产页)', () => {
     it('TAB 栏含「外设控制」，点击后渲染 PeripheralControl 并传入节点身份', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       expect(tab, 'TAB 栏必须有「外设控制」——否则 GPIO/PWM 仍无生产入口').toBeTruthy()
       await tab!.trigger('click')
       await flushPromises()
@@ -1115,7 +1100,7 @@ describe('NodeOverview (生产页)', () => {
     it('registerPending 两个回调都已传入（缺一个即退回「写完不刷新」的降级态）', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
       const periph = wrapper.findComponent({ name: 'PeripheralControl' })
@@ -1126,7 +1111,7 @@ describe('NodeOverview (生产页)', () => {
     it('注册后收到 periph_result 会按 request_id 回填运行态（GPIO 读回）', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
       const periph = wrapper.findComponent({ name: 'PeripheralControl' })
@@ -1152,7 +1137,7 @@ describe('NodeOverview (生产页)', () => {
     it('action/资源身份不匹配时不得回填（同一 request_id 也不能错配）', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
       const periph = wrapper.findComponent({ name: 'PeripheralControl' })
@@ -1172,7 +1157,7 @@ describe('NodeOverview (生产页)', () => {
     it('节点切换后旧 request_id 的 ACK 不得回填（跨节点串台防护）', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
       const periph = wrapper.findComponent({ name: 'PeripheralControl' })
@@ -1192,7 +1177,7 @@ describe('NodeOverview (生产页)', () => {
     it('PWM 回填走 applyRuntimeState，失败时 running=null 表示状态未知', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
       const periph = wrapper.findComponent({ name: 'PeripheralControl' })
@@ -1210,7 +1195,7 @@ describe('NodeOverview (生产页)', () => {
 
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
-      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设'))
       await tab!.trigger('click')
       await flushPromises()
 
@@ -1237,7 +1222,7 @@ describe('NodeOverview (生产页)', () => {
     })
 
     it('源码层面：外设控制 TAB 存在且回填链路完整', () => {
-      expect(source).toContain("{ label: '外设控制'")
+      expect(source).toContain("{ label: '外设'")
       expect(source).toContain('PeripheralControl')
       expect(source).toContain('WS_EVENT.PERIPH_RESULT')
       expect(source).toContain('registerPendingPeripheral')
@@ -1252,7 +1237,7 @@ describe('NodeOverview (生产页)', () => {
       mockRouteQuery.value = { tab: 'config' }
       const wrapper = mount(NodeOverview, { global: { stubs } })
       await flushPromises()
-      expect(wrapper.find('.tab-item.active').text()).toContain('总线配置')
+      expect(wrapper.find('.tab-item.active').text()).toContain('总线与通道')
     })
 
     it('未知 tab 值不得报错也不得改变默认 TAB', async () => {
@@ -1266,15 +1251,16 @@ describe('NodeOverview (生产页)', () => {
   // ── M1/M2：移动端两处缺陷（happy-dom 不做布局，故这里只锁**行为契约**）──
   //
   // 用例层次的取舍（为什么不断言几何）：happy-dom 没有布局引擎与滚动模型 ——
-  // `getBoundingClientRect()` 恒返回 0、`scrollIntoView()` 是空实现、`scrollLeft` 恒 0。
+  // `getBoundingClientRect()` 恒返回 0、`scrollTo()` 是空实现、`scrollLeft` 恒 0。
   // 因此"激活标签是否真的落在可视区内""按钮是否真的 44x44"**在本层无法证明**，
   // 只能证明"代码确实按正确参数发起了滚动/声明了正确规则"。
   // 真实几何由 Playwright 探针在 390x844 / 1440x900 实测（见交付说明的实测数据）。
   describe('M1 深链激活标签滚入视野', () => {
-    it('activeTab 变化时对激活标签调用 scrollIntoView(inline/block:nearest)', async () => {
-      // happy-dom 无此方法（是空实现），注入 spy 后监听
-      const spy = vi.fn()
-      ;(Element.prototype as any).scrollIntoView = spy
+    it('activeTab 变化时只滚页签栏，不调用 scrollIntoView（避免整页跳顶）', async () => {
+      const scrollTo = vi.fn()
+      const scrollIntoView = vi.fn()
+      ;(Element.prototype as any).scrollTo = scrollTo
+      ;(Element.prototype as any).scrollIntoView = scrollIntoView
 
       mockRouteQuery.value = { tab: 'terminal' }
       const wrapper = mount(NodeOverview, { global: { stubs } })
@@ -1282,12 +1268,13 @@ describe('NodeOverview (生产页)', () => {
       await flushPromises()
 
       const active = wrapper.find('.tab-item.active')
-      expect(active.text()).toContain('通道终端')
-      expect(spy).toHaveBeenCalled()
-      // 参数契约：两个方向都必须是 nearest —— block 省略会导致页面纵向跳动
-      expect(spy.mock.calls.at(-1)?.[0]).toEqual({ inline: 'nearest', block: 'nearest' })
+      expect(active.text()).toContain('终端')
+      expect(scrollTo).toHaveBeenCalled()
+      expect(scrollTo.mock.calls.at(-1)?.[0]).toMatchObject({ left: expect.any(Number), behavior: 'smooth' })
+      // scrollIntoView 会连带滚动最近的纵向容器 ⇒ 页面会从阅读位置跳回顶部
+      expect(scrollIntoView, '不得把页面纵向滚动带进来').not.toHaveBeenCalled()
       // 必须打在**激活项**上（data-tab 精确锚点，不靠文本匹配）
-      expect(active.attributes('data-tab')).toBe('通道终端')
+      expect(active.attributes('data-tab')).toBe('终端')
     })
 
     it('时序：标签栏随 node 异步挂载、晚于 setup —— 仍必须滚到（不能只在 immediate 那一刻查 DOM）', async () => {
@@ -1295,7 +1282,7 @@ describe('NodeOverview (生产页)', () => {
       // 而 .tab-bar 在 `<template v-else-if="node">` 内、由 fetchDetail() 异步填充。
       // 若只 watch(activeTab, {immediate:true})，回调发生在挂载前、查不到元素且不再重试。
       const spy = vi.fn()
-      ;(Element.prototype as any).scrollIntoView = spy
+      ;(Element.prototype as any).scrollTo = spy
 
       mockRouteQuery.value = { tab: 'terminal' }
       const wrapper = mount(NodeOverview, { global: { stubs } })
@@ -1305,32 +1292,33 @@ describe('NodeOverview (生产页)', () => {
       // 数据到达后标签栏才出现，此时必须已经滚过
       expect(wrapper.find('.tab-bar').exists()).toBe(true)
       expect(spy).toHaveBeenCalled()
-      expect(spy.mock.calls.at(-1)?.[0]).toEqual({ inline: 'nearest', block: 'nearest' })
+      expect(spy.mock.calls.at(-1)?.[0]).toMatchObject({ behavior: 'smooth' })
     })
 
     it('不得用 scrollLeft=0 之类"重置"绕过（那会让每次切页签跳回栏首）', () => {
       const js = stripCssComments(source)
-      // 反例守卫：源码里不得出现对 scrollLeft 的直接赋值
+      // 反例守卫：源码里不得出现对 scrollLeft 的直接归零
       expect(js).not.toMatch(/scrollLeft\s*=\s*0/)
-      // 正向：必须走 scrollIntoView，且 block 不可省
-      expect(js).toContain('scrollIntoView')
-      expect(js).toContain("block: 'nearest'")
+      // 正向：只滚页签栏自身；scrollIntoView 会连带滚动页面，必须绝迹
+      expect(js).toContain('bar.scrollTo')
+      expect(js).toContain("behavior: 'smooth'")
+      expect(js).not.toMatch(/\.scrollIntoView\s*\(/)
     })
 
     it('切换页签后仍保持可见（不是"只在首屏滚一次"）', async () => {
       const spy = vi.fn()
-      ;(Element.prototype as any).scrollIntoView = spy
+      ;(Element.prototype as any).scrollTo = spy
       const wrapper = mount(NodeOverview, { global: { stubs } })
       await flushPromises()
       spy.mockClear()
 
       const items = wrapper.findAll('.tab-item')
-      await items.find(i => i.text().includes('通道终端'))!.trigger('click')
+      await items.find(i => i.text().includes('终端'))!.trigger('click')
       await flushPromises()
       await flushPromises()
 
       expect(spy).toHaveBeenCalled()
-      expect(wrapper.find('.tab-item.active').attributes('data-tab')).toBe('通道终端')
+      expect(wrapper.find('.tab-item.active').attributes('data-tab')).toBe('终端')
     })
   })
 
@@ -1455,111 +1443,25 @@ describe('NodeOverview (生产页)', () => {
   // 字节 2..5 并 EmitConfigChange 下发），但前端一直停在 2026-08-13 的占位弹窗
   // 「服务端尚未实现通道重配置下发」⇒ 本页最后的「改波特率」路径是断的。
   // 本组用例锁死三条：真调用、目标选择正确、失败不谎报。
-  describe('波特率重配置（接线）', () => {
-    const uartWithBaud = (id: number, hardwareId: string, baud: number) => ({
-      id,
-      node_id: 'F0F5BDFFFE02',
-      name: 'CH' + id,
-      hardware_type: 'UART',
-      hardware_id: hardwareId,
-      status: 'ok',
-      enabled: true,
-      // 与 withUARTBaudrate 同一布局：[tx][rx][baud BE32][data][stop][parity]
-      bus_config: '1415' + baud.toString(16).padStart(8, '0').toUpperCase() + '080100',
-      config: {},
-    })
-
-    it('通道行「改波特率」调真实重配置端点，目标就是该通道、预填当前值', async () => {
-      mockChannelList.mockResolvedValueOnce([uartWithBaud(7, 'UART1', 9600)] as any)
+  // ── 批量改波特率已按 2026-11-19 裁决移除（单条通道配置内仍可改） ──
+  describe('批量改波特率已移除', () => {
+    it('总线页不再提供批量入口，也不再渲染批量弹窗', async () => {
       const wrapper = mount(NodeOverview, { global: { stubs } })
       await flushPromises()
-      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
-      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))?.trigger('click')
       await flushPromises()
-      const btn = wrapper.find('[data-baud-channel="7"]')
-      expect(btn.exists(), '存活页面缺少按通道改波特率的入口').toBe(true)
-      await btn.trigger('click')
-      await flushPromises()
-
-      // 2026-10-02：改为**行内编辑**，不再为「只改一条通道」弹窗遮住整页。
-      // 入口仍必须显示目标与当前值，否则用户不知道要改的是哪一条。
-      expect(wrapper.find('[data-baud-inline-input]').exists(), '行内编辑未打开').toBe(true)
-      expect(wrapper.find('[data-baud-inline-input]').attributes('type')).toBe('number')
-      expect((wrapper.find('[data-baud-inline-input]').element as HTMLInputElement).value).toContain('9600')
-      // 行内编辑态下不再保留「改波特率」按钮，避免同一行出现两个入口
-      expect(wrapper.find('[data-baud-channel="7"]').exists()).toBe(false)
-
-      mockChannelReconfigure.mockClear()
-      await wrapper.find('[data-baud-inline-save]').trigger('click')
-      await flushPromises()
-
-      expect(mockChannelReconfigure).toHaveBeenCalledTimes(1)
-      expect(mockChannelReconfigure).toHaveBeenCalledWith(7, 9600)
-      // 提交后必须刷新通道列表（否则卡片还显示旧波特率）
-      expect(mockChannelList.mock.calls.length).toBeGreaterThan(1)
-    })
-
-    it('非 UART 通道不渲染该入口（后端只支持 UART）', async () => {
-      const wrapper = mount(NodeOverview, { global: { stubs } })
-      await flushPromises()
-      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
-      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
-      await flushPromises()
-      // 默认 mockChannelList 的第 1 条是 i2c、第 2 条是 uart
-      expect(wrapper.find('[data-baud-channel="1"]').exists()).toBe(false)
-      expect(wrapper.find('[data-baud-channel="2"]').exists()).toBe(true)
-    })
-
-    it('后端失败 ⇒ 就地如实报错，不假装成功、不刷新', async () => {
-      mockChannelList.mockResolvedValueOnce([uartWithBaud(7, 'UART1', 9600)] as any)
-      mockChannelReconfigure.mockRejectedValueOnce(new Error('clock_hz 重配未实现'))
-      const wrapper = mount(NodeOverview, { global: { stubs } })
-      await flushPromises()
-      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
-      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
-      await flushPromises()
-      await wrapper.find('[data-baud-channel="7"]').trigger('click')
-      await flushPromises()
-      const before = mockChannelList.mock.calls.length
-      await wrapper.find('[data-baud-inline-save]').trigger('click')
-      await flushPromises()
-
-      const err = wrapper.find('[data-baud-inline-error]')
-      expect(err.exists(), '失败必须就地可见，不能只弹 toast').toBe(true)
-      expect(err.text()).toContain('clock_hz 重配未实现')
-      // 失败后编辑态保持打开，用户可以改一个值重试，不用重新找入口
-      expect(wrapper.find('[data-baud-inline-input]').exists()).toBe(true)
-      // 失败不刷新：列表没变就没有「已生效」的假象
-      expect(mockChannelList.mock.calls.length).toBe(before)
-    })
-
-    it('未选中任何目标时入口禁用，并说明怎么选', async () => {
-      mockGetCapabilities.mockResolvedValueOnce({ buses: { uart: [], i2c: [], spi: [], adc: [], gpio: [], pwm: [] } } as any)
-      const wrapper = mount(NodeOverview, { global: { stubs } })
-      await flushPromises()
-      await wrapper.findAll(".tab-item").find(item => item.text().includes('总线配置'))?.trigger('click')
-      await flushPromises()
-      await wrapper.findAll(".bus-subtab").find(b => b.text().includes('UART'))?.trigger('click')
-      await flushPromises()
-
-      const openBtn = wrapper.find("[data-open-baud-tool]")
-      expect(openBtn.exists()).toBe(true)
-      expect(openBtn.attributes('disabled')).toBeDefined()
-      expect(wrapper.find("[data-baud-pick-hint]").text()).toContain('未选中通道')
+      expect(wrapper.find('[data-open-baud-tool]').exists()).toBe(false)
+      expect(wrapper.find('[data-baud-input]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('批量改波特率')
+      expect(source).not.toContain('data-open-baud-tool')
     })
   })
 
-  // ── 资源表波特率口径（2026-10-03 缺陷 4：把能力上限当当前值显示） ──────────────
+  // ── 资源参数波特率口径（2026-10-03 缺陷 4：把能力上限当当前值显示） ──────────────
   //
-  // 用户可见症状：资源表显示「5000000 baud」，而通道里真实生效的是 4800 ⇒
-  // 用户说"波特率参数都对不上"。根因是 ResourceReport 的 uartEntry **只有** max_baud
-  // （能力上限），旧代码 `resource.baud_rate || resource.max_baud` 于是永远走回退，
-  // 把上限当当前值。本组用例锁死：上限必须明确标注为「最高」，当前值只从通道 bus_config 解，
-  // 无通道时如实显示"未配置"而不是拿 max_baud 冒充。
-  describe("资源表波特率口径（上限 vs 当前值）", () => {
-    // 本组用**持久实现**而非 mockResolvedValueOnce：Once 队列会被前面用例留下的
-    // 未消费值污染（全量跑时本组第二个用例因此拿到空能力 ⇒ 假失败；单跑却全绿）。
-    // 先 mockReset 清空队列，再设持久值；用例结束再 reset，不向下泄漏。
+  // 资源参数必须把 max_baud 标成「最高」，当前值只能从通道 bus_config 解；
+  // 无通道时如实说"未配置"，不得拿上限冒充。
+  describe("资源参数波特率口径（上限 vs 当前值）", () => {
     beforeEach(() => {
       mockGetCapabilities.mockReset()
       mockChannelList.mockReset()
@@ -1568,7 +1470,6 @@ describe('NodeOverview (生产页)', () => {
       mockGetCapabilities.mockReset()
       mockChannelList.mockReset()
     })
-    /** 与 withUARTBaudrate 同一布局：[tx][rx][baud BE32][data][stop][parity][flow] */
     const uartChannelWithBaud = (id: number, hardwareId: string, baud: number) => ({
       id,
       node_id: "F0F5BDFFFE02",
@@ -1580,7 +1481,6 @@ describe('NodeOverview (生产页)', () => {
       bus_config: "1415" + baud.toString(16).padStart(8, "0").toUpperCase() + "08010000",
       config: {},
     })
-
     const uartCaps = {
       buses: {
         uart: [{ id: "UART1", enabled: true, default_tx_pin: 20, default_rx_pin: 21, max_baud: 5000000 }],
@@ -1588,23 +1488,19 @@ describe('NodeOverview (生产页)', () => {
       },
     }
 
-    it("资源表把 max_baud 标为「最高」而不是当前值；当前值从通道 bus_config 解出", async () => {
+    it("资源详情把 max_baud 标为「最高」，当前值来自通道 bus_config", async () => {
       mockGetCapabilities.mockResolvedValue(uartCaps as any)
       mockChannelList.mockResolvedValue([uartChannelWithBaud(7, "UART1", 4800)] as any)
       const wrapper = mount(NodeOverview, { global: { stubs } })
       await flushPromises()
-      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线配置"))?.trigger("click")
+      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线与通道"))?.trigger("click")
       await flushPromises()
-      await wrapper.findAll(".bus-subtab").find(b => b.text().includes("UART"))?.trigger("click")
+      await wrapper.findAll(".bus-seg-btn").find(b => b.text().includes("UART"))?.trigger("click")
       await flushPromises()
 
-      const row = wrapper.findAll(".bus-table tbody tr")[0]
-      // 逐 tag 断言：旧实现只会产出**一个** "5000000 baud" 的裸 tag；
-      // 修好后应是"最高 …" + "当前 …"两个语义明确的 tag。
-      const tags = row.findAll(".bus-tag").map((tag: any) => tag.text())
-      expect(tags, "能力上限必须明确标注为「最高」，不得看起来像当前值").toContain("最高 5000000 baud")
-      expect(tags, "当前值必须来自通道 bus_config（4800），而不是 max_baud").toContain("当前 4800 baud")
-      expect(tags, "不得出现把上限冒充当前值的裸 tag").not.toContain("5000000 baud")
+      const meta = wrapper.find(".bus-meta").text()
+      expect(meta, "能力上限必须明确标注为「最高」").toContain("最高 5000000 baud")
+      expect(meta, "当前值必须来自通道 bus_config（4800）").toContain("当前 4800 baud")
     })
 
     it("没有通道时如实显示「当前波特率未配置」，不拿 max_baud 冒充当前值", async () => {
@@ -1612,14 +1508,14 @@ describe('NodeOverview (生产页)', () => {
       mockChannelList.mockResolvedValue([] as any)
       const wrapper = mount(NodeOverview, { global: { stubs } })
       await flushPromises()
-      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线配置"))?.trigger("click")
+      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线与通道"))?.trigger("click")
       await flushPromises()
-      await wrapper.findAll(".bus-subtab").find(b => b.text().includes("UART"))?.trigger("click")
+      await wrapper.findAll(".bus-seg-btn").find(b => b.text().includes("UART"))?.trigger("click")
       await flushPromises()
 
-      const row = wrapper.findAll(".bus-table tbody tr")[0]
-      expect(row.text()).toContain("最高 5000000 baud")
-      expect(row.text(), "无通道必须如实说未配置").toContain("当前波特率未配置")
+      const meta = wrapper.find(".bus-meta").text()
+      expect(meta).toContain("最高 5000000 baud")
+      expect(meta, "无通道必须如实说未配置").toContain("当前波特率未配置")
     })
   })
 

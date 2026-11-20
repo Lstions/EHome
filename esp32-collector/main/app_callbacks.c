@@ -78,7 +78,10 @@ typedef struct {
 static esp_err_t tx_begin(void *opaque)
 {
     (void)opaque;
-    return periph_owner_transaction_begin();
+    ESP_LOGI(TAG, "tx_begin: acquiring peripheral transaction gate");
+    esp_err_t err = periph_owner_transaction_begin();
+    ESP_LOGI(TAG, "tx_begin: gate acquired (%s)", esp_err_to_name(err));
+    return err;
 }
 
 static void tx_end(void *opaque)
@@ -91,6 +94,7 @@ static esp_err_t tx_snapshot(void *opaque)
 {
     manifest_tx_ctx_t *tx = opaque;
     esp_err_t err = ESP_OK;
+    ESP_LOGI(TAG, "tx_snapshot: begin");
     if (tx->app->dma_pool) {
         err = dma_pool_snapshot_state(tx->app->dma_pool, &tx->old_dma);
         tx->dma_snapshot_valid = err == ESP_OK;
@@ -101,6 +105,7 @@ static esp_err_t tx_snapshot(void *opaque)
     tx->old_log_level = log_stream_get_level();
     if (err == ESP_OK) err = periph_config_snapshot_locked(&tx->old_peripherals);
     if (err == ESP_OK) bus_manager_snapshot_leases(&tx->app->bus_runtime);
+    ESP_LOGI(TAG, "tx_snapshot: done (%s)", esp_err_to_name(err));
     return err;
 }
 

@@ -327,6 +327,8 @@ typedef enum {
 typedef enum {
     PERIPH_TYPE_GPIO = 1,
     PERIPH_TYPE_PWM  = 2,
+    PERIPH_TYPE_ADC  = 3,
+    PERIPH_TYPE_DMA_SELFTEST = 4,
 } periph_type_t;
 
 /* Periph error codes */

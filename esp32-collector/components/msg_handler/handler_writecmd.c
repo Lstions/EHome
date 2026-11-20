@@ -181,9 +181,16 @@ void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
     frame_encode_varint(&enc, 2, hardware_id);
     frame_encode_varint(&enc, 3, success ? 1 : 0);
     if (addresses && addr_count > 0) {
-        for (uint8_t i = 0; i < addr_count; i++) {
-            frame_encode_varint(&enc, 4, addresses[i]);
+        /* Protocol contract (backend handleScanReport + docs): field 4 is a
+         * single bytes field holding one byte per address. The old encoder
+         * emitted repeated varints, so the backend's GetBytes() saw a
+         * non-bytes wire type and decoded an empty list for every scan. */
+        uint8_t addr_bytes[128];
+        uint8_t n = addr_count > sizeof(addr_bytes) ? (uint8_t)sizeof(addr_bytes) : addr_count;
+        for (uint8_t i = 0; i < n; i++) {
+            addr_bytes[i] = (uint8_t)addresses[i];
         }
+        frame_encode_bytes(&enc, 4, addr_bytes, n);
     }
     ESP_LOGI(TAG, "Sending ScanRpt: req=%s, hw=%lu, success=%d, addrs=%d",
              request_id, (unsigned long)hardware_id, success, addr_count);

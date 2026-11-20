@@ -550,6 +550,20 @@ func TestGPIO_Set_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 with a working downlink, got %d: %s", w.Code, w.Body.String())
 	}
+
+	// 前端靠 data.request_id 关联 WS PeriphRsp；缺失会永久停在「正在写入」。
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			RequestID uint64 `json:"request_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response must be a JSON envelope: %v (%s)", err, w.Body.String())
+	}
+	if body.Code != http.StatusOK || body.Data.RequestID == 0 {
+		t.Fatalf("expected envelope code=200 and nonzero data.request_id, got %+v (%s)", body, w.Body.String())
+	}
 }
 
 func TestGPIO_Set_Toggle(t *testing.T) {
@@ -1323,6 +1337,43 @@ func TestPWM_Stop_NodeNotFound(t *testing.T) {
 	}
 }
 
+// ==================== POST /nodes/:id/dma/selftest ====================
+
+func TestDMASelftest_NodeNotFound(t *testing.T) {
+	r, _, _ := setupPeriphTest(t)
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/nonexistent/dma/selftest", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ==================== POST /nodes/:id/adc/:hardware_id/read ====================
+
+func TestADC_Read_ChannelNotFound(t *testing.T) {
+	r, db, _ := setupPeriphTest(t)
+	createTestNode(t, db, "node-1")
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/adc/ADC1_CH1/read", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestADC_Read_DisabledChannel(t *testing.T) {
+	r, db, _ := setupPeriphTest(t)
+	node := createTestNode(t, db, "node-1")
+	ch := models.Channel{NodeID: node.NodeID, HardwareType: "ADC", HardwareID: "ADC1_CH1", BusType: "ADC", BusConfig: "010101030c", Config: `{"bit_width":12}`}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatalf("create ADC channel: %v", err)
+	}
+	if err := db.Model(&ch).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable ADC channel: %v", err)
+	}
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/adc/ADC1_CH1/read", nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ==================== POST /nodes/:id/pwm/:hardware_id/duty ====================
 
 func TestPWM_SetDuty_NodeNotFound(t *testing.T) {
@@ -1332,6 +1383,30 @@ func TestPWM_SetDuty_NodeNotFound(t *testing.T) {
 	})
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// Regression (2026-11-20): runtime SET_DUTY used to persist cfg.Duty. That
+// changed the ConfigManifest hash and pushed a full manifest on every slider
+// drag; the firmware re-initialized PWM (auto_start=false), so a rapid second
+// drag got error_code=5. Runtime duty must not mutate the persisted config.
+func TestPWM_SetDuty_DoesNotMutateConfig(t *testing.T) {
+	r, db, _ := setupPeriphTest(t)
+	node := createTestNodeWithPeriphResources(t, db, "node-1")
+	if err := db.Create(&models.PWMConfig{NodeID: node.NodeID, HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 1000, Resolution: 14, Enabled: true}).Error; err != nil {
+		t.Fatalf("create PWM config: %v", err)
+	}
+
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/pwm/PWM0/duty", map[string]interface{}{"duty": 2000})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var after models.PWMConfig
+	if err := db.Where("node_id = ? AND hardware_id = ?", node.NodeID, "PWM0").First(&after).Error; err != nil {
+		t.Fatalf("reload PWM config: %v", err)
+	}
+	if after.Duty != 1000 {
+		t.Fatalf("runtime duty mutated persisted config: got %d, want 1000", after.Duty)
 	}
 }
 

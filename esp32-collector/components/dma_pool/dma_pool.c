@@ -125,6 +125,29 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
  *  Release
  * ---------------------------------------------------------------- */
 
+esp_err_t dma_pool_mark_bound(dma_pool_t *pool, uint32_t dma_id,
+                              const char *hw_id)
+{
+    if (!pool || !pool->mutex || !hw_id || hw_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    for (int i = 0; i < pool->count; i++) {
+        if (pool->channels[i].dma_id != dma_id) continue;
+        if (pool->channels[i].state == DMA_STATE_DISABLED) {
+            xSemaphoreGive(pool->mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+        pool->channels[i].state = DMA_STATE_ALLOCATED;
+        strncpy(pool->channels[i].bound_to, hw_id, DMA_BOUND_MAX - 1);
+        pool->channels[i].bound_to[DMA_BOUND_MAX - 1] = '\0';
+        xSemaphoreGive(pool->mutex);
+        return ESP_OK;
+    }
+    xSemaphoreGive(pool->mutex);
+    return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t dma_pool_release(dma_pool_t *pool, uint32_t dma_id)
 {
     if (!pool || !pool->mutex) return ESP_ERR_INVALID_ARG;

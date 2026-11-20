@@ -107,6 +107,7 @@ declare module 'vue' {
     PWMResourceList: typeof import('./components/periph/PWMResourceList.vue')['default']
     QuickCreateDeviceDialog: typeof import('./components/node/QuickCreateDeviceDialog.vue')['default']
     RealtimeDataList: typeof import('./components/data/RealtimeDataList.vue')['default']
+    ReleaseNotesDialog: typeof import('./components/common/ReleaseNotesDialog.vue')['default']
     RouteProgressBar: typeof import('./components/common/RouteProgressBar.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
@@ -117,6 +118,7 @@ declare module 'vue' {
     StatusItemGrid: typeof import('./components/common/StatusItemGrid.vue')['default']
     ThemeSwitch: typeof import('./components/common/ThemeSwitch.vue')['default']
     TimeRangeSelector: typeof import('./components/charts/TimeRangeSelector.vue')['default']
+    UpdateBanner: typeof import('./components/common/UpdateBanner.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

@@ -205,9 +205,15 @@ config_apply_result_t config_apply_transaction_execute(
     }
 
     esp_err_t err = ops->begin_transaction(ctx);
-    if (err != ESP_OK) return CONFIG_APPLY_FAILED_UNCHANGED;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "config apply begin_transaction failed: %s (0x%x)",
+                 esp_err_to_name(err), (unsigned)err);
+        return CONFIG_APPLY_FAILED_UNCHANGED;
+    }
     err = ops->snapshot(ctx);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "config apply snapshot failed: %s (0x%x)",
+                 esp_err_to_name(err), (unsigned)err);
         ops->end_transaction(ctx);
         return CONFIG_APPLY_FAILED_UNCHANGED;
     }

@@ -2,6 +2,12 @@
 import client, { type ApiEnvelope } from './client'
 export interface CommandAck { request_id: number }
 
+/** 外设命令必须带 request_id，WS 回执靠它关联；缺失时立刻失败，避免界面永久停在"正在写入"。 */
+function requireAck<T extends { request_id: number }>(data: T | undefined, action: string): T {
+  if (!data || typeof data.request_id !== 'number') throw new Error(`${action}响应缺少 request_id，设备回执无法关联`)
+  return data
+}
+
 // === GPIO ===
 
 export interface GPIOConfig {
@@ -38,7 +44,7 @@ export const gpioApi = {
 
   async set(nodeId: string, pin: number, level: 0 | 1): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/gpio/${pin}/set`, { level })
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'GPIO 写入')
   },
 
   async toggle(nodeId: string, pin: number): Promise<void> {
@@ -47,7 +53,7 @@ export const gpioApi = {
 
   async read(nodeId: string, pin: number): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/gpio/${pin}/read`)
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'GPIO 读取')
   },
 }
 
@@ -93,26 +99,49 @@ export const pwmApi = {
 
   async start(nodeId: string, hardwareId: string): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/start`)
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'PWM 启动')
   },
 
   async stop(nodeId: string, hardwareId: string): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/stop`)
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'PWM 停止')
   },
 
   async setDuty(nodeId: string, hardwareId: string, duty: number): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/duty`, { duty })
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'PWM 占空比')
   },
 
   async setFreq(nodeId: string, hardwareId: string, frequency: number): Promise<CommandAck> {
     const resp = await client.post<unknown, ApiEnvelope<CommandAck>>(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/freq`, { frequency })
-    return resp?.data ?? { request_id: 0 }
+    return requireAck(resp?.data, 'PWM 频率')
   },
 
   async getState(nodeId: string, hardwareId: string): Promise<{ running: boolean; duty: number; frequency: number; request_id: number }> {
     const resp = await client.get<unknown, ApiEnvelope<{ running: boolean; duty: number; frequency: number; request_id: number }>>(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/state`)
+    return requireAck(resp.data, 'PWM 状态')
+  },
+}
+
+// === ADC ===
+
+export interface ADCReadResult {
+  hardware_id: string
+  channel_id: number
+  raw: number
+  max_raw: number
+  bit_width: number
+  percent: number
+  request_id: number
+}
+
+export const adcApi = {
+  /** One synchronous raw sample; backend waits for the device PeriphRsp. */
+  async read(nodeId: string, hardwareId: string): Promise<ADCReadResult> {
+    const resp = await client.post<unknown, ApiEnvelope<ADCReadResult>>(
+      `/api/v1/nodes/${nodeId}/adc/${encodeURIComponent(hardwareId)}/read`,
+    )
+    if (!resp?.data) throw new Error('ADC 读取响应为空')
     return resp.data
   },
 }

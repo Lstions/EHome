@@ -27,10 +27,24 @@ export interface HardwareResource {
   default_sda_pin?: number
   default_scl_pin?: number
   default_cs_pin?: number
+  /* ResourceReport 的字段名带 _pin 后缀（default_mosi_pin 等）。
+   * 旧代码读的是 default_mosi/default_miso/default_sclk，结果永远 undefined，
+   * 被 || -1 变成 0xFF 写进 bus_config —— 设备把 255 当 GPIO 直接拒绝。 */
+  default_mosi_pin?: number
+  default_miso_pin?: number
+  default_sclk_pin?: number
+  /** 兼容旧缓存/旧测试夹具；新代码优先读带 _pin 的字段。 */
   default_mosi?: number
   default_miso?: number
   default_sclk?: number
   max_freq_hz?: number
+  /* ADC 资源字段 */
+  unit?: number
+  channel?: number
+  pin?: number
+  max_bits?: number
+  attenuation_options?: number[]
+  bit_width_options?: number[]
   [key: string]: unknown
 }
 

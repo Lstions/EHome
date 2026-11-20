@@ -14,6 +14,7 @@
 
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
+#include "msg_handler_hooks.h"
 #include "frame_codec.h"
 #include "gpio_ctrl.h"
 #include "pwm_ctrl.h"
@@ -281,6 +282,26 @@ void handler_periph_process(frame_decoder_t *dec)
         process_gpio_cmd(request_id, resource_id, action, value, config_data, config_len);
         break;
 
+    case PERIPH_TYPE_ADC:
+        /* ADC read is short (one adc_oneshot_read) but needs the app-owned
+         * bus lease; the hook resolves it and sends PeriphRsp. */
+        if (action != 0) {
+            send_periph_rsp(request_id, false, 0, PERIPH_ERR_INVALID_ACTION,
+                            PERIPH_TYPE_ADC, resource_id, action);
+            break;
+        }
+        on_adc_read_received(request_id, resource_id);
+        break;
+
+    case PERIPH_TYPE_DMA_SELFTEST:
+        if (action != 0) {
+            send_periph_rsp(request_id, false, 0, PERIPH_ERR_INVALID_ACTION,
+                            PERIPH_TYPE_DMA_SELFTEST, resource_id, action);
+            break;
+        }
+        on_dma_selftest_received(request_id);
+        break;
+
     case PERIPH_TYPE_PWM:
         /* PWM START/STOP may block — forward to worker task */
         {
@@ -546,6 +567,17 @@ static void send_periph_rsp(uint32_t request_id, bool success, uint32_t value,
         ESP_LOGW(TAG, "periph_rsp_queue full, dropping rsp (req=%lu)",
                  (unsigned long)request_id);
     }
+}
+
+/* Public wrapper for app-layer hooks (ADC read) that need to answer a
+ * PeriphCmd but must not publish from the transport callback context. */
+void msg_handler_send_periph_rsp(uint32_t request_id, bool success,
+                                 uint32_t value, uint8_t error_code,
+                                 uint8_t periph_type, uint8_t resource_id,
+                                 uint8_t action)
+{
+    send_periph_rsp(request_id, success, value, error_code, periph_type,
+                    resource_id, action);
 }
 
 /**

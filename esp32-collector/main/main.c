@@ -32,6 +32,9 @@
 #include "log_stream.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_async_memcpy.h"
+#include "freertos/semphr.h"
+#include <string.h>
 #ifdef CONFIG_DEBUG_TCP_ENABLED
 #include "ehome_tcp.h"
 #endif
@@ -595,12 +598,135 @@ static uint16_t modbus_crc16(const uint8_t *data, size_t len)
  * 真要支持该功能时，替换本函数体即可（声明见 msg_handler_hooks.h）。 */
 void on_scan_req_received(const char *request_id, uint32_t hardware_id)
 {
-    ESP_LOGW(TAG, "on_scan_req_received: NOT IMPLEMENTED (request_id=%s hardware_id=%u) "
-                  "-- scan requests are acknowledged but never executed",
-             request_id ? request_id : "(null)", (unsigned)hardware_id);
-    /* 有意不发送任何成功回执：避免把"没做"报成"做完了"。 */
+    app_state_t *s = app_state_get();
+    bus_dma_ctx_t *i2c_ctx = NULL;
+
+    /* Backend contract: hardware_id is the logical channel id (see
+     * SendScanRequest in sender.go). Resolve the exact I2C lease instead of
+     * guessing the first I2C channel. */
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s->bus_ctx[i].initialized && s->bus_ctx[i].bus_type == BUS_TYPE_I2C &&
+            s->bus_ch[i] == hardware_id) {
+            i2c_ctx = &s->bus_ctx[i];
+            break;
+        }
+    }
+    if (!i2c_ctx) {
+        ESP_LOGE(TAG, "I2C scan: channel %u has no initialized I2C lease",
+                 (unsigned)hardware_id);
+        msg_handler_send_scan_rpt(request_id, hardware_id, false, NULL, 0);
+        return;
+    }
+
+    uint8_t addresses[128];
+    size_t count = 0;
+    esp_err_t err = bus_dma_i2c_scan(i2c_ctx, 0x08, 0x77, 50,
+                                     addresses, sizeof(addresses), &count);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C scan failed on channel %u: %s",
+                 (unsigned)hardware_id, esp_err_to_name(err));
+        msg_handler_send_scan_rpt(request_id, hardware_id, false, NULL, 0);
+        return;
+    }
+
+    uint32_t found[128];
+    uint8_t found_count = count > 255 ? 255 : (uint8_t)count;
+    for (uint8_t i = 0; i < found_count; i++) found[i] = addresses[i];
+    ESP_LOGI(TAG, "I2C scan: channel=%u found=%u",
+             (unsigned)hardware_id, (unsigned)found_count);
+    msg_handler_send_scan_rpt(request_id, hardware_id, true, found, found_count);
 }
 
+/* ADC read hook: PeriphCmd type=3 action=0. The backend uses the logical
+ * channel id as resource_id; resolve that exact ADC lease and return one raw
+ * sample through the normal PeriphRsp queue. */
+void on_adc_read_received(uint32_t request_id, uint32_t channel_id)
+{
+    app_state_t *s = app_state_get();
+    bus_dma_ctx_t *adc_ctx = NULL;
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s->bus_ctx[i].initialized &&
+            s->bus_ctx[i].bus_type == BUS_TYPE_ADC &&
+            s->bus_ch[i] == channel_id) {
+            adc_ctx = &s->bus_ctx[i];
+            break;
+        }
+    }
+
+    int raw = 0;
+    esp_err_t err = adc_ctx ? bus_dma_adc_read(adc_ctx, &raw)
+                            : ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ADC read failed: channel=%u err=%s",
+                 (unsigned)channel_id, esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "ADC read: channel=%u raw=%d",
+                 (unsigned)channel_id, raw);
+    }
+    msg_handler_send_periph_rsp(request_id, err == ESP_OK,
+                                err == ESP_OK ? (uint32_t)raw : 0,
+                                err == ESP_OK ? PERIPH_ERR_OK
+                                              : PERIPH_ERR_HW_ERROR,
+                                PERIPH_TYPE_ADC, (uint8_t)channel_id, 0);
+}
+
+#define DMA_SELFTEST_BYTES 2048
+
+static bool dma_selftest_done_cb(async_memcpy_handle_t h, async_memcpy_event_t *event,
+                                void *cb_args)
+{
+    (void)h; (void)event;
+    BaseType_t high_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR((SemaphoreHandle_t)cb_args, &high_task_woken);
+    return high_task_woken == pdTRUE;
+}
+
+/* Real AHB-GDMA memory-to-memory transfer. The logical dma_pool reservation
+ * (CH1 -> uart/UART0) is control-plane bookkeeping; this hook separately
+ * proves the C6 GDMA engine can move bytes and that the destination matches.
+ */
+void on_dma_selftest_received(uint32_t request_id)
+{
+    uint8_t *src = heap_caps_malloc(DMA_SELFTEST_BYTES,
+                                     MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    uint8_t *dst = heap_caps_malloc(DMA_SELFTEST_BYTES,
+                                     MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    async_memcpy_handle_t handle = NULL;
+    esp_err_t err = ESP_OK;
+    uint32_t checksum = 0;
+    bool passed = false;
+
+    if (!src || !dst || !done) { err = ESP_ERR_NO_MEM; goto out; }
+    for (size_t i = 0; i < DMA_SELFTEST_BYTES; i++) src[i] = (uint8_t)(i * 31u + 7u);
+    memset(dst, 0, DMA_SELFTEST_BYTES);
+
+    async_memcpy_config_t cfg = ASYNC_MEMCPY_DEFAULT_CONFIG();
+    err = esp_async_memcpy_install(&cfg, &handle);
+    if (err != ESP_OK) goto out;
+    err = esp_async_memcpy(handle, dst, src, DMA_SELFTEST_BYTES,
+                           dma_selftest_done_cb, done);
+    if (err != ESP_OK) goto out;
+    if (xSemaphoreTake(done, pdMS_TO_TICKS(2000)) != pdTRUE) { err = ESP_ERR_TIMEOUT; goto out; }
+
+    passed = memcmp(src, dst, DMA_SELFTEST_BYTES) == 0;
+    for (size_t i = 0; i < DMA_SELFTEST_BYTES; i++) {
+        checksum = (checksum ^ dst[i]) * 16777619u;
+    }
+    if (!passed) err = ESP_ERR_INVALID_CRC;
+
+out:
+    if (handle) esp_async_memcpy_uninstall(handle);
+    if (done) vSemaphoreDelete(done);
+    if (src) heap_caps_free(src);
+    if (dst) heap_caps_free(dst);
+    ESP_LOGI(TAG, "DMA selftest: passed=%d bytes=%u checksum=0x%08x err=%s",
+             (int)passed, (unsigned)DMA_SELFTEST_BYTES, (unsigned)checksum,
+             esp_err_to_name(err));
+    msg_handler_send_periph_rsp(request_id, passed, checksum,
+                                passed ? PERIPH_ERR_OK : PERIPH_ERR_HW_ERROR,
+                                PERIPH_TYPE_DMA_SELFTEST, 0, 0);
+}
 void on_modbus_scan_req_received(const char *request_id,
     uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)
 {

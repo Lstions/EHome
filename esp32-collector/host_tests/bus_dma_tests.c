@@ -36,6 +36,7 @@
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
 #include "nvs_flash.h"
 #include "rgb_led.h"
 
@@ -326,6 +327,31 @@ esp_err_t i2c_master_transmit(i2c_master_dev_handle_t dev,
 esp_err_t i2c_master_receive(i2c_master_dev_handle_t dev,
                              uint8_t *rx, size_t rx_len, int timeout) {
     (void)dev; (void)rx; (void)rx_len; (void)timeout; return ESP_OK;
+}
+esp_err_t i2c_master_probe(i2c_master_bus_handle_t bus, uint16_t address,
+                           int timeout_ms) {
+    (void)bus; (void)address; (void)timeout_ms;
+    return ESP_ERR_NOT_FOUND;
+}
+
+/* ADC host stubs: bus_dma.c's ADC path is target code; host tests exercise
+ * only the config decode/planning path and must link the same symbols. */
+esp_err_t adc_oneshot_new_unit(const adc_oneshot_unit_init_cfg_t *cfg,
+                               adc_oneshot_unit_handle_t *out_handle) {
+    (void)cfg; *out_handle = (adc_oneshot_unit_handle_t)(uintptr_t)0xADC0;
+    return ESP_OK;
+}
+esp_err_t adc_oneshot_del_unit(adc_oneshot_unit_handle_t handle) {
+    (void)handle; return ESP_OK;
+}
+esp_err_t adc_oneshot_config_channel(adc_oneshot_unit_handle_t handle,
+                                     adc_channel_t channel,
+                                     const adc_oneshot_chan_cfg_t *cfg) {
+    (void)handle; (void)channel; (void)cfg; return ESP_OK;
+}
+esp_err_t adc_oneshot_read(adc_oneshot_unit_handle_t handle,
+                           adc_channel_t channel, int *out_raw) {
+    (void)handle; (void)channel; if (out_raw) *out_raw = 0; return ESP_OK;
 }
 
 /* =====================================================================
@@ -888,7 +914,7 @@ static void test_spi_preferred_controller(void)
     uint8_t cfg[9];
     make_spi_cfg(cfg, 5, 0, 1000000, 23, 19, 18);  /* C6 SPI2 default pins */
 
-    esp_err_t r = bus_dma_init_preferred(&ctx, BUS_TYPE_SPI, true, cfg, sizeof(cfg), 2);
+    esp_err_t r = bus_dma_init_preferred(&ctx, BUS_TYPE_SPI, true, cfg, sizeof(cfg), SPI2_HOST);
     CHECK(r == ESP_OK, "SPI preferred init should succeed");
     CHECK(ctx.cfg.spi.host == SPI2_HOST, "should bind to preferred SPI2");
     CHECK(g_spi_initialized[SPI2_HOST], "SPI2 should be initialized");
@@ -937,11 +963,11 @@ static void test_spi_lease_conflict(void)
     uint8_t cfg[9];
     make_spi_cfg(cfg, 5, 0, 1000000, 23, 19, 18);
 
-    bus_dma_init_preferred(&ctx1, BUS_TYPE_SPI, true, cfg, sizeof(cfg), 2);
+    bus_dma_init_preferred(&ctx1, BUS_TYPE_SPI, true, cfg, sizeof(cfg), SPI2_HOST);
 
-    /* Same pins, different preferred host */
-    esp_err_t r = bus_dma_init_preferred(&ctx2, BUS_TYPE_SPI, true, cfg, sizeof(cfg), 3);
-    CHECK(r == ESP_ERR_INVALID_STATE, "conflicting SPI preferred should fail");
+    /* C6 exposes only SPI2; asking for SPI3 is a distinct, unsupported host. */
+    esp_err_t r = bus_dma_init_preferred(&ctx2, BUS_TYPE_SPI, true, cfg, sizeof(cfg), SPI3_HOST);
+    CHECK(r == ESP_ERR_NOT_SUPPORTED, "SPI3 preferred should be rejected on C6");
 
     bus_dma_deinit(&ctx1);
 }

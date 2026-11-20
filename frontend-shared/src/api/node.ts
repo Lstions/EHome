@@ -261,6 +261,8 @@ export interface DmaChannelInfo {
   state: number       // 0=free, 1=allocated, 2=disabled
   bound_to: string
   compatible_bus: number
+  /** True only when the device's channel report confirms a DMA lease. */
+  device_allocated?: boolean
 }
 
 export interface DmaChannelConfig {
@@ -474,6 +476,14 @@ export const nodeApi = {
 
   async updateDmaConfig(id: number | string, configs: DmaChannelConfig[]): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/dma-config`, configs)
+  },
+
+  /** Real AHB-GDMA memory copy self-test (2KB, checksum verified). */
+  async dmaSelftest(id: number | string): Promise<{ passed: boolean; bytes: number; checksum: number; request_id: number }> {
+    const response = await client.post<unknown, ApiResponse<{ passed: boolean; bytes: number; checksum: number; request_id: number }>>(
+      `/api/v1/nodes/${id}/dma/selftest`
+    )
+    return response.data
   },
 
   // v2.5: Log stream API

@@ -183,6 +183,12 @@ describe('GPIOResourceList', () => {
       expect(wrapper.findAll('[data-testid="gpio-resource-row"]')).toHaveLength(4)
     })
 
+    it('过滤时保留「全部」的高度，页面不会因列表塌陷被钳回顶部', () => {
+      expect(gpioListSource).toContain('filterBodyHeight')
+      expect(gpioListSource).toContain('minHeight')
+      expect(gpioListSource).toContain('resource-body')
+    })
+
     it('筛选后为空时必须给说明（不能留白，否则用户以为页面坏了）', async () => {
       const wrapper = track(mount(GPIOResourceList, {
         props: { resources: manyGpio, configs: [], nodeId: 'node-1' },   // 全未配置
@@ -284,7 +290,7 @@ describe('PWMResourceList', () => {
     expect(wrapper.text()).toContain('无效配置')
   })
 
-  it('keeps Start unavailable while runtime state is unknown', async () => {
+  it('allows Start while runtime state is unknown (PWM read can be unsupported)', async () => {
     mocks.pwmGetState.mockResolvedValue({ hardware_id: 'PWM0', channel: 0, pin: 6, frequency: 1000, duty: 5000, resolution: 14, auto_start: false, enabled: true })
     const wrapper = track(mount(PWMResourceList, {
       props: {
@@ -297,15 +303,15 @@ describe('PWMResourceList', () => {
     }))
 
     await flushPromises()
-    expect(wrapper.text()).toContain('等待状态')
-    // A REST config snapshot cannot prove runtime stopped, so Start remains
-    // unavailable until an authoritative PeriphRsp updates running state.
-    expect(wrapper.find('[data-testid="start-pwm-PWM0"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('状态未知')
+    // 有的固件不支持 PWM READ（PeriphRsp error_code=5）；若此时禁用 Start，
+    // 用户将永远无法启动 PWM。未知态允许主动下发 Start，由 ACK 回填真实状态。
+    expect(wrapper.find('[data-testid="start-pwm-PWM0"]').exists()).toBe(true)
   })
 
   it('waits for authoritative runtime acknowledgement after Start', async () => {
     mocks.pwmGetState.mockResolvedValue({ duty: 5000 })
-    mocks.pwmStart.mockResolvedValue({ message: 'sent' })
+    mocks.pwmStart.mockResolvedValue({ request_id: 77 })
     const wrapper = track(mount(PWMResourceList, {
       props: { resources: pwmHardware, configs: [pwmConfig('PWM0', 6)], nodeId: 'node-1', availablePins: [2] },
       global: { stubs },
@@ -316,7 +322,7 @@ describe('PWMResourceList', () => {
     await wrapper.get('[data-testid="start-pwm-PWM0"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('已停止')
-    expect(wrapper.text()).toContain('等待设备响应')
+    expect(wrapper.text()).toContain('启动命令已发送')
     ;(wrapper.vm as any).applyRuntimeState('PWM0', true, 5000)
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('运行中')

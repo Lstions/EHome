@@ -9,7 +9,7 @@ const mockClient = vi.hoisted(() => ({
 
 vi.mock('../client', () => ({ default: mockClient }))
 
-import { gpioApi, pwmApi, type GPIOConfig, type PWMConfig } from '../periph'
+import { adcApi, gpioApi, pwmApi, type GPIOConfig, type PWMConfig } from '../periph'
 
 const NODE = 'ESP32-C6-01'
 
@@ -40,6 +40,23 @@ const pwm: PWMConfig = {
   created_at: '2026-07-14T08:00:00Z',
   updated_at: '2026-07-14T08:00:00Z',
 }
+
+describe('adcApi', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('read returns the synchronous raw sample envelope', async () => {
+    const sample = { hardware_id: 'ADC1_CH1', channel_id: 19, raw: 2048, max_raw: 4095, bit_width: 12, percent: 50, request_id: 7 }
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: sample })
+
+    await expect(adcApi.read(NODE, 'ADC1_CH1')).resolves.toEqual(sample)
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/adc/ADC1_CH1/read`)
+  })
+
+  it('read rejects an empty payload instead of returning undefined', async () => {
+    mockClient.post.mockResolvedValue({ code: 504, message: 'timeout' })
+    await expect(adcApi.read(NODE, 'ADC1_CH1')).rejects.toThrow('ADC 读取响应为空')
+  })
+})
 
 describe('gpioApi', () => {
   beforeEach(() => vi.clearAllMocks())
@@ -116,12 +133,19 @@ describe('gpioApi', () => {
 
   // ---- set ----
 
-  it('set posts the level to the set endpoint', async () => {
-    mockClient.post.mockResolvedValue(undefined)
+  it('set posts the level and returns the request_id used by the WS ACK', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 42 } })
 
-    await gpioApi.set(NODE, 2, 1)
+    const result = await gpioApi.set(NODE, 2, 1)
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/gpio/2/set`, { level: 1 })
+    expect(result).toEqual({ request_id: 42 })
+  })
+
+  it('set rejects a response without request_id instead of silently using 0', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: {} })
+
+    await expect(gpioApi.set(NODE, 2, 1)).rejects.toThrow('缺少 request_id')
   })
 
   // ---- toggle ----
@@ -136,13 +160,13 @@ describe('gpioApi', () => {
 
   // ---- read ----
 
-  it('read posts to the read endpoint and unwraps the level', async () => {
-    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { level: 1 } })
+  it('read posts to the read endpoint and returns the request_id used by the WS ACK', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 43 } })
 
     const result = await gpioApi.read(NODE, 2)
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/gpio/2/read`)
-    expect(result).toEqual({ level: 1 })
+    expect(result).toEqual({ request_id: 43 })
   })
 })
 
@@ -233,48 +257,52 @@ describe('pwmApi', () => {
 
   // ---- start ----
 
-  it('start posts to the start endpoint', async () => {
-    mockClient.post.mockResolvedValue(undefined)
+  it('start posts to the start endpoint and returns request_id', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 7 } })
 
-    await pwmApi.start(NODE, 'PWM0')
+    const result = await pwmApi.start(NODE, 'PWM0')
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/start`)
+    expect(result).toEqual({ request_id: 7 })
   })
 
   // ---- stop ----
 
-  it('stop posts to the stop endpoint', async () => {
-    mockClient.post.mockResolvedValue(undefined)
+  it('stop posts to the stop endpoint and returns request_id', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 8 } })
 
-    await pwmApi.stop(NODE, 'PWM0')
+    const result = await pwmApi.stop(NODE, 'PWM0')
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/stop`)
+    expect(result).toEqual({ request_id: 8 })
   })
 
   // ---- setDuty ----
 
-  it('setDuty posts the duty value', async () => {
-    mockClient.post.mockResolvedValue(undefined)
+  it('setDuty posts the duty value and returns request_id', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 9 } })
 
-    await pwmApi.setDuty(NODE, 'PWM0', 7500)
+    const result = await pwmApi.setDuty(NODE, 'PWM0', 7500)
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/duty`, { duty: 7500 })
+    expect(result).toEqual({ request_id: 9 })
   })
 
   // ---- setFreq ----
 
-  it('setFreq posts the frequency value', async () => {
-    mockClient.post.mockResolvedValue(undefined)
+  it('setFreq posts the frequency value and returns request_id', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 10 } })
 
-    await pwmApi.setFreq(NODE, 'PWM0', 2000)
+    const result = await pwmApi.setFreq(NODE, 'PWM0', 2000)
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/freq`, { frequency: 2000 })
+    expect(result).toEqual({ request_id: 10 })
   })
 
   // ---- getState ----
 
   it('getState sends a GET and unwraps the state object', async () => {
-    const state = { running: true, duty: 5000, frequency: 1000 }
+    const state = { running: true, duty: 5000, frequency: 1000, request_id: 11 }
     mockClient.get.mockResolvedValue({ code: 200, message: 'ok', data: state })
 
     const result = await pwmApi.getState(NODE, 'PWM0')

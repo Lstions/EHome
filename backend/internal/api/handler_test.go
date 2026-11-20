@@ -1030,8 +1030,10 @@ func TestNode_I2CScan(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// No I2C channel exists yet. A truthful scan cannot be performed, and the
+	// old 200+empty-list response was exactly the stub this endpoint replaced.
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without an I2C channel, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

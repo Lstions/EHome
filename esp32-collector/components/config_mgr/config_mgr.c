@@ -694,6 +694,10 @@ static bool channel_uses_pin(const config_channel_t *channel, uint8_t pin)
         if (len >= 6 && cfg[0] == pin) return true;
         return len >= 9 && (cfg[6] == pin || cfg[7] == pin || cfg[8] == pin);
     }
+    if (channel->bus_type == 5) {
+        /* ADC: [unit, channel, pin, attenuation, bit_width] */
+        return len >= 5 && cfg[2] == pin;
+    }
     return false;
 }
 

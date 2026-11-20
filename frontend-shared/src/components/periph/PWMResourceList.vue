@@ -56,12 +56,13 @@
               :data-testid="`configure-pwm-${row.resource.id}`"
               size="small"
               type="primary"
+              plain
               :disabled="offline || availablePins.length === 0"
               @click="emit('configure', row.resource.id)"
             >配置 PWM</el-button>
             <template v-else>
               <el-button
-                v-if="row.running === false"
+                v-if="row.running !== true"
                 :data-testid="`start-pwm-${row.resource.id}`"
                 size="small"
                 type="primary"
@@ -69,8 +70,7 @@
                 :loading="row.busy"
                 @click="start(row)"
               >启动</el-button>
-			  <el-button v-else-if="row.running === true" size="small" :disabled="offline || row.busy" :loading="row.busy" @click="stop(row)">停止</el-button>
-			  <el-button v-else size="small" disabled>等待状态</el-button>
+              <el-button v-else size="small" :disabled="offline || row.busy" :loading="row.busy" @click="stop(row)">停止</el-button>
               <el-button size="small" text :disabled="offline" @click="emit('edit', row.resource.id)">编辑</el-button>
               <el-button size="small" text :disabled="offline" @click="emit('remove', row.resource.id)">移除配置</el-button>
             </template>

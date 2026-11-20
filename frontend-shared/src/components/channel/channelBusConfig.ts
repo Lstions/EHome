@@ -95,19 +95,52 @@ export function buildChannelSubmitBusPayload(
     buf[5] = (freq >> 8) & 0xFF; buf[6] = freq & 0xFF
     busConfig = toHex(buf)
   } else if (form.hardware_type === 'spi' && hw) {
-    const cs = form.config.cs_pin || hw.default_cs_pin || 5
-    const mode = form.config.spi_mode || 0
-    const freq = form.config.freq_hz || hw.max_freq_hz || 1000000
-    const mosi = form.config.mosi_pin || hw.default_mosi || -1
-    const miso = form.config.miso_pin || hw.default_miso || -1
-    const sclk = form.config.sclk_pin || hw.default_sclk || -1
-    // bus_config: [cs(1B)][mode(1B)][freq(4B BE)][mosi(1B)][miso(1B)][sclk(1B)]
-    const buf = new Uint8Array(9)
-    buf[0] = cs; buf[1] = mode
-    buf[2] = (freq >> 24) & 0xFF; buf[3] = (freq >> 16) & 0xFF
-    buf[4] = (freq >> 8) & 0xFF; buf[5] = freq & 0xFF
-    buf[6] = mosi; buf[7] = miso; buf[8] = sclk
-    busConfig = toHex(buf)
+    /* ResourceReport 的字段名是 default_mosi_pin / default_miso_pin /
+     * default_sclk_pin。旧代码读 default_mosi 等不存在的字段，得到 undefined，
+     * 再被 || -1 变成 0xFF（GPIO 255）写进 bus_config —— 固件 spi_bus_initialize
+     * 必然拒绝，表现为「后端 201、设备 ConfigResult=false」。
+     *
+     * 这里同时保留旧字段回退，兼容旧夹具；但**绝不把缺失值写成 0xFF**：
+     * 任一必需引脚无法确定时返回空 busConfig，交给 ChannelManager 的提交守卫
+     * 明确拦下，而不是生成一个设备必然拒绝的值。 */
+    const firstPin = (...values: Array<number | undefined>): number => {
+      for (const value of values) {
+        if (typeof value === 'number' && value >= 0) return value
+      }
+      return -1
+    }
+    const cs = firstPin(form.config.cs_pin, hw.default_cs_pin, 5)
+    const mode = form.config.spi_mode ?? 0
+    const freq = form.config.freq_hz ?? hw.max_freq_hz ?? 1000000
+    const mosi = firstPin(form.config.mosi_pin, hw.default_mosi_pin, hw.default_mosi)
+    const miso = firstPin(form.config.miso_pin, hw.default_miso_pin, hw.default_miso)
+    const sclk = firstPin(form.config.sclk_pin, hw.default_sclk_pin, hw.default_sclk)
+    if (cs >= 0 && mosi >= 0 && miso >= 0 && sclk >= 0) {
+      // bus_config: [cs(1B)][mode(1B)][freq(4B BE)][mosi(1B)][miso(1B)][sclk(1B)]
+      const buf = new Uint8Array(9)
+      buf[0] = cs; buf[1] = mode
+      buf[2] = (freq >> 24) & 0xFF; buf[3] = (freq >> 16) & 0xFF
+      buf[4] = (freq >> 8) & 0xFF; buf[5] = freq & 0xFF
+      buf[6] = mosi; buf[7] = miso; buf[8] = sclk
+      busConfig = toHex(buf)
+    }
+  } else if (form.hardware_type === 'adc' && hw) {
+    /* ADC 资源在 ResourceReport 里已经给出 unit/channel/pin/max_bits。
+     * 固件不能用「空 bus_config」推导通道（会直接判 INVALID_SIZE），所以必须
+     * 把物理身份编进去。
+     *
+     * 布局与固件 bus_dma.c 的 adc_init 一致（5 字节）：
+     *   [0]=unit [1]=channel [2]=pin [3]=attenuation [4]=bit_width
+     * 其中 pin 用于与 GPIO/UART/I2C/SPI 做引脚冲突检查，atten/bit_width 是
+     * 用户在该通道上选择的采样参数。 */
+    const unit = Number(hw.unit ?? -1)
+    const channel = Number(hw.channel ?? -1)
+    const pin = Number(hw.pin ?? -1)
+    if (unit >= 0 && channel >= 0 && pin >= 0 && pin <= 255) {
+      const attenuation = Number(form.config.attenuation ?? 3)
+      const bitWidth = Number(form.config.bit_width ?? hw.max_bits ?? 12)
+      busConfig = toHex(new Uint8Array([unit, channel, pin, attenuation, bitWidth]))
+    }
   }
 
   return { address, config, busConfig }

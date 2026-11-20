@@ -65,6 +65,12 @@ bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
 esp_err_t msg_handler_send_config_result(const char *manifest_id, const char *sync_id, bool success);
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                 uint32_t error_code, const char *error_msg);
+
+/** Send a PeriphRsp for GPIO/PWM/ADC (used by main's ADC read hook). */
+void msg_handler_send_periph_rsp(uint32_t request_id, bool success,
+                                 uint32_t value, uint8_t error_code,
+                                 uint8_t periph_type, uint8_t resource_id,
+                                 uint8_t action);
 void msg_handler_send_pong(uint64_t timestamp_us);
 void msg_handler_send_ota_prog(const char *ota_id, uint8_t status,
                                uint8_t progress_pct, const char *error_msg);

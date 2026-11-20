@@ -39,8 +39,13 @@ spi_host_device_t hw_derive_spi_host(int mosi_pin, int miso_pin, int sclk_pin,
     for (int i = 0; i < HW_SPI_COUNT; i++) {
         if (hw_spis[i].default_mosi == mosi_pin &&
             hw_spis[i].default_miso == miso_pin &&
-            hw_spis[i].default_sclk == sclk_pin)
-            return (spi_host_device_t)hw_spis[i].port;
+            hw_spis[i].default_sclk == sclk_pin) {
+            /* hw_spis[].port is the human-facing SPI port number (2, 3),
+             * while spi_host_device_t starts at SPI2_HOST=1. Casting port
+             * directly selected SPI3_HOST=2 for SPI2 and made every default
+             * SPI channel fail with ESP_ERR_NOT_SUPPORTED. */
+            return (spi_host_device_t)(hw_spis[i].port - 1);
+        }
     }
     return default_host;
 }

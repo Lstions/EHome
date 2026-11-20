@@ -1,8 +1,20 @@
 <template>
   <div class="peripheral-control">
-    <div class="periph-header">
-      <span class="periph-title">外设控制</span>
-      <el-button size="small" :loading="loading" @click="loadAll">
+    <div class="periph-toolbar">
+      <div class="periph-seg" role="tablist" aria-label="外设类型">
+        <button class="periph-seg-btn" :class="{ active: activeKind === 'gpio' }" type="button" role="tab" :aria-selected="activeKind === 'gpio'" @click="activeKind = 'gpio'">
+          GPIO<span class="periph-seg-num">{{ hardwareGpio.length }}</span>
+        </button>
+        <button class="periph-seg-btn" :class="{ active: activeKind === 'pwm' }" type="button" role="tab" :aria-selected="activeKind === 'pwm'" @click="activeKind = 'pwm'">
+          PWM<span class="periph-seg-num">{{ hardwarePwm.length }}</span>
+        </button>
+      </div>
+      <div class="periph-sum">
+        <span><b>{{ activeConfigured }}</b>已配置</span>
+        <span><b>{{ activeUnconfigured }}</b>未配置</span>
+        <span v-if="activeKind === 'gpio'"><b>{{ gpioOccupiedPins.size }}</b>被占用</span>
+      </div>
+      <el-button size="small" class="periph-refresh" :loading="loading" @click="loadAll">
         <el-icon><Refresh /></el-icon>刷新
       </el-button>
     </div>
@@ -15,7 +27,7 @@
          （基本信息 / 实时指标 / 总线配置）都是 .card 卡片语言，唯独外设控制是"裸标题 +
          一长条列表"，与整页层级不一致（用户反馈"设计水平太差"）。
          现改为与同页一致的卡片 + card-head，标题层级与「总线配置」tab 对齐。 -->
-    <section class="card periph-card">
+    <section v-show="activeKind === 'gpio'" class="card periph-card">
       <div class="card-head">
         <span class="card-title">GPIO 硬件资源</span>
         <span class="card-hint">设备上报的可用引脚</span>
@@ -35,7 +47,7 @@
       />
     </section>
 
-    <section class="card periph-card">
+    <section v-show="activeKind === 'pwm'" class="card periph-card">
       <div class="card-head">
         <span class="card-title">PWM 硬件资源</span>
         <span class="card-hint">可调占空比输出</span>
@@ -107,6 +119,7 @@ const emit = defineEmits<{
   (event: 'configure-pwm' | 'edit-pwm', hardwareId: string): void
 }>()
 
+const activeKind = ref<'gpio' | 'pwm'>('gpio')
 const loading = ref(false)
 const loadError = ref(false)
 const hasLoaded = ref(false)
@@ -127,6 +140,11 @@ const gpioOccupiedPins = computed(() => {
   for (const config of pwmConfigs.value) occupied.set(config.pin, `${config.hardware_id} 输出`)
   return occupied
 })
+const activeConfigured = computed(() => activeKind.value === 'gpio' ? gpioConfigs.value.length : pwmConfigs.value.length)
+const activeUnconfigured = computed(() => activeKind.value === 'gpio'
+  ? Math.max(0, hardwareGpio.value.length - gpioConfigs.value.length)
+  : Math.max(0, hardwarePwm.value.length - pwmConfigs.value.length))
+
 const availablePwmPins = computed(() => {
   const occupied = new Set(occupiedBusPins.value.keys())
   gpioConfigs.value.forEach(config => occupied.add(config.pin))
@@ -346,12 +364,28 @@ defineExpose({
 </script>
 
 <style scoped>
-.peripheral-control { display: flex; flex-direction: column; gap: 16px; }
-.periph-header { display: flex; align-items: center; justify-content: space-between; }
-.periph-title { font-weight: 600; font-size: 15px; }
+.peripheral-control { display: flex; flex-direction: column; gap: 12px; }
+.periph-toolbar { min-height: 52px; padding: 8px 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color, #fff); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.periph-seg { display: inline-flex; align-items: center; gap: 2px; background: var(--el-fill-color-light, #F2F4F7); border-radius: 8px; padding: 3px; }
+.periph-seg-btn { height: 28px; padding: 0 10px; border: 0; background: transparent; border-radius: 6px; color: var(--el-text-color-regular, #526072); display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background .16s ease, color .16s ease; }
+.periph-seg-btn:hover { color: var(--el-color-primary); }
+.periph-seg-btn.active { background: var(--el-bg-color, #fff); color: var(--el-text-color-primary, #1F2329); box-shadow: 0 1px 2px rgba(16, 24, 40, .10); }
+.periph-seg-num { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: rgba(31, 35, 41, .06); color: var(--el-text-color-secondary, #69778B); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+.periph-seg-btn.active .periph-seg-num { background: rgba(46, 107, 255, .12); color: var(--el-color-primary); }
+.periph-sum { display: flex; align-items: baseline; gap: 14px; color: var(--el-text-color-secondary, #69778B); font-size: 12px; flex-wrap: wrap; }
+.periph-sum b { margin-right: 4px; color: var(--el-text-color-primary, #1F2329); font-size: 16px; font-weight: 600; }
+.periph-refresh { margin-left: auto; }
+/* 外设筛选：与顶部分段控件同一语言。Element Plus 的 radio-button 分组默认会在
+   相邻按钮之间画分隔线/阴影（选中态还会补一层），视觉上像“多了一条线”。
+   这里统一去掉边框与阴影，用容器底色 + 间隙表达分组。 */
+.periph-card :deep(.row-filter .el-radio-group) { display: inline-flex; gap: 4px; padding: 3px; background: var(--el-fill-color-light, #F2F4F7); border-radius: 8px; }
+.periph-card :deep(.row-filter .el-radio-button) { border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.periph-card :deep(.row-filter .el-radio-button__inner) { border: 0 !important; outline: none !important; box-shadow: none !important; border-radius: 6px !important; background: transparent !important; color: var(--el-text-color-regular, #526072); font-size: 12px; line-height: 18px; padding: 5px 10px; }
+.periph-card :deep(.row-filter .el-radio-button__original-radio:focus-visible + .el-radio-button__inner) { outline: 2px solid var(--el-color-primary) !important; outline-offset: 1px; }
+.periph-card :deep(.row-filter .el-radio-button__original-radio:checked + .el-radio-button__inner) { background: var(--el-bg-color, #fff); color: var(--el-color-primary); box-shadow: 0 1px 2px rgba(16, 24, 40, .10) !important; }
 /* UI-3：卡片语言与同页「总线配置」一致 —— 复用 .card 外观，本组件只补内距与头部。
    圆角沿用 .card 的既有值（≤8px，规范 §4.2.3），不新造。 */
-.periph-card { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+.periph-card { padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; background: var(--el-bg-color, #fff); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; }
 .card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .card-title { font-weight: 600; font-size: 14px; color: var(--el-text-color-primary); }
 /* 说明文字降级为辅助信息（规范 §4.2.4：标签/数值/辅助说明各有稳定角色）。 */

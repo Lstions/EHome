@@ -49,6 +49,16 @@ void on_query_resources_received(const char *request_id)
     (void)request_id;
 }
 
+void on_adc_read_received(uint32_t request_id, uint32_t channel_id)
+{
+    (void)request_id; (void)channel_id;
+}
+
+void on_dma_selftest_received(uint32_t request_id)
+{
+    (void)request_id;
+}
+
 /* 注意 msg_handler_publish_checked **也不在这里** ——
  * handler_data_tests 与 rx_health_e2e_tests 各自定义了带断言语义的版本
  * （它们要验证"发布是否被调用/调用了几次"）。

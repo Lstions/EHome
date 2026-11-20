@@ -104,6 +104,15 @@ void dma_pool_init(dma_pool_t *pool, const hw_dma_t *table, int count);
 esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
                              const char *hw_id, uint32_t *out_dma_id);
 
+/** @brief Re-assert an already allocated binding (idempotent self-heal).
+ *
+ * Called after a bus controller successfully initialized with `dma_id`. If a
+ * later step in the same transaction cleared the pool entry, this restores the
+ * authoritative ALLOCATED/bound_to state before ResourceReport is emitted.
+ * Refuses to overwrite a user-disabled channel. */
+esp_err_t dma_pool_mark_bound(dma_pool_t *pool, uint32_t dma_id,
+                              const char *hw_id);
+
 /** @brief Release a DMA channel by dma_id. */
 esp_err_t dma_pool_release(dma_pool_t *pool, uint32_t dma_id);
 

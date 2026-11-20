@@ -1,6 +1,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Cloudy, Document, Grid, House, Monitor, Share, Tools, UserFilled } from '@element-plus/icons-vue'
+import { Connection, Cpu, Files, Memo, Monitor, Postcard, Upload, UserFilled } from '@element-plus/icons-vue'
 
 /**
  * 页签栏的**导航与可见性**：页签名册、?tab= 深链消费、以及把激活页签滚入视野。
@@ -16,14 +16,14 @@ export function useNodeTabs() {
   const route = useRoute()
 
   const tabs = [
-    { label: '基本信息', icon: House },
-    { label: '总线配置', icon: Share },
-    { label: '外设控制', icon: Tools },
-    { label: 'DMA 通道', icon: Grid },
+    { label: '基本信息', icon: Postcard },
+    { label: '总线与通道', icon: Connection },
+    { label: '外设', icon: Cpu },
+    { label: 'DMA 分配', icon: Files },
     { label: '关联设备', icon: UserFilled },
-    { label: 'OTA 历史', icon: Cloudy },
-    { label: '系统日志', icon: Document },
-    { label: '通道终端', icon: Monitor },
+    { label: '固件升级', icon: Upload },
+    { label: '日志', icon: Memo },
+    { label: '终端', icon: Monitor },
   ]
   const activeTab = ref('基本信息')
 
@@ -35,16 +35,16 @@ export function useNodeTabs() {
    * 未知值一律忽略（不报错、不白屏），保持「基本信息」默认。
    */
   const TAB_QUERY_MAP: Record<string, string> = {
-    config: '总线配置',
-    bus: '总线配置',
-    peripheral: '外设控制',
-    gpio: '外设控制',
-    pwm: '外设控制',
-    dma: 'DMA 通道',
+    config: '总线与通道',
+    bus: '总线与通道',
+    peripheral: '外设',
+    gpio: '外设',
+    pwm: '外设',
+    dma: 'DMA 分配',
     devices: '关联设备',
-    ota: 'OTA 历史',
-    logs: '系统日志',
-    terminal: '通道终端',
+    ota: '固件升级',
+    logs: '日志',
+    terminal: '终端',
     info: '基本信息',
   }
   function applyTabQuery(value: unknown) {
@@ -65,7 +65,7 @@ export function useNodeTabs() {
    *
    * 为什么必须 nextTick + 元素查询（时序）：
    *  · 标签栏在 `<template v-else-if="node">` 里，而 `node` 由 fetchDetail() **异步**填充
-   *    —— 首屏那一刻 DOM 里根本没有 `.tab-item`，此刻 scrollIntoView 会拿到 null 而静默无效；
+   *    —— 首屏那一刻 DOM 里根本没有 `.tab-item`，此刻查元素会拿到 null 而静默无效；
    *  · 深链场景下 `applyTabQuery` 在 setup 阶段就改好了 activeTab，早于首次渲染，
    *    所以「watch activeTab」的即时回调同样查不到元素。
    *  故同时观察 `tabBarRef`：它在元素**真正挂载**时才由 null 变成节点，
@@ -73,9 +73,11 @@ export function useNodeTabs() {
    *  已落到 DOM。查不到就安静返回 —— 后续 activeTab/挂载变化仍会再次触发，不会永久失效。
    *
    * 为什么不用 `scrollLeft = 0` 之类的"重置"：那会让每次切换页签都跳回栏首，
-   * 既没解决"激活项在右侧看不见"，又新增了跳动。`inline:'nearest'` 只在必要时滚动。
-   * `block:'nearest'` 不可省：省略时浏览器按默认 `block:'start'` 处理，会把标签栏
-   * 滚到视口顶部，导致页面纵向跳动（移动端尤其明显）。
+   * 既没解决"激活项在右侧看不见"，又新增了跳动。
+   *
+   * 为什么不用 `scrollIntoView({block:'nearest'})`：它不只滚标签栏这一层，
+   * 还会滚动最近的可纵向滚动祖先。用户在页面中部阅读时切换页签，整页会被拉回
+   * 顶部（2026-11-20 反馈）。这里只改 `bar.scrollLeft`/`bar.scrollTo`，纵向位置不参与。
    */
   const tabBarRef = ref<HTMLElement | null>(null)
 
@@ -113,8 +115,26 @@ export function useNodeTabs() {
     const active = Array.from(bar.querySelectorAll<HTMLElement>('.tab-item'))
       .find(el => el.dataset.tab === activeTab.value)
     if (!active) return
-    active.scrollIntoView({ inline: 'nearest', block: 'nearest' })
-    // scrollIntoView 的滚动位置在下一帧才稳定，故延后读 scrollLeft 刷新渐隐状态
+
+    // 只做横向滚动，绝不调用 scrollIntoView：后者会连带滚动最近的**纵向**容器。
+    // 用户可能已在页面中部阅读，切换页签时把整页拉回顶部是明确的回归。
+    const barRect = bar.getBoundingClientRect()
+    const itemRect = active.getBoundingClientRect()
+    const pad = 8
+    let target = bar.scrollLeft
+    if (itemRect.left < barRect.left + pad) {
+      target -= barRect.left + pad - itemRect.left
+    } else if (itemRect.right > barRect.right - pad) {
+      target += itemRect.right - (barRect.right - pad)
+    }
+    const max = Math.max(0, bar.scrollWidth - bar.clientWidth)
+    target = Math.max(0, Math.min(target, max))
+    if (typeof bar.scrollTo === 'function') {
+      bar.scrollTo({ left: target, behavior: 'smooth' })
+    } else {
+      bar.scrollLeft = target
+    }
+    // 滚动位置在下一帧才稳定，故延后读 scrollLeft 刷新渐隐状态
     requestAnimationFrame(() => { updateTabScrollState() })
   }
   // flush:'post' 保证在 DOM 更新后执行；同时观察 tabBarRef 覆盖"异步数据到达后标签栏才挂载"。

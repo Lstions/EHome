@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -524,8 +526,15 @@ func createPWMConfigWithPinExclusion(db *gorm.DB, nodeID string, cfg *models.PWM
 //
 // PeriphCmd field 2: periph_type
 const (
-	PeriphTypeGPIO uint8 = 1
-	PeriphTypePWM  uint8 = 2
+	PeriphTypeGPIO        uint8 = 1
+	PeriphTypePWM         uint8 = 2
+	PeriphTypeADC         uint8 = 3
+	PeriphTypeDMASelfTest uint8 = 4
+)
+
+// ADC action enum (PeriphCmd field 4)
+const (
+	ADCActionRead uint8 = 0
 )
 
 // GPIO action enum (PeriphCmd field 4)
@@ -790,7 +799,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+		SuccessMsg(c, nil, "deleted")
 	})
 
 	// POST /api/v1/nodes/:id/gpio/:pin/set — set output level {level: 0|1}
@@ -846,7 +855,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "command sent", "action": action, "request_id": requestID})
+		Success(c, gin.H{"action": action, "request_id": requestID})
 	})
 
 	// POST /api/v1/nodes/:id/gpio/:pin/read — read pin level
@@ -880,9 +889,103 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "read command sent", "request_id": requestID})
+		Success(c, gin.H{"request_id": requestID})
 	})
 
+	// ================================================================
+	// ADC API
+	// ================================================================
+
+	// POST /api/v1/nodes/:id/adc/:hardware_id/read — read one raw ADC sample.
+	//
+	// ADC is a logical channel on a physical adc_oneshot unit; the device
+	// resolves the lease by channel id (PeriphCmd.resource_id) and answers with
+	// the raw sample in PeriphRsp.value. The HTTP request waits for that exact
+	// request_id instead of returning an ACK and hoping the UI receives a WS
+	// event.
+	n.POST("/:id/adc/:hardware_id/read", func(c *gin.Context) {
+		id := c.Param("id")
+		hardwareID := c.Param("hardware_id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			Error(c, http.StatusNotFound, "node not found")
+			return
+		}
+		var ch models.Channel
+		if err := db.Where("node_id = ? AND hardware_id = ? AND UPPER(bus_type) = ? AND bus_config <> ''", node.NodeID, hardwareID, "ADC").Order("id DESC").First(&ch).Error; err != nil {
+			Error(c, http.StatusNotFound, "ADC channel not found")
+			return
+		}
+		if !ch.Enabled {
+			Error(c, http.StatusConflict, "ADC channel is disabled")
+			return
+		}
+		if ch.ID > 255 {
+			Error(c, http.StatusUnprocessableEntity, "ADC channel id exceeds PeriphCmd resource_id range")
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		requestID, result, err := nodeMgr.SendPeriphCmdAndWait(ctx, node.NodeID, PeriphTypeADC, uint8(ch.ID), ADCActionRead, 0, nil)
+		if err != nil {
+			Error(c, http.StatusGatewayTimeout, err.Error())
+			return
+		}
+		if !result.Success {
+			Error(c, http.StatusBadGateway, fmt.Sprintf("device rejected ADC read (error_code=%d)", result.ErrorCode))
+			return
+		}
+
+		bits := 12
+		if strings.TrimSpace(ch.Config) != "" {
+			var cfg map[string]any
+			if json.Unmarshal([]byte(ch.Config), &cfg) == nil {
+				if v, ok := cfg["bit_width"].(float64); ok && v >= 9 && v <= 16 {
+					bits = int(v)
+				}
+			}
+		}
+		maxRaw := uint32((1 << bits) - 1)
+		percent := 0.0
+		if maxRaw > 0 {
+			percent = float64(result.Value) * 100.0 / float64(maxRaw)
+		}
+		Success(c, gin.H{
+			"hardware_id": hardwareID,
+			"channel_id":  ch.ID,
+			"raw":         result.Value,
+			"max_raw":     maxRaw,
+			"bit_width":   bits,
+			"percent":     percent,
+			"request_id":  requestID,
+		})
+	})
+	// POST /api/v1/nodes/:id/dma/selftest — real AHB-GDMA memory copy.
+	//
+	// The logical DMA pool binding (CH1 -> uart/UART0) is bookkeeping; this
+	// diagnostic separately drives the C6 GDMA engine and verifies a 2KB copy.
+	n.POST("/:id/dma/selftest", func(c *gin.Context) {
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			Error(c, http.StatusNotFound, "node not found")
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 4*time.Second)
+		defer cancel()
+		requestID, result, err := nodeMgr.SendPeriphCmdAndWait(ctx, node.NodeID, PeriphTypeDMASelfTest, 0, 0, 0, nil)
+		if err != nil {
+			Error(c, http.StatusGatewayTimeout, err.Error())
+			return
+		}
+		Success(c, gin.H{
+			"passed":     result.Success,
+			"bytes":      2048,
+			"checksum":   result.Value,
+			"request_id": requestID,
+		})
+	})
 	// ================================================================
 	// PWM API
 	// ================================================================
@@ -1159,7 +1262,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangePWM, nodemgr.CfgActionDelete, node.NodeID, fmt.Sprint(cfg.ID))
-		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+		SuccessMsg(c, nil, "deleted")
 	})
 
 	// POST /api/v1/nodes/:id/pwm/:hardware_id/start — start PWM output
@@ -1196,7 +1299,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "start command sent", "request_id": requestID})
+		Success(c, gin.H{"request_id": requestID})
 	})
 
 	// POST /api/v1/nodes/:id/pwm/:hardware_id/stop — stop PWM output
@@ -1226,7 +1329,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "stop command sent", "request_id": requestID})
+		Success(c, gin.H{"request_id": requestID})
 	})
 
 	// POST /api/v1/nodes/:id/pwm/:hardware_id/duty — set duty cycle {duty: 0-10000}
@@ -1267,22 +1370,24 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		oldDuty := cfg.Duty
-		if err := db.Model(&cfg).Update("duty", *req.Duty).Error; err != nil {
-			Error(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		requestID, err := nodeMgr.SendPeriphCmdWithPreviousValue(node.NodeID, PeriphTypePWM, cfg.Channel, PWMActionSetDuty, uint32(*req.Duty), nil, uint32(oldDuty))
+		/* Runtime duty is NOT the persisted PWM config.
+		 *
+		 * Writing cfg.Duty here changed the ConfigManifest hash on every slider
+		 * drag, so the backend immediately pushed a full ConfigManifest. The
+		 * firmware transaction re-initialized peripherals (auto_start=false),
+		 * stopping PWM between two rapid drags; the next SET_DUTY then returned
+		 * error_code=5. That is the "multiple drags, then cannot apply" field bug.
+		 *
+		 * The DB duty/frequency are the boot/auto-start values edited through the
+		 * config dialog. Runtime SET_DUTY only commands the device; GET state is
+		 * the authoritative runtime value and already refreshes the row. */
+		requestID, err := nodeMgr.SendPeriphCmdWithID(node.NodeID, PeriphTypePWM, cfg.Channel, PWMActionSetDuty, uint32(*req.Duty), nil)
 		if err != nil {
-			if restoreErr := db.Model(&cfg).Update("duty", oldDuty).Error; restoreErr != nil {
-				Error(c, http.StatusInternalServerError, fmt.Sprintf("send failed: %v; restore failed: %v", err, restoreErr))
-				return
-			}
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "duty command sent", "duty": *req.Duty, "request_id": requestID})
+		Success(c, gin.H{"duty": *req.Duty, "request_id": requestID})
 	})
 
 	// POST /api/v1/nodes/:id/pwm/:hardware_id/freq — set frequency {frequency: Hz}
@@ -1323,21 +1428,14 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		// SET_FREQ config: [resolution:1B]
 		configBytes := []byte{cfg.Resolution}
 
-		oldFrequency := cfg.Frequency
-		if err := db.Model(&cfg).Update("frequency", req.Frequency).Error; err != nil {
-			Error(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		requestID, err := nodeMgr.SendPeriphCmdWithPreviousValue(node.NodeID, PeriphTypePWM, cfg.Channel, PWMActionSetFreq, req.Frequency, configBytes, oldFrequency)
+		/* Same rule as duty: frequency is a runtime control, not a config edit.
+		 * Persisting it triggered a full manifest rebuild and stopped PWM. */
+		requestID, err := nodeMgr.SendPeriphCmdWithID(node.NodeID, PeriphTypePWM, cfg.Channel, PWMActionSetFreq, req.Frequency, configBytes)
 		if err != nil {
-			if restoreErr := db.Model(&cfg).Update("frequency", oldFrequency).Error; restoreErr != nil {
-				Error(c, http.StatusInternalServerError, fmt.Sprintf("send failed: %v; restore failed: %v", err, restoreErr))
-				return
-			}
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "frequency command sent", "frequency": req.Frequency, "request_id": requestID})
+		Success(c, gin.H{"frequency": req.Frequency, "request_id": requestID})
 	})
 
 	// GET /api/v1/nodes/:id/pwm/:hardware_id/state — read current PWM state (duty)
@@ -1366,10 +1464,10 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		requestID, err := nodeMgr.SendPeriphCmdWithID(node.NodeID, PeriphTypePWM, cfg.Channel, PWMActionRead, 0, nil)
 		if err != nil {
 			logger.Warnf("[%s] Failed to send PWM READ: %v", node.NodeID, err)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"message": "runtime state unavailable"})
+			Error(c, http.StatusServiceUnavailable, "runtime state unavailable")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
+		Success(c, gin.H{
 			"hardware_id": cfg.HardwareID,
 			"channel":     cfg.Channel,
 			"pin":         cfg.Pin,
@@ -1449,6 +1547,72 @@ func validateI2CBusConfig(ch *models.Channel) error {
 //	由这里按 bus_type 分派。**新增总线类型时只改这一处**（P4）。
 //
 // ⚠ 返回的错误可能是任意一种具体错误（UART 的 / I2C 的），调用方用 errors.Is 判。
+// ensureADCBusConfig turns a legacy ADC channel with an empty bus_config into
+// the five-byte physical identity the firmware requires:
+// [unit, channel, pin, attenuation, bit_width].
+//
+// The old frontend never emitted a bus_config for ADC, so every ADC channel
+// reached the device with an empty config and was rejected by bus_manager
+// (INVALID_SIZE) even though the HTTP create returned 201.
+func ensureADCBusConfig(node *models.Node, ch *models.Channel) error {
+	if node == nil {
+		return fmt.Errorf("node is required")
+	}
+	raw := strings.TrimPrefix(strings.TrimSpace(ch.BusConfig), `\x`)
+	if raw != "" {
+		decoded, err := hex.DecodeString(raw)
+		if err != nil || len(decoded) != 5 {
+			return fmt.Errorf("ADC bus_config must be 5 bytes: unit/channel/pin/attenuation/bit_width")
+		}
+		return nil
+	}
+
+	var caps struct {
+		Buses struct {
+			ADC []struct {
+				ID      string `json:"id"`
+				Unit    int    `json:"unit"`
+				Channel int    `json:"channel"`
+				Pin     int    `json:"pin"`
+				MaxBits int    `json:"max_bits"`
+			} `json:"adc"`
+		} `json:"buses"`
+	}
+	if strings.TrimSpace(node.Capabilities) == "" || json.Unmarshal([]byte(node.Capabilities), &caps) != nil {
+		return fmt.Errorf("node has not reported ADC capabilities")
+	}
+	for _, resource := range caps.Buses.ADC {
+		if !strings.EqualFold(resource.ID, ch.HardwareID) {
+			continue
+		}
+		attenuation := 3
+		bitWidth := resource.MaxBits
+		if strings.TrimSpace(ch.Config) != "" {
+			var cfg map[string]any
+			if json.Unmarshal([]byte(ch.Config), &cfg) == nil {
+				if v, ok := cfg["attenuation"].(float64); ok {
+					attenuation = int(v)
+				}
+				if v, ok := cfg["bit_width"].(float64); ok {
+					bitWidth = int(v)
+				}
+			}
+		}
+		if attenuation < 0 || attenuation > 3 {
+			return fmt.Errorf("ADC attenuation must be 0..3")
+		}
+		if resource.MaxBits > 0 && (bitWidth < 9 || bitWidth > resource.MaxBits) {
+			return fmt.Errorf("ADC bit_width must be 9..%d for %s", resource.MaxBits, resource.ID)
+		}
+		if resource.Unit < 0 || resource.Channel < 0 || resource.Pin < 0 || resource.Pin > 255 {
+			return fmt.Errorf("ADC resource %s has invalid unit/channel/pin", resource.ID)
+		}
+		ch.BusConfig = hex.EncodeToString([]byte{byte(resource.Unit), byte(resource.Channel), byte(resource.Pin), byte(attenuation), byte(bitWidth)})
+		return nil
+	}
+	return fmt.Errorf("ADC resource %s is absent from current ResourceReport", ch.HardwareID)
+}
+
 func ensureBusConfigExtras(node *models.Node, ch *models.Channel) error {
 	if ch == nil {
 		return fmt.Errorf("channel is required")
@@ -1459,6 +1623,8 @@ func ensureBusConfigExtras(node *models.Node, ch *models.Channel) error {
 	case "I2C", "2":
 		// I2C 不走"按能力补齐"：它缺的字节里含从机地址，后端不能替用户编（见 validateI2CBusConfig）。
 		return validateI2CBusConfig(ch)
+	case "ADC", "5":
+		return ensureADCBusConfig(node, ch)
 	default:
 		// 其它总线（SPI/USB/ADC/GPIO/PWM）本轮不新增判据：
 		// 它们各自的固件下限尚未在真机上暴露过缺陷，无证据不改（先测再改）。

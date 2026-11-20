@@ -162,6 +162,12 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v addrs=%v",
 		deviceID, requestID, hardwareID, success, addresses)
 
+	// Wake the HTTP request waiting for this exact request_id before the
+	// best-effort WebSocket broadcast. Without this the node-page scan API can
+	// only return a synthetic empty list, which is indistinguishable from a
+	// real bus with no devices.
+	m.deliverScanResult(requestID, success, addresses)
+
 	// Broadcast scan result via WebSocket (v2.2: scan_result 事件名不变)
 	m.wsHub.BroadcastEvent(events.ScanResult, map[string]interface{}{
 		"device_id":     deviceID,
@@ -429,6 +435,14 @@ func (m *Manager) handlePeriphResponse(deviceID string, payload []byte) {
 	delete(m.periphPending, uint32(requestID))
 	delete(m.periphLatest, latestKey)
 	m.periphMu.Unlock()
+
+	// Wake a synchronous API caller (e.g. ADC read) with the same validated
+	// payload. No-op when this response is consumed only by the WebSocket UI.
+	m.deliverPeriphResult(uint32(requestID), PeriphResult{
+		Success: success, Value: uint32(value), ErrorCode: uint8(errorCode),
+		PeriphType: uint8(periphType), ResourceID: uint8(resourceID),
+		Action: uint8(action),
+	})
 
 	var hardwareID string
 	var channel interface{}

@@ -48,7 +48,12 @@
 #define LOG_TX_STACK        4096
 #define LOG_TX_PRIO         2
 #define LOG_TX_BUF_SIZE     768
-#define RING_CAPACITY       4
+/* Config transactions emit a burst of step diagnostics (heap in/out, bus
+ * init, scheduler, commit). With a 4-entry ring those lines were overwritten
+ * before log_tx drained them, which is exactly why ConfigResult=false had no
+ * actionable cause in node_logs. 24 entries retain one transaction's burst
+ * while keeping the static RAM increase bounded. */
+#define RING_CAPACITY       24
 #define LOG_TASK_EXITED_BIT BIT0
 #define LOG_TASK_STOP_TIMEOUT_MS 1000
 #define LOG_CAPTURE_USER_TIMEOUT_MS 100
@@ -60,7 +65,7 @@ typedef enum {
     LOG_STREAM_STOPPING,
 } log_stream_state_t;
 
-#define LOG_STREAM_TX_CYCLE_MS 1000
+#define LOG_STREAM_TX_CYCLE_MS 250
 
 /* Capture storage is static so a wrapper that was already in flight at detach
  * can never observe freed memory. log_capture_esp_detach() also waits for such
@@ -119,7 +124,11 @@ static StackType_t s_log_tx_stack[LOG_TX_STACK / sizeof(StackType_t)];
 /* 预算随 LOG_TX_STACK 上调（1536 -> 4096，见上面的栈溢出分析）。
  * 这是**上界门禁**：一旦有人再加静态缓冲或抬栈，必须同时复核这个数，
  * 否则门禁会在无人察觉时失去意义。 */
-#define LOG_STREAM_OWNED_RAM_BUDGET_BYTES 6656U
+/* 6656 -> 10240: the diagnostic ring grew from 4 to 24 entries so a failed
+ * config transaction keeps its step/error lines long enough for log_tx to
+ * drain them. Still a hard gate: any further buffer/stack increase must be
+ * re-reviewed against this number and the DIRAM budget. */
+#define LOG_STREAM_OWNED_RAM_BUDGET_BYTES 10240U
 #define LOG_STREAM_OWNED_RAM_BYTES ( \
     sizeof(s_capture) + sizeof(s_ring) + sizeof(s_tx_batch) + sizeof(s_tx_buf) + \
     LOG_TX_STACK + sizeof(s_task) + sizeof(s_state) + sizeof(s_capture_users) + \

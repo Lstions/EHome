@@ -585,13 +585,22 @@ esp_err_t pwm_ctrl_get_duty(int channel, uint16_t *duty)
     if (index < 0 || !duty) return ESP_ERR_INVALID_ARG;
     ensure_mutex();
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (!s_channels[index].running) {
+    /* READ 是「读取通道状态」，不是「读取正在运行的通道」：
+     * 用户先 STOP 再刷新页面是完全正常的操作。旧实现要求 running==true，
+     * 导致已配置但已停止的 PWM 返回 ESP_ERR_INVALID_STATE（error_code=5），
+     * UI 永远显示「状态未知」。配置存在时返回最后已知 duty，running 位由
+     * PeriphRsp 单独携带，二者语义不要混在一个 error 里。 */
+    if (!s_channels[index].configured) {
         xSemaphoreGive(s_mutex);
         return ESP_ERR_INVALID_STATE;
     }
-    *duty = ledc_to_duty(ledc_get_duty(PWM_LEDC_MODE, s_channels[index].channel),
-                         s_channels[index].resolution);
-    if (*duty == 0 && s_channels[index].duty > 0) *duty = s_channels[index].duty;
+    if (s_channels[index].running) {
+        *duty = ledc_to_duty(ledc_get_duty(PWM_LEDC_MODE, s_channels[index].channel),
+                             s_channels[index].resolution);
+        if (*duty == 0 && s_channels[index].duty > 0) *duty = s_channels[index].duty;
+    } else {
+        *duty = s_channels[index].duty;
+    }
     xSemaphoreGive(s_mutex);
     return ESP_OK;
 }

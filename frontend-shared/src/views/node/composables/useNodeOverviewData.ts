@@ -160,6 +160,13 @@ export function useNodeOverviewData(options: DataOptions) {
 
   const syncStateLabel = computed(() => {
     if (nodeOffline.value) return '离线'
+    /* config_status is the device's actual apply result (applied/failed);
+     * config_sync_state only describes the server's push state. They can
+     * disagree: after ConfigResult=false the server may still be "in_sync"
+     * with the manifest it sent, while the device kept its old config. Show
+     * the device truth, otherwise a rejected SPI/ADC channel looks healthy. */
+    if (node.value?.config_status === 'failed') return '配置失败'
+    if (node.value?.config_status === 'pending') return '配置处理中'
     return configSyncStateLabel(node.value?.config_sync_state)
   })
 
@@ -246,8 +253,8 @@ export function useNodeOverviewData(options: DataOptions) {
       void fetchChannels()
       void fetchEvents()
       void fetchDevices()
-      if (options.activeTab() === '总线配置') void options.fetchBusData()
-      if (options.activeTab() === 'OTA 历史') void fetchOTAHistory()
+      if (options.activeTab() === '总线与通道') void options.fetchBusData()
+      if (options.activeTab() === '固件升级') void fetchOTAHistory()
       // 在线且无延迟数据时自动测一次延迟
       if (result.status === 'online' && !result.ping_latency_ms && !result.latency_ms) {
         options.onOnlineWithoutLatency()

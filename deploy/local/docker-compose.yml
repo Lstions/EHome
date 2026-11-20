@@ -1,0 +1,79 @@
+name: ehome-local
+
+# 本机隔离部署：不占用 80/443/5432，也不复用任何既有容器名。
+# 启动：
+#   docker compose --env-file deploy/local/.env -f deploy/local/docker-compose.yml up -d --build
+# 访问：
+#   http://<本机局域网 IP>:18080
+# 设备 mTLS：
+#   0.0.0.0:18443 -> 容器 18443（.secrets/pki 只读挂载）
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    container_name: ehome-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?err — POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err — POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ehome}
+    volumes:
+      - ehome-local-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  ehome:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: ehome-local-web
+    restart: unless-stopped
+    ports:
+      - "${LOCAL_WEB_PORT:-18080}:8080"
+      - "${LOCAL_DEVICE_PORT:-18443}:18443"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      EHOME_DB_SSLMODE: disable
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required}
+      EHOME_JWT_SECRET: ${EHOME_JWT_SECRET:?err — EHOME_JWT_SECRET is required}
+      EHOME_ALLOWED_ORIGINS: ""
+      EHOME_STATIC_DIR: /app/static/dist
+      EHOME_DATA_RETENTION_DAYS: "90"
+      # 真机 mTLS：证书三件套齐全即自动启用 18443 监听。
+      EHOME_DEVICE_ADDR: 0.0.0.0:18443
+      EHOME_DEVICE_CERT_FILE: /app/pki/server-203.crt
+      EHOME_DEVICE_KEY_FILE: /app/pki/server-203.key
+      EHOME_DEVICE_CLIENT_CA_FILE: /app/pki/ca.pem
+    volumes:
+      - ../../backend/firmwares:/app/firmwares
+      - ../../.secrets/pki:/app/pki:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 300s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  ehome-local-pgdata:

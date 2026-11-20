@@ -25,6 +25,18 @@
 #include "driver/uart.h"
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
+#ifdef ESP_PLATFORM
+#include "esp_adc/adc_oneshot.h"
+#else
+/* Host tests compile this header without the ESP-IDF esp_adc component. The
+ * ADC context only needs opaque handles/enums; bus_dma.c itself is built for
+ * the target with the real header. */
+typedef void *adc_oneshot_unit_handle_t;
+typedef int adc_unit_t;
+typedef int adc_channel_t;
+typedef int adc_atten_t;
+typedef int adc_bitwidth_t;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +62,11 @@ extern "C" {
  * usb_serial_jtag_vfs_use_driver() routes console reads/writes through the same
  * driver, so logs and sensor traffic coexist. */
 #define BUS_TYPE_USB   4
+/* ADC is a transport-like channel: it owns a physical unit/channel/pin and
+ * an attenuation/bit-width configuration, but has no TX/RX frames. The
+ * scheduler never dispatches to it; it exists so a configured ADC channel
+ * reaches ConfigResult success and can be read through the periph path. */
+#define BUS_TYPE_ADC   5
 
 /* === Bus config helper === */
 
@@ -78,6 +95,7 @@ static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
      * there is no bus_config to read.  Report "DMA enabled" so a caller that
      * treats this as "use the large buffers" gets the streaming behaviour. */
     case BUS_TYPE_USB:  return true;
+    case BUS_TYPE_ADC:  return false; /* ADC has no DMA lease */
     default: return true;
     }
 
@@ -133,6 +151,14 @@ typedef struct {
              * because several logical channels may share the one endpoint. */
             uint32_t ref_count;
         } usb;
+        struct {
+            adc_oneshot_unit_handle_t unit_handle;
+            adc_unit_t    unit;
+            adc_channel_t channel;
+            adc_atten_t   atten;
+            adc_bitwidth_t bitwidth;
+            int           pin;
+        } adc;
     } cfg;
 } bus_dma_ctx_t;
 
@@ -253,6 +279,21 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx);
 esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
                            const uint8_t *tx, size_t tx_len,
                            uint8_t *rx, size_t rx_size, size_t *rx_len);
+
+/**
+ * Probe an inclusive 7-bit I2C address range and collect ACKed addresses.
+ *
+ * Only valid on an initialized I2C context. The caller owns the output
+ * buffer; *count is always set to the number of addresses written (0 on
+ * error). A bus with no slave returns ESP_OK and *count==0: an empty scan is
+ * a valid result, not a failure.
+ */
+esp_err_t bus_dma_i2c_scan(const bus_dma_ctx_t *ctx, uint8_t start_addr,
+                           uint8_t end_addr, uint32_t timeout_ms,
+                           uint8_t *addresses, size_t capacity, size_t *count);
+
+/** Read one raw sample from a configured ADC channel. */
+esp_err_t bus_dma_adc_read(const bus_dma_ctx_t *ctx, int *raw);
 
 /**
  * @brief Initialize UART0 boot mode manager.

@@ -20,6 +20,7 @@
  * | `on_scan_req_received` | 空函数 | 扫描请求**被静默忽略** |
  * | `on_modbus_scan_req_received` | 空函数 | 同上 |
  * | `on_query_resources_received` | 空函数 | 资源查询**被静默忽略** |
+ * | `on_adc_read_received` / `on_dma_selftest_received` | 新增，无弱默认 | 漏实现 = 链接失败 |
  * | `on_channel_cmd_v2_received` | `return false` | 通道命令**被静默拒绝** |
  * | `channel_cmd_v2_current_boot_id` | `NULL` | boot_id 变空 |
  * | `channel_cmd_v2_current_time_ms` | `0` | 时间变 0 |
@@ -56,6 +57,18 @@ void on_write_cmd_received(uint32_t request_id, uint32_t channel_id,
                            const uint8_t *data, size_t len, uint32_t read_size,
                            uint32_t edge_device_id, uint32_t rx_timeout_ms);
 void on_scan_req_received(const char *request_id, uint32_t hardware_id);
+
+/* === 外设 ADC 读取（handler_periph.c 调用；实现在 main/main.c）===
+ *
+ * PeriphCmd(periph_type=3, action=0) 到达后，由 main 找到该逻辑通道绑定的
+ * ADC lease，执行 bus_dma_adc_read()，再通过 msg_handler_send_periph_rsp()
+ * 回 PeriphRsp。禁止弱符号：漏实现必须链接失败。 */
+void on_adc_read_received(uint32_t request_id, uint32_t channel_id);
+
+/* === DMA 数据面自检（handler_periph.c 调用；实现在 main/main.c）===
+ * 用 C6 的 AHB-GDMA 做一次真实内存到内存拷贝并校验；与逻辑 dma_pool
+ * 的 CH1→UART0 预留不同，这条路径直接驱动 GDMA 硬件。 */
+void on_dma_selftest_received(uint32_t request_id);
 void on_modbus_scan_req_received(const char *request_id,
                                  uint32_t start_addr, uint32_t end_addr,
                                  uint32_t timeout_ms);

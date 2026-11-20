@@ -1936,6 +1936,39 @@ static esp_err_t i2c_transact(bus_dma_ctx_t *ctx,
     return r;
 }
 
+esp_err_t bus_dma_i2c_scan(const bus_dma_ctx_t *ctx, uint8_t start_addr,
+                           uint8_t end_addr, uint32_t timeout_ms,
+                           uint8_t *addresses, size_t capacity, size_t *count)
+{
+    if (count) *count = 0;
+    if (!ctx || !ctx->initialized || ctx->bus_type != BUS_TYPE_I2C ||
+        !ctx->cfg.i2c.bus_handle || !addresses || capacity == 0 || !count)
+        return ESP_ERR_INVALID_ARG;
+    if (start_addr < 0x08) start_addr = 0x08;
+    if (end_addr > 0x77) end_addr = 0x77;
+    if (start_addr > end_addr) return ESP_ERR_INVALID_ARG;
+    if (timeout_ms == 0) timeout_ms = 50;
+    if (timeout_ms > 1000) timeout_ms = 1000;
+
+    for (uint16_t addr = start_addr; addr <= end_addr && *count < capacity; addr++) {
+        esp_err_t probe = i2c_master_probe(ctx->cfg.i2c.bus_handle, addr,
+                                           (int)timeout_ms);
+        if (probe == ESP_OK) {
+            addresses[(*count)++] = (uint8_t)addr;
+        } else if (probe != ESP_ERR_TIMEOUT && probe != ESP_ERR_NOT_FOUND &&
+                   probe != ESP_FAIL) {
+            /* A wiring fault (no pull-ups, bus stuck) is not "no device".
+             * Surface it so the UI can distinguish an empty bus from a broken
+             * one; a NACK/timeout per address is the normal empty case. */
+            ESP_LOGW(TAG, "I2C probe 0x%02X failed: %s", addr,
+                     esp_err_to_name(probe));
+        }
+    }
+    ESP_LOGI(TAG, "I2C scan 0x%02X-0x%02X: %u device(s)",
+             start_addr, end_addr, (unsigned)*count);
+    return ESP_OK;
+}
+
 static esp_err_t i2c_deinit(bus_dma_ctx_t *ctx)
 {
     i2c_bus_entry_t *bus_entry = i2c_find_bus(ctx->cfg.i2c.sda_pin,
@@ -1957,6 +1990,109 @@ static esp_err_t i2c_deinit(bus_dma_ctx_t *ctx)
         bus_entry->bus_handle = NULL;
         ESP_LOGI(TAG, "I2C bus deleted (SDA=%d SCL=%d)",
                  ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
+    }
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  ADC init / read / deinit (logical channel, no TX/RX frames)        */
+/* ------------------------------------------------------------------ */
+
+/* One oneshot unit can serve several channels; the driver rejects a second
+ * adc_oneshot_new_unit() for the same unit, so keep a tiny refcounted table. */
+#define ADC_UNIT_SLOTS 2
+static adc_oneshot_unit_handle_t s_adc_units[ADC_UNIT_SLOTS];
+static uint8_t s_adc_unit_refs[ADC_UNIT_SLOTS];
+
+static esp_err_t adc_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
+{
+    /* Layout (matches frontend channelBusConfig.ts and backend docs):
+     *   [0]=unit [1]=channel [2]=pin [3]=attenuation [4]=bit_width */
+    if (!ctx || !cfg || len < 5) return ESP_ERR_INVALID_SIZE;
+    uint8_t unit = cfg[0];
+    uint8_t channel = cfg[1];
+    uint8_t pin = cfg[2];
+    uint8_t atten = cfg[3];
+    uint8_t bits = cfg[4];
+    if (unit < 1 || unit > 2 || channel > 9 ||
+        atten > ADC_ATTEN_DB_12 || bits < ADC_BITWIDTH_9 || bits > ADC_BITWIDTH_12 ||
+        is_pin_reserved(pin))
+        return ESP_ERR_INVALID_ARG;
+
+    const hw_adc_t *resource = NULL;
+    for (int i = 0; i < HW_ADC_COUNT; i++) {
+        if (hw_adcs[i].unit == unit && hw_adcs[i].channel == channel) {
+            resource = &hw_adcs[i];
+            break;
+        }
+    }
+    if (!resource || resource->pin != pin || bits > resource->max_bits)
+        return ESP_ERR_NOT_SUPPORTED;
+
+    /* hw_adcs[].unit is the 1-based human unit number (ADC1 -> 1).
+     * adc_unit_t is zero-based (ADC_UNIT_1 == 0); casting 1 directly selected
+     * ADC_UNIT_2, which does not exist on C6 and returned "invalid unit". */
+    adc_unit_t unit_id = (adc_unit_t)(unit - 1);
+    int slot = (int)unit_id;
+    if (slot < 0 || slot >= ADC_UNIT_SLOTS) return ESP_ERR_NOT_SUPPORTED;
+    if (s_adc_units[slot] == NULL) {
+        adc_oneshot_unit_init_cfg_t unit_cfg = {
+            .unit_id = unit_id,
+            .ulp_mode = ADC_ULP_MODE_DISABLE,
+        };
+        esp_err_t err = adc_oneshot_new_unit(&unit_cfg, &s_adc_units[slot]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ADC unit %u init failed: %s", unit, esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten = (adc_atten_t)atten,
+        .bitwidth = (adc_bitwidth_t)bits,
+    };
+    esp_err_t err = adc_oneshot_config_channel(s_adc_units[slot],
+                                               (adc_channel_t)channel, &chan_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ADC channel %u config failed: %s", channel, esp_err_to_name(err));
+        if (s_adc_unit_refs[slot] == 0) {
+            (void)adc_oneshot_del_unit(s_adc_units[slot]);
+            s_adc_units[slot] = NULL;
+        }
+        return err;
+    }
+
+    s_adc_unit_refs[slot]++;
+    ctx->cfg.adc.unit_handle = s_adc_units[slot];
+    ctx->cfg.adc.unit = unit_id;
+    ctx->cfg.adc.channel = (adc_channel_t)channel;
+    ctx->cfg.adc.atten = (adc_atten_t)atten;
+    ctx->cfg.adc.bitwidth = (adc_bitwidth_t)bits;
+    ctx->cfg.adc.pin = pin;
+    ESP_LOGI(TAG, "ADC%d_CH%u init (pin=%u atten=%u bits=%u)",
+             unit, channel, pin, atten, bits);
+    return ESP_OK;
+}
+
+esp_err_t bus_dma_adc_read(const bus_dma_ctx_t *ctx, int *raw)
+{
+    if (!ctx || !raw || ctx->bus_type != BUS_TYPE_ADC ||
+        !ctx->cfg.adc.unit_handle)
+        return ESP_ERR_INVALID_ARG;
+    return adc_oneshot_read(ctx->cfg.adc.unit_handle, ctx->cfg.adc.channel, raw);
+}
+
+static esp_err_t adc_deinit(bus_dma_ctx_t *ctx)
+{
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    int slot = (int)ctx->cfg.adc.unit;
+    if (slot < 0 || slot >= ADC_UNIT_SLOTS) return ESP_OK;
+    if (s_adc_unit_refs[slot] > 0) s_adc_unit_refs[slot]--;
+    if (s_adc_unit_refs[slot] == 0 && s_adc_units[slot]) {
+        esp_err_t err = adc_oneshot_del_unit(s_adc_units[slot]);
+        s_adc_units[slot] = NULL;
+        if (err != ESP_OK) return err;
+        ESP_LOGI(TAG, "ADC unit %d released", (int)ctx->cfg.adc.unit + 1);
     }
     return ESP_OK;
 }
@@ -1986,6 +2122,7 @@ static esp_err_t bus_dma_init_internal(bus_dma_ctx_t *ctx, uint8_t bus_type,
         case BUS_TYPE_UART: r = uart_port_acquire(ctx, config, config_len); break;
         case BUS_TYPE_SPI:  r = spi_init(ctx, config, config_len);  break;
         case BUS_TYPE_I2C:  r = i2c_init(ctx, config, config_len);  break;
+        case BUS_TYPE_ADC:  r = adc_init(ctx, config, config_len);  break;
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
         case BUS_TYPE_USB:  r = usb_init(ctx, config, config_len);  break;
 #endif
@@ -2128,6 +2265,7 @@ esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx)
         case BUS_TYPE_UART: err = uart_deinit(ctx); break;
         case BUS_TYPE_SPI:  err = spi_deinit(ctx);  break;
         case BUS_TYPE_I2C:  err = i2c_deinit(ctx);  break;
+        case BUS_TYPE_ADC:  err = adc_deinit(ctx);  break;
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
         case BUS_TYPE_USB:  err = usb_deinit(ctx);  break;
 #endif

@@ -121,6 +121,15 @@ static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
         bus_name = "usb";
         id = "USB0";
         break;
+    case BUS_TYPE_ADC:
+        bus_name = "adc";
+        if (bus_config && bus_config_len >= 2)
+            for (int i = 0; i < HW_ADC_COUNT; i++)
+                if (hw_adcs[i].unit == bus_config[0] &&
+                    hw_adcs[i].channel == bus_config[1]) {
+                    id = hw_adcs[i].id; break;
+                }
+        break;
     }
 
     if (id) {
@@ -144,7 +153,8 @@ static void format_resource_hw_id(char *buf, size_t buflen, uint8_t bus_type,
     const char *prefix = bus_type == BUS_TYPE_UART ? "uart" :
                          bus_type == BUS_TYPE_SPI ? "spi" :
                          bus_type == BUS_TYPE_I2C ? "i2c" :
-                         bus_type == BUS_TYPE_USB ? "usb" : "unknown";
+                         bus_type == BUS_TYPE_USB ? "usb" :
+                         bus_type == BUS_TYPE_ADC ? "adc" : "unknown";
     if (!resource_id || resource_id[0] == '\0') {
         snprintf(buf, buflen, "%s/UNKNOWN", prefix);
         return;
@@ -202,6 +212,11 @@ static bool runtime_bus_config_matches(const bus_dma_ctx_t *ctx, uint8_t bus_typ
          * being rejected as "already allocated to a different config". */
         (void)config;
         return true;
+    case BUS_TYPE_ADC:
+        return config_len >= 5 &&
+               (uint8_t)ctx->cfg.adc.unit + 1 == config[0] &&
+               (uint8_t)ctx->cfg.adc.channel == config[1] &&
+               ctx->cfg.adc.pin == config[2];
     default:
         return false;
     }
@@ -214,7 +229,7 @@ static const char *resource_id_for_controller(uint8_t bus_type, uint32_t control
             if ((uint32_t)hw_uarts[i].port == controller_id) return hw_uarts[i].id;
     } else if (bus_type == BUS_TYPE_SPI) {
         for (int i = 0; i < HW_SPI_COUNT; i++)
-            if ((uint32_t)hw_spis[i].port == controller_id) return hw_spis[i].id;
+            if ((uint32_t)(hw_spis[i].port - 1) == controller_id) return hw_spis[i].id;
     } else if (bus_type == BUS_TYPE_I2C) {
         for (int i = 0; i < HW_I2C_COUNT; i++)
             if ((uint32_t)hw_i2cs[i].port == controller_id) return hw_i2cs[i].id;
@@ -267,7 +282,7 @@ static void derive_runtime_hw_id(const bus_runtime_t *rt, char *buf,
         int sclk = config_len >= 9 ? config[8] : -1;
         spi_host_device_t preferred = hw_derive_spi_host(mosi, miso, sclk, SPI_HOST_MAX);
         for (int i = 0; i < HW_SPI_COUNT; i++) {
-            uint32_t host = hw_spis[i].port;
+            uint32_t host = (uint32_t)(hw_spis[i].port - 1);
             if (preferred < SPI_HOST_MAX && host != (uint32_t)preferred) continue;
             if (!controller_in_use(rt, bus_type, host)) {
                 format_resource_hw_id(buf, buflen, bus_type, hw_spis[i].id);
@@ -275,7 +290,7 @@ static void derive_runtime_hw_id(const bus_runtime_t *rt, char *buf,
             }
         }
         for (int i = 0; i < HW_SPI_COUNT; i++) {
-            if (!controller_in_use(rt, bus_type, hw_spis[i].port)) {
+            if (!controller_in_use(rt, bus_type, (uint32_t)(hw_spis[i].port - 1))) {
                 format_resource_hw_id(buf, buflen, bus_type, hw_spis[i].id);
                 return;
             }
@@ -354,6 +369,7 @@ static int32_t runtime_controller_id(const bus_dma_ctx_t *ctx)
     case BUS_TYPE_USB:  return -1;   /* fixed endpoint, nothing to lease */
     case BUS_TYPE_SPI:  return (int32_t)ctx->cfg.spi.host;
     case BUS_TYPE_I2C:  return (int32_t)ctx->cfg.i2c.port;
+    case BUS_TYPE_ADC:  return -1;   /* logical ADC channel, no controller lease */
     default: return -1;
     }
 }
@@ -392,7 +408,7 @@ static int resource_index_for_controller(uint8_t bus_type, int32_t controller_id
             if ((int32_t)hw_uarts[i].port == controller_id) return i;
     } else if (bus_type == BUS_TYPE_SPI) {
         for (int i = 0; i < HW_SPI_COUNT; i++)
-            if ((int32_t)hw_spis[i].port == controller_id) return i;
+            if ((int32_t)(hw_spis[i].port - 1) == controller_id) return i;
     } else if (bus_type == BUS_TYPE_I2C) {
         for (int i = 0; i < HW_I2C_COUNT; i++)
             if ((int32_t)hw_i2cs[i].port == controller_id) return i;
@@ -436,6 +452,7 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
     bool used_uart[HW_UART_COUNT] = {false};
     bool used_spi[HW_SPI_COUNT] = {false};
     bool used_i2c[HW_I2C_COUNT] = {false};
+    bool used_adc[HW_ADC_COUNT] = {false};
     bool spi_dma_mode[HW_SPI_COUNT] = {false};
     bool i2c_dma_mode[HW_I2C_COUNT] = {false};
     bool spi_mode_set[HW_SPI_COUNT] = {false};
@@ -684,6 +701,54 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
             used_i2c[resource_index] = true;
             break;
         }
+        case BUS_TYPE_ADC: {
+            /* ADC is a logical channel on a physical unit/channel/pin.
+             * Layout: [unit, channel, pin, attenuation, bit_width].
+             * It has no TX/RX frames and no DMA lease, but it must still
+             * reserve its analog pin so GPIO/PWM and other buses cannot claim
+             * the same physical pin. */
+            if (ch->bus_config_len < 5) {
+                ESP_LOGE(TAG, "ADC ch=%u bus_config_len=%u < 5", (unsigned)ch->id,
+                         (unsigned)ch->bus_config_len);
+                return ESP_ERR_INVALID_SIZE;
+            }
+            int unit = ch->bus_config[0];
+            int channel = ch->bus_config[1];
+            int pin = ch->bus_config[2];
+            uint8_t bits = ch->bus_config[4];
+            if (unit < 1 || pin < 0 || resource_pin_reserved(pin) || bits < 9 || bits > 12) {
+                ESP_LOGE(TAG, "ADC ch=%u invalid unit=%d pin=%d bits=%u",
+                         (unsigned)ch->id, unit, pin, (unsigned)bits);
+                return ESP_ERR_INVALID_ARG;
+            }
+            for (int a = 0; a < HW_ADC_COUNT; a++) {
+                if (hw_adcs[a].unit == unit && hw_adcs[a].channel == channel &&
+                    hw_adcs[a].pin == pin) {
+                    resource_index = a;
+                    resource_id = hw_adcs[a].id;
+                    if (bits > hw_adcs[a].max_bits) {
+                        ESP_LOGE(TAG, "ADC ch=%u bits=%u > max=%u", (unsigned)ch->id,
+                                 (unsigned)bits, (unsigned)hw_adcs[a].max_bits);
+                        return ESP_ERR_NOT_SUPPORTED;
+                    }
+                    break;
+                }
+            }
+            if (resource_index < 0 || used_adc[resource_index]) {
+                ESP_LOGE(TAG, "ADC ch=%u resource not found/duplicate (unit=%d ch=%d pin=%d idx=%d)",
+                         (unsigned)ch->id, unit, channel, pin, resource_index);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            int owner = (BUS_TYPE_ADC << 8) | resource_index;
+            if (!claim_resource_pin(pin_owners, pin, owner)) {
+                ESP_LOGE(TAG, "ADC ch=%u pin %d already owned", (unsigned)ch->id, pin);
+                return ESP_ERR_INVALID_ARG;
+            }
+            used_adc[resource_index] = true;
+            ESP_LOGI(TAG, "ADC ch=%u planned: %s unit=%d channel=%d pin=%d bits=%u",
+                     (unsigned)ch->id, resource_id, unit, channel, pin, (unsigned)bits);
+            break;
+        }
         case BUS_TYPE_USB: {
             /* Native USB Serial/JTAG as a data bus.
              *
@@ -752,9 +817,11 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
             if (ch->bus_type == BUS_TYPE_UART)
                 plan[i].controller_id = (int32_t)uart->port;
             else if (ch->bus_type == BUS_TYPE_SPI)
-                plan[i].controller_id = (int32_t)hw_spis[resource_index].port;
+                plan[i].controller_id = (int32_t)(hw_spis[resource_index].port - 1);
             else if (ch->bus_type == BUS_TYPE_I2C)
                 plan[i].controller_id = (int32_t)hw_i2cs[resource_index].port;
+            else if (ch->bus_type == BUS_TYPE_ADC)
+                plan[i].controller_id = -1;   /* logical ADC channel */
             else if (ch->bus_type == BUS_TYPE_USB)
                 plan[i].controller_id = -1;   /* no controller to pin */
         }
@@ -784,6 +851,7 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
             
             /* DMA allocation: check user preference first, then try pool */
             bool dma = false;
+            uint32_t dma_id = 0;
             char hw_id[16];
             if (preferred_controller >= 0) {
                 const char *resource_id = resource_id_for_controller(
@@ -806,7 +874,6 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                     rt->bus_ch[i] = 0;
                     return ESP_ERR_INVALID_STATE;
                 }
-                uint32_t dma_id = 0;
                 esp_err_t dma_err = dma_pool_allocate(rt->dma_pool, bus_type,
                                                         hw_id, &dma_id);
                 if (dma_err == ESP_OK) {
@@ -853,6 +920,17 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                 case BUS_TYPE_SPI:  controller_id = (uint32_t)rt->bus_ctx[i].cfg.spi.host; break;
                 case BUS_TYPE_I2C:  controller_id = (uint32_t)rt->bus_ctx[i].cfg.i2c.port; break;
                 default: break;
+                }
+                /* Self-heal: the same transaction's cleanup may have cleared
+                 * the pool entry before this controller was re-initialized.
+                 * The UART driver is now genuinely using dma_id, so make the
+                 * ResourceReport say so instead of reporting a free channel. */
+                if (dma && rt->dma_pool) {
+                    esp_err_t bind_err = dma_pool_mark_bound(rt->dma_pool, dma_id, hw_id);
+                    if (bind_err != ESP_OK) {
+                        ESP_LOGW(TAG, "ch=%" PRIu32 " DMA re-assert failed: %s",
+                                 ch_id, esp_err_to_name(bind_err));
+                    }
                 }
                 hw_profile_runtime_set(ch_id, bus_type, controller_id,
                                        dma_requested, dma, generation);

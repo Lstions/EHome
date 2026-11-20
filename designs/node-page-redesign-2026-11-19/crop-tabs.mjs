@@ -1,0 +1,10 @@
+import { chromium } from "/mnt/storage/WorkSpace/EHome/frontend-shared/node_modules/.pnpm/playwright-core@1.62.0/node_modules/playwright-core/index.mjs";
+import path from "node:path";
+const ROOT = "/mnt/storage/WorkSpace/EHome/designs/node-page-redesign-2026-11-19";
+const b = await chromium.launch({ executablePath: process.env.HOME + "/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome", args: ["--no-sandbox"] });
+const p = await b.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 2 });
+await p.goto("file://" + path.join(ROOT, "index.html"));
+await p.waitForTimeout(300);
+await p.locator(".tabs").screenshot({ path: path.join(ROOT, "shots", "crop-tabs.png") });
+await p.locator(".node-actions").screenshot({ path: path.join(ROOT, "shots", "crop-node-actions.png") });
+await b.close();

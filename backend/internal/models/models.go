@@ -636,6 +636,11 @@ type DmaChannelInfo struct {
 	State         uint8  `json:"state"` // 0=free, 1=allocated, 2=disabled
 	BoundTo       string `json:"bound_to"`
 	CompatibleBus uint8  `json:"compatible_bus"`
+	// DeviceAllocated is true when the device's channel report says at least
+	// one DMA-enabled channel actually got a DMA lease for this bus. It is
+	// derived from hardware_info.channels[].dma_allocated, not from config
+	// intent; nil/false means the device did not confirm it.
+	DeviceAllocated bool `json:"device_allocated"`
 }
 
 // DmaChannelConfig represents DMA channel configuration to send to device

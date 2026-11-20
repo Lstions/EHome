@@ -28,6 +28,7 @@
             <el-radio-button value="unconfigured">未配置 {{ counts.unconfigured }}</el-radio-button>
           </el-radio-group>
         </div>
+        <div ref="bodyRef" class="resource-body" :class="{ 'is-empty': visibleRows.length === 0 }" :style="filterBodyStyle">
         <p v-if="visibleRows.length === 0" class="filter-empty" role="status">
           {{ filter === 'configured' ? '该节点当前没有已配置的 GPIO 引脚。' : '所有引脚都已配置。' }}
         </p>
@@ -89,6 +90,7 @@
               :data-testid="`configure-gpio-${row.pin}`"
               size="small"
               type="primary"
+              plain
               :disabled="offline"
               @click="emit('configure', row.pin)"
             >配置 GPIO</el-button>
@@ -100,13 +102,14 @@
           <div v-if="row.feedback" class="feedback" role="status">{{ row.feedback }}</div>
         </li>
         </ul>
+        </div>
       </template>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import type { GPIOBusResource } from '@/api/node'
 import { gpioApi, type GPIOConfig } from '@/api/periph'
 import { useGuardedOperation } from '@/composables/useGuardedOperation'
@@ -189,6 +192,20 @@ const visibleRows = computed(() => {
   return rows.value.filter(row => row.state !== 'configured')
 })
 
+// 过滤会把列表高度从 N 行缩到 0/1 行；若页面已滚到下方，浏览器会把 scrollTop
+// 钳到新的最大值，用户看到的就是"点一下筛选就跳回顶部"。在过滤态保留「全部」
+// 时量到的高度，让卡片不塌陷；切回全部时再重新量。
+const bodyRef = ref<HTMLElement | null>(null)
+const filterBodyHeight = ref(0)
+const filterBodyStyle = computed(() => filter.value === 'all' || filterBodyHeight.value <= 0
+  ? {}
+  : { minHeight: `${filterBodyHeight.value}px` })
+watch([rows, filter], async () => {
+  if (filter.value !== 'all') return
+  await nextTick()
+  filterBodyHeight.value = bodyRef.value?.offsetHeight || 0
+}, { immediate: true })
+
 function directionLabel(direction: number): string {
   return ['INPUT', 'OUTPUT', 'INPUT_PULLUP', 'INPUT_PULLDOWN'][direction] || 'UNKNOWN'
 }
@@ -219,6 +236,9 @@ defineExpose({ applyRuntimeLevel })
 
 <style scoped>
 .gpio-resource-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.resource-body { display: flex; flex-direction: column; min-height: 0; }
+.resource-body.is-empty { align-items: center; justify-content: center; }
+.resource-body.is-empty .filter-empty { border: 0; padding: 0; text-align: center; }
 /* D6：过滤条与"筛选后为空"的说明。 */
 .row-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .filter-empty { margin: 0; padding: 12px 16px; color: var(--el-text-color-secondary); font-size: 13px; border: 1px dashed var(--el-border-color); border-radius: 8px; }

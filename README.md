@@ -149,6 +149,19 @@ docker compose up -d
 
 首次部署时，容器每次启动都会在日志中输出一个 10 分钟有效的一次性初始化凭据；打开登录页后粘贴凭据并设置管理员账号。完成初始化后，后续启动不再输出凭据。
 
+### 4.1 本机隔离部署
+
+不占用 80/443/5432，使用独立容器名、卷与端口（18080/18443），用于本机演示与真机接入：
+
+```bash
+cd deploy/local
+./gen-env.sh
+docker compose --env-file .env -f docker-compose.yml up -d --build
+./bootstrap-admin.sh
+```
+
+详见 [deploy/local/README.md](deploy/local/README.md)。
+
 ## 协议
 
 二进制帧协议（protobuf wire 格式兼容），1 字节 type + key-value 字段。

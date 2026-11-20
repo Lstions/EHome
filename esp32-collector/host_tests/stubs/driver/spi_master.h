@@ -6,9 +6,13 @@
 #include "esp_err.h"
 
 typedef int spi_host_device_t;
-#define SPI2_HOST 2
-#define SPI3_HOST 3
-#define SPI_HOST_MAX 4
+/* Match ESP-IDF's spi_host_device_t: SPI1_HOST=0, SPI2_HOST=1.
+ * hw_spis[].port remains the human port number (2), and bus_manager maps it
+ * to this enum; keeping the stub at 2 hid that mapping bug in host tests. */
+#define SPI1_HOST 0
+#define SPI2_HOST 1
+#define SPI3_HOST 2  /* not present on C6; valid as an out-of-range sentinel */
+#define SPI_HOST_MAX 2
 
 #define SPI_DMA_CH_AUTO    1
 #define SPI_DMA_DISABLED   0

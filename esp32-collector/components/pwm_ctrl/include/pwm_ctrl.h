@@ -87,7 +87,9 @@ esp_err_t pwm_ctrl_set_freq(int channel, uint32_t freq, uint8_t resolution);
 /** Set resolution for a running reported PWM channel. */
 esp_err_t pwm_ctrl_set_resolution(int channel, uint8_t resolution);
 
-/** Get current duty (0-10000) for a running reported PWM channel. */
+/** Get the configured/current duty (0-10000) for a reported PWM channel.
+ *  Returns ESP_OK for a configured-but-stopped channel too; use
+ *  pwm_ctrl_is_running() for the running bit. */
 esp_err_t pwm_ctrl_get_duty(int channel, uint16_t *duty);
 
 /** Deconfigure a reported PWM channel. Idempotent. */

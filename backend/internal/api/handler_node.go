@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -330,9 +331,45 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		// NOTE: requires MQTT broadcast I2C_SCAN to node firmware
+		// Resolve the selected hardware resource to the logical channel the
+		// firmware knows (ScanReq carries the channel id, not the resource name).
+		var ch models.Channel
+		q := db.Where("node_id = ? AND UPPER(hardware_type) = ?", node.NodeID, "I2C")
+		if numeric, err := strconv.ParseUint(strings.TrimSpace(req.HardwareID), 10, 64); err == nil {
+			q = q.Where("id = ?", numeric)
+		} else {
+			q = q.Where("hardware_id = ?", strings.TrimSpace(req.HardwareID))
+		}
+		if err := q.First(&ch).Error; err != nil {
+			Error(c, http.StatusBadRequest, "该 I2C 资源尚未创建通道，无法扫描")
+			return
+		}
+		if !ch.Enabled {
+			Error(c, http.StatusBadRequest, "I2C 通道已禁用，无法扫描")
+			return
+		}
+
+		// The scan is a real round-trip: publish ScanReq now and wait for the
+		// firmware ScanRpt correlated by request_id. The old handler returned a
+		// synthetic empty list without touching the device, so "未发现设备" was
+		// indistinguishable from "never scanned".
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		requestID, addresses, err := nodeMgr.SendI2CScan(ctx, node.NodeID, uint32(ch.ID))
+		if err != nil {
+			Error(c, http.StatusGatewayTimeout, err.Error())
+			return
+		}
+		devices := make([]string, 0, len(addresses))
+		for _, addr := range addresses {
+			devices = append(devices, fmt.Sprintf("0x%02X", addr))
+		}
 		Success(c, gin.H{
-			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%s-%d", node.NodeID, time.Now().Unix()),
+			"devices":       devices,
+			"addresses":     addresses,
+			"address_count": len(devices),
+			"request_id":    requestID,
+			"channel_id":    ch.ID,
 		})
 	})
 
@@ -501,8 +538,10 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			}
 		}
 
-		// Merge config intent: if dma_configs says enabled=true but device state=2(disabled),
-		// override state to 0(free) — config has been pushed but device hasn't reported back yet.
+		// Merge config intent: the device's ResourceReport can lag behind a
+		// just-applied manifest (or omit bound_to), while node.Config is the
+		// persisted intent. Reflect both enabled state and binding so the UI
+		// doesn't show "free" after a successful bind.
 		var configDmas []models.DmaChannelConfig
 		if node.Config != "" {
 			var cfg map[string]interface{}
@@ -514,19 +553,61 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 				}
 			}
 		}
-		if len(configDmas) > 0 {
-			configMap := make(map[uint32]bool)
-			for _, cd := range configDmas {
-				configMap[cd.DmaID] = cd.Enabled
+		// Device confirmation is a separate fact from config intent. The
+		// ResourceReport channel entries carry dma_allocated=true only after
+		// the UART/SPI/I2C driver really acquired a DMA lease. Expose it so the
+		// UI can distinguish "配置已下发" from "设备已确认分配".
+		deviceAllocatedByBus := map[uint8]bool{}
+		if node.HardwareInfo != "" {
+			var info struct {
+				Channels []struct {
+					BusType      uint8 `json:"bus_type"`
+					DmaAllocated bool  `json:"dma_allocated"`
+				} `json:"channels"`
 			}
-			for i := range channels {
-				if enabled, ok := configMap[channels[i].DmaID]; ok {
-					if enabled && channels[i].State == 2 {
-						channels[i].State = 0 // config says enabled, device hasn't caught up
-					} else if !enabled && channels[i].State != 2 {
-						channels[i].State = 2 // config says disabled
+			if err := json.Unmarshal([]byte(node.HardwareInfo), &info); err == nil {
+				for _, ch := range info.Channels {
+					if ch.DmaAllocated {
+						deviceAllocatedByBus[ch.BusType] = true
 					}
 				}
+			}
+		}
+		busOfBind := func(bind string) uint8 {
+			switch {
+			case strings.HasPrefix(bind, "uart/"):
+				return 1
+			case strings.HasPrefix(bind, "i2c/"):
+				return 2
+			case strings.HasPrefix(bind, "spi/"):
+				return 3
+			default:
+				return 0
+			}
+		}
+		if len(configDmas) > 0 {
+			configMap := make(map[uint32]models.DmaChannelConfig, len(configDmas))
+			for _, cd := range configDmas {
+				configMap[cd.DmaID] = cd
+			}
+			for i := range channels {
+				cd, ok := configMap[channels[i].DmaID]
+				if !ok {
+					continue
+				}
+				if cd.Enabled {
+					channels[i].State = 1 // allocated (config intent)
+					channels[i].BoundTo = cd.BindTo
+					channels[i].DeviceAllocated = deviceAllocatedByBus[busOfBind(cd.BindTo)]
+				} else {
+					channels[i].State = 2 // disabled
+					channels[i].BoundTo = ""
+				}
+			}
+		}
+		for i := range channels {
+			if channels[i].State == 1 && channels[i].BoundTo != "" {
+				channels[i].DeviceAllocated = deviceAllocatedByBus[busOfBind(channels[i].BoundTo)] || channels[i].DeviceAllocated
 			}
 		}
 

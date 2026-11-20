@@ -58,6 +58,13 @@ func isUARTChannel(ch *models.Channel) bool {
 	return strings.EqualFold(strings.TrimSpace(ch.HardwareType), "UART")
 }
 
+func isADCChannel(ch *models.Channel) bool {
+	if ch == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(ch.HardwareType), "ADC")
+}
+
 func validateTransportChannel(ch *models.Channel) error {
 	if ch == nil {
 		return fmt.Errorf("channel is required")
@@ -851,7 +858,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 纵深防御（2026-10-03）：UART 的波特率只存在 bus_config 里，空串会造出
 			// 一个"以后改不了波特率"的通道。前端已不再静默产出空串，但后端不能把
 			// "调用方一定会带合法 bus_config"当契约 —— 这里按节点已上报的资源能力补齐。
-			if isUARTChannel(&ch) {
+			if isUARTChannel(&ch) || isADCChannel(&ch) {
 				if err := ensureBusConfigExtras(&node, &ch); err != nil {
 					return err
 				}
@@ -1036,7 +1043,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 空值按节点已上报的能力补齐，查不到资源则 fail-closed 报 400。
 			// 注意：只在调用方**确实要写 bus_config** 或类型含 UART 时才校验，
 			// 避免"改个名字/开关"被无关能力缺失挡住（既有行为不做无谓加严）。
-			if isUARTChannel(&finalCandidate) && (dto.BusConfig != nil || dto.HardwareType != nil) {
+			if (isUARTChannel(&finalCandidate) && (dto.BusConfig != nil || dto.HardwareType != nil)) || isADCChannel(&finalCandidate) {
 				before := finalCandidate.BusConfig
 				if err := ensureBusConfigExtras(&node, &finalCandidate); err != nil {
 					return err

@@ -12,7 +12,6 @@ import NodeOverview from '../NodeOverview.vue'
  */
 const BUS_SOURCE_FILES = [
   'src/views/node/components/BusConfigPanel.vue',
-  'src/views/node/components/BusCreatedChannelsCard.vue',
   'src/views/node/composables/useBusConfig.ts',
   'src/views/node/composables/busResourceHelpers.ts',
 ] as const
@@ -151,12 +150,16 @@ const stubs = {
 async function openBusTab() {
   const wrapper = mount(NodeOverview, { global: { stubs } })
   await flushPromises()
-  await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+  await wrapper.findAll('.tab-item').find(item => item.text().includes('总线与通道'))?.trigger('click')
   await flushPromises()
   return wrapper
 }
 async function selectBus(wrapper: any, label: string) {
-  await wrapper.findAll('.bus-subtab').find((b: any) => b.text().includes(label))?.trigger('click')
+  await wrapper.findAll('.bus-seg-btn').find((b: any) => b.text().includes(label))?.trigger('click')
+  await flushPromises()
+}
+async function selectResource(wrapper: any, id: string) {
+  await wrapper.find(`[data-resource-id="${id}"]`).trigger('click')
   await flushPromises()
 }
 
@@ -199,19 +202,23 @@ describe('B2 掩码口径必须与 ESP32 设备侧一致（不得放宽）', () 
 describe('A：总线配置页必须渲染"已创建通道"列表', () => {
   it('通道以列表行呈现（名称/标识/使能/所属资源），而不是只有一个数字', async () => {
     const wrapper = await openBusTab()
+    await selectBus(wrapper, 'UART')
+    await selectResource(wrapper, 'UART1')
     const card = wrapper.find('[data-created-channels]')
-    expect(card.exists(), '总线配置页必须有已创建通道卡').toBe(true)
+    expect(card.exists(), '总线配置页必须有已创建通道区').toBe(true)
     const rows = wrapper.findAll('.bus-channel-item')
     expect(rows, '通道必须渲染成列表行').toHaveLength(1)
     const text = rows[0].text()
-    expect(text).toContain('光学雨量计')   // 通道名
-    expect(text).toContain('UART1')       // 硬件标识
-    expect(text).toContain('已启用')       // 使能状态
-    expect(text).toContain('资源 UART1')   // 绑定的资源（与资源表同口径）
+    expect(text).toContain('光学雨量计')
+    expect(text).toContain('UART1')
+    expect(text).toContain('正常')
+    expect(rows[0].attributes('data-resource-id'), '通道行必须标明所属资源').toBe('UART1')
   })
 
   it('每行有进入该通道配置的入口，且点击后打开编辑态对话框', async () => {
     const wrapper = await openBusTab()
+    await selectBus(wrapper, 'UART')
+    await selectResource(wrapper, 'UART1')
     const btn = wrapper.find('[data-edit-channel="1"]')
     expect(btn.exists(), '每行必须有配置入口').toBe(true)
     await btn.trigger('click')
@@ -229,17 +236,17 @@ describe('A：总线配置页必须渲染"已创建通道"列表', () => {
     expect(wrapper.find('[data-created-channels]').exists()).toBe(true)
     const empty = wrapper.find('[data-created-channels-empty]')
     expect(empty.exists(), '无通道时必须给出空态说明').toBe(true)
-    expect(empty.text()).toContain('暂无已创建通道')
+    expect(empty.text()).toContain('还没有通道')
     expect(wrapper.findAll('.bus-channel-item')).toHaveLength(0)
   })
 
-  it('通道列表与资源清单是两个层级：资源表照常渲染，二者不得互相替代', async () => {
+  it('通道列表与资源清单是两个层级：资源清单照常渲染，二者不得互相替代', async () => {
     const wrapper = await openBusTab()
     await selectBus(wrapper, 'UART')
-    expect(wrapper.findAll('.bus-table tbody tr').length, '资源清单仍在').toBe(2)
+    await selectResource(wrapper, 'UART1')
+    expect(wrapper.findAll('.bus-res-card').length, '资源清单仍在').toBe(2)
     expect(wrapper.findAll('.bus-channel-item').length, '通道清单同时存在').toBe(1)
-    // 数字列也不得被删（它仍是资源视角的摘要）
-    expect(wrapper.findAll('.bus-table tbody tr')[1].text()).toContain('1')
+    expect(wrapper.find('[data-resource-id="UART1"]').text(), '资源卡保留通道数摘要').toContain('通道 1')
   })
 })
 
@@ -277,21 +284,18 @@ describe('B1：DMA 必须可选资源（不是只能开关）', () => {
   it('UART（只有 1 条候选 CH1）保留开关形态，不退化也不消失', async () => {
     const wrapper = await openBusTab()
     await selectBus(wrapper, 'UART')
-    const rows = wrapper.findAll('.bus-table tbody tr')
-    // UART0 候选为空→说明原因；UART1 候选唯一→开关
-    const uart1Switches = rows[1].findAll('.el-switch')
-    expect(uart1Switches, '单候选仍用开关（形态不变）').toHaveLength(1)
-    expect(uart1Switches[0].attributes('aria-label')).toContain('GDMA_CH1')
-    expect(rows[1].find('[data-dma-select]').exists()).toBe(false)
+    const switches = wrapper.findAll('.bus-dma-inline .el-switch')
+    expect(switches, '单候选仍用开关（形态不变）').toHaveLength(1)
+    expect(switches[0].attributes('aria-label')).toContain('GDMA_CH1')
+    expect(wrapper.find('[data-dma-select]').exists()).toBe(false)
   })
 
   it('候选为 0 时不得留下空控件，且必须给出原因（B3）', async () => {
     const wrapper = await openBusTab()
     await selectBus(wrapper, 'I2C')
-    const row = wrapper.findAll('.bus-table tbody tr')[0]
-    expect(row.find('[data-dma-select]').exists()).toBe(false)
-    expect(row.findAll('.el-switch'), '不得给出点不动的空开关').toHaveLength(0)
-    const hint = row.find('[data-dma-none="I2C0"]')
+    expect(wrapper.find('[data-dma-select]').exists()).toBe(false)
+    expect(wrapper.findAll('.bus-dma-inline .el-switch'), '不得给出点不动的空开关').toHaveLength(0)
+    const hint = wrapper.find('[data-dma-none="I2C0"]')
     expect(hint.exists(), '必须显式说明原因').toBe(true)
     expect(hint.text()).toContain('该总线暂无可兼容的 DMA 资源')
   })
@@ -299,11 +303,9 @@ describe('B1：DMA 必须可选资源（不是只能开关）', () => {
   it('B3 反例（分类器自检）：不支持 DMA 的总线给 "—"，不得谎称"暂无可兼容资源"', async () => {
     const wrapper = await openBusTab()
     await selectBus(wrapper, 'ADC')
-    // ADC 没有掩码位 ⇒ 走既有的 busSupportsDma 分支渲染 "—"（改前行为，保持不变）
     expect(wrapper.find('[data-dma-none="ADC1_CH0"]').exists()).toBe(false)
-    const cell = wrapper.findAll('.bus-table tbody tr')[0].findAll('td')[6]
-    expect(cell.text().trim()).toBe('—')
-    // 分类器自检的核心：两者措辞必须不同 —— "本来就不支持" ≠ "有这条总线但没兼容资源"
+    const cell = wrapper.find('.bus-dma-inline')
+    expect(cell.text().trim()).toContain('—')
     expect(cell.text()).not.toContain('暂无可兼容')
   })
 })
@@ -312,7 +314,7 @@ describe('B1：DMA 必须可选资源（不是只能开关）', () => {
 describe('源码级防回退（改回旧行为必须变红）', () => {
   it('DMA 单元格不得退回"无条件单个 el-switch"', () => {
     // 候选 >1 时必须走 el-select；若有人把选择器删掉、只留 el-switch，这里会红
-    expect(source).toContain('resourceDmaCandidates(resource).length > 1')
+    expect(source).toMatch(/resourceDmaCandidates\([^)]*\)\.length > 1/)
     expect(source).toContain('changeResourceDma')
     expect(source).toContain('dmaSelectionFor')
   })

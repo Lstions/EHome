@@ -61,6 +61,7 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
     return ESP_OK;
 }
 esp_err_t dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id) { (void)pool; (void)hw_id; return ESP_OK; }
+esp_err_t dma_pool_mark_bound(dma_pool_t *pool, uint32_t dma_id, const char *hw_id) { (void)pool; (void)dma_id; (void)hw_id; return ESP_OK; }
 void dma_pool_init(dma_pool_t *pool, const hw_dma_t *table, int count) {
     (void)pool; (void)table; (void)count;
 }

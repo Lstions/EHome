@@ -63,7 +63,7 @@
           <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!nodeOffline">
             <span>
               <button class="btn btn-primary" :disabled="nodeOffline" @click="showOTADialog = true">
-                <el-icon :size="14"><UploadFilled /></el-icon>OTA 升级
+                <el-icon :size="14"><Upload /></el-icon>OTA 升级
               </button>
             </span>
           </el-tooltip>
@@ -88,7 +88,7 @@
             <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!nodeOffline">
               <span>
                 <button class="btn btn-plain" :disabled="nodeOffline || deviceOpBusy" @click="handleDeviceOp('factory_reset')">
-                  <el-icon :size="14" :class="{ spin: deviceOpBusy && deviceOpInFlight === 'factory_reset' }"><Delete /></el-icon>{{ deviceOpInFlight === 'factory_reset' ? '恢复中...' : '恢复出厂' }}
+                  <el-icon :size="14" :class="{ spin: deviceOpBusy && deviceOpInFlight === 'factory_reset' }"><RefreshLeft /></el-icon>{{ deviceOpInFlight === 'factory_reset' ? '恢复中...' : '恢复出厂' }}
                 </button>
               </span>
             </el-tooltip>
@@ -347,26 +347,25 @@
       </template>
 
       <!-- 总线配置：布局对齐 designs/new-node-2.png；资源全部来自节点上报能力 -->
-      <template v-else-if="activeTab === '总线配置'">
+      <template v-else-if="activeTab === '总线与通道'">
         <BusConfigPanel
           :node-online="nodeOnline"
           :node-offline="nodeOffline"
           :capabilities="capabilities"
           :channels="channels"
+          :devices="devices"
           :dma-channels="dmaChannels"
           :dma-toggling="dmaToggling"
           :active-bus-type="activeBusType"
           :selected-resource-id="selectedResourceId"
-          :bus-page="busPage"
-          :bus-page-size="busPageSize"
           :bus-loading="busLoading"
           :bus-load-error="busLoadError"
           :resource-querying="resourceQuerying"
           :i2c-scanning="i2cScanning"
           :scan-result="scanResult"
-          :baud-tool-selection="baudToolSelection"
-          :baud-tool-selection-text="baudToolSelectionText"
-          :baud-tool-available="baudToolAvailable"
+          :adc-reading-id="adcReadingId"
+          :adc-result="adcResult"
+          :adc-error="adcError"
           @refresh-resources="requestBusResourceRefresh"
           @retry-load="fetchBusData"
           @select-bus-type="selectBusType"
@@ -374,22 +373,11 @@
           @change-dma="changeResourceDma"
           @toggle-dma="toggleResourceDma"
           @scan="scanSelectedI2C"
+          @read-adc="readAdc"
           @navigate-channels="navigateToNodeChannels"
           @open-channel-manager="openChannelManager"
-          @bus-page-change="busPage = $event"
-          @open-baud-tool="openBaudToolInline"
-        />
-        <BusCreatedChannelsCard
-          :channels="channels"
-          :channels-loading="channelsLoading"
-          :node-offline="nodeOffline"
-          :node-serial="nodeSerial"
-          :capabilities="capabilities"
-          :active-bus-type="activeBusType"
-          :baud-max="baudMax"
-          :refresh-channels="fetchChannels"
           @edit-channel="editChannel"
-          @navigate-channels="navigateToNodeChannels"
+          @delete-channel="deleteChannel"
         />
       </template>
 
@@ -399,7 +387,7 @@
            FR-I1/I2/I3 已标 ✅ 但生产无入口 —— 本 TAB 是能力接线，不是新功能。
            写后回填：本页订阅 WS periph_result，经 registerPending* 登记请求后按 request_id
            代际校验回填（与 ChannelPanel 同一套语义，见 onPeriphResult）。 -->
-      <template v-else-if="activeTab === '外设控制'">
+      <template v-else-if="activeTab === '外设'">
         <PeripheralControl
           :ref="setPeripheralControlRef"
           :node-id="nodeSerial"
@@ -413,12 +401,16 @@
         />
       </template>
 
-      <!-- DMA 通道：只读资源视图，绑定操作在总线配置 TAB -->
+      <!-- DMA 分配：可筛选、可解绑、可跳转的分配清单 -->
       <DmaChannelsCard
-        v-else-if="activeTab === 'DMA 通道'"
+        v-else-if="activeTab === 'DMA 分配'"
         :dma-channels="dmaChannels"
         :dma-loading="dmaLoading"
         :capabilities="capabilities"
+        :node-serial="nodeSerial"
+        :node-offline="nodeOffline"
+        @goto-resource="focusBusResource"
+        @goto-bus="gotoBusTab"
       />
 
       <!-- 关联设备 -->
@@ -436,7 +428,7 @@
 
       <!-- OTA 历史 -->
       <NodeOtaHistoryCard
-        v-else-if="activeTab === 'OTA 历史'"
+        v-else-if="activeTab === '固件升级'"
         :ota-history="otaHistory"
         :ota-history-loading="otaHistoryLoading"
         :node-offline="nodeOffline"
@@ -445,7 +437,7 @@
       />
 
       <!-- 系统日志 -->
-      <template v-else-if="activeTab === '系统日志'">
+      <template v-else-if="activeTab === '日志'">
         <section class="card log-card">
           <div class="card-head"><span class="card-title">系统日志</span></div>
           <LogPanel :collector-id="nodeSerial" :node-device-id="node?.node_id" />
@@ -453,7 +445,7 @@
       </template>
 
       <!-- 通道终端 -->
-      <template v-else-if="activeTab === '通道终端'">
+      <template v-else-if="activeTab === '终端'">
         <section class="card terminal-card">
           <div class="card-head"><span class="card-title">通道终端</span></div>
           <ChannelTerminal :collector-id="nodeSerial" :node-device-id="node?.node_id" :channels="channels" />
@@ -529,34 +521,7 @@
       @created="handleDeviceCreated"
     />
 
-    <!-- 波特率重配置：服务端 2026-09-16 起已真实改写 bus_config 并触发下发
-         （POST /channels/:id/reconfigure，见 handler_device.go）。
-         本前端的旧文案「服务端尚未实现」是 2026-08-13 的占位，已过时 —— 见下方注释。 -->
-    <el-dialog v-model="baudToolVisible" title="修改波特率" width="480px">
-      <div v-if="baudToolSelection" class="baud-target" data-baud-target>
-        {{ baudToolTargetText }}
-      </div>
-      <div v-else class="baud-pick-hint" data-baud-scope-hint>
-        未选中通道：本次将按「总线资源」批量配置该资源上的全部 UART 通道。
-      </div>
-      <div class="baud-field">
-        <label for="baud-tool-input">目标波特率</label>
-        <!-- 既有 validateBaudrate() 的枚举不含 230400/460800，而 921600 这个既有的
-             「能力兜底」值也不在白名单内 —— 抽屉在这里的话后端明明会接受
-             （withUARTBaudrate 只要求正整数），前端却先失败。失败方向是「不发请求」，
-             不会谎报成功，故保持既有白名单不变，只把上限交给能力数据约束。 -->
-        <el-input-number id="baud-tool-input" data-baud-input v-model="baudTarget" :min="1200" :max="baudMax" :step="1200" />
-        <span class="baud-range">范围 1200 ~ {{ baudMax }}</span>
-      </div>
-      <p class="baud-note">改完即写入通道 bus_config 并向节点下发配置；节点按新波特率重建总线。改错会让该通道上的设备失联，请先在设备侧确认目标值。</p>
-      <el-alert v-if="baudToolError" type="error" :closable="false" :title="baudToolError" data-baud-error />
-      <template #footer>
-        <button class="btn btn-plain" data-baud-cancel @click="baudToolVisible = false">取消</button>
-        <button class="btn btn-primary" data-baud-confirm :disabled="baudSubmitting" @click="confirmBaudReconfigure">
-          {{ baudSubmitting ? '下发中…' : '确认修改' }}
-        </button>
-      </template>
-    </el-dialog>
+    <!-- 2026-11-19 裁决：移除批量改波特率入口；单条通道的波特率在「配置」抽屉内修改。 -->
   </div>
 </template>
 
@@ -565,8 +530,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  ArrowRight, Clock, Connection, CopyDocument, Cpu, Delete, Document, EditPen, Link, Odometer,
-  Refresh, RefreshRight, Select, Share, SwitchButton, Timer, UploadFilled, WarningFilled,
+  ArrowRight, Clock, Connection, CopyDocument, Cpu, Document, EditPen, Link, Odometer,
+  Refresh, RefreshLeft, RefreshRight, Select, Share, SwitchButton, Timer, Upload, WarningFilled,
 } from '@element-plus/icons-vue'
 import { nodeApi, type OTARecord } from '@/api/node'
 import { channelApi, type Channel } from '@/api/channel'
@@ -583,17 +548,15 @@ import { getSessionGeneration, assertSessionGeneration } from '@/utils/sessionCa
 import { logger } from '@/utils/logger'
 import feedback from '@/utils/feedback'
 import { channelBadgeClass, channelName, channelStatusText } from './composables/channelDisplay'
-import type { BusResource } from './composables/busResourceHelpers'
+import type { BusResource, BusType } from './composables/busResourceHelpers'
 import { useNodeOverviewData } from './composables/useNodeOverviewData'
 import { useBusResources } from './composables/useBusResources'
 import { useBusConfig } from './composables/useBusConfig'
-import { useBaudReconfigure } from './composables/useBaudReconfigure'
 import { useNodeTabs } from './composables/useNodeTabs'
 import { useNodeHeaderActions } from './composables/useNodeHeaderActions'
 import { useNodeDeviceOps } from './composables/useNodeDeviceOps'
 import { usePeripheralAck } from './composables/usePeripheralAck'
 import BusConfigPanel from './components/BusConfigPanel.vue'
-import BusCreatedChannelsCard from './components/BusCreatedChannelsCard.vue'
 import DmaChannelsCard from './components/DmaChannelsCard.vue'
 import NodeDevicesCard from './components/NodeDevicesCard.vue'
 import NodeOtaHistoryCard from './components/NodeOtaHistoryCard.vue'
@@ -657,8 +620,9 @@ const { capabilities, busLoading, busLoadError, busDataLoaded, resourceQuerying,
 
 const bus = useBusConfig({ capabilities, channels, nodeSerial, nodeOffline, opGeneration })
 const {
-  activeBusType, selectedResourceId, busPage, busPageSize, i2cScanning, scanResult,
-  selectedResource, busSupportsChannels, selectBusType, changeResourceDma, toggleResourceDma,
+  activeBusType, selectedResourceId, i2cScanning, scanResult,
+  adcReadingId, adcResult, adcError, readAdc,
+  busSupportsChannels, selectBusType, changeResourceDma, toggleResourceDma,
   scanSelectedI2C, resetForRouteChange: resetBusForRouteChange,
 } = bus
 
@@ -672,16 +636,6 @@ const {
 const {
   deviceOpReady, deviceOpBusy, deviceOpInFlight, loadDeviceOpSupport, handleDeviceOp,
 } = useNodeDeviceOps({ node, nodeSerial, nodeOffline })
-
-// ── 波特率（按资源批量改；单条行内改在「已创建通道」卡内部） ──
-const baud = useBaudReconfigure({
-  channels, capabilities, activeBusType, selectedResource, nodeOffline, nodeSerial, fetchChannels,
-})
-const {
-  baudToolVisible, baudTarget, baudSubmitting, baudToolError, baudToolSelection,
-  baudToolSelectionText, baudToolAvailable, baudToolTargetText, baudMax,
-  openBaudToolInline, confirmBaudReconfigure, resetForUnmount: resetBaudForUnmount,
-} = baud
 
 // ── 外设直控写后回填 ──
 const periph = usePeripheralAck()
@@ -709,13 +663,13 @@ const dmaToggling = computed(() => dmaStore.toggling)
  */
 function activateTab(label: string) {
   activeTab.value = label
-  if (label === '总线配置' || label === 'DMA 通道') {
+  if (label === '总线与通道' || label === 'DMA 分配') {
     // D5：DMA 空态必须能区分「设备未上报该能力」与「上报了但一条不可用」，
     // 而后者需要 capabilities.buses.dma —— 所以进 DMA 页签同样要保证能力数据已加载
     // （改前只有"总线配置"会拉 capabilities，DMA 页签永远拿不到，只能笼统说"暂无"）。
     if (node.value && !busLoading.value && !busDataLoaded.value) void fetchBusData()
   }
-  if (label === 'DMA 通道') {
+  if (label === 'DMA 分配') {
     const serial = nodeSerial.value
     if (serial && dmaStore.mergedChannels.length === 0 && !dmaStore.loading) {
       void dmaStore.fetch(serial).catch(err => logger.warn('获取 DMA 通道失败', { error: String(err) }))
@@ -725,7 +679,7 @@ function activateTab(label: string) {
     // 首次进入或创建后才强制刷新；来回切换走 store 30s TTL 缓存，不穿透
     if (devices.value.length === 0 && !devicesLoading.value) void fetchDevices()
   }
-  if (label === 'OTA 历史' && otaHistory.value.length === 0 && !otaHistoryLoading.value) {
+  if (label === '固件升级' && otaHistory.value.length === 0 && !otaHistoryLoading.value) {
     void fetchOTAHistory()
   }
 }
@@ -734,11 +688,23 @@ async function refreshAll() {
   refreshing.value = true
   try {
     await fetchDetail()
-    if (activeTab.value === '总线配置') await fetchBusData()
+    if (activeTab.value === '总线与通道') await fetchBusData()
     data.lastRefreshAt.value = Date.now()
   } finally {
     refreshing.value = false
   }
+}
+
+function focusBusResource(type: BusType, id: string) {
+  if (!busDataLoaded.value) void fetchBusData()
+  selectBusType(type)
+  selectedResourceId.value = id
+  activeTab.value = '总线与通道'
+}
+
+function gotoBusTab() {
+  if (!busDataLoaded.value) void fetchBusData()
+  activeTab.value = '总线与通道'
 }
 
 function openChannelManager(resource: BusResource) {
@@ -906,7 +872,6 @@ onUnmounted(() => {
   periph.stopAll()
   // 选中态只在「用户刚点了某一行」的上下文里有意义；留在组件外会让下次挂载
   // 带着上一次的通道/弹窗打开状态。
-  resetBaudForUnmount()
   header.stopAll()
   dmaStore.clearCache()
 })
@@ -1010,7 +975,7 @@ html.dark .node-overview-page {
 /* ── 页头 ── */
 .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 16px; }
 .ph-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.ph-title { font-size: 20px; font-weight: 600; margin: 0; line-height: 28px; }
+.ph-title { font-size: 22px; font-weight: 600; margin: 0; line-height: 30px; }
 /* 图标动作入口：<button> 承载（自带焦点与 Enter/Space）。
    UA 复位是必需的：全站没有裸 button 复位（theme.css 无该选择器，Element Plus 只覆盖
    .el-button），少了它铅笔会被套上浏览器默认的灰色描边盒子 —— 与改前的纯图标视觉不符。 */
@@ -1039,17 +1004,26 @@ html.dark .node-overview-page {
 .stat-value { font-size: 14px; font-weight: 500; line-height: 20px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Tab 栏 */
-.tab-bar { display: flex; align-items: center; height: 48px; padding: 0 20px; gap: 24px; margin-bottom: 16px; border-bottom: 1px solid var(--no-border); border-radius: 8px 8px 0 0; }
+.tab-bar { display: flex; align-items: center; height: 48px; padding: 0 20px; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--no-border); border-radius: 8px 8px 0 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; scroll-behavior: smooth; }
+.tab-bar::-webkit-scrollbar { display: none; }
 .tab-item {
-  display: flex; align-items: center; gap: 6px; height: 48px; padding: 0 4px;
-  font-size: 14px; color: var(--no-text-secondary); cursor: pointer; position: relative;
+  display: flex; align-items: center; gap: 6px; height: 48px; padding: 0 12px; flex: 0 0 auto;
+  font-size: 13px; font-weight: 500; color: var(--no-text-secondary); cursor: pointer; position: relative;
+  border-radius: 6px 6px 0 0; white-space: nowrap; transition: color .18s ease, background .18s ease;
 }
 .tab-item:hover { color: var(--no-primary); }
 .tab-item:focus-visible { outline: 2px solid var(--no-primary); outline-offset: -2px; border-radius: 4px; }
-.tab-item.active { color: var(--no-primary); font-weight: 500; }
-.tab-item.active::after {
-  content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--no-primary);
+.tab-item.active { color: var(--no-primary); }
+.tab-item::after {
+  content: ''; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; border-radius: 2px;
+  background: var(--no-primary); opacity: 0; transform: scaleX(.55); transform-origin: center;
+  transition: opacity .18s ease, transform .22s ease;
 }
+.tab-item.active::after { opacity: 1; transform: scaleX(1); }
+.tab-item .el-icon { opacity: .85; transition: opacity .18s ease; }
+.tab-item.active .el-icon { opacity: 1; }
+@keyframes no-pane-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.card-row, .peripheral-control, .dma-card, .log-card, .terminal-card { animation: no-pane-in .22s cubic-bezier(.2,0,.2,1); }
 /* 系统日志 / 通道终端 */
 .log-card, .terminal-card { overflow: hidden; }
 .log-card .card-head, .terminal-card .card-head { border-bottom-color: var(--no-border-light); }
@@ -1058,12 +1032,6 @@ html.dark .node-overview-page {
 .terminal-card > :not(.card-head):not(.card-loading):not(.card-empty) {
   padding: 0 20px 16px;
 }
-.baud-target { font-size: 13px; color: var(--no-text); margin-bottom: 10px; }
-.baud-pick-hint { font-size: 13px; line-height: 20px; color: var(--no-text-muted); margin-bottom: 10px; }
-.baud-field { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.baud-field > label { font-size: 13px; color: var(--no-text-secondary); }
-.baud-range { font-size: 12px; color: var(--no-text-muted); }
-.baud-note { margin: 12px 0 8px; font-size: 12px; line-height: 18px; color: var(--no-text-muted); }
 /* 卡片行 */
 .card-row { display: flex; gap: 16px; margin-bottom: 16px; }
 .row-1 .info-card { flex: 5; }
@@ -1142,7 +1110,7 @@ html.dark .node-overview-page {
 .chip-off { background: var(--no-chip-off-bg); }
 .chip-label { font-size: 12px; color: var(--no-text-secondary); display: flex; align-items: center; gap: 6px; }
 .chip-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
-.chip-num { font-size: 18px; font-weight: 600; line-height: 26px; }
+.chip-num { font-size: 16px; font-weight: 600; line-height: 24px; }
 .dim-num { color: var(--no-text-dim); }
 /* D2：列表被截断时的显式提示（不能把"看到 6 行"读成"只有 6 个通道"）。 */
 .chan-more { padding: 8px 4px 0; font-size: 12px; line-height: 18px; color: var(--no-text-muted); }

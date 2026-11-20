@@ -85,6 +85,7 @@ esp_err_t dma_pool_allocate(dma_pool_t *p, uint8_t bt, const char *hw, uint32_t 
     (void)p;(void)bt;(void)hw; if(id)*id=1; return ESP_OK;
 }
 esp_err_t dma_pool_release_by_hw(dma_pool_t *p, const char *hw) { (void)p;(void)hw; return ESP_OK; }
+esp_err_t dma_pool_mark_bound(dma_pool_t *p, uint32_t id, const char *hw) { (void)p;(void)id;(void)hw; return ESP_OK; }
 void dma_pool_init(dma_pool_t *p, const hw_dma_t *t, int c) { (void)p;(void)t;(void)c; }
 size_t dma_pool_serialize(dma_pool_t *p, uint8_t *b, size_t s) { (void)p;(void)b;(void)s; return 0; }
 
@@ -165,11 +166,11 @@ static void test_resource_index_for_uart(void)
 
 static void test_resource_index_for_spi(void)
 {
-    /* C6: SPI2 port=2 */
-    int idx = resource_index_for_controller(BUS_TYPE_SPI, 2);
+    /* C6: SPI2 human port=2, controller enum SPI2_HOST=1 */
+    int idx = resource_index_for_controller(BUS_TYPE_SPI, SPI2_HOST);
     CHECK(idx == 0, "SPI2 should be index 0");
 
-    idx = resource_index_for_controller(BUS_TYPE_SPI, 3);
+    idx = resource_index_for_controller(BUS_TYPE_SPI, SPI3_HOST);
     CHECK(idx == -1, "SPI3 doesn't exist on C6, should return -1");
 }
 
@@ -273,7 +274,7 @@ static void test_runtime_controller_id_extracts_port(void)
 
     ctx.bus_type = BUS_TYPE_SPI;
     ctx.cfg.spi.host = SPI2_HOST;
-    CHECK(runtime_controller_id(&ctx) == 2, "SPI2 controller_id should be 2");
+    CHECK(runtime_controller_id(&ctx) == SPI2_HOST, "SPI2 controller_id should be SPI2_HOST");
 
     ctx.bus_type = BUS_TYPE_I2C;
     ctx.cfg.i2c.port = I2C_NUM_0;

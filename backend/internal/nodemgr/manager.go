@@ -93,7 +93,14 @@ type Manager struct {
 	periphIntentMu sync.Mutex
 	periphPending  map[uint32]periphRequestMeta
 	periphLatest   map[string]uint32
-	commandExec    *commandexec.Service
+	// periphWaiters/periphResults bridge asynchronous PeriphRsp frames to
+	// synchronous HTTP callers (ADC read). Keyed by request_id.
+	periphWaiters sync.Map
+	periphResults sync.Map
+	// scanWaiters correlates asynchronous I2C ScanReport frames with the HTTP
+	// request that triggered them (request_id -> chan i2cScanResult).
+	scanWaiters sync.Map
+	commandExec *commandexec.Service
 
 	// parserConsumers 持有所有 sensor_parser 消费者引用, 供 setter
 	// 在 NewManager 之后注入 alert/automation/latest sink (并发安全: setter 与

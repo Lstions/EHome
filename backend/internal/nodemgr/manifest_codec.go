@@ -89,6 +89,13 @@ func decodeManifestTransportPins(ch models.Channel, busType string) ([]int, erro
 		}
 		return pins, nil
 	case "ADC":
+		/* [unit, channel, pin, attenuation, bit_width]. The analog pin is a
+		 * physical resource: claim it so GPIO/PWM cannot silently reuse it.
+		 * Legacy empty configs are synthesized by the API before encoding;
+		 * an empty value here still means "no pin claim" for old manifests. */
+		if len(data) >= 5 {
+			return []int{int(data[2])}, nil
+		}
 		return nil, nil
 	// USB carries no GPIO route: a CDC/JTAG data bus has no tx/rx pins and no
 	// baudrate, so there is nothing for the pin-authority check to claim.

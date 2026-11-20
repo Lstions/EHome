@@ -74,6 +74,8 @@ void on_write_cmd_received(uint32_t a, uint32_t b, const uint8_t *c, size_t d,
                            uint32_t e, uint32_t f, uint32_t g)
 { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g; }
 void on_scan_req_received(const char *a, uint32_t b) { (void)a; (void)b; }
+void on_adc_read_received(uint32_t a, uint32_t b) { (void)a; (void)b; }
+void on_dma_selftest_received(uint32_t a) { (void)a; }
 void on_modbus_scan_req_received(const char *a, uint32_t b, uint32_t c, uint32_t d)
 { (void)a;(void)b;(void)c;(void)d; }
 const char *channel_cmd_v2_current_boot_id(void) { return "boot"; }
