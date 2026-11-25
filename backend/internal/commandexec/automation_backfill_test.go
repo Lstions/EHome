@@ -129,6 +129,25 @@ func TestRecordInboxFailedBackfillsAutomationEventAsFailed(t *testing.T) {
 	}
 }
 
+// TestRecordInboxVerifierCauseLandsInAutomationDetail 钉死 2026-11-25 的第二个缺陷：
+// 服务端把设备的成功回传改判为失败时，判定原因必须进审计 detail 与通知，
+// 否则用户只看到"设备未确认执行成功"，无法判断是设备没动还是回读判据不认。
+func TestRecordInboxVerifierCauseLandsInAutomationDetail(t *testing.T) {
+	s, exec, _ := setupInboxService(t, StatusDispatched)
+	ev := seedAutomationEventForCommand(t, s.Database(), exec.CommandID)
+	event := inboxEvent(exec.CommandID, "final_failed")
+	event.FailureDetail = "jiabaida set_mos_policy readback mismatch: want charge_open=0; readback#1 fet_status=0x03 protection_status=0x1000"
+	if _, applied, err := s.RecordInbox(context.Background(), event); err != nil || !applied {
+		t.Fatalf("RecordInbox err=%v applied=%v", err, applied)
+	}
+	got := reloadAutomationEvent(t, s.Database(), ev.ID)
+	for _, want := range []string{"服务端回读校验未通过", "protection_status=0x1000", "final_reason=final_failed"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Fatalf("detail=%q 缺少 %q（verifier 原因必须落库，否则只剩日志）", got.Detail, want)
+		}
+	}
+}
+
 // TestRecordInboxUnknownBackfillsAutomationEventAsFailed：设备上报"未知"同样不是"已执行"。
 func TestRecordInboxUnknownBackfillsAutomationEventAsFailed(t *testing.T) {
 	s, exec, _ := setupInboxService(t, StatusVerifying)
@@ -241,6 +260,7 @@ func TestAutomationTerminalOutcomeMapping(t *testing.T) {
 		name       string
 		status     string
 		reason     string
+		cause      string
 		wantResult string
 		wantParts  []string
 	}{
@@ -261,10 +281,14 @@ func TestAutomationTerminalOutcomeMapping(t *testing.T) {
 		{name: "empty reason", status: StatusFailed, reason: "",
 			wantResult: models.AutomationResultFailedExecution,
 			wantParts:  []string{"没有 final_reason", "final_reason=(空)"}},
+		{name: "verifier cause", status: StatusFailed, reason: "final_failed",
+			cause:      "jiabaida set_mos_policy readback mismatch: readback#1 protection_status=0x1000",
+			wantResult: models.AutomationResultFailedExecution,
+			wantParts:  []string{"服务端回读校验未通过", "readback mismatch", "final_reason=final_failed"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, detail := automationTerminalOutcome(tc.status, tc.reason)
+			result, detail := automationTerminalOutcome(tc.status, tc.reason, tc.cause)
 			if result != tc.wantResult {
 				t.Fatalf("result=%q want %q", result, tc.wantResult)
 			}
@@ -283,7 +307,7 @@ func TestAutomationTerminalOutcomeMapping(t *testing.T) {
 // TestAutomationTerminalOutcomeClampsLongReason：超长原因必须被截断到列预算内
 // （否则 MySQL 静默截断 / PostgreSQL 直接报错，两种方言表现不同）。
 func TestAutomationTerminalOutcomeClampsLongReason(t *testing.T) {
-	_, detail := automationTerminalOutcome(StatusFailed, strings.Repeat("超长原因", 400))
+	_, detail := automationTerminalOutcome(StatusFailed, strings.Repeat("超长原因", 400), "")
 	if n := len([]rune(detail)); n > automationEventDetailColumnRunes {
 		t.Fatalf("detail runes=%d must be <= %d", n, automationEventDetailColumnRunes)
 	}

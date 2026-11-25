@@ -48,11 +48,17 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 		eventType = "final_failed"
 	}
 	verifiedResultJSON := ""
+	// failureDetail 记录"服务端把设备成功回传改判为失败"的原因。它必须走完
+	// inbox → commandexec → automation 审计/通知 这条链，否则用户只能看到一句
+	// "设备未确认执行成功"，无法判断是设备没动还是回读判据不认（2026-11-25 生产
+	// 事故：设备明明已关断，页面与通知连续 5 天报失败）。
+	failureDetail := ""
 	if response.Final {
 		if !response.Success {
 			eventType = "final_failed"
 		} else if result, err := m.commandExec.VerifyFinal(context.Background(), execution, response.RawResponse); err != nil {
 			logger.Warnf("[%s] ChannelCmdV2 final verification failed command=%s: %v", deviceID, commandID, err)
+			failureDetail = err.Error()
 			eventType = "final_failed"
 		} else if encoded, err := json.Marshal(result); err != nil {
 			logger.Errorf("[%s] ChannelCmdV2 result encoding failed command=%s: %v", deviceID, commandID, err)
@@ -73,10 +79,15 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 			return err
 		}
 	}
+	inboxPayload := map[string]interface{}{"error_code": response.ErrorCode, "final": response.Final, "replayed": response.Replayed, "raw_response_len": len(response.RawResponse)}
+	if failureDetail != "" {
+		inboxPayload["verify_error"] = failureDetail
+	}
 	updated, applied, err := m.commandExec.RecordInboxWithFinalizer(context.Background(), commandexec.InboxEvent{
 		EventID: eventID, CommandID: commandID, EventType: eventType, AttemptNo: response.Attempt, BootID: response.BootID,
-		Payload:            map[string]interface{}{"error_code": response.ErrorCode, "final": response.Final, "replayed": response.Replayed, "raw_response_len": len(response.RawResponse)},
+		Payload:            inboxPayload,
 		VerifiedResultJSON: verifiedResultJSON,
+		FailureDetail:      failureDetail,
 	}, finalizer)
 	if err != nil && finalizer != nil {
 		// The finalizer is part of the transaction, so a failure rolls back the

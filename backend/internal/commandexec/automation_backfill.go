@@ -61,6 +61,10 @@ type AutomationTerminalEvent struct {
 	// FinalReason 是 command_executions.final_reason 的**同一个值**（设备事件类型
 	// 或 deadline/cancel 的原因串）。原文进 detail，便于运维直接与执行记录对齐。
 	FinalReason string
+	// Cause 是服务端把设备成功回传改判为失败时的判定原因（目前由 ChannelCmdV2
+	// verifier 提供）。它比 final_reason 细一层：final_reason=final_failed 既可能
+	// 是设备真的失败，也可能是设备成功但回读对账没通过，处置完全不同。
+	Cause string
 }
 
 // AutomationEventUpdate 是回填后的自动化事件投影（WS 广播 / 通知的输入）。
@@ -122,7 +126,7 @@ func backfillAutomationEventTx(tx *gorm.DB, terminal AutomationTerminalEvent) (A
 	if tx == nil || commandID == "" || terminal.Status == "" {
 		return none, nil
 	}
-	result, detail := automationTerminalOutcome(terminal.Status, terminal.FinalReason)
+	result, detail := automationTerminalOutcome(terminal.Status, terminal.FinalReason, terminal.Cause)
 	var events []models.AutomationEvent
 	if err := tx.Select("id", "rule_id").
 		Where("command_id = ? AND result = ?", commandID, models.AutomationResultExecuted).
@@ -157,7 +161,7 @@ func backfillAutomationEventTx(tx *gorm.DB, terminal AutomationTerminalEvent) (A
 //
 // 纯函数（无 DB / 无时钟），供回填与单测共用 —— 结果码与文案的对应关系只在这里，
 // 不允许在调用点各自拼字符串。
-func automationTerminalOutcome(status, finalReason string) (result, detail string) {
+func automationTerminalOutcome(status, finalReason, cause string) (result, detail string) {
 	reason := strings.TrimSpace(finalReason)
 	if status == StatusSucceeded {
 		return models.AutomationResultExecuted, automationDetailSucceeded
@@ -171,7 +175,7 @@ func automationTerminalOutcome(status, finalReason string) (result, detail strin
 	case StatusCancelled:
 		label = "命令已被取消（未下发到设备）"
 	}
-	reasonText := automationTerminalCauseText(reason)
+	reasonText := automationTerminalCauseText(reason, cause)
 	if reason == "" {
 		reason = "(空)"
 	}
@@ -185,12 +189,17 @@ func automationTerminalOutcome(status, finalReason string) (result, detail strin
 //
 // 未识别的原因码**不丢弃**：调用方会把原文附在 detail 末尾（final_reason=...），
 // 这里只负责说明"这条码属于哪一类"，不做有损映射。
-func automationTerminalCauseText(finalReason string) string {
+func automationTerminalCauseText(finalReason, cause string) string {
+	// 服务端 verifier 的原始原因优先：它是唯一能区分"设备没执行"与"设备执行了
+	// 但回读对账没通过"的信息，也是用户排查时最需要看到的一句。
+	if trimmed := strings.TrimSpace(cause); trimmed != "" {
+		return "服务端回读校验未通过: " + clampRunes(trimmed, 240)
+	}
 	switch {
 	case finalReason == "":
 		return "执行记录没有 final_reason"
 	case finalReason == "final_failed":
-		return "设备上报最终执行失败，或最终回传未通过服务端校验"
+		return "设备上报最终失败，或最终回传未通过服务端校验（未记录判定原因）"
 	case finalReason == "final_succeeded":
 		return "设备上报最终成功（但命令记录未落到 SUCCEEDED）"
 	case finalReason == "unknown":

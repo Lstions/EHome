@@ -20,6 +20,11 @@ type InboxEvent struct {
 	AttemptNo                             uint32
 	Payload                               interface{}
 	VerifiedResultJSON                    string
+	// FailureDetail 是服务端在把设备的成功回传改判为失败时记录的**判定原因**
+	// （目前只有 ChannelCmdV2 的 verifier 会填）。它不进 command_executions 的
+	// final_reason（那是稳定的原因码），而是进自动化审计的 detail 与失败通知，
+	// 让用户看到"哪次回读、看到什么"，而不是一句笼统的"设备上报失败"。
+	FailureDetail string
 }
 
 // InboxFinalizer runs inside the same database transaction that accepts a
@@ -143,6 +148,7 @@ func (s *Service) recordInbox(ctx context.Context, event InboxEvent, finalizer I
 				CommandID:   execution.CommandID,
 				Status:      to,
 				FinalReason: event.EventType,
+				Cause:       event.FailureDetail,
 			})
 			if err != nil {
 				return err

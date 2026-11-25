@@ -34,9 +34,9 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	actions = append(actions,
 		ControlAction{
 			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
-			Description: "一次提交充电/放电两个软件关闭位；bounded 写+读回 fet_status 对账",
+			Description: "一次提交充电/放电两个软件关闭位；bounded 基线读+写+两帧 0x0F 回读对账（FET 位或 protection_status 锁存位）",
 			Semantics:   "set", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 2,
+			AtMostOnce: true, MaxSteps: 4,
 			Parameters: []ControlParameter{
 				{Name: "charge_software_closed", Type: "boolean", Required: true},
 				{Name: "discharge_software_closed", Type: "boolean", Required: true},
@@ -480,17 +480,29 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		if err != nil {
 			return CompiledControlPlan{}, err
 		}
+		// 四步计划（2026-11-25 生产取证重写，勿再退回两步）：
+		//
+		//	[0] 0x0F 基线读   —— 拿到写入前的 fet_status / protection_status
+		//	[1] E1 写          —— 策略下发（一次写两位）
+		//	[2] 0x0F 回读      —— 稳定窗 1200ms 后第一帧
+		//	[3] 0x0F 再回读    —— 再晚 600ms，兜住"FET 位慢一拍"的设备
+		//
+		// 为什么回读必须是 0x0F 而不是 0x03：这台 BMS（软件版本 0x81）把 E1 当
+		// **策略锁存** —— 关断立刻置 protection_status bit12(0x1000)，而 fet_status
+		// 是物理 FET 状态，带载放电时可能十几个小时都不切换。0x03 帧里**没有**
+		// protection_status，只读它必然把"策略已生效"判成"设备回退"，于是自动化
+		// 审计与通知天天报假失败（2026-11-21~24 连续 5 次，见
+		// docs/分析/自动规则误报失败-取证与修复方案-2026-11-25.md）。
+		//
+		// 稳定窗 1200ms 仍然保留：0x03 时代它是为了躲开"写入后 ~1s 自动恢复"的
+		// 假象；现在虽然判据换成锁存位，仍然要在设备完成一次状态刷新之后再读。
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				// 写入后必须等满一个"稳定窗"再回读（2026-11-20 生产实测）：
-				// 该 BMS（软件版本 0x81）把 E1 软件关断当成瞬时动作 —— 写入后
-				// ~1s 内 fet_status 会自行恢复成 0x03，而 100ms 时就回读会拿到
-				// "已关断"的假象，于是命令被判 SUCCEEDED，用户却在页面上看到
-				// MOS 仍然导通（"手动触发显示执行成功但实际没有效果"）。
-				// 稳定窗取 1200ms：> 实测恢复时刻（约 960ms）+ 一帧 0x0F 周期。
+				{ID: "read_baseline", Kind: "read", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 1200},
-				{ID: "readback_fet", Kind: "readback", TXData: jiabaidaReadFrame(0x03), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_mos", Kind: "readback", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 600},
+				{ID: "readback_mos_confirm", Kind: "readback", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "bms_restart":
@@ -776,28 +788,18 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 // wrong-device or stale response could be stored under the wrong Action.
 func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
 	if actionID == "set_mos_policy" {
-		// The bounded plan reports a step-count envelope: raw[0] = N steps,
-		// then per step: kind(1B) + length_le(2B) + response.  Step 1 is the
-		// E1 MOS write ACK (DD E1 00 00 CRC 77), step 2 is the 0x03 readback
-		// whose fet_status confirms the software-close state.
+		// 有界计划固定四步（2026-11-25 生产取证修复）：
+		//   [0] 0x0F 基线读   [1] E1 写 ACK   [2] 0x0F 回读   [3] 0x0F 再回读
 		steps, err := decodeBatchPlanEnvelope(raw)
 		if err != nil {
 			return nil, err
 		}
-		if len(steps) != 2 {
-			return nil, fmt.Errorf("jiabaida set_mos_policy requires two verified responses, got %d", len(steps))
+		if len(steps) != 4 {
+			return nil, fmt.Errorf("jiabaida set_mos_policy requires four verified responses (baseline, ack, two readbacks), got %d", len(steps))
 		}
-		if err := jiabaidaExpectZeroAck(steps[0], 0xE1); err != nil {
+		if err := jiabaidaExpectZeroAck(steps[1], 0xE1); err != nil {
 			return nil, fmt.Errorf("jiabaida set_mos_policy ACK: %w", err)
 		}
-		readback, err := d.ParseData(steps[1])
-		if err != nil {
-			return nil, fmt.Errorf("jiabaida set_mos_policy readback: %w", err)
-		}
-		// Bit-level reconciliation against the requested software-close flags.
-		// The E1 write byte is inverse-polarity (1 = software close) while
-		// fet_status bit0 = charge MOS / bit1 = discharge MOS with 1 = open,
-		// so a close request must read back as a cleared FET bit.
 		var input struct {
 			ChargeClosed    bool `json:"charge_software_closed"`
 			DischargeClosed bool `json:"discharge_software_closed"`
@@ -813,39 +815,26 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 		if !input.DischargeClosed {
 			wantDischargeOpen = 1
 		}
-		var fet *uint8
-		var protection uint16
-		hasProtection := false
-		for i := range readback {
-			switch readback[i].Name {
-			case "fet_status":
-				v := uint8(readback[i].Value)
-				fet = &v
-			case "protection_status":
-				protection = uint16(readback[i].Value)
-				hasProtection = true
+		// 基线只进诊断文案，不参与判据：幂等重复关断时锁存位本来就在，仍应判成功。
+		var baseline jiabaidaMOSState
+		if samples, parseErr := d.ParseData(steps[0]); parseErr == nil {
+			baseline = jiabaidaMOSStateFrom(samples)
+		}
+		var mismatches []string
+		for _, index := range []int{2, 3} {
+			samples, parseErr := d.ParseData(steps[index])
+			if parseErr != nil {
+				mismatches = append(mismatches, fmt.Sprintf("readback#%d 解析失败: %v", index-1, parseErr))
+				continue
 			}
-		}
-		if fet == nil {
-			return nil, fmt.Errorf("jiabaida set_mos_policy readback: fet_status missing")
-		}
-		gotCharge := *fet & 0x01
-		gotDischarge := (*fet >> 1) & 0x01
-		if gotCharge != wantChargeOpen || gotDischarge != wantDischargeOpen {
-			// 2026-11-20 生产取证：这台 BMS（软件版本 0x81）收到 E1 软件关断后
-			// ~1s 内自行把 fet_status 恢复成 0x03，同时置 protection_status bit12
-			// (0x1000)。稳定窗读回因此必然看到"回退"而不是"保护覆盖"，告警文案
-			// 必须把两者讲清楚，否则运维会去查根本不存在的硬件保护。
-			reason := "设备在稳定窗内回退了软件策略（BMS 把 E1 软件关断当作瞬时动作，约 1s 后自动恢复）"
-			if hasProtection && protection != 0x1000 {
-				reason = fmt.Sprintf("设备回退且 protection_status=0x%04X 可能有硬件/保护覆盖", protection)
-			} else if hasProtection && protection == 0x1000 {
-				reason = "设备回退（protection_status bit12=0x1000 为软件锁定/软件关断标志位，随关断请求置位后保留，不代表硬件保护）"
+			state := jiabaidaMOSStateFrom(samples)
+			if ok, _ := state.matches(wantChargeOpen, wantDischargeOpen); ok {
+				return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, jiabaidaMOSEvidence(state)...), nil
 			}
-			return nil, fmt.Errorf("jiabaida set_mos_policy settle readback mismatch: fet_status=0x%02X charge=%d(want %d) discharge=%d(want %d) protection_status=0x%04X; %s",
-				*fet, gotCharge, wantChargeOpen, gotDischarge, wantDischargeOpen, protection, reason)
+			mismatches = append(mismatches, fmt.Sprintf("readback#%d %s", index-1, state.describe()))
 		}
-		return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, readback...), nil
+		return nil, fmt.Errorf("jiabaida set_mos_policy readback mismatch: want charge_open=%d discharge_open=%d (protection_status bit12=0x1000 = 软件关断已锁存); baseline %s; %s",
+			wantChargeOpen, wantDischargeOpen, baseline.describe(), strings.Join(mismatches, "; "))
 	}
 	if actionID == "bms_restart" {
 		// Step-count envelope: step 1 = 0x0E reset ACK (DD 0E 00 00 CRC 77),
@@ -890,6 +879,100 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 		return nil, fmt.Errorf("jiabaida action %q received unexpected response command", actionID)
 	}
 	return d.ParseData(raw)
+}
+
+// jiabaidaMOSState 是一次 0x0F 回读里与 MOS 策略判定有关的两个位域。
+//
+// 为什么分开记录 known：0x0F 一定同时带 fet_status 与 protection_status，但历史
+// 0x03 帧只有 fet_status。缺字段时必须能说"没读到"，而不是把缺失当成读到 0 位。
+type jiabaidaMOSState struct {
+	fet             uint8
+	fetKnown        bool
+	protection      uint16
+	protectionKnown bool
+}
+
+// jiabaidaMOSStateFrom projects a parsed 0x0F/0x03 frame onto the two bit fields.
+func jiabaidaMOSStateFrom(samples []SensorData) jiabaidaMOSState {
+	var state jiabaidaMOSState
+	for i := range samples {
+		switch samples[i].Name {
+		case "fet_status":
+			state.fet = uint8(samples[i].Value)
+			state.fetKnown = true
+		case "protection_status":
+			state.protection = uint16(samples[i].Value)
+			state.protectionKnown = true
+		}
+	}
+	return state
+}
+
+// matches 判定一次回读是否构成"策略已生效"的证据；第二个返回值是判定理由
+// （成功时说明靠哪条证据过的，失败时说明缺什么）。
+//
+//   - 关断（wantChargeOpen=0）：充电 FET 位已清零 **或** 保护锁存位
+//     protection_status bit12(0x1000) 已置位，任一即可。前者是物理断开，后者是
+//     BMS 接受了软件关断 —— 这台固件在带载放电时只锁存、不立刻切换物理 FET
+//     （2026-11-21~24 生产实测 fet_status 保持 0x03 超过 12 小时，而充电确实被
+//     阻断），只认前者就会把"已生效"判成"回退"。
+//   - 打开（wantChargeOpen=1）：两条都要满足 —— 锁存位已清零，且充电 FET 位为 1。
+//     只满足一条不足以证明"真的能充上电"。
+//
+// discharge 位在两种请求下都必须等于请求值：协议一次写两位，放电位不匹配说明
+// 写入的字节或设备状态有问题。
+func (s jiabaidaMOSState) matches(wantChargeOpen, wantDischargeOpen uint8) (bool, string) {
+	if !s.fetKnown {
+		return false, "回包里没有 fet_status"
+	}
+	if got := (s.fet >> 1) & 0x01; got != wantDischargeOpen {
+		return false, fmt.Sprintf("discharge=%d(want %d)", got, wantDischargeOpen)
+	}
+	charge := s.fet & 0x01
+	latch := s.protectionKnown && s.protection&0x1000 != 0
+	if wantChargeOpen == 0 {
+		if charge == 0 {
+			return true, "充电 FET 位已清零（物理关断）"
+		}
+		if latch {
+			return true, "protection_status bit12(0x1000) 已锁存（软件关断已生效，物理 FET 随负载延后切换）"
+		}
+		return false, fmt.Sprintf("charge=%d(want 0)，且保护锁存位未置位", charge)
+	}
+	if charge != 1 {
+		return false, fmt.Sprintf("charge=%d(want 1)", charge)
+	}
+	if latch {
+		return false, "充电 FET 位已为 1，但 protection_status bit12(0x1000) 仍锁存（软件关断未解除）"
+	}
+	return true, "保护锁存位已清零且充电 FET 位为 1"
+}
+
+// describe 是错误文案里的单行投影：一行就能看出设备到底报了什么。
+func (s jiabaidaMOSState) describe() string {
+	if !s.fetKnown {
+		return "fet_status 缺失"
+	}
+	out := fmt.Sprintf("fet_status=0x%02X charge=%d discharge=%d", s.fet, s.fet&0x01, (s.fet>>1)&0x01)
+	if s.protectionKnown {
+		out += fmt.Sprintf(" protection_status=0x%04X", s.protection)
+	} else {
+		out += " protection_status=缺失"
+	}
+	return out
+}
+
+// jiabaidaMOSEvidence 只保留判定用到的两个字段。整帧 0x0F 含 16 串电压与温度，
+// 全塞进 verified_result_json 会把一条策略执行记录变成几十行遥测噪音。
+func jiabaidaMOSEvidence(state jiabaidaMOSState) []SensorData {
+	evidence := make([]SensorData, 0, 2)
+	if state.fetKnown {
+		evidence = append(evidence, SensorData{Name: "fet_status", Value: float64(state.fet), Unit: "bitmask"})
+	}
+	if state.protectionKnown {
+		evidence = append(evidence, SensorData{Name: "protection_status", Value: float64(state.protection), Unit: "bitmask"})
+	}
+	return evidence
 }
 
 // jiabaidaExpectZeroAck asserts that a bounded-plan step response is the

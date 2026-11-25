@@ -123,16 +123,18 @@ func TestJiabaidaMOSPlanPairsWithRealShortFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile set_mos_policy plan: %v", err)
 	}
-	if len(plan.Steps) != 2 {
-		t.Fatalf("set_mos_policy must compile to 2 steps, got %d", len(plan.Steps))
+	// 2026-11-25 起固定 4 步：基线 0x0F + E1 写 + 两帧 0x0F 回读。步数变了，
+	// 但"每一步的 ReadSize 必须是 0"这条约束不变。
+	if len(plan.Steps) != 4 {
+		t.Fatalf("set_mos_policy must compile to 4 steps (baseline+write+2 readbacks), got %d", len(plan.Steps))
 	}
 	for i, step := range plan.Steps {
 		if step.ReadSize != 0 {
-			t.Fatalf("set_mos_policy step %d (%s) declares ReadSize=%d; must be 0 (38 B real 0x03 reply vs 60 B declared caused the 2026-11-15 field failure)", i, step.ID, step.ReadSize)
+			t.Fatalf("set_mos_policy step %d (%s) declares ReadSize=%d; must be 0 (0x0F reply length varies with NTC/cell count; a fixed lower bound caused the 2026-11-15 field failure)", i, step.ID, step.ReadSize)
 		}
 	}
-	// 真实形状的回读帧：DD 03 00 1F + 31 B + CRC + 77 = 38 B
-	readback := jiabaidaMOSEnvelope(t, []byte{0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77}, 0x02)
+	// 真实形状的回读帧：DD 0F 00 18 + 24 B + CRC + 77（长度随 NTC/串数变化）
+	readback := jiabaidaMOSEnvelope(t, []byte{0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77}, 0x02, 0x0000)
 	if len(readback) == 0 {
 		t.Fatal("empty envelope fixture")
 	}
