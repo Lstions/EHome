@@ -34,9 +34,9 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	actions = append(actions,
 		ControlAction{
 			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
-			Description: "一次提交充电/放电两个软件关闭位；bounded 基线读+写+两帧 0x0F 回读对账（FET 位或 protection_status 锁存位）",
+			Description: "一次提交充电/放电两个软件关闭位；bounded 写 + 0x0F 回读对账（FET 位或 protection_status 锁存位）",
 			Semantics:   "set", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 4,
+			AtMostOnce: true, MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "charge_software_closed", Type: "boolean", Required: true},
 				{Name: "discharge_software_closed", Type: "boolean", Required: true},
@@ -480,29 +480,28 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 		if err != nil {
 			return CompiledControlPlan{}, err
 		}
-		// 四步计划（2026-11-25 生产取证重写，勿再退回两步）：
+		// 两步计划（2026-11-27 生产回归修复）：写 + 单帧 0x0F 回读。
 		//
-		//	[0] 0x0F 基线读   —— 拿到写入前的 fet_status / protection_status
-		//	[1] E1 写          —— 策略下发（一次写两位）
-		//	[2] 0x0F 回读      —— 稳定窗 1200ms 后第一帧
-		//	[3] 0x0F 再回读    —— 再晚 600ms，兜住"FET 位慢一拍"的设备
+		// ⚠ 步数受**节点固件的最终响应预算**硬约束，不是想加就能加：
+		// handler_channel_cmd_v2.c 的 V2_MAX_RX = 128 B 是最终响应的存储上限，
+		// 超过即 V2_ERR_FINAL_OVERFLOW(1005) 并判失败。一帧 0x0F（16 串 4 NTC）
+		// 约 80 B，加上写 ACK 与每步头已经是 94 B；再来第二帧 0x0F 就 177 B，
+		// 2026-11-25 曾因此让生产上每条策略都失败（1005/1007）。回归护栏见
+		// TestJiabaidaMOSPlanFitsNodeFinalPayload。
 		//
-		// 为什么回读必须是 0x0F 而不是 0x03：这台 BMS（软件版本 0x81）把 E1 当
+		// 为什么回读必须读 0x0F 而不是 0x03：这台 BMS（软件版本 0x81）把 E1 当
 		// **策略锁存** —— 关断立刻置 protection_status bit12(0x1000)，而 fet_status
 		// 是物理 FET 状态，带载放电时可能十几个小时都不切换。0x03 帧里**没有**
-		// protection_status，只读它必然把"策略已生效"判成"设备回退"，于是自动化
-		// 审计与通知天天报假失败（2026-11-21~24 连续 5 次，见
-		// docs/分析/自动规则误报失败-取证与修复方案-2026-11-25.md）。
+		// protection_status，只读它必然把"策略已生效"判成"设备回退"（2026-11-21~24
+		// 连续 5 次假失败，见 docs/分析/自动规则误报失败-取证与修复方案-2026-11-25.md）。
 		//
-		// 稳定窗 1200ms 仍然保留：0x03 时代它是为了躲开"写入后 ~1s 自动恢复"的
-		// 假象；现在虽然判据换成锁存位，仍然要在设备完成一次状态刷新之后再读。
+		// 稳定窗 1800ms：实测设备在写入后 ~0.8~1.4s 完成锁存/清锁存（11-23 22:46
+		// 的打开就是 1.2s 时还没刷新、1.4s 已生效），单帧回读必须落在刷新之后。
 		return CompiledControlPlan{
 			AtMostOnce: true,
 			Steps: []CompiledControlPlanStep{
-				{ID: "read_baseline", Kind: "read", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 1200},
-				{ID: "readback_mos", Kind: "readback", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 600},
-				{ID: "readback_mos_confirm", Kind: "readback", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 1800},
+				{ID: "readback_mos", Kind: "readback", TXData: jiabaidaReadFrame(0x0F), ReadSize: 0, RXTimeoutMS: 1500, PostTXDelayMS: 100},
 			},
 		}, nil
 	case "bms_restart":
@@ -788,16 +787,18 @@ func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params jso
 // wrong-device or stale response could be stored under the wrong Action.
 func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
 	if actionID == "set_mos_policy" {
-		// 有界计划固定四步（2026-11-25 生产取证修复）：
-		//   [0] 0x0F 基线读   [1] E1 写 ACK   [2] 0x0F 回读   [3] 0x0F 再回读
+		// 有界计划固定两步（2026-11-27 生产回归修复）：
+		//   [0] E1 写 ACK   [1] 0x0F 回读
+		// 不能加基线与第二次回读：节点固件最终响应上限 128 B（V2_MAX_RX），
+		// 两帧 0x0F 必然触发 1005 V2_ERR_FINAL_OVERFLOW。
 		steps, err := decodeBatchPlanEnvelope(raw)
 		if err != nil {
 			return nil, err
 		}
-		if len(steps) != 4 {
-			return nil, fmt.Errorf("jiabaida set_mos_policy requires four verified responses (baseline, ack, two readbacks), got %d", len(steps))
+		if len(steps) != 2 {
+			return nil, fmt.Errorf("jiabaida set_mos_policy requires two verified responses (write ack, 0x0F readback), got %d", len(steps))
 		}
-		if err := jiabaidaExpectZeroAck(steps[1], 0xE1); err != nil {
+		if err := jiabaidaExpectZeroAck(steps[0], 0xE1); err != nil {
 			return nil, fmt.Errorf("jiabaida set_mos_policy ACK: %w", err)
 		}
 		var input struct {
@@ -815,26 +816,16 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 		if !input.DischargeClosed {
 			wantDischargeOpen = 1
 		}
-		// 基线只进诊断文案，不参与判据：幂等重复关断时锁存位本来就在，仍应判成功。
-		var baseline jiabaidaMOSState
-		if samples, parseErr := d.ParseData(steps[0]); parseErr == nil {
-			baseline = jiabaidaMOSStateFrom(samples)
+		samples, parseErr := d.ParseData(steps[1])
+		if parseErr != nil {
+			return nil, fmt.Errorf("jiabaida set_mos_policy readback: %w", parseErr)
 		}
-		var mismatches []string
-		for _, index := range []int{2, 3} {
-			samples, parseErr := d.ParseData(steps[index])
-			if parseErr != nil {
-				mismatches = append(mismatches, fmt.Sprintf("readback#%d 解析失败: %v", index-1, parseErr))
-				continue
-			}
-			state := jiabaidaMOSStateFrom(samples)
-			if ok, _ := state.matches(wantChargeOpen, wantDischargeOpen); ok {
-				return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, jiabaidaMOSEvidence(state)...), nil
-			}
-			mismatches = append(mismatches, fmt.Sprintf("readback#%d %s", index-1, state.describe()))
+		state := jiabaidaMOSStateFrom(samples)
+		if ok, _ := state.matches(wantChargeOpen, wantDischargeOpen); ok {
+			return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, jiabaidaMOSEvidence(state)...), nil
 		}
-		return nil, fmt.Errorf("jiabaida set_mos_policy readback mismatch: want charge_open=%d discharge_open=%d (protection_status bit12=0x1000 = 软件关断已锁存); baseline %s; %s",
-			wantChargeOpen, wantDischargeOpen, baseline.describe(), strings.Join(mismatches, "; "))
+		return nil, fmt.Errorf("jiabaida set_mos_policy readback mismatch: want charge_open=%d discharge_open=%d (protection_status bit12=0x1000 = 软件关断已锁存); %s",
+			wantChargeOpen, wantDischargeOpen, state.describe())
 	}
 	if actionID == "bms_restart" {
 		// Step-count envelope: step 1 = 0x0E reset ACK (DD 0E 00 00 CRC 77),

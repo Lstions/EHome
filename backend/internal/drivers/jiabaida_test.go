@@ -819,37 +819,55 @@ func TestJiabaidaMOSPolicyPlanCompilerGoldenVector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileControlActionPlan error = %v", err)
 	}
-	if !plan.AtMostOnce || len(plan.Steps) != 4 {
-		t.Fatalf("plan metadata = %+v（2026-11-25 起必须是 4 步：基线读+写+两次 0x0F 回读）", plan)
+	if !plan.AtMostOnce || len(plan.Steps) != 2 {
+		t.Fatalf("plan metadata = %+v（必须是 2 步：写 + 单帧 0x0F 回读；步数受节点 128 B 最终响应预算约束）", plan)
 	}
 	wantWrite := []byte{0xDD, 0x5A, 0xE1, 0x02, 0x00, 0x01, 0xFF, 0x1C, 0x77}
-	if got := plan.Steps[1].TXData; string(got) != string(wantWrite) {
+	if got := plan.Steps[0].TXData; string(got) != string(wantWrite) {
 		t.Fatalf("write step = % X, want % X", got, wantWrite)
 	}
 	// 0x0F comprehensive read: DD A5 0F 00 FF F1 77. 回读必须是 0x0F 而不是
 	// 0x03 —— 0x03 帧里没有 protection_status，锁存位判据就永远不生效。
 	wantReadback := []byte{0xDD, 0xA5, 0x0F, 0x00, 0xFF, 0xF1, 0x77}
-	for _, index := range []int{0, 2, 3} {
-		if got := plan.Steps[index].TXData; string(got) != string(wantReadback) {
-			t.Fatalf("step %d 帧 = % X, want % X（0x0F 回读）", index, got, wantReadback)
+	if got := plan.Steps[1].TXData; string(got) != string(wantReadback) {
+		t.Fatalf("readback step = % X, want % X（0x0F 回读）", got, wantReadback)
+	}
+	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
+		t.Fatalf("step kinds = %q/%q", plan.Steps[0].Kind, plan.Steps[1].Kind)
+	}
+	// 稳定窗：设备在写入后约 0.8~1.4s 完成锁存/清锁存（2026-11-23 22:46 的打开
+	// 在 1.2s 时还没刷新、1.4s 已生效），单帧回读必须落在刷新之后。
+	if plan.Steps[0].PostTXDelayMS < 1500 {
+		t.Fatalf("write step settle window = %dms, want >= 1500（设备刷新约 0.8~1.4s）", plan.Steps[0].PostTXDelayMS)
+	}
+}
+
+// TestJiabaidaMOSPlanFitsNodeFinalPayload 钉死「计划响应不能超过节点最终响应预算」。
+//
+// 节点固件 handler_channel_cmd_v2.c 的 V2_MAX_RX = 128 B：最终响应 raw 超过即
+// 1005 V2_ERR_FINAL_OVERFLOW，整条命令判失败（2026-11-27 生产事故：4 步计划里
+// 三帧 0x0F 约 254 B，策略全部失败）。这里用 16 串 + 4 NTC 的真实 0x0F 帧做上界。
+func TestJiabaidaMOSPlanFitsNodeFinalPayload(t *testing.T) {
+	const nodeFinalPayloadMax = 128 // firmware handler_channel_cmd_v2.c: V2_MAX_RX
+	d := &JiabaidaBMSDriver{}
+	plan, err := d.CompileControlActionPlan("set_mos_policy",
+		json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`))
+	if err != nil {
+		t.Fatalf("compile set_mos_policy plan: %v", err)
+	}
+	// 0x0F 帧：7 B 头尾 + 24 B 固定段 + 2*4 NTC + 1 B 串数 + 2*16 单体 + 8 B 尾。
+	const frame0F = 7 + 24 + 2*4 + 1 + 2*16 + 8
+	envelope := 1 // step count
+	for _, step := range plan.Steps {
+		size := frame0F
+		if step.Kind == "write" {
+			size = 7 // DD E1 00 00 00 00 77
 		}
+		envelope += 3 + size // kind(1) + len_le(2) + response
 	}
-	wantKinds := []string{"read", "write", "readback", "readback"}
-	for i, kind := range wantKinds {
-		if plan.Steps[i].Kind != kind {
-			t.Fatalf("step %d kind = %q, want %q", i, plan.Steps[i].Kind, kind)
-		}
-	}
-	// 2026-11-20 生产取证（真机 UART 原始帧）：这台 BMS 收到 E1 软件关断后约 1s
-	// 自行把 fet_status 恢复成 0x03。写入后 100ms 回读会拿到"已关断"的假象，
-	// 于是命令被判成功、用户却看到 MOS 仍导通。稳定窗必须 ≥ 1s。
-	if plan.Steps[1].PostTXDelayMS < 1000 {
-		t.Fatalf("write step settle window = %dms, want >= 1000 (BMS reverts fet_status about 1s after E1)", plan.Steps[1].PostTXDelayMS)
-	}
-	// 第二帧回读必须比第一帧再晚一拍：2026-11-23 的打开请求在同一秒内生效，
-	// 但稳定窗里的第一帧仍是旧状态，只有第二次回读能救回来。
-	if plan.Steps[2].PostTXDelayMS < 300 {
-		t.Fatalf("confirm readback delay = %dms, want >= 300（需要兜住 FET 位慢一拍）", plan.Steps[2].PostTXDelayMS)
+	if envelope > nodeFinalPayloadMax {
+		t.Fatalf("计划响应的最坏信封 = %d B，超过节点最终响应上限 %d B（会触发 1005 V2_ERR_FINAL_OVERFLOW）",
+			envelope, nodeFinalPayloadMax)
 	}
 }
 
@@ -918,11 +936,13 @@ func TestJiabaidaVerifyMOSPolicyAckAndReadback(t *testing.T) {
 	if !found {
 		t.Fatalf("readback result missing fet_status: %+v", data)
 	}
-	// Wrong step count must be rejected: two steps is the pre-2026-11-25 plan
-	// shape and must no longer be accepted (the latch evidence lives in 0x0F).
+	// Wrong step count must be rejected: the 2026-11-25 four-step experiment
+	// overran the node's 128 B final-response budget and is gone for good.
 	if _, err := d.VerifyControlAction("set_mos_policy", params,
-		jiabaidaTestEnvelope(t, ack, jiabaidaComprehensiveReadback(0x02, 0x0000))); err == nil {
-		t.Fatal("two-step envelope accepted for set_mos_policy")
+		jiabaidaTestEnvelope(t, ack,
+			jiabaidaComprehensiveReadback(0x02, 0x0000),
+			jiabaidaComprehensiveReadback(0x02, 0x0000))); err == nil {
+		t.Fatal("extra-step envelope accepted for set_mos_policy")
 	}
 	// Malformed ACK (wrong command byte) must be rejected.
 	wrongAck := []byte{0xDD, 0x04, 0x00, 0x00, 0x00, 0x00, 0x77}
@@ -1066,27 +1086,14 @@ func jiabaidaComprehensiveReadback(fet byte, protection uint16) []byte {
 
 // jiabaidaMOSEnvelope builds the four-step set_mos_policy response envelope:
 // baseline 0x0F, E1 write ACK, and two 0x0F readbacks carrying fet/protection.
+// jiabaidaMOSEnvelope builds the two-step set_mos_policy response envelope:
+// the E1 write ACK plus one 0x0F readback carrying fet/protection.
+//
+// 两步是**硬约束**：节点固件最终响应上限 128 B（V2_MAX_RX），两帧 0x0F 会
+// 触发 1005 V2_ERR_FINAL_OVERFLOW（2026-11-27 生产事故）。
 func jiabaidaMOSEnvelope(t *testing.T, ack []byte, fet byte, protection uint16) []byte {
 	t.Helper()
-	return jiabaidaTestEnvelope(t,
-		jiabaidaComprehensiveReadback(0x03, 0x0000),
-		ack,
-		jiabaidaComprehensiveReadback(fet, protection),
-		jiabaidaComprehensiveReadback(fet, protection),
-	)
-}
-
-// jiabaidaMOSEnvelopeSlowApply models a BMS that only reports the new state on
-// the second readback (2026-11-23 生产取证：打开策略在同一秒内已生效，但稳定窗
-// 内的第一帧回读仍是旧状态).
-func jiabaidaMOSEnvelopeSlowApply(t *testing.T, ack []byte, firstFet byte, firstProtection uint16, fet byte, protection uint16) []byte {
-	t.Helper()
-	return jiabaidaTestEnvelope(t,
-		jiabaidaComprehensiveReadback(0x03, 0x0000),
-		ack,
-		jiabaidaComprehensiveReadback(firstFet, firstProtection),
-		jiabaidaComprehensiveReadback(fet, protection),
-	)
+	return jiabaidaTestEnvelope(t, ack, jiabaidaComprehensiveReadback(fet, protection))
 }
 
 // jiabaidaHardwareVersionReadback is the known-good 0x05 response used by the
@@ -1905,11 +1912,7 @@ func TestJiabaidaVerifyMOSPolicyFetStatusMissing(t *testing.T) {
 	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
 	// Second step parses fine (0x05 hardware version) but its projection has
 	// no fet_status entry, so reconciliation must fail.
-	envelope := jiabaidaTestEnvelope(t,
-		jiabaidaComprehensiveReadback(0x03, 0x0000),
-		jiabaidaZeroAck(0xE1),
-		jiabaidaHardwareVersionReadback(),
-		jiabaidaHardwareVersionReadback())
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0xE1), jiabaidaHardwareVersionReadback())
 	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err == nil {
 		t.Fatal("set_mos_policy accepted readback without fet_status")
 	}
@@ -1953,7 +1956,7 @@ func TestJiabaidaVerifyMOSPolicyCloseRejectsSilentNoop(t *testing.T) {
 		t.Fatal("FET 位未变且锁存位未置位的回读被误判为成功")
 	}
 	// 失败文案必须把两次回读都摆出来，否则运维无法判断是"设备没动"还是"读错了帧"。
-	for _, want := range []string{"readback#1", "readback#2", "protection_status=0x0000"} {
+	for _, want := range []string{"readback mismatch", "protection_status=0x0000"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("错误文案缺少 %q: %v", want, err)
 		}
@@ -1965,12 +1968,7 @@ func TestJiabaidaVerifyMOSPolicyCloseRejectsSilentNoop(t *testing.T) {
 func TestJiabaidaVerifyMOSPolicyCloseIdempotentLatch(t *testing.T) {
 	d := &JiabaidaBMSDriver{}
 	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
-	envelope := jiabaidaTestEnvelope(t,
-		jiabaidaComprehensiveReadback(0x03, 0x1000),
-		jiabaidaZeroAck(0xE1),
-		jiabaidaComprehensiveReadback(0x03, 0x1000),
-		jiabaidaComprehensiveReadback(0x03, 0x1000),
-	)
+	envelope := jiabaidaMOSEnvelope(t, jiabaidaZeroAck(0xE1), 0x03, 0x1000)
 	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err != nil {
 		t.Fatalf("幂等重复关断必须判成功: %v", err)
 	}
@@ -1995,17 +1993,6 @@ func TestJiabaidaVerifyMOSPolicyOpenAcceptsClearedLatch(t *testing.T) {
 	envelope := jiabaidaMOSEnvelope(t, jiabaidaZeroAck(0xE1), 0x03, 0x0000)
 	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err != nil {
 		t.Fatalf("锁存位已清除的打开请求必须判成功: %v", err)
-	}
-}
-
-// TestJiabaidaVerifyMOSPolicySlowApplyCaughtBySecondReadback：第一帧回读还是旧状态、
-// 第二帧才看到新状态 —— 这正是 2026-11-23 22:46 打开被判失败的形态，必须救回来。
-func TestJiabaidaVerifyMOSPolicySlowApplyCaughtBySecondReadback(t *testing.T) {
-	d := &JiabaidaBMSDriver{}
-	params := json.RawMessage(`{"charge_software_closed":false,"discharge_software_closed":false,"priority":"user"}`)
-	envelope := jiabaidaMOSEnvelopeSlowApply(t, jiabaidaZeroAck(0xE1), 0x02, 0x1000, 0x03, 0x0000)
-	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err != nil {
-		t.Fatalf("第二次回读已看到新状态时仍判失败: %v", err)
 	}
 }
 

@@ -123,10 +123,9 @@ func TestJiabaidaMOSPlanPairsWithRealShortFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile set_mos_policy plan: %v", err)
 	}
-	// 2026-11-25 起固定 4 步：基线 0x0F + E1 写 + 两帧 0x0F 回读。步数变了，
-	// 但"每一步的 ReadSize 必须是 0"这条约束不变。
-	if len(plan.Steps) != 4 {
-		t.Fatalf("set_mos_policy must compile to 4 steps (baseline+write+2 readbacks), got %d", len(plan.Steps))
+	// 2 步：E1 写 + 单帧 0x0F 回读（节点最终响应上限 128 B，步数不能再加）。
+	if len(plan.Steps) != 2 {
+		t.Fatalf("set_mos_policy must compile to 2 steps (write + 0x0F readback), got %d", len(plan.Steps))
 	}
 	for i, step := range plan.Steps {
 		if step.ReadSize != 0 {

@@ -578,11 +578,11 @@ func sceneConfirm(e *harness.Env, eventID uint) autoEventRow {
 // 恰恰在于"真正发到 BMS 的字节是对的"（关的是充电还是放电，差一位就是两回事）。
 func sceneAssertMosFrame(e *harness.Env, cmd frame.ChannelCmdV2, wantPriority, wantMos byte, label string) {
 	e.T.Helper()
-	// 2026-11-25 起计划固定 4 步：基线 0x0F 读 → E1 写 → 两帧 0x0F 回读。
-	// 写帧不再固定在 index 0，按命令字节定位，避免以后调整步骤顺序时又要改断言。
-	if len(cmd.Plan) != 4 {
-		e.Fatalf("%s：set_mos_policy 是 bounded_sequence（基线读 + 写 + 两帧回读），"+
-			"指令帧应携带 4 个步骤，实际 %d 个", label, len(cmd.Plan))
+	// 计划固定 2 步：E1 写 + 单帧 0x0F 回读（节点最终响应上限 128 B，步数不能再加）。
+	// 写帧按命令字节定位而不是假设 index 0，避免以后调整步骤顺序时又要改断言。
+	if len(cmd.Plan) != 2 {
+		e.Fatalf("%s：set_mos_policy 是 bounded_sequence（写 + 0x0F 回读），"+
+			"指令帧应携带 2 个步骤，实际 %d 个", label, len(cmd.Plan))
 	}
 	var tx []byte
 	for _, planStep := range cmd.Plan {
